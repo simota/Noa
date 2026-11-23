@@ -8,7 +8,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use noa_ipc::{Client, ClientError, EventKind, Notification, Panel, Scope, ScopeSet, TextSource};
+use noa_ipc::{
+    Client, ClientError, ErrorCode, EventKind, Notification, Panel, Scope, ScopeSet,
+    SendTextOptions, TextSource,
+};
 
 use crate::fleet::{Fleet, Orchestrator, Phase, State, Worker, minutes_text, one_line};
 
@@ -244,7 +247,16 @@ trait Noa {
     fn subscribe(&mut self) -> Result<(), ClientError>;
     fn next_notification(&mut self, wait: Duration) -> Result<Option<Notification>, ClientError>;
     fn focus_pane(&mut self, pane: u64) -> Result<(), ClientError>;
-    fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError>;
+    /// With `refuse_shell`, Noa writes nothing and answers `NotReady` when
+    /// the pane's foreground process, probed at the moment of the request,
+    /// is a plain shell (`noa.sendText`'s `refuseShell`).
+    fn send_text(
+        &mut self,
+        pane: u64,
+        text: &str,
+        paste: bool,
+        refuse_shell: bool,
+    ) -> Result<(), ClientError>;
     fn close_pane(&mut self, pane: u64) -> Result<(), ClientError>;
     /// Pause between pasting text and submitting Enter.
     fn submit_delay(&self) -> Duration {
@@ -283,8 +295,19 @@ impl Noa for Client {
         Client::focus_pane(self, pane)
     }
 
-    fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError> {
-        Client::send_text(self, pane, text, paste)
+    fn send_text(
+        &mut self,
+        pane: u64,
+        text: &str,
+        paste: bool,
+        refuse_shell: bool,
+    ) -> Result<(), ClientError> {
+        let options = SendTextOptions {
+            paste,
+            require_paste_mode: false,
+            refuse_shell,
+        };
+        Client::send_text_with(self, pane, text, options)
     }
 
     fn close_pane(&mut self, pane: u64) -> Result<(), ClientError> {
@@ -530,19 +553,30 @@ impl Feed {
                         self.give_back(instance, pane, text);
                         continue;
                     }
-                    match client.send_text(pane, &text, true) {
+                    // Both writes refuse a pane back at its shell: the text
+                    // meant for the agent would run there as a command line.
+                    // Noa probes the real foreground process at the moment
+                    // of each write; the panel's `process` can lag seconds.
+                    match client.send_text(pane, &text, true, true) {
                         Ok(()) => {
                             let delay = client.submit_delay();
                             if !delay.is_zero() {
                                 std::thread::sleep(delay);
                             }
-                            match client.send_text(pane, "\r", false) {
+                            match client.send_text(pane, "\r", false, true) {
                                 Ok(()) => self.last_contact = self.now(),
+                                Err(err) if refused_as_shell(&err) => {
+                                    self.notice(SHELL_SUBMIT_REFUSED.to_owned());
+                                }
                                 Err(ClientError::Rpc { message, .. }) => {
                                     self.notice(format!("送信の確定に失敗しました: {message}"));
                                 }
                                 Err(err) => return Err(err.into()),
                             }
+                        }
+                        Err(err) if refused_as_shell(&err) => {
+                            self.notice(SHELL_SEND_REFUSED.to_owned());
+                            self.give_back(instance, pane, text);
                         }
                         Err(ClientError::Rpc { message, .. }) => {
                             self.notice(format!("送信できません: {message}"));
@@ -702,6 +736,21 @@ fn connect() -> Result<Client, String> {
         ClientError::Rpc { .. } => rpc_reason(&err),
         other => format!("{url} に接続できません: {other}"),
     })
+}
+
+/// What the notice line says when Noa refused a message because the pane
+/// is back at its shell (`refused_as_shell`): the message is the draft again.
+pub(crate) const SHELL_SEND_REFUSED: &str =
+    "エージェントが終了してシェルに戻ったペインには送信しませんでした（下書きに戻しました）";
+/// The same refusal for the Enter after a delivered paste: the agent left
+/// between the two writes, and its input (with the text) went with it.
+pub(crate) const SHELL_SUBMIT_REFUSED: &str =
+    "送信の確定（Enter）をやめました: エージェントが終了してシェルに戻っています";
+
+/// Whether `err` is Noa refusing a `refuseShell` write: `NotReady`, the one
+/// refusal such a write (without `requirePasteMode`) can get.
+fn refused_as_shell(err: &ClientError) -> bool {
+    matches!(err, ClientError::Rpc { code, .. } if *code == ErrorCode::NotReady.code())
 }
 
 fn rpc_reason(err: &ClientError) -> String {
@@ -1362,6 +1411,7 @@ fn worker_of(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod actions;
     mod performance;
 
     use std::cell::RefCell;
@@ -2294,6 +2344,13 @@ pub(crate) mod tests {
         focused: Vec<u64>,
         /// Texts sent to panes: `(pane, text, paste)`.
         sent: Vec<(u64, String, bool)>,
+        /// Each write's `refuse_shell`, in the order asked (refused ones too).
+        refuse_shell: Vec<bool>,
+        /// The panes whose foreground process is a plain shell: a write
+        /// with `refuse_shell` to one is refused, as Noa refuses it. The
+        /// number is how many writes go through first (an agent that exits
+        /// between the paste and the Enter).
+        shells: HashMap<u64, usize>,
         /// The panes asked to be closed, in order.
         closed: Vec<u64>,
         /// The panes whose screens were asked for, in order.
@@ -2323,6 +2380,8 @@ pub(crate) mod tests {
                 focus_takes: Duration::ZERO,
                 focused: Vec::new(),
                 sent: Vec::new(),
+                refuse_shell: Vec::new(),
+                shells: HashMap::new(),
                 closed: Vec::new(),
                 fetched: Vec::new(),
                 on_wait: None,
@@ -2379,7 +2438,23 @@ pub(crate) mod tests {
             Ok(())
         }
 
-        fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError> {
+        fn send_text(
+            &mut self,
+            pane: u64,
+            text: &str,
+            paste: bool,
+            refuse_shell: bool,
+        ) -> Result<(), ClientError> {
+            self.refuse_shell.push(refuse_shell);
+            if refuse_shell && let Some(left) = self.shells.get_mut(&pane) {
+                if *left == 0 {
+                    return Err(ClientError::Rpc {
+                        code: ErrorCode::NotReady.code(),
+                        message: format!("pane {pane} is at a shell prompt"),
+                    });
+                }
+                *left -= 1;
+            }
             self.sent.push((pane, text.to_owned(), paste));
             Ok(())
         }

@@ -875,6 +875,150 @@ mod tests {
         }
     }
 
+    /// Pins what one refresh reports for a repository holding every kind of
+    /// worktree: ahead with commits and a predicted conflict, detached, on an
+    /// unborn branch, and the base itself, from a pane in a subdirectory.
+    #[test]
+    fn a_refresh_reports_every_kind_of_worktree() {
+        let repo = temp_repo("live-kinds", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&foo, "old.rs", "fn theirs() {}\n");
+        commit_file(&foo, "two.rs", "2\n");
+        commit_file(&repo.0, "old.rs", "fn ours() {}\n");
+        std::fs::write(foo.join("old.rs"), "dirty\n").unwrap();
+        let detached = format!("{}-wt/detached", repo.0.display());
+        crate::git::tests::git(&repo.0, &["worktree", "add", "-q", "--detach", &detached]);
+        let unborn = format!("{}-wt/unborn", repo.0.display());
+        crate::git::tests::git(&repo.0, &["worktree", "add", "-q", "--orphan", &unborn]);
+        std::fs::write(Path::new(&unborn).join("u.rs"), "u\n").unwrap();
+        std::fs::create_dir_all(repo.0.join("sub")).unwrap();
+        let sub = repo.0.join("sub");
+        for mode in DiffMode::ALL {
+            let mut merges = git::MergePredictions::default();
+            let mut commits = git::CommitCache::default();
+            for _ in 0..2 {
+                let (data, _) =
+                    offline_refresh(sub.to_str().unwrap(), mode, &mut merges, &mut commits);
+                assert_eq!(data.repos.len(), 1, "{mode:?}");
+                let got: Vec<_> = data.repos[0]
+                    .worktrees
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.branch.clone(),
+                            w.has_pane(),
+                            w.ahead,
+                            w.behind,
+                            w.files
+                                .iter()
+                                .map(|f| {
+                                    format!("{} {} +{}-{}", f.status, f.path, f.added, f.deleted)
+                                })
+                                .collect::<Vec<_>>(),
+                            w.merge_conflicts.clone(),
+                            w.commits
+                                .iter()
+                                .map(|c| c.subject.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect();
+                let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                let (foo_files, unborn_files) = match mode {
+                    DiffMode::Unstaged => (s(&["M old.rs +1-1"]), s(&["? u.rs +0-0"])),
+                    DiffMode::Staged => (s(&[]), s(&[])),
+                    DiffMode::VsMain => (s(&["M old.rs +1-1", "A two.rs +1-0"]), s(&[])),
+                };
+                assert_eq!(
+                    got,
+                    vec![
+                        ("(detached)".into(), false, 0, 0, s(&[]), s(&[]), s(&[])),
+                        ("main".into(), true, 0, 0, s(&[]), s(&[]), s(&[])),
+                        (
+                            "orch/foo".into(),
+                            false,
+                            0,
+                            0,
+                            foo_files,
+                            s(&["old.rs"]),
+                            s(&["two.rs", "old.rs"]),
+                        ),
+                        ("unborn".into(), false, 0, 0, unborn_files, s(&[]), s(&[])),
+                    ],
+                    "{mode:?}"
+                );
+            }
+            // The second refresh is answered from the caches.
+            assert_eq!(merges.runs(), 2, "{mode:?}");
+        }
+    }
+
+    /// The git half of `build_snapshot` for one pane in `cwd`, without a Noa
+    /// server: every worktree of its repository, then the first file's diff.
+    fn offline_refresh(
+        cwd: &str,
+        mode: DiffMode,
+        merges: &mut git::MergePredictions,
+        commit_cache: &mut git::CommitCache,
+    ) -> (RepoData, Option<DiffEntry>) {
+        let mut bases = git::BaseRefs::default();
+        let mut by_worktree: ByWorktree = HashMap::new();
+        if let Some(info) = git::inspect_worktree(cwd, mode, &mut bases) {
+            by_worktree.insert(info.worktree_root.clone(), (info, vec![pane(1)]));
+        }
+        add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
+        let data = repo_data(by_worktree, merges, commit_cache, &mut bases);
+        let diff = data
+            .repos
+            .first()
+            .and_then(|r| r.worktrees.iter().find(|w| !w.files.is_empty()))
+            .and_then(|w| {
+                let f = w.files.first()?;
+                Some((
+                    w.cwd.clone(),
+                    f.path.clone(),
+                    git::file_diff(&w.cwd, &f.path, mode),
+                ))
+            });
+        (data, diff)
+    }
+
+    /// Times refreshes of `REPO_BROWSER_BENCH_DIR` (default: this crate's
+    /// repository) in every mode, `REPO_BROWSER_BENCH_RUNS` times each after
+    /// one warm-up. Run with a logging `git` first on `PATH` to count spawns.
+    #[test]
+    #[ignore = "benchmark: cargo test -- --ignored --nocapture bench_refresh"]
+    fn bench_refresh() {
+        let dir = std::env::var("REPO_BROWSER_BENCH_DIR")
+            .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_owned());
+        let runs: usize = std::env::var("REPO_BROWSER_BENCH_RUNS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(10);
+        for mode in DiffMode::ALL {
+            let mut merges = git::MergePredictions::default();
+            let mut commits = git::CommitCache::default();
+            let mut times = Vec::new();
+            let mut worktrees = 0;
+            for i in 0..=runs {
+                let t = Instant::now();
+                let (data, _) = offline_refresh(&dir, mode, &mut merges, &mut commits);
+                if i > 0 {
+                    times.push(t.elapsed().as_secs_f64() * 1000.0);
+                }
+                worktrees = data.repos.iter().map(|r| r.worktrees.len()).sum();
+            }
+            times.sort_by(f64::total_cmp);
+            println!(
+                "bench_refresh {mode:?}: {worktrees} worktrees, median {:.1} ms, min {:.1}, max {:.1} ({runs} runs)",
+                times[times.len() / 2],
+                times[0],
+                times[times.len() - 1]
+            );
+        }
+    }
+
     #[test]
     fn notifications_rebuild_at_most_once_a_second() {
         let ms = Duration::from_millis;

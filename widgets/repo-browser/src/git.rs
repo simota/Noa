@@ -420,6 +420,12 @@ impl MergePredictions {
         conflicts
     }
 
+    /// How many times `git merge-tree` ran.
+    #[cfg(test)]
+    pub(crate) fn runs(&self) -> usize {
+        self.runs
+    }
+
     /// Forgets the worktrees `keep` rejects (gone from the browser).
     pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
         self.entries.retain(|root, _| keep(root));
@@ -994,6 +1000,44 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         assert_eq!(paths, vec!["old.rs", "日本語.txt"]);
         let diff = file_diff(cwd(&repo), "日本語.txt", DiffMode::Unstaged);
         assert!(diff.contains("+こんにちは"), "{diff}");
+    }
+
+    #[test]
+    fn a_directory_outside_any_repository_is_not_a_worktree() {
+        let dir = scratch_dir("not-a-repo");
+        let mut bases = BaseRefs::default();
+        assert!(inspect_worktree(cwd(&dir), DiffMode::Unstaged, &mut bases).is_none());
+        let gone = dir.0.join("missing");
+        assert!(inspect_worktree(gone.to_str().unwrap(), DiffMode::Unstaged, &mut bases).is_none());
+        // A bare repository has no work tree to inspect.
+        let seed = temp_repo("bare-seed", "main");
+        let bare = dir.0.join("r.git");
+        git(
+            &dir.0,
+            &["clone", "-q", "--bare", cwd(&seed), bare.to_str().unwrap()],
+        );
+        assert!(inspect_worktree(bare.to_str().unwrap(), DiffMode::Unstaged, &mut bases).is_none());
+    }
+
+    #[test]
+    fn worktree_info_names_the_repository_and_canonical_roots() {
+        let repo = temp_repo("names", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        std::fs::create_dir_all(foo.join("a b")).unwrap();
+        let info = inspect_worktree(
+            foo.join("a b").to_str().unwrap(),
+            DiffMode::Unstaged,
+            &mut BaseRefs::default(),
+        )
+        .unwrap();
+        assert_eq!(info.repo_root, canonical_or_raw(&repo.0));
+        assert_eq!(
+            info.repo_name,
+            repo.0.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(info.worktree_root, canonical_or_raw(&foo));
+        assert_eq!(info.branch, "orch/foo");
     }
 
     #[test]

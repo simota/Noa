@@ -59,6 +59,8 @@ pub fn stored(id: &str) -> Option<Session> {
             session.created_at = now.saturating_sub(5 * hour);
         }
         "comp-2" => {
+            // Ran all its rounds: it can go on with more.
+            session.max_rounds = Some(session.rounds.len() as competition::model::types::RoundNo);
             session.closed = true;
             session.winner = Some(PartId::new("claude"));
             session.created_at = now.saturating_sub(3 * 24 * hour);
@@ -339,5 +341,6 @@ pub fn session() -> Session {
         rounds,
         winner: None,
         closed: false,
+        hold: false,
     }
 }

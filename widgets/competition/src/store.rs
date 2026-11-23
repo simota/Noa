@@ -492,6 +492,8 @@ pub struct Summary {
     /// Unfinished, without [`LOCKS_FILE`], and written lately: it may be
     /// running in a widget from before the lock.
     pub maybe_running: bool,
+    /// Rounds can be added to it ([`Session::extendable`]).
+    pub extendable: bool,
 }
 
 /// A directory under the store root and what reading its log gave.
@@ -568,6 +570,7 @@ impl Summary {
                 .collect(),
             busy: false,
             maybe_running: false,
+            extendable: session.extendable().is_ok(),
         }
     }
 }

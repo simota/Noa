@@ -86,7 +86,20 @@ pub enum Action {
     Rematch,
     /// Brings a participant's (or the judge's) pane to the front in Noa.
     FocusPane(PartId),
+    /// Holds the competition after each judged round, or lets it go on.
+    SetHold(bool),
+    /// Starts the next round of the held competition.
+    Continue,
+    /// Gives the competition on screen this many more rounds (a stored one
+    /// is resumed to go on).
+    Extend(RoundNo),
+    /// Gives the stored competition in the directory more rounds and goes
+    /// on with it.
+    ExtendPast(PathBuf, RoundNo),
 }
+
+/// The rounds the "+N" buttons add.
+const EXTEND_BY: [RoundNo; 2] = [1, 3];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CenterTab {
@@ -119,6 +132,8 @@ pub struct Competition {
     past: Vec<Listed>,
     /// Where they are read from: the store root.
     past_root: Option<PathBuf>,
+    /// The log of the read-only competition on screen, when it is one.
+    stored_dir: Option<PathBuf>,
     /// What the board was last built from: the session revision, the link,
     /// and the clock minute while some agent's elapsed time is running.
     built: Option<BuiltKey>,
@@ -179,6 +194,13 @@ impl Competition {
         start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
         screen.rebuild(&mut text);
         screen
+    }
+
+    /// The demo held after its last judged round, waiting for the user.
+    pub fn demo_held() -> Self {
+        let mut session = crate::demo::session();
+        session.hold = true;
+        Self::build(Source::Demo, Link::Live, Some(Arc::new(session)), None)
     }
 
     /// The competition logged in `dir`, read-only.
@@ -275,6 +297,7 @@ impl Competition {
             read_only: false,
             past: Vec::new(),
             past_root: store::default_root(),
+            stored_dir: None,
             built: None,
             start,
             board,
@@ -373,6 +396,7 @@ impl Competition {
         self.session = None;
         self.artifact_root = None;
         self.read_only = false;
+        self.stored_dir = None;
         self.tab = CenterTab::Compare;
         self.selected_round = None;
         self.filter_part = None;
@@ -382,12 +406,25 @@ impl Competition {
         self.refresh_past();
     }
 
+    /// Resumes the stored competition in `dir` with `by` more rounds: the
+    /// screen leaves what it shows, and the runner's snapshots follow.
+    fn extend_stored(&mut self, dir: PathBuf, by: RoundNo, text: &mut TextStore) {
+        if !matches!(self.source, Source::Live(_)) {
+            self.toast("デモ表示では操作を送信できません");
+            return;
+        }
+        self.leave();
+        self.send_cmd(Command::ExtendStored { dir, by });
+        self.rebuild(text);
+    }
+
     fn show_stored(&mut self, dir: &Path, text: &mut TextStore) -> Result<(), String> {
         let (session, root) = self.load_stored(dir)?;
         self.leave();
         self.session = Some(Arc::new(session));
         self.artifact_root = root;
         self.read_only = true;
+        self.stored_dir = Some(dir.to_owned());
         self.rebuild(text);
         Ok(())
     }
@@ -577,6 +614,59 @@ impl Competition {
             }
 
             let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+            let waits = session.waits_to_continue();
+            if waits {
+                tag(
+                    &mut self.tree,
+                    self.status_leading,
+                    "一時停止中",
+                    Tone::Warning,
+                );
+            }
+            if !self.read_only && !session.closed {
+                let hold = self.tree.insert(
+                    Some(self.status_trailing),
+                    small(if session.hold {
+                        "ラウンド後に停止: オン"
+                    } else {
+                        "ラウンド後に停止: オフ"
+                    })
+                    .tooltip("オンにすると、審判の採点のあと次のラウンドを始める前に止まります"),
+                );
+                self.actions.push((hold, Action::SetHold(!session.hold)));
+                if waits {
+                    let go = self.tree.insert(
+                        Some(self.status_trailing),
+                        small("次のラウンドへ").default_button(true),
+                    );
+                    self.actions.push((go, Action::Continue));
+                }
+            }
+            // A stored competition that ran all its rounds is resumed to go on.
+            if session.extendable().is_ok()
+                && (!self.read_only || (session.closed && self.stored_dir.is_some()))
+            {
+                if let Some(max) = session.max_rounds {
+                    caption(
+                        &mut self.tree,
+                        self.status_trailing,
+                        format!("上限 {max} ラウンド"),
+                    );
+                }
+                for by in EXTEND_BY {
+                    let more = self.tree.insert(
+                        Some(self.status_trailing),
+                        small(&format!("+{by}")).tooltip(if self.read_only {
+                            "再開してラウンドを追加します（エージェントが起動します）"
+                        } else {
+                            "ラウンド上限を増やします。上限で終了していればコンペを続けます"
+                        }),
+                    );
+                    self.tree
+                        .set_accessible_label(more, format!("ラウンドを {by} 追加"));
+                    self.actions.push((more, Action::Extend(by)));
+                }
+            }
             let new = self
                 .tree
                 .insert(Some(self.status_trailing), small("新しいコンペ"));
@@ -869,6 +959,13 @@ impl Competition {
                 self.rebuild(text);
             }
             Action::FocusPane(part) => self.send_cmd(Command::Focus { part }),
+            Action::SetHold(hold) => self.send_cmd(Command::SetHold { hold }),
+            Action::Continue => self.send_cmd(Command::Continue),
+            Action::Extend(by) => match self.stored_dir.clone() {
+                Some(dir) if self.read_only => self.extend_stored(dir, by, text),
+                _ => self.send_cmd(Command::Extend { by }),
+            },
+            Action::ExtendPast(dir, by) => self.extend_stored(dir, by, text),
         }
     }
 }
@@ -1198,6 +1295,13 @@ mod tests {
     /// A finished one-round competition of claude on opus against claude
     /// on sonnet (`claude-2`), judged by codex, logged under `root`.
     fn stored_competition(root: &Path) -> PathBuf {
+        stored_competition_of(root, 3)
+    }
+
+    /// [`stored_competition`] with a round limit of `max_rounds`: with 1,
+    /// it ended at its limit (and can be extended); with more, the judge
+    /// closed it early.
+    fn stored_competition_of(root: &Path, max_rounds: RoundNo) -> PathBuf {
         let on = |model: &str| AgentChoice {
             kind: AgentKind::Claude,
             setup: AgentSetup {
@@ -1210,7 +1314,7 @@ mod tests {
         let dir = store::session_dir(root, &id);
         let setup = Setup {
             request: "音楽プレイヤーのミニマルな UI を作る",
-            max_rounds: Some(3),
+            max_rounds: Some(max_rounds),
             reveal_interval: 5,
             workdir: None,
             judge: AgentKind::Codex.into(),
@@ -1755,6 +1859,154 @@ mod tests {
         snapshots.send(snapshot(1)).unwrap();
         screen.poll_live(&mut text);
         assert!(screen.session.is_some());
+    }
+
+    /// The ids of the screen's actions (the widgets that raise them).
+    fn widget_for(screen: &Competition, action: &Action) -> Option<WidgetId> {
+        screen
+            .actions
+            .iter()
+            .find(|(_, a)| a == action)
+            .map(|(id, _)| *id)
+    }
+
+    fn commands(link: &crate::live::FakeLink) -> Vec<Command> {
+        link.commands.try_iter().map(|(_, cmd)| cmd).collect()
+    }
+
+    #[test]
+    fn a_held_competition_offers_the_next_round_and_the_toggle() {
+        let (channel, link) = Channel::fake();
+        let mut screen = Competition::live(channel);
+        let mut text = TextStore::new(Default::default());
+        let mut session = crate::demo::session();
+        session.hold = true;
+        link.snapshots
+            .send(Snapshot {
+                link: Link::Live,
+                session: Some(Arc::new(session)),
+                artifact_root: None,
+                generation: 0,
+            })
+            .unwrap();
+        screen.poll_live(&mut text);
+        let go = widget_for(&screen, &Action::Continue).expect("次のラウンドへ");
+        click(&mut screen, go, &mut text);
+        assert_eq!(commands(&link), [Command::Continue]);
+        let toggle = widget_for(&screen, &Action::SetHold(false)).expect("the toggle");
+        click(&mut screen, toggle, &mut text);
+        assert_eq!(commands(&link), [Command::SetHold { hold: false }]);
+        let more = widget_for(&screen, &Action::Extend(3)).expect("+3");
+        click(&mut screen, more, &mut text);
+        assert_eq!(commands(&link), [Command::Extend { by: 3 }]);
+
+        // Not held: no next-round button, and the toggle turns it on.
+        // As the runner sends it after `HoldSet { hold: false }`: a new rev.
+        let mut running = crate::demo::session();
+        running.hold = false;
+        running.rev += 1;
+        link.snapshots
+            .send(Snapshot {
+                link: Link::Live,
+                session: Some(Arc::new(running)),
+                artifact_root: None,
+                generation: 0,
+            })
+            .unwrap();
+        screen.poll_live(&mut text);
+        assert!(widget_for(&screen, &Action::Continue).is_none());
+        assert!(widget_for(&screen, &Action::SetHold(true)).is_some());
+    }
+
+    #[test]
+    fn rounds_are_offered_only_where_they_can_be_added() {
+        let offered = |session: Session| {
+            let screen =
+                Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+            widget_for(&screen, &Action::Extend(1)).is_some()
+                && widget_for(&screen, &Action::Extend(3)).is_some()
+        };
+        let base = crate::demo::session();
+        // Running, with a limit.
+        assert!(offered(base.clone()));
+        // Ended at its limit.
+        let mut ran_out = base.clone();
+        ran_out.max_rounds = Some(ran_out.rounds.len() as RoundNo);
+        ran_out.closed = true;
+        assert!(offered(ran_out));
+        // Ended before it (by the judge or the user).
+        let mut early = base.clone();
+        early.closed = true;
+        assert!(!offered(early));
+        // No limit.
+        let mut unlimited = base.clone();
+        unlimited.max_rounds = None;
+        assert!(!offered(unlimited));
+        // The judge scores the final round.
+        let mut judging = base;
+        judging.max_rounds = Some(judging.rounds.len() as RoundNo);
+        let last = judging.rounds.len() - 1;
+        judging.rounds[last].phase = Phase::Judging;
+        assert!(!offered(judging));
+    }
+
+    #[test]
+    fn a_stored_competition_that_ran_out_of_rounds_is_extended_from_its_view() {
+        let root = temp_root("extend-view");
+        let dir = stored_competition_of(&root, 1);
+        let (mut screen, link, mut text) = live_on(&root);
+        screen.handle_action(Action::OpenPast(dir.clone()), &mut text);
+        assert!(screen.read_only);
+        let _ = commands(&link);
+        let more = widget_for(&screen, &Action::Extend(3)).expect("+3 on the stored view");
+        click(&mut screen, more, &mut text);
+        let sent: Vec<(u64, Command)> = link.commands.try_iter().collect();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(sent[0].1, Command::Leave);
+        assert_eq!(
+            sent[1],
+            (
+                sent[0].0,
+                Command::ExtendStored {
+                    dir: dir.clone(),
+                    by: 3
+                }
+            )
+        );
+        assert!(screen.session.is_none() && !screen.read_only);
+        // No hold toggle or next round on a stored view.
+        screen.handle_action(Action::OpenPast(dir), &mut text);
+        assert!(widget_for(&screen, &Action::SetHold(true)).is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_stored_competition_closed_early_offers_no_rounds() {
+        let root = temp_root("extend-early");
+        let dir = stored_competition_of(&root, 3);
+        let (mut screen, _link, mut text) = live_on(&root);
+        assert!(
+            !actions(&screen)
+                .iter()
+                .any(|a| matches!(a, Action::ExtendPast(..)))
+        );
+        screen.handle_action(Action::OpenPast(dir), &mut text);
+        assert!(widget_for(&screen, &Action::Extend(1)).is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_listed_competition_that_ran_out_of_rounds_is_extended_from_the_list() {
+        let root = temp_root("extend-list");
+        let dir = stored_competition_of(&root, 1);
+        let (mut screen, link, mut text) = live_on(&root);
+        let more = widget_for(&screen, &Action::ExtendPast(dir.clone(), 1)).expect("+1 row");
+        click(&mut screen, more, &mut text);
+        assert_eq!(
+            commands(&link),
+            [Command::Leave, Command::ExtendStored { dir, by: 1 }]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

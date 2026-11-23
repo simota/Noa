@@ -21,12 +21,13 @@ use noa_gpui_text::TextStore;
 use crate::live::{Link, Snapshot};
 use crate::ui::Competition;
 
-const USAGE: &str = "usage: competition [--demo [--start] | --session=DIR] \
+const USAGE: &str = "usage: competition [--demo [--start | --held] | --session=DIR] \
                      [--snapshot=FILE.png [--size=WxH]]\n       \
                      competition --check=ENTRY_DIR [--out=DIR]\n  \
                      the live competition by default; \
                      --demo shows a canned multi-round competition \
-                     (--start: the demo's start view, with past competitions); \
+                     (--start: the demo's start view, with past competitions; \
+                     --held: held after its last judged round); \
                      --session shows the competition stored in DIR \
                      (<data>/noa/competitions/comp-*) read-only; \
                      --check runs the snapshot check a submission gets (viewer copy, \
@@ -146,6 +147,7 @@ fn main() -> Result<(), String> {
     let mut check_out = None;
     let mut session_dir = None;
     let mut start_view = false;
+    let mut held = false;
 
     for arg in std::env::args().skip(1) {
         if let Some(path) = arg.strip_prefix("--check=") {
@@ -162,6 +164,8 @@ fn main() -> Result<(), String> {
             demo = true;
         } else if arg == "--start" {
             start_view = true;
+        } else if arg == "--held" {
+            held = true;
         } else if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
             return Ok(());
@@ -173,8 +177,11 @@ fn main() -> Result<(), String> {
     if let Some(entry) = check_entry {
         return run_check(&entry, check_out);
     }
-    if start_view && !demo {
-        return Err(format!("--start needs --demo\n{USAGE}"));
+    if (start_view || held) && !demo {
+        return Err(format!("--start and --held need --demo\n{USAGE}"));
+    }
+    if start_view && held {
+        return Err(format!("--start and --held do not go together\n{USAGE}"));
     }
     if demo && session_dir.is_some() {
         return Err(format!("--demo and --session do not go together\n{USAGE}"));
@@ -183,6 +190,8 @@ fn main() -> Result<(), String> {
     if let Some(path) = snapshot_path {
         let mut screen = if demo && start_view {
             Competition::demo_start()
+        } else if demo && held {
+            Competition::demo_held()
         } else if demo {
             Competition::demo()
         } else if let Some(dir) = &session_dir {
@@ -203,6 +212,9 @@ fn main() -> Result<(), String> {
     App::new(options(), move |setup| {
         if demo && start_view {
             return Box::new(Competition::demo_start());
+        }
+        if demo && held {
+            return Box::new(Competition::demo_held());
         }
         if demo {
             return Box::new(Competition::demo());

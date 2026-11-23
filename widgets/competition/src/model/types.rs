@@ -627,6 +627,10 @@ pub struct Session {
     #[serde(default)]
     pub winner: Option<PartId>,
     pub closed: bool,
+    /// The user holds the competition after each judged round: the next
+    /// round waits for them.
+    #[serde(default)]
+    pub hold: bool,
 }
 
 fn default_reveal_interval() -> RoundNo {
@@ -634,6 +638,41 @@ fn default_reveal_interval() -> RoundNo {
 }
 
 impl Session {
+    /// Whether the competition waits for the user to start its next round:
+    /// held, with the last round judged.
+    pub fn waits_to_continue(&self) -> bool {
+        !self.closed
+            && self.hold
+            && self
+                .current_round()
+                .is_some_and(|round| round.phase == Phase::Closed)
+    }
+
+    /// Whether the user may add rounds, or why not. The competition must
+    /// have a round limit; once ended, it must have ended by running all
+    /// its rounds (not by the judge closing it early or by the user). While
+    /// the judge scores the round its brief called FINAL, rounds are added
+    /// once that verdict is in.
+    pub fn extendable(&self) -> Result<(), &'static str> {
+        let Some(max) = self.max_rounds else {
+            return Err("ラウンド上限のないコンペです");
+        };
+        let at_limit = self.rounds.len() as RoundNo >= max;
+        let phase = self.current_round().map(|round| round.phase);
+        if !self.closed {
+            return if at_limit && phase == Some(Phase::Judging) {
+                Err("審判が最終ラウンドを採点中です（採点の後に追加できます）")
+            } else {
+                Ok(())
+            };
+        }
+        if at_limit && phase == Some(Phase::Closed) {
+            Ok(())
+        } else {
+            Err("ラウンド上限の前に終了したコンペです")
+        }
+    }
+
     pub fn participant(&self, id: &PartId) -> Option<&Participant> {
         std::iter::once(&self.judge)
             .chain(&self.contestants)
@@ -930,6 +969,7 @@ mod tests {
             ],
             winner: None,
             closed: false,
+            hold: false,
         };
         assert_eq!(s.round(0), None);
         assert_eq!(s.round(1).map(|r| r.no), Some(1));

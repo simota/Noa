@@ -659,6 +659,14 @@ pub(super) fn rebuild_past(
             )
         };
         actions.push(open);
+        // A competition that ran all its rounds goes on with more.
+        if summary.closed && summary.extendable && !summary.busy {
+            for by in super::EXTEND_BY {
+                let more = tree.insert(Some(buttons), small(&format!("+{by}")));
+                tree.set_accessible_label(more, format!("ラウンドを {by} 追加して再開"));
+                actions.push((more, Action::ExtendPast(dir.clone(), by)));
+            }
+        }
         let rematch = tree.insert(Some(buttons), small("リマッチ"));
         actions.push((rematch, Action::RematchPast(dir)));
     }

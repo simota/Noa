@@ -2,7 +2,7 @@
 //! inspecting local git worktrees for every active pane.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -579,8 +579,10 @@ fn build_snapshot(
 }
 
 /// The worktree of each panel's cwd, with the panes in it as `summary` makes
-/// them; a panel whose cwd is no worktree is left out. Each cwd is inspected
-/// once: a later panel in the same one joins the earlier panel's worktree.
+/// them; a panel whose cwd is no worktree is left out. A cwd that resolves
+/// to the same directory as one already inspected successfully this time
+/// joins that worktree instead of being inspected again; one that failed,
+/// or cannot be resolved, is inspected again, as main does for every cwd.
 fn place_panes(
     panels: &[Panel],
     mode: DiffMode,
@@ -588,37 +590,46 @@ fn place_panes(
     mut summary: impl FnMut(&Panel) -> PaneSummary,
 ) -> ByWorktree {
     let mut by_worktree: ByWorktree = HashMap::new();
-    for (i, panel) in panels.iter().enumerate() {
+    // Resolved cwd -> the worktree its successful inspection found. Keyed by
+    // the resolved path, so a symlink retargeted between two panels is
+    // inspected again and lands where it points now.
+    let mut inspected: HashMap<PathBuf, String> = HashMap::new();
+    for panel in panels {
         let cwd = panel.cwd.trim();
         if cwd.is_empty() {
             continue;
         }
-        let info = if let Some((existing, _)) = by_worktree.get(cwd) {
-            existing.clone()
-        } else if let Some(earlier) = panels[..i].iter().find(|p| p.cwd.trim() == cwd) {
-            // Inspecting it again would find the same worktree, which keeps
-            // its first inspection, or again none.
-            let id = earlier.pane_id.0;
-            match by_worktree
-                .values()
-                .find(|(_, panes)| panes.iter().any(|p| p.pane_id == id))
-            {
-                Some((existing, _)) => existing.clone(),
-                None => continue,
-            }
+        let (key, info) = if by_worktree.contains_key(cwd) {
+            (cwd.to_owned(), None)
         } else {
-            let Some(info) = git::inspect_worktree(cwd, mode, bases) else {
-                continue;
-            };
-            info
+            let resolved = std::fs::canonicalize(cwd).ok();
+            if let Some(root) = resolved.as_ref().and_then(|dir| inspected.get(dir)) {
+                // Inspecting it again would find this worktree, which keeps
+                // the info of its first inspection.
+                (root.clone(), None)
+            } else {
+                let Some(info) = git::inspect_worktree(cwd, mode, bases) else {
+                    continue;
+                };
+                if let Some(dir) = resolved {
+                    inspected.insert(dir, info.worktree_root.clone());
+                }
+                (info.worktree_root.clone(), Some(info))
+            }
         };
         let summary = summary(panel);
-        let key = info.worktree_root.clone();
-        by_worktree
-            .entry(key)
-            .or_insert_with(|| (info, Vec::new()))
-            .1
-            .push(summary);
+        match info {
+            Some(info) => by_worktree
+                .entry(key)
+                .or_insert_with(|| (info, Vec::new()))
+                .1
+                .push(summary),
+            None => {
+                if let Some((_, panes)) = by_worktree.get_mut(&key) {
+                    panes.push(summary);
+                }
+            }
+        }
     }
     by_worktree
 }
@@ -988,13 +999,24 @@ mod tests {
         let plain = TempRepo(format!("{}-plain", repo.0.display()).into());
         std::fs::create_dir_all(plain.0.join("sub")).unwrap();
         std::fs::create_dir_all(repo.0.join("sub")).unwrap();
-        let root = repo.0.to_str().unwrap().to_owned();
-        let sub = repo.0.join("sub").to_str().unwrap().to_owned();
-        let foo = foo.to_str().unwrap().to_owned();
-        let plain = plain.0.join("sub").to_str().unwrap().to_owned();
-        let missing = format!("{root}/missing");
+        // Resolved paths, so that whether the temporary directory is reached
+        // through a symlink (`/var` on macOS) changes nothing: the root is
+        // then the key of the worktree its subdirectory found.
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let root = real(&repo.0);
+        let link = real(&plain.0).join("link");
+        std::os::unix::fs::symlink(root.join("sub"), &link).unwrap();
+        let s = |p: &Path| p.to_str().unwrap().to_owned();
+        let (sub, foo, plain, link) = (
+            s(&root.join("sub")),
+            s(&real(&foo)),
+            s(&real(&plain.0).join("sub")),
+            s(&link),
+        );
+        let missing = format!("{}/missing", s(&root));
+        let root = s(&root);
         let cwds = [
-            &sub, &sub, &plain, &root, &foo, &plain, "  ", &missing, &sub, &foo,
+            &sub, &sub, &plain, &root, &foo, &plain, "  ", &missing, &sub, &foo, &link,
         ];
         let panels: Vec<Panel> = cwds
             .iter()
@@ -1009,30 +1031,69 @@ mod tests {
                 summarized.push(panel.pane_id.0);
                 pane(panel.pane_id.0)
             });
-            assert_eq!(summarized, vec![1, 2, 4, 5, 9, 10], "{mode:?}");
-            // `/tmp` is a symlink on macOS, so no cwd here is a canonical
-            // worktree root: each is inspected once, a repeat never again.
+            assert_eq!(summarized, vec![1, 2, 4, 5, 9, 10, 11], "{mode:?}");
+            // sub, plain, foo, plain again (a failed inspection is retried)
+            // and missing; the root is the worktree sub found, and a repeat
+            // or a symlink to an inspected directory is not inspected again.
             let inspected = git::INSPECTIONS.with(std::cell::Cell::get) - before;
             assert_eq!(inspected, 5, "{mode:?}");
-            let mut got: Vec<(String, Vec<u64>)> = by_worktree
-                .values()
-                .map(|(info, panes)| {
-                    (
-                        info.branch.clone(),
-                        panes.iter().map(|p| p.pane_id).collect(),
-                    )
-                })
-                .collect();
-            got.sort();
             assert_eq!(
-                got,
-                vec![
-                    ("main".to_owned(), vec![1, 2, 4, 9]),
-                    ("orch/foo".to_owned(), vec![5, 10]),
-                ],
+                placed(&by_worktree),
+                [("main", vec![1, 2, 4, 9, 11]), ("orch/foo", vec![5, 10])],
                 "{mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_symlink_retargeted_between_panes_is_inspected_again() {
+        let repo = temp_repo("live-relink", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        let links = TempRepo(format!("{}-links", repo.0.display()).into());
+        std::fs::create_dir_all(&links.0).unwrap();
+        let link = links.0.join("link");
+        let panels = [
+            panel(1, link.to_str().unwrap()),
+            panel(2, link.to_str().unwrap()),
+        ];
+        for (second, want) in [
+            (foo.clone(), vec![("main", vec![1]), ("orch/foo", vec![2])]),
+            (repo.0.join("gone"), vec![("main", vec![1])]),
+        ] {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&repo.0, &link).unwrap();
+            // Retargeted while the first pane is summarized, as its terminal
+            // tail is fetched in a refresh.
+            let by_worktree = place_panes(
+                &panels,
+                DiffMode::Unstaged,
+                &mut git::BaseRefs::default(),
+                |panel| {
+                    if panel.pane_id.0 == 1 {
+                        std::fs::remove_file(&link).unwrap();
+                        std::os::unix::fs::symlink(&second, &link).unwrap();
+                    }
+                    pane(panel.pane_id.0)
+                },
+            );
+            assert_eq!(placed(&by_worktree), want, "{second:?}");
+        }
+    }
+
+    /// Each worktree's branch with the panes placed in it, sorted.
+    fn placed(by_worktree: &ByWorktree) -> Vec<(&str, Vec<u64>)> {
+        let mut got: Vec<(&str, Vec<u64>)> = by_worktree
+            .values()
+            .map(|(info, panes)| {
+                (
+                    info.branch.as_str(),
+                    panes.iter().map(|p| p.pane_id).collect(),
+                )
+            })
+            .collect();
+        got.sort();
+        got
     }
 
     /// The git half of `build_snapshot` for one pane in `cwd`, without a Noa

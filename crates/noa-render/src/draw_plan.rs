@@ -43,6 +43,31 @@ impl PaneRect {
     pub const fn bottom(self) -> u32 {
         self.y.saturating_add(self.h)
     }
+
+    /// The overlap of `self` and `other`; zero-sized (at the overlap's
+    /// clamped corner) when they do not overlap.
+    pub fn intersect(self, other: PaneRect) -> PaneRect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right()).max(x);
+        let bottom = self.bottom().min(other.bottom()).max(y);
+        PaneRect::new(x, y, right - x, bottom - y)
+    }
+}
+
+/// One frame of the split-zoom transition, as the renderer draws it
+/// (`docs/specs/split-zoom-animation.md`).
+///
+/// `pane`'s grid already has its zoomed size and its layout rect is the full
+/// rect; only `clip` of it is visible, and its content is drawn translated so
+/// the grid's top-left sits at `content_origin` (text never scales). Every
+/// other split pane draws at `sibling_alpha`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitZoomFx {
+    pub pane: PaneId,
+    pub clip: PaneRect,
+    pub content_origin: (u32, u32),
+    pub sibling_alpha: f32,
 }
 
 /// One operation in a single render pass.
@@ -68,6 +93,13 @@ pub enum DrawOp {
         header: Option<(PaneRect, noa_core::Rgb)>,
         border: Vec<PaneRect>,
         focused: bool,
+    },
+    /// Restores the frame's base (background fill plus background image)
+    /// over `rect`, so split siblings drawn earlier do not show through the
+    /// default-background cells of the split-zoom pane drawn next: those
+    /// cells emit no background quad.
+    ZoomUnderlay {
+        rect: PaneRect,
     },
 }
 
@@ -115,6 +147,26 @@ pub fn build_draw_plan_with_overlays(
     zoomed: Option<PaneId>,
     force_ring: bool,
 ) -> Vec<DrawOp> {
+    build_draw_plan_with_zoom_fx(layout, overlays, focused, zoomed, force_ring, None)
+}
+
+/// [`build_draw_plan_with_overlays`] during a split-zoom transition.
+///
+/// `fx = Some((pane, clip))` with `pane` a split (non-overlay) pane of
+/// `layout`: `zoomed` is ignored and every other split pane draws in layout
+/// order, then a [`DrawOp::ZoomUnderlay`] over `clip ∩ pane's rect`, then
+/// `pane`'s cells scissored to that same rect, so it covers its siblings
+/// only where it is revealed. Dividers are empty and there is no focus ring,
+/// as when zoomed. Overlay groups follow unchanged. Any other `fx` (absent,
+/// or naming a pane the split layout does not hold) gives the plain plan.
+pub fn build_draw_plan_with_zoom_fx(
+    layout: &[(PaneId, PaneRect)],
+    overlays: &[OverlayGroup],
+    focused: Option<PaneId>,
+    zoomed: Option<PaneId>,
+    force_ring: bool,
+    fx: Option<(PaneId, PaneRect)>,
+) -> Vec<DrawOp> {
     let is_overlay = |pane: &PaneId| overlays.iter().any(|group| group.panes.contains(pane));
     // Without overlays (the common frame) the split layout is the whole
     // layout, so it is borrowed rather than copied.
@@ -127,12 +179,25 @@ pub fn build_draw_plan_with_overlays(
             .copied()
             .collect()
     };
-    let zoomed = zoomed.filter(|pane| base.iter().any(|(candidate, _)| candidate == pane));
-    let mut plan = Vec::with_capacity(layout.len() + overlays.len() + 3);
+    // The transition pane with its bind-group index and revealed rect.
+    let fx = fx.and_then(|(fx_pane, clip)| {
+        layout
+            .iter()
+            .enumerate()
+            .find(|(_, (pane, _))| *pane == fx_pane && !is_overlay(pane))
+            .map(|(index, (pane, rect))| (*pane, index, clip.intersect(*rect)))
+    });
+    let zoomed = zoomed
+        .filter(|_| fx.is_none())
+        .filter(|pane| base.iter().any(|(candidate, _)| candidate == pane));
+    let mut plan = Vec::with_capacity(layout.len() + overlays.len() + 4);
     plan.push(DrawOp::Clear);
 
     for (index, (pane, rect)) in layout.iter().enumerate() {
-        if is_overlay(pane) || zoomed.is_some_and(|zoomed| zoomed != *pane) {
+        if is_overlay(pane)
+            || zoomed.is_some_and(|zoomed| zoomed != *pane)
+            || fx.is_some_and(|(fx_pane, _, _)| fx_pane == *pane)
+        {
             continue;
         }
 
@@ -143,14 +208,25 @@ pub fn build_draw_plan_with_overlays(
         });
     }
 
-    let rects = if zoomed.is_some() {
+    if let Some((pane, index, revealed)) = fx {
+        plan.push(DrawOp::ZoomUnderlay { rect: revealed });
+        plan.push(DrawOp::PaneCells {
+            pane,
+            scissor: revealed,
+            bind_group_index: index,
+        });
+    }
+
+    let rects = if zoomed.is_some() || fx.is_some() {
         Vec::new()
     } else {
         divider_rects(&base)
     };
     plan.push(DrawOp::Dividers { rects });
 
-    if let Some((pane, rects)) = focus_indicator(&base, focused, zoomed, force_ring) {
+    if fx.is_none()
+        && let Some((pane, rects)) = focus_indicator(&base, focused, zoomed, force_ring)
+    {
         plan.push(DrawOp::FocusIndicator { pane, rects });
     }
 
@@ -180,6 +256,47 @@ pub fn build_draw_plan_with_overlays(
     }
 
     plan
+}
+
+/// The layout a split-zoom frame's uniforms and kitty-image quads are
+/// resolved against: `fx.pane`'s rect keeps its size but moves to
+/// `fx.content_origin`, so its grid is drawn anchored to the clip's top-left
+/// corner. Only the origin moves, so the grid size and balanced padding
+/// (functions of the rect's size) are unchanged. The draw plan keeps the real
+/// layout, whose rect bounds the scissor.
+pub(crate) fn zoom_fx_uniform_layout(
+    layout: &[(PaneId, PaneRect)],
+    fx: &SplitZoomFx,
+) -> Vec<(PaneId, PaneRect)> {
+    layout
+        .iter()
+        .map(|&(pane, rect)| {
+            if pane == fx.pane {
+                let (x, y) = fx.content_origin;
+                (pane, PaneRect::new(x, y, rect.w, rect.h))
+            } else {
+                (pane, rect)
+            }
+        })
+        .collect()
+}
+
+/// The opacity `pane` draws at: `fx.sibling_alpha` for a split pane other
+/// than the transition pane, opaque for the transition pane, overlay panes
+/// and every pane when no transition is live.
+pub(crate) fn zoom_fx_pane_alpha(
+    fx: Option<&SplitZoomFx>,
+    overlays: &[OverlayGroup],
+    pane: PaneId,
+) -> f32 {
+    match fx {
+        Some(fx)
+            if fx.pane != pane && !overlays.iter().any(|group| group.panes.contains(&pane)) =>
+        {
+            fx.sibling_alpha
+        }
+        _ => 1.0,
+    }
 }
 
 /// A one-pixel frame just inside `rect`.
@@ -335,9 +452,269 @@ mod tests {
                 DrawOp::Clear
                 | DrawOp::Dividers { .. }
                 | DrawOp::FocusIndicator { .. }
-                | DrawOp::OverlayFrame { .. } => None,
+                | DrawOp::OverlayFrame { .. }
+                | DrawOp::ZoomUnderlay { .. } => None,
             })
             .collect()
+    }
+
+    /// A compact per-op label, so a whole plan's order reads as one list.
+    fn op_kinds(plan: &[DrawOp]) -> Vec<String> {
+        plan.iter()
+            .map(|op| match op {
+                DrawOp::Clear => "clear".to_string(),
+                DrawOp::PaneCells {
+                    pane,
+                    bind_group_index,
+                    ..
+                } => format!("cells:{}@{bind_group_index}", pane.get()),
+                DrawOp::Dividers { rects } => format!("dividers:{}", rects.len()),
+                DrawOp::FocusIndicator { pane, .. } => format!("focus:{}", pane.get()),
+                DrawOp::OverlayFrame { .. } => "frame".to_string(),
+                DrawOp::ZoomUnderlay { .. } => "underlay".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rect_intersection_is_the_overlap_or_zero_sized() {
+        let a = PaneRect::new(10, 10, 100, 50);
+        assert_eq!(
+            a.intersect(PaneRect::new(50, 0, 100, 30)),
+            PaneRect::new(50, 10, 60, 20)
+        );
+        assert_eq!(a.intersect(a), a);
+        assert_eq!(
+            a.intersect(PaneRect::new(0, 0, 400, 400)),
+            a,
+            "a rect inside another intersects to itself"
+        );
+        let apart = a.intersect(PaneRect::new(200, 100, 10, 10));
+        assert_eq!((apart.w, apart.h), (0, 0));
+    }
+
+    // Split-zoom transition: siblings first in layout order, then the
+    // underlay, then the transition pane last, both on `clip ∩ rect`; no
+    // dividers and no ring even when focus and `force_ring` would draw one.
+    #[test]
+    fn zoom_fx_plan_draws_siblings_then_underlay_then_the_pane_last() {
+        let tile_a = PaneRect::new(0, 0, 49, 40);
+        let full = PaneRect::new(0, 0, 100, 40);
+        let tile_c = PaneRect::new(50, 21, 50, 19);
+        let a = PaneId::new(1);
+        let p = PaneId::new(2);
+        let c = PaneId::new(3);
+        // The transition pane's layout rect is already the full rect.
+        let layout = [(a, tile_a), (p, full), (c, tile_c)];
+        let clip = PaneRect::new(25, 10, 75, 30);
+
+        for focused in [None, Some(a), Some(p)] {
+            for force_ring in [false, true] {
+                let plan = build_draw_plan_with_zoom_fx(
+                    &layout,
+                    &[],
+                    focused,
+                    None,
+                    force_ring,
+                    Some((p, clip)),
+                );
+                assert_eq!(
+                    op_kinds(&plan),
+                    [
+                        "clear",
+                        "cells:1@0",
+                        "cells:3@2",
+                        "underlay",
+                        "cells:2@1",
+                        "dividers:0"
+                    ],
+                    "focused={focused:?} ring={force_ring}"
+                );
+                assert_eq!(plan[3], DrawOp::ZoomUnderlay { rect: clip });
+                assert_eq!(
+                    pane_cells(&plan),
+                    vec![(a, tile_a, 0), (c, tile_c, 2), (p, clip, 1)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_fx_scissor_is_the_clip_cut_to_the_pane_rect() {
+        let p = PaneId::new(2);
+        let rect = PaneRect::new(10, 0, 90, 40);
+        let layout = [(PaneId::new(1), PaneRect::new(0, 0, 49, 40)), (p, rect)];
+        // A clip reaching past the pane's rect on the left and bottom.
+        let clip = PaneRect::new(0, 20, 60, 100);
+        let revealed = PaneRect::new(10, 20, 50, 20);
+
+        let plan = build_draw_plan_with_zoom_fx(&layout, &[], None, None, false, Some((p, clip)));
+
+        assert!(plan.contains(&DrawOp::ZoomUnderlay { rect: revealed }));
+        assert_eq!(pane_cells(&plan).last(), Some(&(p, revealed, 1)));
+    }
+
+    #[test]
+    fn zoom_fx_ignores_zoomed_and_keeps_overlay_groups_after() {
+        let a = PaneId::new(1);
+        let p = PaneId::new(2);
+        let float = PaneId::new(10);
+        let layout = [
+            (a, PaneRect::new(0, 0, 49, 40)),
+            (p, PaneRect::new(0, 0, 100, 40)),
+            (float, PaneRect::new(20, 5, 30, 10)),
+        ];
+        let overlays = [OverlayGroup {
+            outer: PaneRect::new(20, 5, 30, 10),
+            header: None,
+            panes: vec![float],
+            focused: false,
+        }];
+        let clip = PaneRect::new(50, 0, 50, 40);
+
+        for zoomed in [None, Some(a), Some(p)] {
+            let plan = build_draw_plan_with_zoom_fx(
+                &layout,
+                &overlays,
+                Some(p),
+                zoomed,
+                false,
+                Some((p, clip)),
+            );
+            assert_eq!(
+                op_kinds(&plan),
+                [
+                    "clear",
+                    "cells:1@0",
+                    "underlay",
+                    "cells:2@1",
+                    "dividers:0",
+                    "frame",
+                    "cells:10@2"
+                ],
+                "zoomed={zoomed:?}"
+            );
+        }
+    }
+
+    // `fx = None` is exactly the overlay plan, and an `fx` naming a pane the
+    // split layout does not hold (absent, or an overlay pane) falls back to
+    // it, across every layout / focus / zoom / ring / overlay combination.
+    #[test]
+    fn zoom_fx_none_or_absent_pane_is_the_plain_plan() {
+        let layout = [
+            (PaneId::new(1), PaneRect::new(0, 0, 499, 299)),
+            (PaneId::new(2), PaneRect::new(500, 0, 500, 299)),
+            (PaneId::new(3), PaneRect::new(0, 300, 1000, 300)),
+            (PaneId::new(10), PaneRect::new(100, 100, 200, 100)),
+        ];
+        let overlay_sets: [&[OverlayGroup]; 2] = [
+            &[],
+            &[OverlayGroup {
+                outer: PaneRect::new(100, 100, 200, 100),
+                header: None,
+                panes: vec![PaneId::new(10)],
+                focused: true,
+            }],
+        ];
+        let ids = [
+            None,
+            Some(PaneId::new(1)),
+            Some(PaneId::new(3)),
+            Some(PaneId::new(7)),
+        ];
+        let clip = PaneRect::new(10, 10, 300, 200);
+        for overlays in overlay_sets {
+            let fallbacks = if overlays.is_empty() {
+                vec![PaneId::new(7)]
+            } else {
+                vec![PaneId::new(7), PaneId::new(10)]
+            };
+            for layout in [&layout[..0], &layout[..1], &layout[..3], &layout[..]] {
+                for focused in ids {
+                    for zoomed in ids {
+                        for force_ring in [false, true] {
+                            let plain = build_draw_plan_with_overlays(
+                                layout, overlays, focused, zoomed, force_ring,
+                            );
+                            let ctx = format!(
+                                "layout={layout:?} overlays={} focused={focused:?} zoomed={zoomed:?} ring={force_ring}",
+                                overlays.len()
+                            );
+                            assert_eq!(
+                                build_draw_plan_with_zoom_fx(
+                                    layout, overlays, focused, zoomed, force_ring, None
+                                ),
+                                plain,
+                                "{ctx}"
+                            );
+                            for absent in &fallbacks {
+                                assert_eq!(
+                                    build_draw_plan_with_zoom_fx(
+                                        layout,
+                                        overlays,
+                                        focused,
+                                        zoomed,
+                                        force_ring,
+                                        Some((*absent, clip)),
+                                    ),
+                                    plain,
+                                    "{ctx} fx={absent:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_fx_uniform_layout_translates_only_the_transition_pane() {
+        let a = PaneId::new(1);
+        let p = PaneId::new(2);
+        let layout = [
+            (a, PaneRect::new(0, 0, 49, 40)),
+            (p, PaneRect::new(0, 0, 100, 40)),
+        ];
+        let fx = SplitZoomFx {
+            pane: p,
+            clip: PaneRect::new(25, 3, 75, 37),
+            content_origin: (25, 3),
+            sibling_alpha: 0.5,
+        };
+
+        assert_eq!(
+            zoom_fx_uniform_layout(&layout, &fx),
+            vec![
+                (a, PaneRect::new(0, 0, 49, 40)),
+                (p, PaneRect::new(25, 3, 100, 40)),
+            ]
+        );
+    }
+
+    #[test]
+    fn zoom_fx_alpha_fades_split_siblings_only() {
+        let a = PaneId::new(1);
+        let p = PaneId::new(2);
+        let float = PaneId::new(10);
+        let overlays = [OverlayGroup {
+            outer: PaneRect::new(0, 0, 10, 10),
+            header: None,
+            panes: vec![float],
+            focused: false,
+        }];
+        let fx = SplitZoomFx {
+            pane: p,
+            clip: PaneRect::new(0, 0, 10, 10),
+            content_origin: (0, 0),
+            sibling_alpha: 0.25,
+        };
+
+        assert_eq!(zoom_fx_pane_alpha(Some(&fx), &overlays, a), 0.25);
+        assert_eq!(zoom_fx_pane_alpha(Some(&fx), &overlays, p), 1.0);
+        assert_eq!(zoom_fx_pane_alpha(Some(&fx), &overlays, float), 1.0);
+        assert_eq!(zoom_fx_pane_alpha(None, &overlays, a), 1.0);
     }
 
     #[test]
@@ -534,6 +911,7 @@ mod tests {
                         border.len()
                     )
                 }
+                DrawOp::ZoomUnderlay { .. } => "underlay".to_string(),
             })
             .collect();
         assert_eq!(

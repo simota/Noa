@@ -1,6 +1,7 @@
 //! [`Renderer`] — owns GPU draw state, references the shared font atlas, and the
 //! instance buffers; rebuilds them from a [`crate::FrameSnapshot`] and draws.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -12,7 +13,10 @@ use noa_grid::{Cell, CursorStyle, PLACEHOLDER, Row, SearchState, Selection, Term
 use unicode_width::UnicodeWidthChar;
 
 use crate::background_image::{BackgroundImage, BackgroundImageLayer};
-use crate::draw_plan::{DrawOp, OverlayGroup, PaneId, PaneRect, build_draw_plan_with_overlays};
+use crate::draw_plan::{
+    DrawOp, OverlayGroup, PaneId, PaneRect, SplitZoomFx, build_draw_plan_with_zoom_fx,
+    zoom_fx_pane_alpha, zoom_fx_uniform_layout,
+};
 use crate::image_layer::{ImageDraw, ImageLayer};
 use crate::instance::{
     BlendMode, CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform,
@@ -400,8 +404,15 @@ pub struct Renderer {
     /// rest of the surface is cleared fully transparent. See
     /// [`Renderer::set_backdrop_rect`].
     backdrop_rect: Option<PaneRect>,
-    /// Built on the first frame that has a `backdrop_rect`.
+    /// Built on the first frame that has a `backdrop_rect` or draws a
+    /// [`DrawOp::ZoomUnderlay`].
     backdrop_pipeline: Option<wgpu::RenderPipeline>,
+    /// The live split-zoom transition frame ([`Renderer::set_split_zoom_fx`]).
+    split_zoom_fx: Option<SplitZoomFx>,
+    /// Index of the pane bind group the window-pixel overlays (dividers,
+    /// focus ring, overlay frames) draw with: one whose `pane_alpha` is 1,
+    /// so they never fade with a split-zoom sibling. Set by `upload_uniforms`.
+    pixel_overlay_gpu: usize,
     /// Split-divider fill, re-derived from the active theme each
     /// [`Renderer::rebuild_panes`] (the overlay border tone) so the hairline
     /// tracks light/dark themes instead of staying a fixed gray.
@@ -530,6 +541,8 @@ impl Renderer {
             clear_color: [0.0, 0.0, 0.0, 1.0],
             backdrop_rect: None,
             backdrop_pipeline: None,
+            split_zoom_fx: None,
+            pixel_overlay_gpu: 0,
             divider_color: DIVIDER_RGBA,
             focus_indicator_color: FOCUS_INDICATOR_RGBA,
             overlays: Vec::new(),
@@ -666,6 +679,16 @@ impl Renderer {
 
     pub fn set_backdrop_rect(&mut self, rect: Option<PaneRect>) {
         self.backdrop_rect = rect;
+    }
+
+    /// Set the split-zoom transition frame for the following draws: `Some`
+    /// while a transition is live, `None` otherwise. The transition pane is
+    /// drawn last, cut to `clip` over a restored base and with its grid
+    /// anchored at `content_origin`; every other split pane draws at
+    /// `sibling_alpha`, without its kitty images while below 1. Ignored for
+    /// a frame whose split layout does not hold the pane.
+    pub fn set_split_zoom_fx(&mut self, fx: Option<SplitZoomFx>) {
+        self.split_zoom_fx = fx;
     }
 
     /// Mask atlas generation this renderer has uploaded.
@@ -1105,13 +1128,34 @@ impl Renderer {
         zoomed: Option<PaneId>,
         force_ring: bool,
     ) {
-        let plan =
-            build_draw_plan_with_overlays(layout, &self.overlays, focused, zoomed, force_ring);
+        // A transition applies only while its pane is a split pane of this
+        // layout; otherwise the frame is the plain plan, unfaded.
+        let fx = self.split_zoom_fx.filter(|fx| {
+            layout.iter().any(|(pane, _)| *pane == fx.pane)
+                && !self
+                    .overlays
+                    .iter()
+                    .any(|group| group.panes.contains(&fx.pane))
+        });
+        let plan = build_draw_plan_with_zoom_fx(
+            layout,
+            &self.overlays,
+            focused,
+            zoomed,
+            force_ring,
+            fx.map(|fx| (fx.pane, fx.clip)),
+        );
+        // Uniforms and kitty images see the transition pane at its content
+        // origin; the plan keeps the real rect, which bounds the scissor.
+        let uniform_layout: Cow<'_, [(PaneId, PaneRect)]> = match &fx {
+            Some(fx) => Cow::Owned(zoom_fx_uniform_layout(layout, fx)),
+            None => Cow::Borrowed(layout),
+        };
         self.ensure_pane_gpu_count(device, layout.len());
-        self.upload_uniforms(queue, layout);
+        self.upload_uniforms(queue, &uniform_layout, fx.as_ref());
         self.prepare_overlay_instances(&plan);
         self.upload_instances(device, queue);
-        let image_draws = self.build_frame_image_draws(device, queue, layout);
+        let image_draws = self.build_frame_image_draws(device, queue, &uniform_layout);
         let backdrop = self.backdrop_rect.and_then(|rect| {
             let w = rect.w.min(self.viewport.w.saturating_sub(rect.x));
             let h = rect.h.min(self.viewport.h.saturating_sub(rect.y));
@@ -1139,7 +1183,11 @@ impl Renderer {
             b: f64::from(self.clear_color[2]),
             a: f64::from(self.clear_color[3]),
         };
-        if self.backdrop_rect.is_some() && self.backdrop_pipeline.is_none() {
+        let needs_backdrop_pipeline = self.backdrop_rect.is_some()
+            || plan
+                .iter()
+                .any(|op| matches!(op, DrawOp::ZoomUnderlay { .. }));
+        if needs_backdrop_pipeline && self.backdrop_pipeline.is_none() {
             self.backdrop_pipeline = Some(backdrop_pipeline(device, self.target_format));
         }
 
@@ -1205,6 +1253,19 @@ impl Renderer {
             for op in &plan {
                 match op {
                     DrawOp::Clear => {}
+                    DrawOp::ZoomUnderlay { rect } => {
+                        let Some(pipeline) = self.backdrop_pipeline.as_ref() else {
+                            continue;
+                        };
+                        self.draw_zoom_underlay(
+                            &mut pass,
+                            pipeline,
+                            *rect,
+                            backdrop,
+                            background,
+                            bg_image_draw.as_ref(),
+                        );
+                    }
                     DrawOp::OverlayFrame { .. } => {
                         if let Some(range) = overlay_frames.next() {
                             self.draw_pixel_overlay_range(&mut pass, range.clone());
@@ -1232,10 +1293,12 @@ impl Renderer {
                         // Interleave the pane's image quads with its cell passes
                         // in three z bands (design Step R): band 0 under the
                         // background, band 1 between background and text, band 2
-                        // over text but under the UI overlays.
+                        // over text but under the UI overlays. A fading pane
+                        // skips them: the image pipeline has no pane alpha.
+                        let opaque = zoom_fx_pane_alpha(fx.as_ref(), &self.overlays, *pane) >= 1.0;
                         let bands = image_draws
                             .iter()
-                            .find(|(id, _)| id == pane)
+                            .find(|(id, _)| id == pane && opaque)
                             .map(|(_, b)| b);
                         if let Some(b) = bands {
                             self.image_layer.draw_band(&mut pass, &b[0]);
@@ -1264,6 +1327,62 @@ impl Renderer {
         }
 
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// [`DrawOp::ZoomUnderlay`]: put back over `rect` what the frame's base
+    /// drew there before any pane, replacing what siblings drew since. That
+    /// is the background fill (inside the backdrop when there is one; outside
+    /// it the base is the transparent clear) and then the background image,
+    /// with the same viewport the base used. Ends with the full viewport set.
+    fn draw_zoom_underlay(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        rect: PaneRect,
+        backdrop: Option<PaneRect>,
+        background: wgpu::Color,
+        bg_image_draw: Option<&crate::background_image::BgImageDraws>,
+    ) {
+        if rect.w == 0 || rect.h == 0 {
+            return;
+        }
+        pass.set_pipeline(pipeline);
+        let filled = match backdrop {
+            Some(backdrop) => {
+                pass.set_scissor_rect(rect.x, rect.y, rect.w, rect.h);
+                pass.set_blend_constant(wgpu::Color::TRANSPARENT);
+                pass.draw(0..3, 0..1);
+                rect.intersect(backdrop)
+            }
+            None => rect,
+        };
+        if filled.w == 0 || filled.h == 0 {
+            return;
+        }
+        pass.set_scissor_rect(filled.x, filled.y, filled.w, filled.h);
+        pass.set_blend_constant(background);
+        pass.draw(0..3, 0..1);
+        if let Some(backdrop) = backdrop {
+            pass.set_viewport(
+                backdrop.x as f32,
+                backdrop.y as f32,
+                backdrop.w as f32,
+                backdrop.h as f32,
+                0.0,
+                1.0,
+            );
+        }
+        self.background_image_layer.draw(pass, bg_image_draw);
+        if backdrop.is_some() {
+            pass.set_viewport(
+                0.0,
+                0.0,
+                self.viewport.w as f32,
+                self.viewport.h as f32,
+                0.0,
+                1.0,
+            );
+        }
     }
 
     /// Draw one contiguous cell-instance subrange for a pane. A no-op for an
@@ -1431,11 +1550,23 @@ impl Renderer {
         }
     }
 
-    fn upload_uniforms(&mut self, queue: &wgpu::Queue, layout: &[(PaneId, PaneRect)]) {
+    fn upload_uniforms(
+        &mut self,
+        queue: &wgpu::Queue,
+        layout: &[(PaneId, PaneRect)],
+        fx: Option<&SplitZoomFx>,
+    ) {
         let (cell_w, cell_h) = self.cell_size;
-        for (index, (_, rect)) in layout.iter().enumerate() {
+        self.pixel_overlay_gpu = 0;
+        let mut pixel_overlay_found = false;
+        for (index, (pane, rect)) in layout.iter().enumerate() {
             if index >= self.pane_gpu.len() {
                 continue;
+            }
+            let pane_alpha = zoom_fx_pane_alpha(fx, &self.overlays, *pane);
+            if pane_alpha >= 1.0 && !pixel_overlay_found {
+                self.pixel_overlay_gpu = index;
+                pixel_overlay_found = true;
             }
             let uniforms = populate_pane_uniform(PaneUniformParams {
                 pane_rect: *rect,
@@ -1447,6 +1578,7 @@ impl Renderer {
                 },
                 bg_color: self.clear_color,
                 blend_mode: self.blend_mode,
+                pane_alpha,
             });
             let gpu = &mut self.pane_gpu[index];
             let unchanged = gpu.uploaded_uniforms.as_ref().is_some_and(|uploaded| {
@@ -1516,7 +1648,7 @@ impl Renderer {
                     let end = (self.cell_instance_len + instances.len()) as u32;
                     self.focus_indicator_range = start..end;
                 }
-                DrawOp::Clear | DrawOp::PaneCells { .. } => {}
+                DrawOp::Clear | DrawOp::PaneCells { .. } | DrawOp::ZoomUnderlay { .. } => {}
             }
         }
         self.instance_changes
@@ -1534,7 +1666,7 @@ impl Renderer {
         if range.is_empty() || self.viewport.w == 0 || self.viewport.h == 0 {
             return;
         }
-        let Some(gpu) = self.pane_gpu.first() else {
+        let Some(gpu) = self.pane_gpu.get(self.pixel_overlay_gpu) else {
             return;
         };
         pass.set_pipeline(&self.cell.pipeline);

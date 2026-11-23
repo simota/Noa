@@ -1079,7 +1079,16 @@ fn a_read_only_view_has_no_inert_controls() {
         Link::Stored(demo_dir("disc-demo-1")),
         Some(crate::demo::session()),
     );
-    // Names and receipts are plain: every pressable left does something.
+    // Names and receipts are plain, not links to a pane nothing runs.
+    assert!(
+        !h.screen
+            .actions
+            .iter()
+            .any(|(_, a)| matches!(a, Action::Focus(_)))
+    );
+    let names = labels_under(&h.screen.tree, h.screen.center_host);
+    assert!(names.iter().any(|l| l == "claude"), "names still show");
+    // Every pressable left does something.
     for id in subtree_of(&h.screen.tree, h.screen.center_host) {
         if h.screen.tree.get::<Pressable>(id).is_some() {
             assert!(

@@ -141,15 +141,19 @@ pub enum Attr {
 
 /// One color/style run within a [`Row`]. Consecutive same-style cells are
 /// folded into a single span (PreviewSpan-equivalent), per spec §L2.
+///
+/// Fields are declared in the byte order of their serialized keys, the
+/// order a `serde_json::Map` sorts them to, so serializing it directly writes
+/// the bytes its `Value` would (`wire_types_serialize_as_their_values_do`).
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct Span {
-    pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fg: Option<SpanColor>,
+    pub attrs: Option<Vec<Attr>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bg: Option<SpanColor>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub attrs: Option<Vec<Attr>>,
+    pub fg: Option<SpanColor>,
+    pub text: String,
 }
 
 /// One grid/preview row: its absolute row index plus color runs.
@@ -162,45 +166,49 @@ pub struct Row {
 /// `Panel` — mirrors `SessionCard`, the unit `noa.listPanels` enumerates.
 /// `PartialEq` backs the `noa.stateChanged` diff (F-5: only changed/added
 /// panels are broadcast, not the full list every wake).
+///
+/// Fields are declared in the byte order of their serialized keys, the
+/// order a `serde_json::Map` sorts them to, so serializing it directly writes
+/// the bytes its `Value` would (`wire_types_serialize_as_their_values_do`).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Panel {
-    pub window_group_id: WireId,
-    pub window_id: WireId,
-    pub pane_id: WireId,
-    pub name: String,
-    pub cwd: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub process: Option<String>,
-    pub busy: bool,
-    pub attention: bool,
-    /// Whether the server exposes this pane through `noa.attach`.
-    #[serde(default = "default_attachable")]
-    pub attachable: bool,
-    pub preview: Vec<Row>,
-    /// The pane child's `NOA_SURFACE_ID`, so a process inside a pane can find
-    /// its own panel (agent-orchestration D1). Absent for remote panes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub surface_id: Option<String>,
     /// Coding-agent state (agent-orchestration D1). Absent unless the
     /// foreground process is a recognized agent or a report arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<PanelAgent>,
+    /// Whether the server exposes this pane through `noa.attach`.
+    #[serde(default = "default_attachable")]
+    pub attachable: bool,
+    pub attention: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub busy: bool,
+    pub cwd: String,
     /// Present only while the pane is held open after its child exited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<PanelExit>,
-    /// The orchestrator pane that spawned this one, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_pane_id: Option<WireId>,
     /// The label given at spawn, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    pub name: String,
+    pub pane_id: WireId,
+    /// The orchestrator pane that spawned this one, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pane_id: Option<WireId>,
+    pub preview: Vec<Row>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
     /// What the pane was started with, for a pane an IPC spawn started with
     /// a command. Absent otherwise, and from servers that predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn: Option<PanelSpawn>,
+    /// The pane child's `NOA_SURFACE_ID`, so a process inside a pane can find
+    /// its own panel (agent-orchestration D1). Absent for remote panes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_id: Option<String>,
+    pub window_group_id: WireId,
+    pub window_id: WireId,
 }
 
 /// `Panel.spawn`: the argv an IPC spawn ran and when the pane started.
@@ -216,23 +224,27 @@ pub struct PanelSpawn {
 /// report; `seq` counts reports for this pane (each report, `clear`
 /// included, advances it by one), so a waiter can ignore a report that
 /// predates the input it sent.
+///
+/// Fields are declared in the byte order of their serialized keys, the
+/// order a `serde_json::Map` sorts them to, so serializing it directly writes
+/// the bytes its `Value` would (`wire_types_serialize_as_their_values_do`).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PanelAgent {
-    /// `claude` / `codex` / `agy`, from the foreground process name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// `running` / `permission` / `input` / `finished` / `error`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    pub seq: u64,
     /// What the agent is blocked on, `permission` or `question`: set only
     /// from an `OSC 7501` blocked report, so a `state: input` without it came
     /// from a hook or `OSC 777` report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// `claude` / `codex` / `agy`, from the foreground process name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub seq: u64,
+    /// `running` / `permission` / `input` / `finished` / `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// `Panel.exit`: the held-open pane's child exit code, when one was reported.
@@ -436,7 +448,102 @@ impl Panel {
 
 #[cfg(test)]
 mod panel_tests {
-    use super::Panel;
+    use super::*;
+
+    fn panel(agent: Option<PanelAgent>, exit: Option<PanelExit>) -> Panel {
+        Panel {
+            agent,
+            attachable: false,
+            attention: true,
+            branch: Some("orch/x".to_string()),
+            busy: true,
+            cwd: "/tmp/é".to_string(),
+            exit,
+            label: Some("w".to_string()),
+            name: "n\"\n".to_string(),
+            pane_id: WireId(12),
+            parent_pane_id: Some(WireId(1)),
+            preview: vec![Row {
+                row: 3,
+                spans: vec![
+                    Span {
+                        attrs: Some(vec![Attr::Bold, Attr::Overline]),
+                        bg: Some(SpanColor::Palette(8)),
+                        fg: Some(SpanColor::rgb(1, 2, 255)),
+                        text: "● x".to_string(),
+                    },
+                    Span::default(),
+                ],
+            }],
+            process: Some("claude".to_string()),
+            spawn: Some(PanelSpawn {
+                argv: vec!["claude".to_string()],
+                started_at: 9,
+            }),
+            surface_id: Some("0x1".to_string()),
+            window_group_id: WireId(3),
+            window_id: WireId(u64::MAX),
+        }
+    }
+
+    fn assert_serializes_as_its_value(value: &impl Serialize) {
+        assert_eq!(
+            serde_json::to_string(value).unwrap(),
+            serde_json::to_value(value).unwrap().to_string()
+        );
+    }
+
+    // The server writes these directly: a field declared out of key order
+    // would change the bytes on the wire.
+    #[test]
+    fn wire_types_serialize_as_their_values_do() {
+        let agent = PanelAgent {
+            blocked: Some("question".to_string()),
+            detail: Some("d".to_string()),
+            kind: Some("codex".to_string()),
+            seq: 4,
+            state: Some("input".to_string()),
+        };
+        let bare_agent = PanelAgent {
+            blocked: None,
+            detail: None,
+            kind: None,
+            seq: 0,
+            state: None,
+        };
+        let full = panel(Some(agent), Some(PanelExit { code: Some(-2) }));
+        let mut bare = panel(Some(bare_agent), Some(PanelExit { code: None }));
+        bare.branch = None;
+        bare.label = None;
+        bare.parent_pane_id = None;
+        bare.preview.clear();
+        bare.process = None;
+        bare.spawn = None;
+        bare.surface_id = None;
+        let mut none = bare.clone();
+        none.agent = None;
+        none.exit = None;
+        let panels = vec![full, bare, none];
+        for panel in &panels {
+            assert_serializes_as_its_value(panel);
+        }
+        assert_serializes_as_its_value(&ListPanelsResult {
+            panels: panels.clone(),
+        });
+        for (dropped, removed_pane_ids) in [(false, vec![]), (true, vec![WireId(2)])] {
+            assert_serializes_as_its_value(&StateChangedParams {
+                dropped,
+                panels: panels.clone(),
+                removed_pane_ids,
+            });
+            assert_serializes_as_its_value(&OutputParams {
+                coordinate_generation: 5,
+                dropped,
+                lines: panels[0].preview.clone(),
+                pane_id: WireId(12),
+            });
+        }
+    }
 
     #[test]
     fn missing_attachable_field_defaults_to_true_for_protocol_v1_peers() {
@@ -889,32 +996,40 @@ where
 
 // ---- notifications ----
 
+/// `noa.stateChanged`'s params.
+///
+/// Fields are declared in the byte order of their serialized keys (see
+/// [`Panel`]).
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StateChangedParams {
-    pub panels: Vec<Panel>,
-    /// Panes whose Surface closed since the previous notification, in scope
-    /// for this connection. Omitted when empty (additive per FR-19).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub removed_pane_ids: Vec<WireId>,
     /// Set when a subscriber's push queue overflowed and dropped an older
     /// `stateChanged` before this one was sent (F-5, mirrors `noa.output`'s
     /// `dropped` — additive per FR-19, so older clients ignoring the field
     /// stay compatible).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dropped: bool,
+    pub panels: Vec<Panel>,
+    /// Panes whose Surface closed since the previous notification, in scope
+    /// for this connection. Omitted when empty (additive per FR-19).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed_pane_ids: Vec<WireId>,
 }
 
+/// `noa.output`'s params.
+///
+/// Fields are declared in the byte order of their serialized keys (see
+/// [`Panel`]).
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputParams {
-    pub pane_id: WireId,
     /// Opaque identity of the row-coordinate space. Clients must discard all
     /// cached rows when this value changes.
     pub coordinate_generation: u64,
-    pub lines: Vec<Row>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dropped: bool,
+    pub lines: Vec<Row>,
+    pub pane_id: WireId,
 }
 
 /// Tail-priority truncation on a UTF-8 char boundary (FR-8 / AC-9). Returns

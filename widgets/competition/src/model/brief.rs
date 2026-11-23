@@ -631,6 +631,7 @@ mod tests {
             rounds: vec![],
             winner: None,
             closed: false,
+            hold: false,
         };
         for no in 1..=5 {
             let mut submissions = BTreeMap::new();

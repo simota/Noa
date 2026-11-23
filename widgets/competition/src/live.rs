@@ -61,6 +61,23 @@ pub enum Command {
     Focus {
         part: PartId,
     },
+    /// Holds the running competition after each judged round, or lets it
+    /// go on.
+    SetHold {
+        hold: bool,
+    },
+    /// Starts the next round of the held competition.
+    Continue,
+    /// Raises the running competition's round limit by `by`.
+    Extend {
+        by: RoundNo,
+    },
+    /// Gives the stored competition in `dir` `by` more rounds and goes on
+    /// with it: a finished one that ran out of rounds continues.
+    ExtendStored {
+        dir: PathBuf,
+        by: RoundNo,
+    },
     /// Leaves the competition on screen: its runner stops (an unfinished
     /// one can be resumed from the list) and the start view comes back.
     /// Sent by [`Channel::leave`].
@@ -216,7 +233,11 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                 }
             }
             (Command::Resume { dir }, None) => runner::Start::Resume { dir },
-            (Command::Start { .. } | Command::Resume { .. }, Some(_)) => {
+            (Command::ExtendStored { dir, by }, None) => runner::Start::Extend { dir, by },
+            (
+                Command::Start { .. } | Command::Resume { .. } | Command::ExtendStored { .. },
+                Some(_),
+            ) => {
                 notify("コンペティションはすでに始まっています");
                 continue;
             }
@@ -254,7 +275,13 @@ fn forwarded(cmd: Command) -> Option<Action> {
         Command::Close => Action::Close,
         Command::Adopt { winner, agent } => Action::Adopt { winner, agent },
         Command::Focus { part } => Action::Focus { part },
-        Command::Start { .. } | Command::Resume { .. } | Command::Leave => return None,
+        Command::SetHold { hold } => Action::SetHold { hold },
+        Command::Continue => Action::Continue,
+        Command::Extend { by } => Action::Extend { by },
+        Command::Start { .. }
+        | Command::Resume { .. }
+        | Command::ExtendStored { .. }
+        | Command::Leave => return None,
     })
 }
 
@@ -398,6 +425,55 @@ mod tests {
         let (generation, notice) = channel.notices.recv_timeout(WAIT).unwrap();
         assert_eq!(generation, 0);
         assert!(notice.contains("始まっていません"), "{notice}");
+    }
+
+    #[test]
+    fn round_control_goes_to_the_running_competition() {
+        assert_eq!(
+            forwarded(Command::SetHold { hold: true }),
+            Some(Action::SetHold { hold: true })
+        );
+        assert_eq!(forwarded(Command::Continue), Some(Action::Continue));
+        assert_eq!(
+            forwarded(Command::Extend { by: 3 }),
+            Some(Action::Extend { by: 3 })
+        );
+        let stored = Command::ExtendStored {
+            dir: PathBuf::from("/x"),
+            by: 1,
+        };
+        assert_eq!(forwarded(stored), None);
+    }
+
+    /// Extending a stored competition starts a runner on it, whose refusal
+    /// comes back as a notice of the command's generation.
+    #[test]
+    fn extending_a_stored_competition_starts_a_runner_on_it() {
+        let (snapshot_tx, _snapshots) = mpsc::channel();
+        let (notice_tx, notices) = mpsc::channel();
+        let (released_tx, released) = mpsc::channel();
+        let (commands, command_rx) = mpsc::channel();
+        let dir = std::env::temp_dir().join(format!(
+            "noa-competition-no-such-stored-{}",
+            std::process::id()
+        ));
+        commands
+            .send((2, Command::ExtendStored { dir, by: 1 }))
+            .unwrap();
+        drop(commands);
+        run_commands(
+            command_rx,
+            Outlets {
+                snapshots: snapshot_tx,
+                notices: notice_tx,
+                released: released_tx,
+                wake: Arc::new(|| {}),
+            },
+        );
+        let (generation, notice) = notices.recv_timeout(WAIT).unwrap();
+        assert_eq!(generation, 2);
+        assert!(notice.contains("を開けません"), "{notice}");
+        released.recv_timeout(WAIT).unwrap();
     }
 
     /// A runner started by a command is stamped with the generation the

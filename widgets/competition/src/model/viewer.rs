@@ -998,6 +998,7 @@ mod tests {
                 rounds: vec![],
                 winner: None,
                 closed: false,
+                hold: false,
             },
             Path::new("/nonexistent"),
         );
@@ -1053,6 +1054,7 @@ mod tests {
             }],
             winner: None,
             closed: false,
+            hold: false,
         };
         let html = render_html(&session, Path::new("/nonexistent"));
         assert!(
@@ -1189,6 +1191,7 @@ mod tests {
             }],
             winner: None,
             closed: false,
+            hold: false,
         };
 
         let mut cache = ViewerCache::new();

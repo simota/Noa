@@ -98,6 +98,20 @@ pub enum Event {
     WinnerSelected {
         winner: PartId,
     },
+    /// The user holds the competition after each judged round (`true`), or
+    /// lets rounds follow each other again.
+    HoldSet {
+        #[serde(default)]
+        hold: bool,
+    },
+    /// The user raised the round limit to `max_rounds`. A competition that
+    /// ended at its limit is open again, its winner undecided until the
+    /// new final round (the earlier verdict stays in its round).
+    RoundsExtended {
+        max_rounds: RoundNo,
+        #[serde(default)]
+        at: Millis,
+    },
     SessionClosed,
 }
 
@@ -147,6 +161,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
         rounds: Vec::new(),
         winner: None,
         closed: false,
+        hold: false,
     };
     for event in rest {
         apply_one(&mut session, event)?;
@@ -358,9 +373,120 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             }
             session.winner = Some(winner.clone());
         }
+        Event::HoldSet { hold } => session.hold = *hold,
+        Event::RoundsExtended { max_rounds, .. } => {
+            if (*max_rounds as usize) <= session.rounds.len() {
+                return err(format!(
+                    "round limit {max_rounds} leaves no round after round {}",
+                    session.rounds.len()
+                ));
+            }
+            session.max_rounds = Some(*max_rounds);
+            if session.closed {
+                session.closed = false;
+                session.winner = None;
+            }
+        }
         Event::SessionClosed => {
             session.closed = true;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Config, Engine, Setup};
+    use crate::model::types::{AgentKind, SessionId};
+
+    fn created() -> Vec<Event> {
+        let setup = Setup {
+            request: "x",
+            max_rounds: Some(1),
+            reveal_interval: 5,
+            workdir: None,
+            judge: AgentKind::Agy.into(),
+            panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+        };
+        let (_, out) = Engine::create_in(
+            SessionId::new("comp-test"),
+            setup,
+            std::path::Path::new("/tmp/comp-test"),
+            Config::default(),
+            1,
+        )
+        .unwrap();
+        out.batches[0].clone()
+    }
+
+    #[test]
+    fn round_control_events_read_back_and_default_their_fields() {
+        for event in [
+            Event::HoldSet { hold: true },
+            Event::RoundsExtended {
+                max_rounds: 3,
+                at: 9,
+            },
+        ] {
+            let line = serde_json::to_string(&event).unwrap();
+            assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), event);
+        }
+        let bare: Event = serde_json::from_str(r#"{"event":"hold_set"}"#).unwrap();
+        assert_eq!(bare, Event::HoldSet { hold: false });
+        let bare: Event =
+            serde_json::from_str(r#"{"event":"rounds_extended","max_rounds":2}"#).unwrap();
+        assert_eq!(
+            bare,
+            Event::RoundsExtended {
+                max_rounds: 2,
+                at: 0
+            }
+        );
+        // A log from before them folds with no hold.
+        assert!(!create(&created()).unwrap().hold);
+    }
+
+    #[test]
+    fn an_extension_reopens_a_finished_competition_without_its_winner() {
+        let mut session = create(&created()).unwrap();
+        apply(
+            &mut session,
+            &[Event::RoundStarted {
+                no: 1,
+                kind: RoundKind::Blind,
+                at: 2,
+            }],
+        )
+        .unwrap();
+        // No round left after round 1 with a limit of 1.
+        assert!(
+            apply(
+                &mut session,
+                &[Event::RoundsExtended {
+                    max_rounds: 1,
+                    at: 3
+                }]
+            )
+            .is_err()
+        );
+        apply(
+            &mut session,
+            &[
+                Event::WinnerSelected {
+                    winner: PartId::new("codex"),
+                },
+                Event::SessionClosed,
+                Event::HoldSet { hold: true },
+                Event::RoundsExtended {
+                    max_rounds: 2,
+                    at: 4,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(!session.closed && session.hold);
+        assert_eq!(session.winner, None);
+        assert_eq!(session.max_rounds, Some(2));
+    }
 }

@@ -92,6 +92,22 @@ pub enum Input {
     },
     UserRetry,
     UserClose,
+    /// The user holds the competition after each judged round (`true`), or
+    /// lets rounds follow each other again: a round that waits starts now.
+    UserSetHold {
+        hold: bool,
+        at: Millis,
+    },
+    /// The user starts the next round of a held competition.
+    UserContinue {
+        at: Millis,
+    },
+    /// The user gives the competition `by` more rounds; one that ended at
+    /// its round limit goes on.
+    UserExtend {
+        by: RoundNo,
+        at: Millis,
+    },
     /// The agent's pane was lost while the competition was stopped: its
     /// open brief goes out again as it was, without counting a retry.
     Redeliver {
@@ -338,8 +354,14 @@ impl Engine {
                     out.effects.push(Effect::RefreshViewer);
                     Ok(out)
                 }
-                Input::UserIntervention { .. } | Input::UserRetry | Input::UserClose => {
-                    rejected("コンペティションは終了しています")
+                Input::UserIntervention { .. }
+                | Input::UserRetry
+                | Input::UserClose
+                | Input::UserSetHold { .. }
+                | Input::UserContinue { .. } => rejected("コンペティションは終了しています"),
+                Input::UserExtend { by, at } => {
+                    self.extend(&mut out, by, at)?;
+                    Ok(out)
                 }
                 _ => Ok(out),
             };
@@ -418,6 +440,26 @@ impl Engine {
                 out.effects.push(Effect::RefreshViewer);
             }
             Input::UserRetry => self.user_retry(&mut out)?,
+            Input::UserSetHold { hold, at } => {
+                if hold != self.session.hold {
+                    let waiting = self.session.waits_to_continue();
+                    self.commit(&mut out, vec![Event::HoldSet { hold }])?;
+                    // Let go while a round waits: nothing holds it now.
+                    if waiting && !hold {
+                        self.next_round(&mut out, at)?;
+                    }
+                }
+            }
+            Input::UserContinue { at } => {
+                if !self.session.hold {
+                    return rejected("ラウンド後に停止していません");
+                }
+                if !self.session.waits_to_continue() {
+                    return rejected("ラウンドはまだ進行中です");
+                }
+                self.start_next(&mut out, at, true)?;
+            }
+            Input::UserExtend { by, at } => self.extend(&mut out, by, at)?,
             Input::Redeliver { round, part } => {
                 if let Some(brief) = self.open_brief(round, &part)
                     && brief.receipt.sent.is_some()
@@ -551,7 +593,35 @@ impl Engine {
         self.advance(out)
     }
 
+    /// Gives the competition `by` more rounds past the limit (or the rounds
+    /// it has run). One that ended at its limit is open again, and its next
+    /// round starts unless it is held.
+    fn extend(&mut self, out: &mut Output, by: RoundNo, at: Millis) -> Result<(), EngineError> {
+        if by == 0 {
+            return rejected("1ラウンド以上追加してください");
+        }
+        if let Err(why) = self.session.extendable() {
+            return rejected(why);
+        }
+        let base = self
+            .session
+            .max_rounds
+            .unwrap_or_default()
+            .max(self.session.rounds.len() as RoundNo);
+        let max_rounds = base.saturating_add(by);
+        self.commit(out, vec![Event::RoundsExtended { max_rounds, at }])?;
+        out.effects.push(Effect::RefreshViewer);
+        self.next_round(out, at)
+    }
+
+    /// Starts the round after a judged one (or the first), unless the
+    /// competition is over or the user holds it after each round.
     fn next_round(&mut self, out: &mut Output, now: Millis) -> Result<(), EngineError> {
+        self.start_next(out, now, false)
+    }
+
+    /// [`Self::next_round`]; with `go`, past the user's hold.
+    fn start_next(&mut self, out: &mut Output, now: Millis, go: bool) -> Result<(), EngineError> {
         if self.session.closed {
             return Ok(());
         }
@@ -567,6 +637,11 @@ impl Engine {
         {
             self.commit(out, vec![Event::SessionClosed])?;
             out.effects.push(Effect::RefreshViewer);
+            return Ok(());
+        }
+        // Held: the judged round waits for the user (the limit above still
+        // ends the competition).
+        if self.session.hold && !go && !self.session.rounds.is_empty() {
             return Ok(());
         }
         let no = self.session.rounds.len() as RoundNo + 1;
@@ -1368,5 +1443,300 @@ mod tests {
             .unwrap();
         assert!(brief.receipt.rejected.is_some());
         assert_eq!(brief.receipt.rejected_digest, Some(store::digest("  ")));
+    }
+
+    /// An engine and every batch it committed, from its creation on.
+    struct Logged {
+        engine: Engine,
+        log: Vec<Vec<Event>>,
+    }
+
+    impl Logged {
+        fn new(max_rounds: Option<RoundNo>) -> Self {
+            let setup = Setup {
+                request: "Design a music player UI",
+                max_rounds,
+                reveal_interval: 5,
+                workdir: None,
+                judge: AgentKind::Agy.into(),
+                panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+            };
+            let (engine, out) = Engine::create_in(
+                SessionId::new("comp-test"),
+                setup,
+                Path::new("/tmp/comp-test"),
+                Config::default(),
+                1,
+            )
+            .unwrap();
+            let mut logged = Logged {
+                engine,
+                log: out.batches,
+            };
+            logged.feed(Input::Start { now: 2 });
+            logged
+        }
+
+        fn feed(&mut self, input: Input) -> Output {
+            let out = self.engine.handle(input).unwrap();
+            self.log.extend(out.batches.iter().cloned());
+            out
+        }
+
+        fn try_feed(&mut self, input: Input) -> Result<Output, String> {
+            let out = self.engine.handle(input).map_err(|e| e.to_string())?;
+            self.log.extend(out.batches.iter().cloned());
+            Ok(out)
+        }
+
+        fn round(&mut self, no: RoundNo, close: bool) {
+            let before = self.engine.session().clone();
+            run_one_round(&mut self.engine, no, close);
+            // `run_one_round` drives the engine directly: log what it did.
+            let after = self.engine.session().clone();
+            assert!(after.rev > before.rev);
+            self.log = replay_log(&self.log, &before, &after);
+        }
+
+        fn rounds(&self) -> usize {
+            self.engine.session().rounds.len()
+        }
+
+        fn folds(&self) {
+            assert_eq!(reduce::replay(&self.log).unwrap(), *self.engine.session());
+        }
+    }
+
+    /// The log with the batches that took `before` to `after` appended,
+    /// read back off a second engine driven the same way.
+    fn replay_log(log: &[Vec<Event>], before: &Session, after: &Session) -> Vec<Vec<Event>> {
+        let mut twin = Engine::resume(
+            before.clone(),
+            Path::new("/tmp/comp-test"),
+            Config::default(),
+        );
+        let no = after.rounds.len().max(before.rounds.len()) as RoundNo;
+        let mut log = log.to_vec();
+        let round = before
+            .current_round()
+            .filter(|r| r.phase != Phase::Closed)
+            .map_or(no, |r| r.no);
+        let mut feed = |input| log.extend(twin.handle(input).unwrap().batches);
+        for part in ["claude", "codex"] {
+            let part = PartId::new(part);
+            feed(Input::Sent {
+                round,
+                part: part.clone(),
+                at: round as u64 * 100,
+            });
+            feed(Input::ReplyFileWritten {
+                round,
+                part: part.clone(),
+                content: format!(
+                    "# Summary: {part} R{round} work\n\nDetails from {part} R{round}."
+                ),
+                artifacts: vec![ArtifactFile {
+                    rel_path: "index.html".into(),
+                    kind: ArtifactKind::Html,
+                    bytes: 512,
+                }],
+                at: round as u64 * 100 + 10,
+            });
+        }
+        let judge = PartId::new(JUDGE_ID);
+        feed(Input::Sent {
+            round,
+            part: judge.clone(),
+            at: round as u64 * 100 + 20,
+        });
+        let winner = after.rounds[round as usize - 1]
+            .outcome
+            .as_ref()
+            .and_then(|o| o.winner.clone());
+        let winner_json = match winner {
+            Some(w) => format!(
+                r#""winner": "{w}", "final_verdict": "Codex delivered a sharper UI.", "close": true"#
+            ),
+            None => r#""winner": null, "final_verdict": null, "close": false"#.to_owned(),
+        };
+        let json = format!(
+            r#"{{
+  "overview": "Round {round} evaluated.",
+  "evaluations": {{
+    "claude": {{ "score": {}, "strengths": "Solid", "feedback": "Iterate more" }},
+    "codex": {{ "score": {}, "strengths": "Bold", "feedback": "Refine details" }}
+  }},
+  "ranking": ["codex", "claude"],
+  {winner_json}
+}}"#,
+            70 + round,
+            75 + round
+        );
+        feed(Input::ReplyFileWritten {
+            round,
+            part: judge,
+            content: json,
+            artifacts: vec![],
+            at: round as u64 * 100 + 30,
+        });
+        assert_eq!(twin.session(), after, "the twin drifted");
+        log
+    }
+
+    fn sends(out: &Output) -> usize {
+        out.effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SendBrief { .. }))
+            .count()
+    }
+
+    #[test]
+    fn a_held_competition_waits_after_judging_and_takes_interventions_into_the_next_brief() {
+        let mut l = Logged::new(Some(3));
+        let err = l.try_feed(Input::UserContinue { at: 3 }).unwrap_err();
+        assert!(err.contains("停止していません"), "{err}");
+        let out = l.feed(Input::UserSetHold { hold: true, at: 3 });
+        assert_eq!(out.batches, vec![vec![Event::HoldSet { hold: true }]]);
+        assert!(
+            l.feed(Input::UserSetHold { hold: true, at: 3 })
+                .batches
+                .is_empty()
+        );
+        let err = l.try_feed(Input::UserContinue { at: 3 }).unwrap_err();
+        assert!(err.contains("進行中"), "{err}");
+
+        l.round(1, false);
+        assert_eq!(l.rounds(), 1, "held: no round 2 yet");
+        assert!(l.engine.session().waits_to_continue());
+        l.feed(Input::UserIntervention {
+            to: vec![],
+            body: "モバイル表示を優先して".into(),
+            at: 200,
+        });
+        let out = l.feed(Input::UserContinue { at: 201 });
+        assert_eq!(l.rounds(), 2);
+        assert_eq!(sends(&out), 2);
+        let brief = &l.engine.session().round(2).unwrap().briefs[0].body;
+        assert!(brief.contains("モバイル表示を優先して"), "{brief}");
+
+        // Still held after round 2; let go, and round 3 follows at once.
+        l.round(2, false);
+        assert_eq!(l.rounds(), 2);
+        let out = l.feed(Input::UserSetHold {
+            hold: false,
+            at: 300,
+        });
+        assert_eq!(l.rounds(), 3);
+        assert_eq!(sends(&out), 2);
+        let err = l.try_feed(Input::UserContinue { at: 301 }).unwrap_err();
+        assert!(err.contains("停止していません"), "{err}");
+        l.folds();
+    }
+
+    #[test]
+    fn a_held_competition_still_ends_at_its_round_limit() {
+        let mut l = Logged::new(Some(1));
+        l.feed(Input::UserSetHold { hold: true, at: 3 });
+        // The final round's verdict closes it (the judge must close there).
+        l.round(1, true);
+        assert!(l.engine.session().closed);
+        assert!(!l.engine.session().waits_to_continue());
+        let err = l.try_feed(Input::UserContinue { at: 200 }).unwrap_err();
+        assert!(err.contains("終了"), "{err}");
+        l.folds();
+    }
+
+    #[test]
+    fn a_competition_that_ran_out_of_rounds_goes_on_without_its_winner() {
+        let mut l = Logged::new(Some(2));
+        l.round(1, false);
+        l.round(2, true);
+        let session = l.engine.session();
+        assert!(session.closed);
+        assert_eq!(session.winner, Some(PartId::new("codex")));
+        assert!(session.extendable().is_ok());
+        let err = l
+            .try_feed(Input::UserExtend { by: 0, at: 300 })
+            .unwrap_err();
+        assert!(err.contains("1ラウンド以上"), "{err}");
+
+        let out = l.feed(Input::UserExtend { by: 3, at: 300 });
+        assert_eq!(
+            out.batches[0],
+            vec![Event::RoundsExtended {
+                max_rounds: 5,
+                at: 300
+            }]
+        );
+        let session = l.engine.session();
+        assert!(!session.closed);
+        assert_eq!(
+            session.winner, None,
+            "the winner waits for the new final round"
+        );
+        assert_eq!(session.max_rounds, Some(5));
+        assert_eq!(session.rounds.len(), 3);
+        assert_eq!(sends(&out), 2);
+        // The earlier verdict stays where the judge gave it.
+        let earlier = session.round(2).unwrap().outcome.as_ref().unwrap();
+        assert_eq!(earlier.winner, Some(PartId::new("codex")));
+        assert!(earlier.final_verdict.is_some());
+        // Round 3 is no longer the final one.
+        let brief = &session.round(3).unwrap().briefs[0].body;
+        assert!(!brief.contains("FINAL"), "{brief}");
+        l.folds();
+    }
+
+    #[test]
+    fn a_running_competition_gets_a_higher_limit_without_a_new_round() {
+        let mut l = Logged::new(Some(2));
+        let out = l.feed(Input::UserExtend { by: 1, at: 3 });
+        assert_eq!(l.engine.session().max_rounds, Some(3));
+        assert_eq!(l.rounds(), 1);
+        assert_eq!(sends(&out), 0);
+        l.folds();
+    }
+
+    #[test]
+    fn a_held_competition_extended_after_its_end_waits_for_the_user() {
+        let mut l = Logged::new(Some(1));
+        l.feed(Input::UserSetHold { hold: true, at: 3 });
+        l.round(1, true);
+        assert!(l.engine.session().closed);
+        let out = l.feed(Input::UserExtend { by: 1, at: 200 });
+        assert_eq!(sends(&out), 0);
+        assert_eq!(l.rounds(), 1);
+        assert!(l.engine.session().waits_to_continue());
+        l.feed(Input::UserContinue { at: 201 });
+        assert_eq!(l.rounds(), 2);
+        l.folds();
+    }
+
+    #[test]
+    fn a_competition_ended_early_or_without_a_limit_or_on_its_final_verdict_is_not_extended() {
+        let refused = |l: &mut Logged| {
+            l.try_feed(Input::UserExtend { by: 1, at: 900 })
+                .unwrap_err()
+        };
+        // The judge closed it before its limit.
+        let mut l = Logged::new(Some(3));
+        l.round(1, true);
+        assert!(refused(&mut l).contains("上限の前に終了"));
+        // The user ended it.
+        let mut l = Logged::new(Some(3));
+        l.feed(Input::UserClose);
+        assert!(refused(&mut l).contains("上限の前に終了"));
+        // No limit.
+        let mut l = Logged::new(None);
+        assert!(refused(&mut l).contains("上限のない"));
+        // The judge scores the round its brief called FINAL.
+        let mut l = Logged::new(Some(1));
+        for part in ["claude", "codex"] {
+            submission(&mut l.engine, part, "# Summary: done", 10);
+        }
+        assert_eq!(l.engine.session().round(1).unwrap().phase, Phase::Judging);
+        let judge = &l.engine.session().round(1).unwrap().judge_brief;
+        assert!(judge.as_ref().unwrap().body.contains("FINAL"));
+        assert!(refused(&mut l).contains("採点中"));
     }
 }

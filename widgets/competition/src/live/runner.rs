@@ -59,6 +59,11 @@ pub enum Start {
     /// `Engine::resume`): agents still in their panes are taken up again,
     /// the others are started anew.
     Resume { dir: PathBuf },
+    /// Gives the competition logged in `dir` `by` more rounds, then goes on
+    /// as [`Start::Resume`]: a finished competition that ran out of rounds
+    /// continues. The extension is stored before any pane is started, and
+    /// a refused one starts none.
+    Extend { dir: PathBuf, by: RoundNo },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +84,16 @@ pub enum Action {
     /// Brings `part`'s pane to the front in Noa.
     Focus {
         part: PartId,
+    },
+    /// Holds the competition after each judged round, or lets it go on.
+    SetHold {
+        hold: bool,
+    },
+    /// Starts the next round of a held competition.
+    Continue,
+    /// Raises the round limit by `by`.
+    Extend {
+        by: RoundNo,
     },
     Stop,
 }
@@ -392,7 +407,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         wake: Rc<dyn Fn()>,
     ) -> Result<Self, String> {
         let now = clock.now();
-        let resumed = matches!(start, Start::Resume { .. });
+        let resumed = matches!(start, Start::Resume { .. } | Start::Extend { .. });
         let (engine, store) = match start {
             Start::New {
                 request,
@@ -429,35 +444,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 let _ = store::write_viewer(&reply_dir, engine.session());
                 (engine, store)
             }
-            Start::Resume { dir } => {
-                let (store, session) = Store::open(&dir)
-                    .map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
-                // Checked under the lock: a list shown earlier may be stale.
-                if session.closed {
-                    return Err(format!(
-                        "{} は終了しています（閲覧で開いてください）",
-                        dir.display()
-                    ));
-                }
-                competition::engine::check_resumable(&session, &dir)
-                    .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
-                if let Some(workdir) = &session.workdir {
-                    if !workdir.is_dir() {
-                        return Err(format!(
-                            "{} はディレクトリではありません",
-                            workdir.display()
-                        ));
-                    }
-                    store::prepare_workdir(workdir)
-                        .map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
-                }
-                let engine = Engine::resume(session, &dir, config);
-                let reply_dir = engine.reply_dir();
-                for part in engine.session().contestant_ids() {
-                    let _ = fs::create_dir_all(store::entry_dir(&reply_dir, part));
-                }
-                (engine, store)
-            }
+            Start::Resume { dir } => open_log(dir, None, config, now)?,
+            Start::Extend { dir, by } => open_log(dir, Some(by), config, now)?,
         };
         let runner = Self {
             engine,
@@ -709,6 +697,18 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 }
                 Ok(Action::Focus { part }) => {
                     self.focus_pane(conn.as_deref_mut(), &part);
+                }
+                Ok(Action::SetHold { hold }) => {
+                    let at = self.clock.now();
+                    self.feed_user(Input::UserSetHold { hold, at })?;
+                }
+                Ok(Action::Continue) => {
+                    let at = self.clock.now();
+                    self.feed_user(Input::UserContinue { at })?;
+                }
+                Ok(Action::Extend { by }) => {
+                    let at = self.clock.now();
+                    self.feed_user(Input::UserExtend { by, at })?;
                 }
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => {
@@ -1308,6 +1308,57 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     fn pane_label(&self, part: &PartId) -> String {
         format!("comp:{}:{part}", self.engine.session().id)
     }
+}
+
+/// Opens the competition logged in `dir` to go on with it, after the
+/// checks a log gets (see [`Start::Resume`]); with `extend_by`, extended
+/// first (see [`Start::Extend`]).
+fn open_log(
+    dir: PathBuf,
+    extend_by: Option<RoundNo>,
+    config: Config,
+    now: Millis,
+) -> Result<(Engine, Store), String> {
+    let (mut store, session) =
+        Store::open(&dir).map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
+    // Checked under the lock: a list shown earlier may be stale.
+    if session.closed && extend_by.is_none() {
+        return Err(format!(
+            "{} は終了しています（閲覧で開いてください）",
+            dir.display()
+        ));
+    }
+    competition::engine::check_resumable(&session, &dir)
+        .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
+    if let Some(workdir) = &session.workdir {
+        if !workdir.is_dir() {
+            return Err(format!(
+                "{} はディレクトリではありません",
+                workdir.display()
+            ));
+        }
+        store::prepare_workdir(workdir)
+            .map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
+    }
+    let mut engine = Engine::resume(session, &dir, config);
+    if let Some(by) = extend_by {
+        // Stored before anything starts; the round it opens is
+        // briefed by the start that follows the first connection.
+        match engine.handle(Input::UserExtend { by, at: now }) {
+            Ok(out) => store
+                .append_all(&out.batches)
+                .map_err(|e| format!("write log: {e}"))?,
+            Err(EngineError::Rejected(why)) => {
+                return Err(format!("ラウンドを追加できません: {why}"));
+            }
+            Err(EngineError::Reduce(e)) => return Err(e.to_string()),
+        }
+    }
+    let reply_dir = engine.reply_dir();
+    for part in engine.session().contestant_ids() {
+        let _ = fs::create_dir_all(store::entry_dir(&reply_dir, part));
+    }
+    Ok((engine, store))
 }
 
 fn unique_session_id(root: &Path, now: Millis) -> SessionId {
@@ -2287,6 +2338,144 @@ mod tests {
         let err = open_wired(&fake, Start::Resume { dir }).err().unwrap();
         assert!(err.contains("返答パス"), "{err}");
         assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "keep me");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A one-round competition of claude and codex, judged by claude, logged
+    /// under `root` and run to its end by the engine: at its limit when
+    /// `max_rounds` is 1, closed early by the judge otherwise.
+    fn finished(root: &Path, max_rounds: RoundNo) -> PathBuf {
+        let id = SessionId::new("comp-1000");
+        let dir = store::session_dir(root, &id);
+        let setup = competition::engine::Setup {
+            request: "x",
+            max_rounds: Some(max_rounds),
+            reveal_interval: 5,
+            workdir: None,
+            judge: AgentKind::Claude.into(),
+            panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+        };
+        let (mut engine, out) = Engine::create_in(id, setup, &dir, CONFIG, 1_000).unwrap();
+        let mut log = Store::create(&dir, &out.batches[0]).unwrap();
+        let mut feed = |engine: &mut Engine, input| {
+            log.append_all(&engine.handle(input).unwrap().batches)
+                .unwrap();
+        };
+        feed(&mut engine, Input::Start { now: 1_000 });
+        for part in ["claude", "codex"] {
+            let part = PartId::new(part);
+            feed(
+                &mut engine,
+                Input::ReplyFileWritten {
+                    round: 1,
+                    part,
+                    content: "# Summary: done".into(),
+                    artifacts: vec![],
+                    at: 2_000,
+                },
+            );
+        }
+        let json = r#"{
+  "overview": "ok",
+  "evaluations": {
+    "claude": { "score": 80, "strengths": "a", "feedback": "b" },
+    "codex": { "score": 70, "strengths": "a", "feedback": "b" }
+  },
+  "ranking": ["claude", "codex"],
+  "winner": "claude",
+  "final_verdict": "claude wins",
+  "close": true
+}"#;
+        feed(
+            &mut engine,
+            Input::ReplyFileWritten {
+                round: 1,
+                part: PartId::new(competition::model::types::JUDGE_ID),
+                content: json.into(),
+                artifacts: vec![],
+                at: 3_000,
+            },
+        );
+        assert!(engine.session().closed);
+        dir
+    }
+
+    #[test]
+    fn a_finished_competition_is_extended_before_any_pane_starts() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = finished(&root, 1);
+        let (mut runner, _actions, _updates) = open_wired(
+            &fake,
+            Start::Extend {
+                dir: dir.clone(),
+                by: 2,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        // Stored, and nothing started yet.
+        let stored = store::read_session(&dir).unwrap();
+        assert!(!stored.closed);
+        assert_eq!(stored.max_rounds, Some(3));
+        assert_eq!(stored.winner, None);
+        assert_eq!(stored.rounds.len(), 2);
+        assert_eq!(fake.0.borrow().spawned, 0);
+
+        let mut conn = fake.clone();
+        assert!(runner.begin(&mut conn).is_ok());
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.0.borrow().spawned, 2);
+        for part in [":claude", ":codex"] {
+            fake.report(fake.pane_of(part), "input", None);
+        }
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        for part in [":claude", ":codex"] {
+            assert_eq!(fake.pasted(fake.pane_of(part)), 1, "{part} not briefed");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_competition_the_judge_closed_early_is_not_extended() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = finished(&root, 3);
+        let before = fs::read(dir.join(store::EVENTS_FILE)).unwrap();
+        let err = open_wired(
+            &fake,
+            Start::Extend {
+                dir: dir.clone(),
+                by: 1,
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("ラウンドを追加できません"), "{err}");
+        assert_eq!(fs::read(dir.join(store::EVENTS_FILE)).unwrap(), before);
+        assert_eq!(fake.0.borrow().spawned, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn round_control_reaches_the_engine_from_the_screen() {
+        let fake = fake();
+        let root = temp_root();
+        let panel = vec![AgentKind::Claude.into(), AgentKind::Codex.into()];
+        let (mut runner, actions, updates) = rig_on(&fake, new_start(&root, panel));
+        let mut conn = fake.clone();
+        actions.send(Action::SetHold { hold: true }).unwrap();
+        actions.send(Action::Extend { by: 3 }).unwrap();
+        actions.send(Action::Continue).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        let session = runner.engine.session();
+        assert!(session.hold);
+        assert_eq!(session.max_rounds, Some(5));
+        // Round 1 still runs: there is nothing to continue yet.
+        assert!(notices(&updates)[0].contains("進行中"));
+        let stored = store::read_session(runner.engine.dir()).unwrap();
+        assert!(stored.hold);
+        assert_eq!(stored.max_rounds, Some(5));
         let _ = fs::remove_dir_all(root);
     }
 

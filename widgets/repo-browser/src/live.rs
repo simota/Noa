@@ -1006,21 +1006,36 @@ mod tests {
             let mut merges = git::MergePredictions::default();
             let mut commits = git::CommitCache::default();
             let mut times = Vec::new();
+            let (mut allocs, mut peaks) = (Vec::new(), Vec::new());
             let mut worktrees = 0;
             for i in 0..=runs {
                 let t = Instant::now();
-                let (data, _) = offline_refresh(&dir, mode, &mut merges, &mut commits);
+                let ((data, _), n, peak) =
+                    crate::heap::measure(|| offline_refresh(&dir, mode, &mut merges, &mut commits));
                 if i > 0 {
                     times.push(t.elapsed().as_secs_f64() * 1000.0);
+                    allocs.push(n);
+                    peaks.push(peak);
                 }
                 worktrees = data.repos.iter().map(|r| r.worktrees.len()).sum();
             }
             times.sort_by(f64::total_cmp);
+            allocs.sort();
+            peaks.sort();
             println!(
                 "bench_refresh {mode:?}: {worktrees} worktrees, median {:.1} ms, min {:.1}, max {:.1} ({runs} runs)",
                 times[times.len() / 2],
                 times[0],
                 times[times.len() - 1]
+            );
+            println!(
+                "bench_heap {mode:?}: allocations median {} (min {}, max {}), peak heap median {} B (min {}, max {})",
+                allocs[allocs.len() / 2],
+                allocs[0],
+                allocs[allocs.len() - 1],
+                peaks[peaks.len() / 2],
+                peaks[0],
+                peaks[peaks.len() - 1]
             );
         }
     }

@@ -115,3 +115,26 @@ fn nothing_selected_says_so() {
     assert!(fake.asked.borrow().is_empty());
     assert_eq!(notice_of(&dashboard), NOTHING_SELECTED);
 }
+
+/// The demo and a snapshot never start a program: D says so instead.
+#[test]
+fn the_demo_and_a_snapshot_start_nothing() {
+    let mut demo = Dashboard::with_prefs(&Prefs::default(), fleet::canned());
+    let mut text = TextStore::new(Default::default());
+    demo.prepare(window(), &mut text);
+    demo.select(Some(11), &mut text);
+    key(&mut demo, &mut text, Key::Char('d'));
+    assert_eq!(notice_of(&demo), DEMO_NO_LAUNCH);
+    assert!(notice_of(&demo).starts_with("[DEMO]"));
+
+    let (mut snap, mut text) = {
+        let mut d =
+            Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet::canned_with_closed(), 0));
+        let mut text = TextStore::new(Default::default());
+        d.prepare(window(), &mut text);
+        (d, text)
+    };
+    snap.select(Some(11), &mut text);
+    key(&mut snap, &mut text, Key::Char('d'));
+    assert_eq!(notice_of(&snap), SNAPSHOT_NO_LAUNCH);
+}

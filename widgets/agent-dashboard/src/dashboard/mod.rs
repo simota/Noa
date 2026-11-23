@@ -203,6 +203,9 @@ struct Feed {
 
 const NOTICE_FOR: Duration = Duration::from_secs(8);
 const NOTICE_HEIGHT: f32 = 24.0;
+/// What 差分を見る says where nothing is ever started.
+const DEMO_NO_LAUNCH: &str = "[DEMO] デモでは Repo Browser を起動しません";
+const SNAPSHOT_NO_LAUNCH: &str = "スナップショットでは Repo Browser を起動しません";
 const NOTHING_SELECTED: &str = "ワーカーが選ばれていません（J / K で選ぶ）";
 const DRAWER_WIDTH: f32 = 384.0;
 const HELP_WIDTH: f32 = 520.0;
@@ -583,7 +586,9 @@ impl Dashboard {
             fleet,
             ..Feed::default()
         };
-        Self::start(View::from_prefs(prefs), feed).with_filter(prefs.filter.clone())
+        Self::start(View::from_prefs(prefs), feed)
+            .offline(DEMO_NO_LAUNCH)
+            .with_filter(prefs.filter.clone())
     }
 
     /// `live`, starting from `prefs`.
@@ -598,7 +603,9 @@ impl Dashboard {
 
     /// `of_snapshot`, starting from `prefs`.
     pub fn of_snapshot_with_prefs(prefs: &Prefs, snapshot: Snapshot) -> Self {
-        Self::from_snapshot(View::from_prefs(prefs), snapshot).with_filter(prefs.filter.clone())
+        Self::from_snapshot(View::from_prefs(prefs), snapshot)
+            .offline(SNAPSHOT_NO_LAUNCH)
+            .with_filter(prefs.filter.clone())
     }
 
     /// Saves the view in `store` from now on, whenever it changes and when
@@ -664,7 +671,7 @@ impl Dashboard {
     /// (`of_snapshot_with_prefs`).
     #[cfg(test)]
     pub fn of_snapshot(grouping: Grouping, snapshot: Snapshot) -> Self {
-        Self::from_snapshot(View::of(grouping), snapshot)
+        Self::from_snapshot(View::of(grouping), snapshot).offline(SNAPSHOT_NO_LAUNCH)
     }
 
     /// The header shows the snapshot's age as of when it was taken in: the
@@ -2051,6 +2058,13 @@ impl Dashboard {
             Err(why) => why,
         };
         self.show_notice(notice);
+    }
+
+    /// Starts no other program from now on: the demo and a snapshot show
+    /// what the app does without doing it. `notice` is said instead.
+    fn offline(mut self, notice: &'static str) -> Self {
+        self.repo_browser = Box::new(repo_browser::Offline(notice));
+        self
     }
 
     /// Lets a test start a Repo Browser of its own.

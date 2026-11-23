@@ -50,6 +50,9 @@ pub(super) struct Record {
     pub(super) label: Option<String>,
     pub(super) argv: Vec<String>,
     pub(super) cwd: Option<String>,
+    /// A `close --prune` removed the worktree (`worktree.removed`): the
+    /// cwd is a path that no longer exists.
+    pub(super) worktree_removed: bool,
     pub(super) branch: Option<String>,
     /// The worker's result file as the spawn named it; `moved_to` once a
     /// `close --prune` moved it out of the worktree it removed.
@@ -217,6 +220,7 @@ fn parse(text: &str) -> (Vec<Record>, Vec<(PathBuf, PathBuf)>) {
                 // `+ctl close` journals a close of a pane already gone too
                 // (a retried prune): the first one is when it closed.
                 record.closed_at.get_or_insert(ts);
+                record.worktree_removed |= event["worktree"]["removed"].as_bool() == Some(true);
                 if let Some(result) = event["worktree"]["result"].as_str() {
                     record.moved_to = Some(PathBuf::from(result));
                 }
@@ -582,7 +586,13 @@ pub(super) fn closed_worker(gone: &Gone, now: f64) -> Worker {
         freshness: 0.0,
         phases,
         closed_pane: Some(record.pane),
-        cwd: record.cwd.clone().unwrap_or_default(),
+        // A removed worktree is nothing to look at (and its path may be
+        // another worker's by now).
+        cwd: if record.worktree_removed {
+            String::new()
+        } else {
+            record.cwd.clone().unwrap_or_default()
+        },
     }
     .on_one_line()
 }

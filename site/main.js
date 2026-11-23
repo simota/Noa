@@ -187,7 +187,7 @@
     const lines = [];
     for (let i = 0; i < 48; i++) {
       const k = i % 6;
-      if (k === 0 || k === 3) lines.push('<span class="g">   Compiling</span> ' + crates[i % crates.length] + " v0.9.12");
+      if (k === 0 || k === 3) lines.push('<span class="g">   Compiling</span> ' + crates[i % crates.length] + " v0.9.13");
       else if (k === 1) lines.push("test " + tests[i % tests.length] + " ... " + '<span class="g">ok</span>');
       else if (k === 2) lines.push('<span class="d">[' + String(i * 37 % 1000).padStart(3, "0") + "]</span> " + esc(wide[i % wide.length]));
       else if (k === 4) lines.push('<span class="d">  warning:</span> unused import in ' + crates[(i + 3) % crates.length]);

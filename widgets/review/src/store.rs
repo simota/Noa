@@ -426,14 +426,15 @@ mod tests {
         vec![Event::Created {
             id: SessionId::new(id),
             request: String::new(),
-            target: Target {
+            target: Box::new(Target {
                 kind: TargetKind::Document,
                 path: None,
                 base: None,
                 head: Head::Worktree,
                 paths: Vec::new(),
                 text: Some("doc".into()),
-            },
+                workdir: None,
+            }),
             manifest: Box::new(TargetManifest {
                 label: format!("doc {id}"),
                 ..TargetManifest::default()

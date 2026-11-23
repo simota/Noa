@@ -62,9 +62,14 @@ fn section_request(out: &mut String, heading: &str, session: &Session, round: Ro
         .round(round)
         .map(|r| r.kind)
         .unwrap_or_else(|| RoundKind::for_round(round));
-    let mode = match kind {
-        RoundKind::Blind => "BLIND independent review (you see no other reviewer's work)",
-        RoundKind::Cross => "CROSS-EXAMINATION (every finding so far is shown to every reviewer)",
+    let lead = who.starts_with("the lead");
+    let mode = match (kind, lead) {
+        (RoundKind::Blind, false) => "BLIND independent review (you see no other reviewer's work)",
+        (RoundKind::Blind, true) => "consolidation of the blind round (each reviewer worked alone)",
+        (RoundKind::Cross, false) => {
+            "CROSS-EXAMINATION (every finding so far is shown to every reviewer)"
+        }
+        (RoundKind::Cross, true) => "consolidation of a cross-examination round",
     };
     let _ = writeln!(out, "You are: {who}");
     let _ = writeln!(out, "Round: {round} of {} — {mode}", session.max_rounds);
@@ -188,7 +193,7 @@ fn section_target(out: &mut String, heading: &str, session: &Session, reply_dir:
 fn lens_text(lens: &Lens) -> String {
     match lens {
         Lens::Builtin { id } => format!("{} ({}): {}", id.id(), id.label(), id.checklist()),
-        Lens::Custom { id, text } => format!("{id} (custom): {}", text.trim()),
+        Lens::Custom { id, text } => format!("{id} (custom lens): {}", text.trim()),
     }
 }
 
@@ -206,8 +211,23 @@ fn section_lens(out: &mut String, heading: &str, session: &Session, to: &PartId)
     );
 }
 
+/// The categories a finding may take; a custom lens's id carries its text.
 fn write_categories(out: &mut String, session: &Session) {
-    out.push_str(&session.categories().join(", "));
+    let names: Vec<String> = session
+        .categories()
+        .into_iter()
+        .map(|id| {
+            let custom = session.reviewers.iter().find_map(|p| match &p.lens {
+                Some(Lens::Custom { id: lens, text }) if *lens == id => Some(text.trim()),
+                _ => None,
+            });
+            match custom {
+                Some(text) => format!("{id} (= {text})"),
+                None => id,
+            }
+        })
+        .collect();
+    out.push_str(&names.join(", "));
 }
 
 fn section_interventions(
@@ -439,6 +459,7 @@ pub fn reviewer_brief(
             }
             let question = session.question_for(to, round).unwrap_or(DEFAULT_QUESTION);
             let _ = writeln!(body, "Your question: {question}\n");
+            body.push_str("Rules:\n");
             for rule in REVIEWER_RULES {
                 let _ = writeln!(body, "- {rule}");
             }

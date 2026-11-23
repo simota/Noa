@@ -461,6 +461,9 @@ pub struct Target {
     /// A document typed into the start view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The working directory a document's reviewers get as context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

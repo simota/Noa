@@ -58,6 +58,7 @@ pub fn target() -> Target {
         head: Head::Ref("feat/store".into()),
         paths: Vec::new(),
         text: None,
+        workdir: None,
     }
 }
 

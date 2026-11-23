@@ -400,7 +400,7 @@ impl Engine {
         let batch = vec![Event::Created {
             id,
             request: setup.request.trim().to_owned(),
-            target: setup.target,
+            target: Box::new(setup.target),
             manifest: Box::new(setup.manifest),
             workdir: setup.workdir,
             max_rounds: setup.max_rounds,

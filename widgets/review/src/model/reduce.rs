@@ -20,7 +20,7 @@ pub enum Event {
     Created {
         id: SessionId,
         request: String,
-        target: Target,
+        target: Box<Target>,
         manifest: Box<TargetManifest>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workdir: Option<PathBuf>,
@@ -162,7 +162,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
     let mut session = Session {
         id: id.clone(),
         request: request.clone(),
-        target: target.clone(),
+        target: (**target).clone(),
         manifest: (**manifest).clone(),
         workdir: workdir.clone(),
         max_rounds: *max_rounds,

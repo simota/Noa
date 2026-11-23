@@ -315,13 +315,18 @@ pub fn capture(target: &Target, dest: &Path, now: Millis) -> Result<TargetManife
     }
 }
 
+/// The top level of the work tree holding `path`.
+pub fn repo_root(path: &Path) -> Result<PathBuf, String> {
+    git_text(path, &["rev-parse", "--show-toplevel"])
+        .map(PathBuf::from)
+        .map_err(|_| format!("{} は git の作業ツリーではありません", path.display()))
+}
+
 fn capture_git(target: &Target, dest: &Path, now: Millis) -> Result<TargetManifest, String> {
     let Some(path) = &target.path else {
         return Err("リポジトリを指定してください".to_owned());
     };
-    let repo = git_text(path, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| format!("{} は git の作業ツリーではありません", path.display()))?;
-    let repo = PathBuf::from(repo);
+    let repo = repo_root(path)?;
     let base_ref = match target
         .base
         .as_deref()
@@ -745,6 +750,7 @@ mod tests {
             head,
             paths: Vec::new(),
             text: None,
+            workdir: None,
         }
     }
 
@@ -854,6 +860,7 @@ mod tests {
             head: Head::Worktree,
             paths: Vec::new(),
             text: None,
+            workdir: None,
         };
         assert!(
             capture(&files, &dest("many"), 0)
@@ -916,6 +923,7 @@ mod tests {
             head: Head::Worktree,
             paths: Vec::new(),
             text: None,
+            workdir: None,
         };
         let dest = temp("omit-dest").join("target");
         let manifest = capture(&target, &dest, 0).unwrap();
@@ -942,6 +950,7 @@ mod tests {
             head: Head::Worktree,
             paths: Vec::new(),
             text: None,
+            workdir: None,
         };
         let manifest = capture(&target, &temp("gi").join("target"), 0).unwrap();
         let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
@@ -981,6 +990,7 @@ mod tests {
             head: Head::Worktree,
             paths: Vec::new(),
             text: Some("# 移行計画\n\n1. 段階的に\n".into()),
+            workdir: None,
         };
         let dest = temp("doc").join("target");
         let manifest = capture(&typed, &dest, 0).unwrap();

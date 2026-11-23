@@ -130,3 +130,67 @@ fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
         record_rows: None,
     }
 }
+
+/// A backdrop rect entirely outside the target resolves to a transparent
+/// base with no fill; the zoom underlay must replay exactly that (clear the
+/// rect transparent, no background fill), not fill the whole rect opaque.
+#[test]
+fn zoom_underlay_follows_a_backdrop_outside_the_target() {
+    let viewport = PixelSize { w: 240, h: 64 };
+    let clip = PaneRect::new(60, 0, 180, 64);
+    let base = FrameBase::resolve(Some(PaneRect::new(240, 0, 40, 64)), viewport);
+    assert_eq!(base, FrameBase::Transparent);
+    assert!(base.clears_transparent());
+    assert_eq!(base.backdrop(), None);
+    assert_eq!(
+        base.underlay_steps(clip),
+        UnderlaySteps {
+            clear_transparent: true,
+            fill: None,
+            image_scissor: Some(clip),
+        }
+    );
+}
+
+#[test]
+fn zoom_underlay_follows_the_frame_base() {
+    let viewport = PixelSize { w: 240, h: 64 };
+    let clip = PaneRect::new(60, 0, 180, 64);
+
+    let opaque = FrameBase::resolve(None, viewport);
+    assert_eq!(opaque, FrameBase::Opaque);
+    assert!(!opaque.clears_transparent());
+    assert_eq!(
+        opaque.underlay_steps(clip),
+        UnderlaySteps {
+            clear_transparent: false,
+            fill: None,
+            image_scissor: Some(clip),
+        }
+    );
+
+    // Clipped to the target, then the underlay fills only its share of it.
+    let base = FrameBase::resolve(Some(PaneRect::new(0, 0, 100, 200)), viewport);
+    let backdrop = PaneRect::new(0, 0, 100, 64);
+    assert_eq!(base, FrameBase::Backdrop(backdrop));
+    assert!(base.clears_transparent());
+    assert_eq!(base.backdrop(), Some(backdrop));
+    let inside = PaneRect::new(60, 0, 40, 64);
+    assert_eq!(
+        base.underlay_steps(clip),
+        UnderlaySteps {
+            clear_transparent: true,
+            fill: Some(inside),
+            image_scissor: Some(inside),
+        }
+    );
+    // A rect outside the backdrop is only cleared transparent.
+    assert_eq!(
+        base.underlay_steps(PaneRect::new(150, 0, 90, 64)),
+        UnderlaySteps {
+            clear_transparent: true,
+            fill: None,
+            image_scissor: None,
+        }
+    );
+}

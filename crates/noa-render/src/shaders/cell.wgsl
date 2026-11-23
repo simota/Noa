@@ -3,9 +3,10 @@
 // selected by `flags & FLAG_GLYPH`.
 
 // Field order + tail padding MUST match `instance.rs`'s `Uniforms` exactly
-// (16-byte members first, then vec2s, then scalars). The tail pad is three
-// scalars, NOT a vec3 (vec3 forces 16-byte alignment and would reintroduce a
-// size mismatch). Total: 160 bytes.
+// (16-byte members first, then vec2s, then scalars: `min_contrast,
+// blend_mode, pane_alpha, _pad2`). The tail is scalars, NOT a vec3 (vec3
+// forces 16-byte alignment and would reintroduce a size mismatch). Total:
+// 160 bytes.
 struct Uniforms {
     projection: mat4x4<f32>,
     grid_padding: vec4<f32>, // top, right, bottom, left
@@ -21,7 +22,10 @@ struct Uniforms {
     // changes shader behavior (glyph-coverage correction); native vs linear
     // differ only by the target's blend space (surface format).
     blend_mode: u32,
-    _pad1: f32,
+    // Opacity every fragment's alpha is multiplied by: below 1 for split
+    // siblings fading during a split-zoom transition, 1 otherwise. Mirrors
+    // `instance.rs`'s `Uniforms::pane_alpha`.
+    pane_alpha: f32,
     _pad2: f32,
 };
 
@@ -158,10 +162,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // (REQ-EMOJI-2). Only place color_atlas_tex's textureDimensions
             // is called — normalizing the texel-space uv from vs_main.
             let cuv = in.uv / vec2<f32>(textureDimensions(color_atlas_tex));
-            return textureSample(color_atlas_tex, color_atlas_sampler, cuv);
+            let texel = textureSample(color_atlas_tex, color_atlas_sampler, cuv);
+            return vec4<f32>(texel.rgb, texel.a * uniforms.pane_alpha);
         }
         let coverage = corrected_coverage(textureSample(atlas_tex, mask_atlas_sampler, in.uv).r);
-        return vec4<f32>(in.color.rgb, in.color.a * coverage);
+        return vec4<f32>(in.color.rgb, in.color.a * coverage * uniforms.pane_alpha);
     }
-    return in.color;
+    return vec4<f32>(in.color.rgb, in.color.a * uniforms.pane_alpha);
 }

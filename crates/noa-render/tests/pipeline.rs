@@ -27,6 +27,8 @@ mod overview;
 mod shared_atlas;
 #[path = "pipeline/split_atlas.rs"]
 mod split_atlas;
+#[path = "pipeline/split_zoom.rs"]
+mod split_zoom;
 
 /// Idle Ember uses a straight-alpha upload, including completely clear texels.
 #[test]

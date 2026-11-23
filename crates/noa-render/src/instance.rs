@@ -46,8 +46,9 @@ impl CellInstance {
 ///
 /// Field order is deliberate: the 16-byte-aligned members (mat4 + vec4s) come
 /// first, then the 8-byte vec2s, then scalars + tail padding to a 16-byte
-/// multiple. Laid out this way, the tight `#[repr(C)]` Rust layout (160 bytes,
-/// no interior padding) matches the WGSL std140 uniform layout in
+/// multiple (`min_contrast, blend_mode, pane_alpha, _pad`). Laid out this
+/// way, the tight `#[repr(C)]` Rust layout (160 bytes, no interior padding)
+/// matches the WGSL std140 uniform layout in
 /// `shaders/cell.wgsl` **byte-for-byte** — a mismatch here binds a buffer the
 /// shader reads at the wrong offsets / rejects for size (wgpu validation error
 /// at draw time). Keep the two struct definitions in lockstep.
@@ -69,7 +70,12 @@ pub struct Uniforms {
     /// correction); `0`/`1` differ only by the target's blend space, which is
     /// selected by the surface format, not here.
     blend_mode: u32,
-    _pad: [f32; 2],
+    /// Opacity the fragment shader multiplies every output alpha by: below 1
+    /// for split siblings fading during a split-zoom transition, 1 otherwise.
+    /// Takes the first of the two tail pad floats, so the scalar group is
+    /// `min_contrast, blend_mode, pane_alpha, _pad` and the size stays 160.
+    pane_alpha: f32,
+    _pad: f32,
 }
 
 /// Coverage-blend mode encoded into [`Uniforms::blend_mode`]. Kept as a small
@@ -106,6 +112,8 @@ pub struct PaneUniformParams {
     pub cell_size: CellSize,
     pub bg_color: [f32; 4],
     pub blend_mode: BlendMode,
+    /// Written to [`Uniforms`]' `pane_alpha`: `1.0` draws the pane opaque.
+    pub pane_alpha: f32,
 }
 
 /// Populate uniform data for one pane.
@@ -153,7 +161,8 @@ pub fn populate_pane_uniform(params: PaneUniformParams) -> Uniforms {
         cursor_pos: [0.0, 0.0],
         min_contrast: 0.0,
         blend_mode: params.blend_mode.as_u32(),
-        _pad: [0.0; 2],
+        pane_alpha: params.pane_alpha,
+        _pad: 0.0,
     }
 }
 
@@ -189,6 +198,7 @@ mod tests {
             cell_size,
             bg_color,
             blend_mode: BlendMode::Native,
+            pane_alpha: 1.0,
         });
         let right = populate_pane_uniform(PaneUniformParams {
             pane_rect: PaneRect::new(91, 0, 109, 100),
@@ -197,6 +207,7 @@ mod tests {
             cell_size,
             bg_color,
             blend_mode: BlendMode::Native,
+            pane_alpha: 1.0,
         });
 
         assert_eq!(left.screen_size, [200.0, 100.0]);
@@ -218,6 +229,7 @@ mod tests {
             cell_size: CellSize { w: 10.0, h: 4.0 },
             bg_color: [0.0, 0.0, 0.0, 1.0],
             blend_mode: BlendMode::LinearCorrected,
+            pane_alpha: 1.0,
         };
         assert_eq!(populate_pane_uniform(params).blend_mode, 2);
 
@@ -234,5 +246,63 @@ mod tests {
             .blend_mode,
             1
         );
+    }
+
+    // Split zoom anchors a pane's grid to the clip origin by translating its
+    // rect. Among the fields the shader reads, only the grid origin (`.x`
+    // top, `.w` left of `grid_padding`) may move; `.y`/`.z` (right/bottom)
+    // are unread and may clamp, and the grid extent must not change.
+    #[test]
+    fn translated_pane_rect_moves_only_the_grid_origin() {
+        let params = PaneUniformParams {
+            pane_rect: PaneRect::new(30, 20, 120, 60),
+            window_size: PixelSize { w: 200, h: 100 },
+            grid_padding: GridPadding::new(2.0, 4.0, 6.0, 8.0),
+            cell_size: CellSize { w: 10.0, h: 4.0 },
+            bg_color: [0.1, 0.2, 0.3, 1.0],
+            blend_mode: BlendMode::LinearCorrected,
+            pane_alpha: 0.5,
+        };
+        let base = populate_pane_uniform(params);
+        // The second offset pushes the rect past the window's right edge, as
+        // a content rect anchored to a mid-transition clip origin can.
+        for (dx, dy) in [(7_u32, 3_u32), (90, 35)] {
+            let moved = populate_pane_uniform(PaneUniformParams {
+                pane_rect: PaneRect::new(30 + dx, 20 + dy, 120, 60),
+                ..params
+            });
+            assert_eq!(moved.grid_padding[0], base.grid_padding[0] + dy as f32);
+            assert_eq!(moved.grid_padding[3], base.grid_padding[3] + dx as f32);
+            assert_eq!(moved.grid_size, base.grid_size);
+            assert_eq!(moved.projection, base.projection);
+            assert_eq!(moved.cell_size, base.cell_size);
+            assert_eq!(moved.screen_size, base.screen_size);
+            assert_eq!(moved.bg_color, base.bg_color);
+            assert_eq!(moved.cursor_color, base.cursor_color);
+            assert_eq!(moved.cursor_pos, base.cursor_pos);
+            assert_eq!(moved.min_contrast, base.min_contrast);
+            assert_eq!(moved.blend_mode, base.blend_mode);
+            assert_eq!(moved.pane_alpha, base.pane_alpha);
+        }
+    }
+
+    #[test]
+    fn pane_alpha_is_written_into_the_uniform_tail() {
+        let params = PaneUniformParams {
+            pane_rect: PaneRect::new(0, 0, 90, 100),
+            window_size: PixelSize { w: 200, h: 100 },
+            grid_padding: GridPadding::new(0.0, 0.0, 0.0, 0.0),
+            cell_size: CellSize { w: 10.0, h: 4.0 },
+            bg_color: [0.0, 0.0, 0.0, 1.0],
+            blend_mode: BlendMode::Native,
+            pane_alpha: 0.375,
+        };
+        let uniforms = populate_pane_uniform(params);
+        assert_eq!(std::mem::size_of::<Uniforms>(), 160);
+        // Byte offset 152: right after `min_contrast` (144) and `blend_mode`
+        // (148), where WGSL's `pane_alpha` sits.
+        let bytes = bytemuck::bytes_of(&uniforms);
+        assert_eq!(&bytes[152..156], &0.375_f32.to_ne_bytes());
+        assert_eq!(&bytes[156..160], &0.0_f32.to_ne_bytes());
     }
 }

@@ -35,6 +35,9 @@ pub(crate) struct WindowAx {
     /// The `(id, rect, focused)` layout the elements were last synced to.
     layout: Vec<(u64, Rect, bool)>,
     scale_factor: f64,
+    /// Whether a modal overlay card currently covers this window, suppressing
+    /// `TerminalAxElement::is_focused` while winit keeps first responder.
+    modal_open: bool,
     #[cfg(target_os = "macos")]
     elements: Vec<(u64, objc2::rc::Retained<imp::TerminalAxElement>)>,
     #[cfg(target_os = "macos")]
@@ -50,16 +53,20 @@ impl WindowAx {
         window: &winit::window::Window,
         scale_factor: f64,
         panes: &[AxPane],
+        modal_open: bool,
     ) {
         let layout: Vec<(u64, Rect, bool)> = panes
             .iter()
             .map(|pane| (pane.id, pane.rect, pane.focused))
             .collect();
-        if layout == self.layout && scale_factor == self.scale_factor {
+        if layout == self.layout
+            && scale_factor == self.scale_factor
+            && modal_open == self.modal_open
+        {
             return;
         }
         #[cfg(target_os = "macos")]
-        let synced = imp::sync(self, window, scale_factor, panes);
+        let synced = imp::sync(self, window, scale_factor, panes, modal_open);
         #[cfg(not(target_os = "macos"))]
         let synced = true;
         // Remember the layout only once it is applied, so a sync that could
@@ -67,8 +74,47 @@ impl WindowAx {
         if synced {
             self.layout = layout;
             self.scale_factor = scale_factor;
+            self.modal_open = modal_open;
         }
     }
+
+    /// Update whether a modal overlay suppresses terminal AX focus. Returns
+    /// `true` when the state actually changed.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn set_modal_open(&mut self, modal_open: bool) -> bool {
+        if self.modal_open == modal_open {
+            return false;
+        }
+        self.modal_open = modal_open;
+        #[cfg(target_os = "macos")]
+        imp::set_modal_open(self, modal_open);
+        true
+    }
+
+    /// Clear modal focus suppression after the last modal overlay view has
+    /// been removed and notify VoiceOver that AX focus returned to the
+    /// focused terminal pane. Returns `true` when focus was restored.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn restore_focus_after_modal(&mut self) -> bool {
+        if !self.set_modal_open(false) {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        imp::post_focus_changed_to_focused_pane(self);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn modal_open(&self) -> bool {
+        self.modal_open
+    }
+}
+
+/// Whether a terminal pane should report `AXFocused = true`. Any open modal
+/// overlay card steals keyboard and AX focus from the underlying pane even
+/// though winit's content view stays first responder.
+pub(crate) fn pane_is_focused(pane_focused: bool, modal_open: bool, window_is_key: bool) -> bool {
+    pane_focused && !modal_open && window_is_key
 }
 
 /// A pane rect (physical pixels) in points, as `(x, y, w, h)`. A
@@ -110,14 +156,22 @@ mod imp {
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    use super::{AxPane, WindowAx, cursor_viewport_row};
+    use super::{AxPane, WindowAx, cursor_viewport_row, pane_is_focused};
     use crate::macos_applescript::{terminal_contents, terminal_selection};
+
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {
+        static NSAccessibilityFocusedUIElementChangedNotification: *const AnyObject;
+        fn NSAccessibilityPostNotification(element: *mut AnyObject, notification: *const AnyObject);
+    }
 
     pub(crate) struct AxState {
         id: u64,
         /// Frame in the container's (flipped, point) coordinates.
         frame: NSRect,
         focused: bool,
+        /// Suppresses `isAccessibilityFocused` while a modal overlay is open.
+        modal_open: bool,
         /// The `AXGroup` container: the element's AX parent and the view its
         /// frame is relative to.
         container: Weak<AnyObject>,
@@ -314,7 +368,7 @@ mod imp {
 
         fn focused_in_key_window(&self) -> bool {
             let state = self.ivars().borrow();
-            if !state.focused {
+            if !pane_is_focused(state.focused, state.modal_open, true) {
                 return false;
             }
             let Some(view) = state.container.load() else {
@@ -324,7 +378,8 @@ mod imp {
             // nil, checked before use.
             unsafe {
                 let window: *mut AnyObject = msg_send![&*view, window];
-                !window.is_null() && msg_send![window, isKeyWindow]
+                let is_key = !window.is_null() && msg_send![window, isKeyWindow];
+                pane_is_focused(state.focused, state.modal_open, is_key)
             }
         }
 
@@ -357,6 +412,7 @@ mod imp {
         window: &winit::window::Window,
         scale_factor: f64,
         panes: &[AxPane],
+        modal_open: bool,
     ) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
@@ -384,6 +440,7 @@ mod imp {
                         let mut state = element.ivars().borrow_mut();
                         state.frame = frame;
                         state.focused = pane.focused;
+                        state.modal_open = modal_open;
                         state.terminal = terminal(pane);
                     }
                     element
@@ -394,6 +451,7 @@ mod imp {
                         id: pane.id,
                         frame,
                         focused: pane.focused,
+                        modal_open,
                         container: Weak::new(container_object),
                         terminal: terminal(pane),
                     },
@@ -413,6 +471,34 @@ mod imp {
         }
         ax.elements = elements;
         true
+    }
+
+    pub(super) fn set_modal_open(ax: &WindowAx, modal_open: bool) {
+        for (_, element) in &ax.elements {
+            element.ivars().borrow_mut().modal_open = modal_open;
+        }
+    }
+
+    pub(super) fn post_focus_changed_to_focused_pane(ax: &WindowAx) {
+        for (_, element) in &ax.elements {
+            if element.focused_in_key_window() {
+                let ptr = (&**element as *const TerminalAxElement)
+                    .cast_mut()
+                    .cast::<AnyObject>();
+                // SAFETY: main thread; `element` is a live `TerminalAxElement`
+                // and `NSAccessibilityFocusedUIElementChangedNotification` is
+                // AppKit's static notification name constant.
+                unsafe {
+                    if !NSAccessibilityFocusedUIElementChangedNotification.is_null() {
+                        NSAccessibilityPostNotification(
+                            ptr,
+                            NSAccessibilityFocusedUIElementChangedNotification,
+                        );
+                    }
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -454,5 +540,23 @@ mod tests {
         stream.feed(b"\x1b[H", &mut terminal);
         assert_eq!(terminal.viewport_offset(), 1);
         assert_eq!(cursor_viewport_row(&terminal), Some(1));
+    }
+
+    #[test]
+    fn modal_overlay_suppresses_terminal_pane_ax_focus() {
+        assert!(pane_is_focused(true, false, true));
+        assert!(!pane_is_focused(true, true, true));
+        assert!(!pane_is_focused(false, false, true));
+        assert!(!pane_is_focused(true, false, false));
+
+        let mut ax = WindowAx::default();
+        assert!(!ax.modal_open());
+        assert!(!ax.restore_focus_after_modal());
+        assert!(ax.set_modal_open(true));
+        assert!(ax.modal_open());
+        assert!(!ax.set_modal_open(true));
+        assert!(ax.restore_focus_after_modal());
+        assert!(!ax.modal_open());
+        assert!(!ax.restore_focus_after_modal());
     }
 }

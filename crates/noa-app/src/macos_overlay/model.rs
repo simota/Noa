@@ -41,6 +41,22 @@ pub(crate) struct NativeOverlayCache {
     /// The pane whose child-exited bar the pointer is over; that bar is
     /// hidden so the text under it shows, as in Ghostty.
     pub(crate) child_exited_hovered: Option<crate::split_tree::PaneId>,
+    /// Last announced selection label while the command palette is open
+    /// (`None` while closed).
+    pub(super) palette_ax: Option<Option<String>>,
+    /// Last `(mode, selection_label)` announced while theme/settings is open
+    /// (`None` while closed).
+    pub(super) theme_settings_ax:
+        Option<(crate::theme_settings::ThemeSettingsMode, Option<String>)>,
+    /// Last selected `(index, process, location)` while process monitor is
+    /// open (`None` while closed). Metric ticks keep this identical so they
+    /// never spam VoiceOver announcements.
+    pub(super) process_monitor_ax: Option<Option<(usize, String, String)>>,
+    /// Last `(message, hint)` announced while a confirm dialog is open
+    /// (`None` while closed).
+    pub(super) confirm_ax: Option<(String, String)>,
+    /// Whether the "Set Tab Title" prompt was open on the previous sync.
+    pub(super) title_prompt_open: bool,
     /// Debug-only instrumentation (NFR-7/AC-58, mirrors the app-wide
     /// `ChromeTextures::record_rebuild`/`rebuild_count` pattern):
     /// incremented once per real `sync_theme_settings` dispatch to
@@ -52,6 +68,16 @@ pub(crate) struct NativeOverlayCache {
 }
 
 impl NativeOverlayCache {
+    /// Whether any modal AppKit overlay card is currently mounted on this
+    /// window (toast, scratch badge, and child-exited bars are non-modal).
+    pub(crate) fn has_modal(&self) -> bool {
+        self.palette.is_some()
+            || self.theme_settings.is_some()
+            || self.process_monitor.is_some()
+            || self.confirm.is_some()
+            || self.title_prompt.is_some()
+    }
+
     #[cfg(debug_assertions)]
     pub(crate) fn record_theme_settings_rebuild(&self) {
         self.theme_settings_rebuild_count
@@ -66,6 +92,93 @@ impl NativeOverlayCache {
     pub(crate) fn theme_settings_rebuild_count(&self) -> usize {
         self.theme_settings_rebuild_count
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Accessibility notification plan emitted by a modal overlay sync step.
+/// Computed purely from previous vs. current modal state so every open,
+/// close, focus-transfer, and selection-announcement transition is
+/// unit-testable headlessly without an AppKit window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ModalAxActions {
+    /// Move VoiceOver / AX focus to the modal root
+    /// (`NSAccessibilityFocusedUIElementChangedNotification`).
+    pub(crate) focus_modal: bool,
+    /// Notify AX clients that the window's overlay layout changed
+    /// (`NSAccessibilityLayoutChangedNotification`).
+    pub(crate) layout_changed: bool,
+    /// Request a VoiceOver announcement: `(text, high_priority)`.
+    pub(crate) announcement: Option<(String, bool)>,
+}
+
+/// Format an item's accessible row label / selection announcement as
+/// `"{title}, {hint}"` when a non-empty hint or value is present, else
+/// `"{title}"`.
+pub(crate) fn format_ax_item(title: &str, hint: Option<&str>) -> String {
+    match hint.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(hint) => format!("{title}, {hint}"),
+        None => title.to_string(),
+    }
+}
+
+/// Format a modal dialog's open announcement from its primary message/title
+/// and optional key-hint line.
+pub(crate) fn format_dialog_announcement(message: &str, hint: &str) -> String {
+    let message = message.trim();
+    let hint = hint.trim();
+    if hint.is_empty() {
+        message.to_string()
+    } else if message.is_empty() {
+        hint.to_string()
+    } else if message.ends_with(['.', '?', '!']) {
+        format!("{message} {hint}")
+    } else {
+        format!("{message}. {hint}")
+    }
+}
+
+/// Accessible label for a theme row in the Theme picker.
+pub(crate) fn theme_row_ax_label(name: &str, favorite: bool) -> String {
+    if favorite {
+        format!("{name}, Favorite")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Accessible label for a row in the Process Monitor table.
+pub(crate) fn process_monitor_row_ax_label(row: &ProcessMonitorRowView) -> String {
+    format_ax_item(
+        &row.process,
+        (!row.location.is_empty()).then_some(row.location.as_str()),
+    )
+}
+
+/// The currently selected palette entry formatted as `"{title}, {hint}"` (or
+/// `"{title}"` without a hint), or `None` when no entry is selected.
+pub(crate) fn palette_selected_ax_label(snap: &CommandPaletteSnapshot) -> Option<String> {
+    match snap.rows.get(snap.selected)? {
+        PaletteRow::Entry { title, hint, .. } => Some(format_ax_item(title, hint.as_deref())),
+        PaletteRow::Header { .. } => None,
+    }
+}
+
+/// The currently selected theme or settings row formatted for VoiceOver
+/// selection announcements.
+pub(crate) fn theme_settings_selected_ax_label(vm: &ThemeSettingsViewModel) -> Option<String> {
+    match vm.mode {
+        crate::theme_settings::ThemeSettingsMode::Theme => vm
+            .themes
+            .iter()
+            .find(|(_, highlighted, _)| *highlighted)
+            .map(|(name, _, favorite)| theme_row_ax_label(name, *favorite)),
+        crate::theme_settings::ThemeSettingsMode::Settings => {
+            vm.settings_visible.iter().copied().find_map(|idx| {
+                let row = vm.rows.get(idx)?;
+                row.selected
+                    .then(|| format_ax_item(&row.label, Some(&row.value)))
+            })
+        }
     }
 }
 

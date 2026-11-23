@@ -651,8 +651,8 @@ impl Session {
     /// Whether the user may add rounds, or why not. The competition must
     /// have a round limit; once ended, it must have ended by running all
     /// its rounds (not by the judge closing it early or by the user). While
-    /// the judge scores the round its brief called FINAL, rounds are added
-    /// once that verdict is in.
+    /// the final round runs, its briefs say FINAL (those sent and those
+    /// waiting to go out), so rounds are added once its verdict is in.
     pub fn extendable(&self) -> Result<(), &'static str> {
         let Some(max) = self.max_rounds else {
             return Err("ラウンド上限のないコンペです");
@@ -660,8 +660,8 @@ impl Session {
         let at_limit = self.rounds.len() as RoundNo >= max;
         let phase = self.current_round().map(|round| round.phase);
         if !self.closed {
-            return if at_limit && phase == Some(Phase::Judging) {
-                Err("審判が最終ラウンドを採点中です（採点の後に追加できます）")
+            return if at_limit {
+                Err("最終ラウンドの進行中です（最終判定の後に追加できます）")
             } else {
                 Ok(())
             };
@@ -671,6 +671,19 @@ impl Session {
         } else {
             Err("ラウンド上限の前に終了したコンペです")
         }
+    }
+
+    /// The judge's final verdict on the winner now decided: that of the
+    /// last judged round, when it named the current winner. An earlier
+    /// verdict (before the competition was extended, or one a later manual
+    /// choice overrode) stays with its round and is not the result.
+    pub fn final_verdict(&self) -> Option<&str> {
+        let winner = self.winner.as_ref()?;
+        let outcome = self.rounds.iter().rev().find_map(|r| r.outcome.as_ref())?;
+        outcome
+            .final_verdict
+            .as_deref()
+            .filter(|_| outcome.winner.as_ref() == Some(winner))
     }
 
     pub fn participant(&self, id: &PartId) -> Option<&Participant> {

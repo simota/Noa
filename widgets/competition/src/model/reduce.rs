@@ -375,9 +375,19 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
         }
         Event::HoldSet { hold } => session.hold = *hold,
         Event::RoundsExtended { max_rounds, .. } => {
-            if (*max_rounds as usize) <= session.rounds.len() {
+            // Only what the engine would extend: a competition with a
+            // limit, running before its final round or ended at its limit,
+            // to a strictly higher limit with a round left to run.
+            if let Err(why) = session.extendable() {
+                return err(format!("rounds extended where none can be: {why}"));
+            }
+            let base = session
+                .max_rounds
+                .unwrap_or_default()
+                .max(session.rounds.len() as RoundNo);
+            if *max_rounds <= base {
                 return err(format!(
-                    "round limit {max_rounds} leaves no round after round {}",
+                    "round limit {max_rounds} is not above {base} after round {}",
                     session.rounds.len()
                 ));
             }
@@ -447,25 +457,59 @@ mod tests {
         assert!(!create(&created()).unwrap().hold);
     }
 
-    #[test]
-    fn an_extension_reopens_a_finished_competition_without_its_winner() {
-        let mut session = create(&created()).unwrap();
-        apply(
-            &mut session,
-            &[Event::RoundStarted {
-                no: 1,
-                kind: RoundKind::Blind,
-                at: 2,
-            }],
+    /// The log of a one-round competition (limit 1) the judge's final
+    /// verdict ended, won by claude.
+    fn ended_at_its_limit() -> Vec<Vec<Event>> {
+        let setup = Setup {
+            request: "x",
+            max_rounds: Some(1),
+            reveal_interval: 5,
+            workdir: None,
+            judge: AgentKind::Agy.into(),
+            panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+        };
+        let (mut engine, out) = Engine::create_in(
+            SessionId::new("comp-test"),
+            setup,
+            std::path::Path::new("/tmp/comp-test"),
+            Config::default(),
+            1,
         )
         .unwrap();
-        // No round left after round 1 with a limit of 1.
+        let mut log = out.batches;
+        let mut feed = |input| log.extend(engine.handle(input).unwrap().batches);
+        feed(crate::engine::Input::Start { now: 2 });
+        for part in ["claude", "codex"] {
+            feed(crate::engine::Input::ReplyFileWritten {
+                round: 1,
+                part: PartId::new(part),
+                content: "# Summary: done".into(),
+                artifacts: vec![],
+                at: 3,
+            });
+        }
+        feed(crate::engine::Input::ReplyFileWritten {
+            round: 1,
+            part: PartId::new(crate::model::types::JUDGE_ID),
+            content: r#"{"overview":"ok","evaluations":{"claude":{"score":80,"feedback":"a"},"codex":{"score":70,"feedback":"b"}},"ranking":["claude","codex"],"winner":"claude","final_verdict":"claude wins","close":true}"#.into(),
+            artifacts: vec![],
+            at: 4,
+        });
+        log
+    }
+
+    #[test]
+    fn an_extension_reopens_a_competition_that_ended_at_its_limit_without_its_winner() {
+        let mut session = replay(ended_at_its_limit()).unwrap();
+        assert!(session.closed);
+        assert_eq!(session.winner, Some(PartId::new("claude")));
+        // Not above the limit it has.
         assert!(
             apply(
-                &mut session,
+                &mut session.clone(),
                 &[Event::RoundsExtended {
                     max_rounds: 1,
-                    at: 3
+                    at: 5
                 }]
             )
             .is_err()
@@ -473,14 +517,10 @@ mod tests {
         apply(
             &mut session,
             &[
-                Event::WinnerSelected {
-                    winner: PartId::new("codex"),
-                },
-                Event::SessionClosed,
                 Event::HoldSet { hold: true },
                 Event::RoundsExtended {
                     max_rounds: 2,
-                    at: 4,
+                    at: 5,
                 },
             ],
         )
@@ -488,5 +528,46 @@ mod tests {
         assert!(!session.closed && session.hold);
         assert_eq!(session.winner, None);
         assert_eq!(session.max_rounds, Some(2));
+        // The verdict stays with its round, and is not the result now.
+        let earlier = session.round(1).unwrap().outcome.as_ref().unwrap();
+        assert_eq!(earlier.final_verdict.as_deref(), Some("claude wins"));
+        assert_eq!(session.final_verdict(), None);
+    }
+
+    #[test]
+    fn a_log_extending_what_cannot_be_extended_does_not_fold() {
+        let started = || {
+            let mut session = create(&created()).unwrap();
+            apply(
+                &mut session,
+                &[Event::RoundStarted {
+                    no: 1,
+                    kind: RoundKind::Blind,
+                    at: 2,
+                }],
+            )
+            .unwrap();
+            session
+        };
+        let extend = |max_rounds| Event::RoundsExtended { max_rounds, at: 3 };
+        // Ended by the user before its limit (5).
+        let mut session = started();
+        session.max_rounds = Some(5);
+        apply(&mut session, &[Event::SessionClosed]).unwrap();
+        assert!(apply(&mut session, &[extend(6)]).is_err());
+        assert!(session.closed);
+        // Running before its limit: only upward.
+        let mut session = started();
+        session.max_rounds = Some(5);
+        assert!(apply(&mut session.clone(), &[extend(2)]).is_err());
+        assert!(apply(&mut session.clone(), &[extend(5)]).is_err());
+        apply(&mut session, &[extend(6)]).unwrap();
+        // The final round under way.
+        let mut session = started();
+        assert!(apply(&mut session, &[extend(2)]).is_err());
+        // No limit.
+        let mut session = started();
+        session.max_rounds = None;
+        assert!(apply(&mut session, &[extend(2)]).is_err());
     }
 }

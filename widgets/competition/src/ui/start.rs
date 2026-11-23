@@ -660,7 +660,7 @@ pub(super) fn rebuild_past(
         };
         actions.push(open);
         // A competition that ran all its rounds goes on with more.
-        if summary.closed && summary.extendable && !summary.busy {
+        if summary.closed && summary.extendable && !summary.busy && !summary.maybe_running {
             for by in super::EXTEND_BY {
                 let more = tree.insert(Some(buttons), small(&format!("+{by}")));
                 tree.set_accessible_label(more, format!("ラウンドを {by} 追加して再開"));

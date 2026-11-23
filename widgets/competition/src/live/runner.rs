@@ -805,6 +805,14 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     fn adopt_winner(&mut self, conn: Option<&mut C::Conn>, winner: &PartId, agent: AgentKind) {
+        // The button was drawn for the winner then; rounds added since
+        // leave the winner undecided.
+        if self.engine.session().winner.as_ref() != Some(winner) {
+            self.notice(format!(
+                "{winner} は現在の優勝者ではありません（新しい最終判定を待ってください）"
+            ));
+            return;
+        }
         let Some(workdir) = self.engine.session().workdir.clone() else {
             self.notice("採用して実装するには作業ディレクトリを指定して開始してください");
             return;
@@ -1330,7 +1338,19 @@ fn open_log(
     }
     competition::engine::check_resumable(&session, &dir)
         .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
-    if let Some(workdir) = &session.workdir {
+    let mut engine = Engine::resume(session, &dir, config);
+    // Refused before anything is written, in the log or the workdir.
+    let extension = match extend_by {
+        None => None,
+        Some(by) => match engine.handle(Input::UserExtend { by, at: now }) {
+            Ok(out) => Some(out),
+            Err(EngineError::Rejected(why)) => {
+                return Err(format!("ラウンドを追加できません: {why}"));
+            }
+            Err(EngineError::Reduce(e)) => return Err(e.to_string()),
+        },
+    };
+    if let Some(workdir) = &engine.session().workdir {
         if !workdir.is_dir() {
             return Err(format!(
                 "{} はディレクトリではありません",
@@ -1340,21 +1360,16 @@ fn open_log(
         store::prepare_workdir(workdir)
             .map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
     }
-    let mut engine = Engine::resume(session, &dir, config);
-    if let Some(by) = extend_by {
-        // Stored before anything starts; the round it opens is
-        // briefed by the start that follows the first connection.
-        match engine.handle(Input::UserExtend { by, at: now }) {
-            Ok(out) => store
-                .append_all(&out.batches)
-                .map_err(|e| format!("write log: {e}"))?,
-            Err(EngineError::Rejected(why)) => {
-                return Err(format!("ラウンドを追加できません: {why}"));
-            }
-            Err(EngineError::Reduce(e)) => return Err(e.to_string()),
-        }
-    }
     let reply_dir = engine.reply_dir();
+    if let Some(out) = extension {
+        // Stored before anything starts; the round it opens is briefed by
+        // the start that follows the first connection. The viewer shows
+        // the reopened competition (no winner) at once.
+        store
+            .append_all(&out.batches)
+            .map_err(|e| format!("write log: {e}"))?;
+        let _ = store::write_viewer(&reply_dir, engine.session());
+    }
     for part in engine.session().contestant_ids() {
         let _ = fs::create_dir_all(store::entry_dir(&reply_dir, part));
     }
@@ -2345,13 +2360,24 @@ mod tests {
     /// under `root` and run to its end by the engine: at its limit when
     /// `max_rounds` is 1, closed early by the judge otherwise.
     fn finished(root: &Path, max_rounds: RoundNo) -> PathBuf {
+        finished_with(root, max_rounds, None, false)
+    }
+
+    /// [`finished`] in `workdir` (when given), held after each round when
+    /// `hold`.
+    fn finished_with(
+        root: &Path,
+        max_rounds: RoundNo,
+        workdir: Option<PathBuf>,
+        hold: bool,
+    ) -> PathBuf {
         let id = SessionId::new("comp-1000");
         let dir = store::session_dir(root, &id);
         let setup = competition::engine::Setup {
             request: "x",
             max_rounds: Some(max_rounds),
             reveal_interval: 5,
-            workdir: None,
+            workdir,
             judge: AgentKind::Claude.into(),
             panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
         };
@@ -2361,6 +2387,9 @@ mod tests {
             log.append_all(&engine.handle(input).unwrap().batches)
                 .unwrap();
         };
+        if hold {
+            feed(&mut engine, Input::UserSetHold { hold, at: 1_000 });
+        }
         feed(&mut engine, Input::Start { now: 1_000 });
         for part in ["claude", "codex"] {
             let part = PartId::new(part);
@@ -2397,6 +2426,8 @@ mod tests {
             },
         );
         assert!(engine.session().closed);
+        // What the runner leaves: the viewer of the finished competition.
+        store::write_viewer(&engine.reply_dir(), engine.session()).unwrap();
         dir
     }
 
@@ -2433,6 +2464,138 @@ mod tests {
         for part in [":claude", ":codex"] {
             assert_eq!(fake.pasted(fake.pane_of(part)), 1, "{part} not briefed");
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_finished_log_a_widget_from_before_the_lock_may_still_hold_is_not_extended() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = finished(&root, 1);
+        // No marker, written just now: an older widget's finished screen
+        // may still take a manual winner on it.
+        fs::remove_file(dir.join(store::LOCKS_FILE)).unwrap();
+        let before = fs::read(dir.join(store::EVENTS_FILE)).unwrap();
+        let err = open_wired(
+            &fake,
+            Start::Extend {
+                dir: dir.clone(),
+                by: 1,
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("旧版"), "{err}");
+        assert_eq!(fs::read(dir.join(store::EVENTS_FILE)).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extending_a_held_stored_competition_shows_it_without_its_winner_at_once() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = finished_with(&root, 1, None, true);
+        let page = store::viewer_path(&dir);
+        let had = fs::read_to_string(&page).unwrap();
+        assert!(had.contains(r#""winner":"claude""#));
+        let (_runner, _actions, _updates) = open_wired(
+            &fake,
+            Start::Extend {
+                dir: dir.clone(),
+                by: 1,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        // Held: no round starts, so nothing else would rewrite the viewer.
+        assert_eq!(store::read_session(&dir).unwrap().rounds.len(), 1);
+        let now = fs::read_to_string(&page).unwrap();
+        assert!(
+            now.contains(r#""winner":null"#),
+            "the old winner is still shown"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_refused_extension_writes_nothing_into_the_workdir() {
+        let fake = fake();
+        let root = temp_root();
+        let work = root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        // Closed early by the judge (limit 3): not extendable.
+        let dir = finished_with(&root, 3, Some(work.clone()), false);
+        fs::remove_dir_all(work.join(".noa")).unwrap();
+        let err = open_wired(&fake, Start::Extend { dir, by: 1 })
+            .err()
+            .unwrap();
+        assert!(err.contains("ラウンドを追加できません"), "{err}");
+        assert!(!work.join(".noa").exists(), "the workdir was written to");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_winner_of_before_an_extension_is_not_adopted() {
+        let fake = fake();
+        let root = temp_root();
+        let work = root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let start = Start::New {
+            request: "x".into(),
+            workdir: Some(work.clone()),
+            max_rounds: Some(1),
+            reveal_interval: 5,
+            judge: AgentKind::Claude.into(),
+            panel: vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+            root: root.clone(),
+        };
+        let (mut runner, actions, updates) = rig_on(&fake, start);
+        let mut conn = fake.clone();
+        for part in ["claude", "codex"] {
+            assert!(
+                runner
+                    .feed(Input::ReplyFileWritten {
+                        round: 1,
+                        part: PartId::new(part),
+                        content: "# Summary: done".into(),
+                        artifacts: vec![],
+                        at: 2_000,
+                    })
+                    .is_ok()
+            );
+        }
+        let json = r#"{"overview":"ok","evaluations":{"claude":{"score":80,"feedback":"a"},"codex":{"score":70,"feedback":"b"}},"ranking":["claude","codex"],"winner":"claude","final_verdict":"claude wins","close":true}"#;
+        assert!(
+            runner
+                .feed(Input::ReplyFileWritten {
+                    round: 1,
+                    part: PartId::new(competition::model::types::JUDGE_ID),
+                    content: json.into(),
+                    artifacts: vec![],
+                    at: 3_000,
+                })
+                .is_ok()
+        );
+        assert!(runner.engine.session().closed);
+        let spawned = fake.0.borrow().spawned;
+        // "+1", then the adopt button still showing claude, before the
+        // screen catches up.
+        actions.send(Action::Extend { by: 1 }).unwrap();
+        actions
+            .send(Action::Adopt {
+                winner: PartId::new("claude"),
+                agent: AgentKind::Codex,
+            })
+            .unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(runner.engine.session().winner, None);
+        assert_eq!(fake.0.borrow().spawned, spawned, "an adopt pane started");
+        let task = runner.engine.reply_dir().join("adopt-claude.md");
+        assert!(!task.exists(), "the adopt task was written");
+        assert!(
+            notices(&updates)
+                .iter()
+                .any(|n| n.contains("現在の優勝者ではありません"))
+        );
         let _ = fs::remove_dir_all(root);
     }
 

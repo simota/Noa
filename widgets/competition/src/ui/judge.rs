@@ -52,12 +52,7 @@ pub(super) fn insert(
             .radius(8.0),
         );
         tag(tree, banner, format!("🏆 優勝: {winner}"), Tone::Success);
-        if let Some(verdict) = session
-            .rounds
-            .iter()
-            .rev()
-            .find_map(|r| r.outcome.as_ref().and_then(|o| o.final_verdict.as_deref()))
-        {
+        if let Some(verdict) = session.final_verdict() {
             tree.insert(
                 Some(banner),
                 Label::new(verdict.to_owned()).font_size(12.0).wrap(true),
@@ -146,6 +141,17 @@ pub(super) fn insert(
             })
             .collect();
         caption(tree, card, ranks.join(" · "));
+        // A verdict that is no longer the result (the competition went on,
+        // or a later choice overrode it) stays with its round.
+        if let (Some(winner), Some(verdict)) = (&outcome.winner, &outcome.final_verdict)
+            && session.final_verdict() != Some(verdict.as_str())
+        {
+            note(
+                tree,
+                card,
+                format!("この時点の判定: 🏆 {winner} — {}", verdict.trim()),
+            );
+        }
     }
     if !any {
         caption(tree, list, "（まだ審判の評価はありません）");

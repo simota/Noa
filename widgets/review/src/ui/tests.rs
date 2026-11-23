@@ -129,7 +129,11 @@ fn ac25_a_matrix_cell_opens_the_board_filtered_and_a_row_opens_its_thread() {
 fn ac26_a_stored_review_opens_read_only_without_composer_or_pane_buttons() {
     let root = std::env::temp_dir().join(format!("noa-review-ui-{}", std::process::id()));
     let dir = stored_demo(&root);
+    let before = std::fs::read(dir.join(store::EVENTS_FILE)).unwrap();
     let screen = Review::stored(&dir).unwrap();
+    // AC-23: a read-only view writes nothing into the session's directory.
+    assert!(!store::report_path(&dir).exists());
+    assert_eq!(std::fs::read(dir.join(store::EVENTS_FILE)).unwrap(), before);
     assert!(screen.read_only);
     assert!(screen.tree.is_hidden(screen.composer.root));
     let a = acts(&screen);

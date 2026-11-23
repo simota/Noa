@@ -238,3 +238,41 @@ fn part_chip(tree: &mut UiTree, parent: WidgetId, name: &str, brief: Option<&Bri
         caption(tree, chip, format!("再送{}回", brief.receipt.retries));
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn receipt(sent: Option<Millis>, replied: Option<Millis>, failed: bool) -> Receipt {
+        Receipt {
+            sent,
+            started: sent,
+            replied,
+            failed: failed.then(|| "gone".to_owned()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn elapsed_runs_to_now_and_stops_at_the_reply() {
+        let running = receipt(Some(0), None, false);
+        assert_eq!(elapsed(&running, 30_000).as_deref(), Some("1分未満"));
+        assert_eq!(elapsed(&running, 5 * 60_000).as_deref(), Some("5分"));
+        assert_eq!(elapsed(&running, 125 * 60_000).as_deref(), Some("2時間5分"));
+        let replied = receipt(Some(0), Some(3 * 60_000), false);
+        assert_eq!(elapsed(&replied, 99 * 60_000).as_deref(), Some("3分"));
+        assert_eq!(elapsed(&receipt(None, None, false), 1), None);
+        assert_eq!(elapsed(&receipt(Some(0), None, true), 1), None);
+    }
+
+    #[test]
+    fn only_a_sent_unanswered_brief_counts_as_running() {
+        let mut session = crate::demo::session();
+        assert!(!has_running(&session));
+        session.closed = false;
+        let last = session.rounds.len() - 1;
+        session.rounds[last].briefs[0].receipt = receipt(Some(0), None, false);
+        assert!(has_running(&session));
+        session.rounds[last].briefs[0].receipt = receipt(Some(0), None, true);
+        assert!(!has_running(&session));
+    }
+}

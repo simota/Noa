@@ -186,10 +186,13 @@ pub(super) fn insert(
     host: WidgetId,
     session: &Session,
     view: &DebateView,
+    live: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let debate = view.debate(session);
-    let editable = view.editable(session);
+    // A stored discussion shown read-only takes no decision: it gets the
+    // way back to the chat, not "却下".
+    let editable = live && view.editable(session);
     let issue_id = view.issue(session).cloned();
     let issue = issue_id.as_ref().and_then(|i| session.issues.get(i));
     let (pro, con) = view.sides(session).unwrap_or_default();
@@ -378,7 +381,7 @@ pub(super) fn insert(
             caption(tree, list, empty);
         }
         for message in messages {
-            message_card(tree, list, session, message, actions);
+            message_card(tree, list, session, message, live, actions);
         }
     }
 }

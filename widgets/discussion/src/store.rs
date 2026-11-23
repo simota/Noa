@@ -11,9 +11,10 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::model::reduce::{self, Event, ReduceError};
-use crate::model::types::{PartId, RoundNo, Session, SessionId};
+use crate::model::types::{Millis, PartId, RoundNo, Session, SessionId};
 
 pub const EVENTS_FILE: &str = "events.jsonl";
 pub const MODERATOR_FILE: &str = "moderator.json";
@@ -123,6 +124,8 @@ pub enum StoreError {
     },
     /// The log parses but does not fold.
     Reduce(ReduceError),
+    /// Another runner (in this window or another) has the log open.
+    Busy,
 }
 
 impl fmt::Display for StoreError {
@@ -133,6 +136,7 @@ impl fmt::Display for StoreError {
                 write!(f, "{EVENTS_FILE} line {line} is damaged: {error}")
             }
             StoreError::Reduce(e) => write!(f, "{EVENTS_FILE} does not fold: {e}"),
+            StoreError::Busy => f.write_str("別のウィンドウで実行中です"),
         }
     }
 }
@@ -158,9 +162,156 @@ fn line(batch: &[Event]) -> io::Result<Vec<u8>> {
     Ok(line)
 }
 
+/// How long a lock found taken is waited for before the log counts as
+/// running elsewhere. A `flock` lock belongs to the open file, and a child
+/// process being started on another thread holds a copy of every open file
+/// of this process until its exec closes them: for that moment it holds
+/// the lock of a log just closed, or the shared lock of an [`is_busy`]
+/// probe. The moment lasts microseconds, longer on a loaded machine.
+pub const LOCK_GRACE: Duration = Duration::from_secs(2);
+const LOCK_POLL: Duration = Duration::from_millis(5);
+
+/// Takes the log's exclusive lock, held until the file is closed.
+fn lock(file: &File) -> Result<(), StoreError> {
+    let until = Instant::now() + LOCK_GRACE;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < until => {
+                std::thread::sleep(LOCK_POLL);
+            }
+            Err(fs::TryLockError::WouldBlock) => return Err(StoreError::Busy),
+            Err(fs::TryLockError::Error(e)) => return Err(StoreError::Io(e)),
+        }
+    }
+}
+
+/// Whether a runner holds `dir`'s log open right now. Looked at once: a
+/// lock held for an instant by a starting child (see [`LOCK_GRACE`]) can
+/// show a log busy that is not, so a decision uses [`held_elsewhere`].
+pub fn is_busy(dir: &Path) -> bool {
+    File::open(dir.join(EVENTS_FILE))
+        .is_ok_and(|file| matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)))
+}
+
+/// Whether `dir`'s log stays locked for [`LOCK_GRACE`]: a runner holds it,
+/// not a child that was starting when it was looked at.
+pub fn held_elsewhere(dir: &Path) -> bool {
+    let until = Instant::now() + LOCK_GRACE;
+    while is_busy(dir) {
+        if Instant::now() >= until {
+            return true;
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
+    false
+}
+
+/// A log as read: its complete batches, how many bytes they take, and
+/// whether a last line was cut short.
+struct Log {
+    batches: Vec<Vec<Event>>,
+    kept: usize,
+    torn: bool,
+}
+
+fn read_log(text: &[u8]) -> Result<Log, StoreError> {
+    // Bytes, not a string: a last line torn inside a multi-byte character
+    // is not valid UTF-8, and is dropped like any torn line.
+    let mut batches = Vec::new();
+    let mut kept = 0;
+    let mut offset = 0;
+    let mut torn = false;
+    for (n, raw) in text.split_inclusive(|&b| b == b'\n').enumerate() {
+        let complete = raw.ends_with(b"\n");
+        offset += raw.len();
+        if raw.trim_ascii().is_empty() {
+            kept = offset;
+            continue;
+        }
+        match serde_json::from_slice::<Vec<Event>>(raw) {
+            Ok(batch) => {
+                batches.push(batch);
+                kept = offset;
+                torn = !complete;
+            }
+            Err(_) if !complete => torn = true,
+            Err(error) => {
+                return Err(StoreError::Corrupt {
+                    line: n + 1,
+                    error: error.to_string(),
+                });
+            }
+        }
+    }
+    Ok(Log {
+        batches,
+        kept,
+        torn,
+    })
+}
+
+/// Folds the session at `dir` without opening its log for writing: a torn
+/// last line is skipped, not cut from the file. For showing a stored
+/// discussion (another window may still be writing to it).
+pub fn load(dir: &Path) -> Result<Session, StoreError> {
+    let text = fs::read(dir.join(EVENTS_FILE))?;
+    let read = read_log(&text)?;
+    reduce::replay(&read.batches).map_err(StoreError::Reduce)
+}
+
+/// One stored discussion, as the start view lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    pub id: SessionId,
+    pub dir: PathBuf,
+    /// What the log folds to, or why it does not.
+    pub state: Result<Outline, String>,
+}
+
+/// The facts a listed discussion shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outline {
+    pub topic: String,
+    pub rounds: usize,
+    pub max_rounds: Option<RoundNo>,
+    pub closed: bool,
+    pub created_at: Millis,
+}
+
+impl Outline {
+    pub fn of(session: &Session) -> Self {
+        Outline {
+            topic: session.topic.clone(),
+            rounds: session.rounds.len(),
+            max_rounds: session.max_rounds,
+            closed: session.closed,
+            created_at: session.created_at,
+        }
+    }
+}
+
+/// The sessions under `root`, newest first, each folded read-only
+/// ([`load`]). A session whose log does not fold is listed with why.
+pub fn summaries(root: &Path) -> io::Result<Vec<Summary>> {
+    let mut ids = list_sessions(root)?;
+    ids.reverse();
+    Ok(ids
+        .into_iter()
+        .map(|id| {
+            let dir = session_dir(root, &id);
+            let state = load(&dir)
+                .map(|session| Outline::of(&session))
+                .map_err(|e| e.to_string());
+            Summary { id, dir, state }
+        })
+        .collect())
+}
+
 impl Store {
     /// Starts a new session directory at `dir` with its first batch (the
-    /// `Created` one). Fails if the directory already exists.
+    /// `Created` one). Fails if the directory already exists. The log stays
+    /// locked while the store is open, as with [`Store::open`].
     pub fn create(dir: &Path, first: &[Event]) -> Result<Store, StoreError> {
         reduce::create(first).map_err(StoreError::Reduce)?;
         if let Some(parent) = dir.parent() {
@@ -171,6 +322,7 @@ impl Store {
             .create_new(true)
             .append(true)
             .open(dir.join(EVENTS_FILE))?;
+        lock(&file)?;
         let mut store = Store {
             dir: dir.to_owned(),
             file,
@@ -181,43 +333,20 @@ impl Store {
 
     /// Opens the session at `dir` and folds its log. A last line cut short
     /// (the app died while writing it) is dropped from the file; damage
-    /// anywhere else is an error.
+    /// anywhere else is an error. The log is locked (an exclusive
+    /// `File::try_lock`, across processes) before it is read and stays
+    /// locked until the store is dropped, so two runners never fold and
+    /// append to one log: the second gets [`StoreError::Busy`].
     pub fn open(dir: &Path) -> Result<(Store, Session), StoreError> {
         let path = dir.join(EVENTS_FILE);
-        // Bytes, not a string: a last line torn inside a multi-byte
-        // character is not valid UTF-8, and is dropped like any torn line.
-        let text = fs::read(&path)?;
-        let mut batches = Vec::new();
-        let mut kept = 0;
-        let mut offset = 0;
-        let mut torn = false;
-        for (n, raw) in text.split_inclusive(|&b| b == b'\n').enumerate() {
-            let complete = raw.ends_with(b"\n");
-            offset += raw.len();
-            if raw.trim_ascii().is_empty() {
-                kept = offset;
-                continue;
-            }
-            match serde_json::from_slice::<Vec<Event>>(raw) {
-                Ok(batch) => {
-                    batches.push(batch);
-                    kept = offset;
-                    torn = !complete;
-                }
-                Err(_) if !complete => torn = true,
-                Err(error) => {
-                    return Err(StoreError::Corrupt {
-                        line: n + 1,
-                        error: error.to_string(),
-                    });
-                }
-            }
-        }
-        let session = reduce::replay(&batches).map_err(StoreError::Reduce)?;
         let mut file = OpenOptions::new().append(true).open(&path)?;
-        if torn {
-            if kept < text.len() {
-                file.set_len(kept as u64)?;
+        lock(&file)?;
+        let text = fs::read(&path)?;
+        let read = read_log(&text)?;
+        let session = reduce::replay(&read.batches).map_err(StoreError::Reduce)?;
+        if read.torn {
+            if read.kept < text.len() {
+                file.set_len(read.kept as u64)?;
             } else {
                 // The last batch parsed but lacks its newline.
                 file.write_all(b"\n")?;
@@ -348,6 +477,7 @@ mod tests {
         assert_eq!(session.rev, 4);
         // Appending after a resume continues the same log.
         store.append(&posted(3)).unwrap();
+        drop(store);
         let (_, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 3);
         assert_eq!(
@@ -377,6 +507,7 @@ mod tests {
         let (mut store, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 1);
         store.append(&posted(2)).unwrap();
+        drop(store);
         let (_, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 2);
         fs::remove_dir_all(&root).unwrap();
@@ -401,6 +532,7 @@ mod tests {
         let (mut store, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 1);
         store.append(&posted(2)).unwrap();
+        drop(store);
         let (_, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 2);
         fs::remove_dir_all(&root).unwrap();
@@ -422,6 +554,7 @@ mod tests {
         let (mut store, session) = Store::open(&dir).unwrap();
         assert_eq!(session.messages.len(), 1);
         store.append(&posted(2)).unwrap();
+        drop(store);
         assert_eq!(Store::open(&dir).unwrap().1.messages.len(), 2);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -460,6 +593,96 @@ mod tests {
         clear_reply(&path).unwrap();
         assert_eq!(read_reply(&path).unwrap(), None);
         assert!(list_sessions(&root.join("missing")).unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_log_open_in_one_store_is_busy_for_another_until_dropped() {
+        let root = temp_root("lock");
+        let dir = root.join("s");
+        let created = Store::create(&dir, &created()).unwrap();
+        assert!(is_busy(&dir));
+        assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
+        // Reading it stays possible.
+        assert!(load(&dir).is_ok());
+        drop(created);
+        assert!(!held_elsewhere(&dir));
+        let (first, _) = Store::open(&dir).unwrap();
+        assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
+        drop(first);
+        assert!(Store::open(&dir).is_ok());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn load_folds_without_touching_a_torn_last_line() {
+        let root = temp_root("load");
+        let dir = root.join("s");
+        let mut store = Store::create(&dir, &created()).unwrap();
+        store.append(&posted(1)).unwrap();
+        drop(store);
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(dir.join(EVENTS_FILE))
+            .unwrap();
+        file.write_all(br#"[{"event":"message_po"#).unwrap();
+        drop(file);
+        let before = fs::read(dir.join(EVENTS_FILE)).unwrap();
+        let session = load(&dir).unwrap();
+        assert_eq!(session.messages.len(), 1);
+        // A writer may still be mid-line: the file is left as it was.
+        assert_eq!(fs::read(dir.join(EVENTS_FILE)).unwrap(), before);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn summaries_list_newest_first_and_name_a_damaged_log() {
+        let root = temp_root("summaries");
+        let old = session_dir(&root, &SessionId::new("disc-1000"));
+        let mut store = Store::create(&old, &created()).unwrap();
+        store
+            .append(&[Event::RoundStarted {
+                no: 1,
+                kind: RoundKind::Open,
+                at: 3,
+            }])
+            .unwrap();
+        store.append(&[Event::SessionClosed]).unwrap();
+        drop(store);
+        let new = session_dir(&root, &SessionId::new("disc-2000"));
+        drop(Store::create(&new, &created()).unwrap());
+        let broken = session_dir(&root, &SessionId::new("disc-1500"));
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join(EVENTS_FILE), "garbage\n").unwrap();
+        // Not a session: no log.
+        fs::create_dir_all(root.join("stray")).unwrap();
+
+        let listed = summaries(&root).unwrap();
+        let ids: Vec<&str> = listed.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["disc-2000", "disc-1500", "disc-1000"]);
+        assert_eq!(listed[0].dir, new);
+        assert_eq!(
+            listed[0].state,
+            Ok(Outline {
+                topic: "t".into(),
+                rounds: 0,
+                max_rounds: None,
+                closed: false,
+                created_at: 1,
+            })
+        );
+        assert!(
+            listed[1]
+                .state
+                .as_ref()
+                .is_err_and(|why| why.contains("line 1")),
+            "{:?}",
+            listed[1].state
+        );
+        let closed = listed[2].state.as_ref().unwrap();
+        assert!(closed.closed);
+        assert_eq!(closed.rounds, 1);
+        assert!(summaries(&root.join("missing")).unwrap().is_empty());
         fs::remove_dir_all(&root).unwrap();
     }
 

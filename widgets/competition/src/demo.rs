@@ -4,11 +4,96 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use competition::store::{Listed, Summary};
+
 use competition::model::types::{
-    AgentKind, ArtifactFile, ArtifactKind, Author, Brief, EntryEvaluation, JUDGE_ID, JudgeOutput,
-    Message, MessageId, MsgKind, PartId, Participant, Phase, Receipt, Role, Round, RoundKind,
-    Session, SessionId, Submission,
+    AgentChoice, AgentKind, AgentSetup, ArtifactFile, ArtifactKind, Author, Brief, EntryEvaluation,
+    JUDGE_ID, JudgeOutput, Message, MessageId, Millis, MsgKind, PartId, Participant, Phase,
+    Receipt, Role, Round, RoundKind, Session, SessionId, Submission,
 };
+
+/// The start view's demo panel: the same CLI on two models, and codex.
+pub fn start_panel() -> Vec<AgentChoice> {
+    let on = |kind, model: &str, effort: Option<&str>| AgentChoice {
+        kind,
+        setup: AgentSetup {
+            model: Some(model.into()),
+            effort: effort.map(Into::into),
+        },
+    };
+    vec![
+        on(AgentKind::Claude, "opus", Some("high")),
+        on(AgentKind::Claude, "sonnet", None),
+        on(AgentKind::Codex, "gpt-6.2-sol", Some("xhigh")),
+    ]
+}
+
+/// The demo's past competitions by id, each made from [`session`]: what the
+/// start view lists and what opening or rematching a row shows.
+pub fn stored(id: &str) -> Option<Session> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as Millis);
+    let hour = 3_600_000;
+    let mut session = session();
+    session.id = SessionId::new(id);
+    match id {
+        "comp-4" => {
+            session.request =
+                "音楽プレイヤーのミニマルな UI を設計・実装する（index.html で確認可能にすること）"
+                    .into();
+            session.rounds.truncate(3);
+            session.created_at = now.saturating_sub(2 * hour);
+            session.contestants[0].setup = AgentSetup {
+                model: Some("opus".into()),
+                effort: Some("high".into()),
+            };
+            session.contestants[1].setup = AgentSetup {
+                model: Some("gpt-6.2-sol".into()),
+                effort: None,
+            };
+        }
+        "comp-3" => {
+            session.request = "社内ダッシュボードの KPI カードを 3 案作る".into();
+            session.rounds.truncate(2);
+            session.created_at = now.saturating_sub(5 * hour);
+        }
+        "comp-2" => {
+            // Ran all its rounds: it can go on with more.
+            session.max_rounds = Some(session.rounds.len() as competition::model::types::RoundNo);
+            session.closed = true;
+            session.winner = Some(PartId::new("claude"));
+            session.created_at = now.saturating_sub(3 * 24 * hour);
+        }
+        _ => return None,
+    }
+    Some(session)
+}
+
+/// Canned past competitions for the demo's start view, newest first:
+/// interrupted, running in another window, finished, and a damaged log.
+pub fn past() -> Vec<Listed> {
+    let listed = |id: &str, busy: bool| {
+        let dir = PathBuf::from("/demo").join(id);
+        let session = stored(id).expect("a demo competition");
+        Listed {
+            summary: Ok(Summary {
+                busy,
+                ..Summary::of(&dir, &session)
+            }),
+            dir,
+        }
+    };
+    vec![
+        listed("comp-4", false),
+        listed("comp-3", true),
+        listed("comp-2", false),
+        Listed {
+            dir: PathBuf::from("/demo/comp-1"),
+            summary: Err("events.jsonl line 4 is damaged: EOF while parsing".into()),
+        },
+    ]
+}
 
 pub fn session() -> Session {
     let p = |id: &str, kind, role| Participant {
@@ -30,6 +115,7 @@ pub fn session() -> Session {
         retries: 0,
         failed: None,
         rejected: None,
+        rejected_digest: None,
     };
 
     let make_brief = |to: &PartId, t| Brief {
@@ -255,5 +341,6 @@ pub fn session() -> Session {
         rounds,
         winner: None,
         closed: false,
+        hold: false,
     }
 }

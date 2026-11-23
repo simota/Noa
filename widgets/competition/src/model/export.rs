@@ -39,12 +39,7 @@ pub fn result_markdown(session: &Session) -> String {
         let _ = writeln!(out, "- 優勝: **{winner}**");
     }
 
-    if let Some(verdict) = session
-        .rounds
-        .iter()
-        .rev()
-        .find_map(|r| r.outcome.as_ref().and_then(|o| o.final_verdict.as_deref()))
-    {
+    if let Some(verdict) = session.final_verdict() {
         let _ = writeln!(out, "\n## 最終講評\n\n{}", verdict.trim());
     }
 

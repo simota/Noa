@@ -18,7 +18,8 @@ use noa_gpui_scene::{Color, Point, Size};
 use noa_gpui_text::TextStore;
 
 use crate::fleet::{self, Fleet, Grouping, Need, State, Tier, Worker};
-use crate::live::{Channel, Command, Link, Snapshot, Unsent};
+use crate::live::{Channel, CloseTarget, Command, Link, Snapshot, Unsent};
+use crate::repo_browser::{self, Launcher};
 
 mod analytics;
 mod cards;
@@ -33,6 +34,7 @@ mod keymap;
 mod mindmap;
 mod pager;
 mod panel;
+mod prefs;
 mod queue;
 mod select;
 mod style;
@@ -47,17 +49,22 @@ use keymap::{Action, Mode, Route};
 use mindmap::MapAxis;
 use pager::ListParts;
 use panel::{Panel, empty, history_row, panel};
+pub use prefs::{Prefs, PrefsStore, default_path as default_prefs_path};
 use queue::{QueueButtons, queue, queue_since};
 use select::Step;
 use style::{GUTTER, HEADER_HEIGHT, fill_remaining, gap, set_label, set_tag};
 use timeline::{TimelineParts, fill_lanes, span_text, timeline, timeline_span};
 
-/// The unsent messages a rebuild carries over (`Dashboard::drafts`,
-/// `Dashboard::send_caret`), so the drawer is built with its draft at once.
+/// What a rebuild carries over to the drawer it builds: the unsent
+/// messages (`Dashboard::drafts`, `Dashboard::send_caret`), so the drawer
+/// shows its draft at once, and a bulk close waiting for its second press.
 #[derive(Default)]
 struct Drafts {
     text: HashMap<u64, String>,
     caret: Option<(u64, usize)>,
+    /// The bulk close waiting for its second press (`Dashboard::close_ended`):
+    /// the drawer's button says so from its first build.
+    close_ended: Option<Vec<u64>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -138,6 +145,34 @@ impl View {
             reveal: None,
         }
     }
+
+    /// The view a run starts with: what `prefs` keeps, nothing selected.
+    fn from_prefs(prefs: &Prefs) -> Self {
+        View {
+            tab: prefs.tab,
+            map_axis: prefs.map_axis,
+            time_scale: prefs.time_scale,
+            shown: prefs.shown,
+            ..View::of(prefs.grouping)
+        }
+    }
+}
+
+impl Prefs {
+    /// The command line's values over the saved ones: each one given wins.
+    pub fn overridden(
+        self,
+        tab: Option<Tab>,
+        grouping: Option<Grouping>,
+        filter: Option<String>,
+    ) -> Prefs {
+        Prefs {
+            tab: tab.unwrap_or(self.tab),
+            grouping: grouping.unwrap_or(self.grouping),
+            filter: filter.unwrap_or(self.filter),
+            ..self
+        }
+    }
 }
 
 /// Where the workers come from: the canned fleet (no link) or the live feed.
@@ -152,6 +187,8 @@ struct Feed {
     can_focus: bool,
     /// The live feed's `Snapshot::can_input`.
     can_input: bool,
+    /// The live feed's `Snapshot::safe_send`.
+    safe_send: bool,
     /// The server instance the shown pane ids belong to (the last
     /// `Snapshot::instance` that named one).
     instance: Option<String>,
@@ -166,6 +203,9 @@ struct Feed {
 
 const NOTICE_FOR: Duration = Duration::from_secs(8);
 const NOTICE_HEIGHT: f32 = 24.0;
+/// What 差分を見る says where nothing is ever started.
+const DEMO_NO_LAUNCH: &str = "[DEMO] デモでは Repo Browser を起動しません";
+const SNAPSHOT_NO_LAUNCH: &str = "スナップショットでは Repo Browser を起動しません";
 const NOTHING_SELECTED: &str = "ワーカーが選ばれていません（J / K で選ぶ）";
 const DRAWER_WIDTH: f32 = 384.0;
 const HELP_WIDTH: f32 = 520.0;
@@ -191,6 +231,7 @@ fn dropped_text(label: &str) -> String {
 }
 
 impl Feed {
+    #[cfg(test)]
     fn demo() -> Self {
         Feed {
             fleet: fleet::canned(),
@@ -210,6 +251,7 @@ impl Feed {
         self.synced_secs = snapshot.synced_secs;
         self.can_focus = snapshot.can_focus;
         self.can_input = snapshot.can_input;
+        self.safe_send = snapshot.safe_send;
         if snapshot.instance.is_some() {
             self.instance = snapshot.instance;
         }
@@ -295,6 +337,10 @@ pub struct Registry {
     drawer: Option<(WidgetId, WidgetId)>,
     /// The drawer's ペインを閉じる / 本当に閉じる button.
     close_pane_button: Option<(WidgetId, u64)>,
+    /// The drawer's まとめて閉じる button, with the count it names.
+    close_ended_button: Option<(WidgetId, usize)>,
+    /// The drawer's 差分を見る button.
+    diff_button: Option<(WidgetId, u64)>,
     /// The drawer's result 表示 / 隠す.
     result_toggle: Option<WidgetId>,
     /// The drawer's result 再読込 button.
@@ -385,6 +431,27 @@ fn button_pane(buttons: &[(WidgetId, u64)], source: WidgetId) -> Option<u64> {
     QueueButtons::worker(buttons, source)
 }
 
+/// How many workers a bulk close names by label before it counts the rest.
+const BULK_NAMED: usize = 5;
+
+/// The labels of `panes` for a bulk close's confirmation: the first
+/// `BULK_NAMED`, then how many more.
+fn bulk_names(fleet: &Fleet, panes: &[u64]) -> String {
+    let labels: Vec<String> = panes
+        .iter()
+        .filter_map(|pane| fleet.worker(*pane))
+        .take(BULK_NAMED)
+        .map(|w| fleet::one_line(&w.label))
+        .collect();
+    let rest = panes.len().saturating_sub(labels.len());
+    let named = labels.join("、");
+    if rest > 0 {
+        format!("{named} ほか {rest} 件")
+    } else {
+        named
+    }
+}
+
 pub struct Dashboard {
     tree: UiTree,
     view: View,
@@ -432,15 +499,27 @@ pub struct Dashboard {
     /// What the open help disabled under it, to enable again when it
     /// closes (`open_help`).
     shielded: Vec<WidgetId>,
-    /// When the close `view.confirm_close` waits for ends unconfirmed: as
-    /// its notice does (`NOTICE_FOR`).
+    /// When the close `view.confirm_close` (or `close_ended`) waits for
+    /// ends unconfirmed: as its notice does (`NOTICE_FOR`).
     close_until: Option<Instant>,
+    /// The ended workers a first ⇧X (or まとめて閉じる) named, waiting for
+    /// the second press to close them all (`request_close_ended`).
+    close_ended: Option<Vec<u64>>,
+    /// Shift came up since `close_ended` was armed. The platform marks no
+    /// key repeat and sends no key release, so ⇧X held down sends ⇧X again
+    /// and again: only one after Shift came up is a second press.
+    shift_up: bool,
     /// The filter field had the focus when the input being handled began:
     /// a rebuild that input causes focuses the new field. For a release,
     /// what counts is the press: a press moves the focus to what it hits
     /// before the release activates it (a grouping segment, a button).
     filter_had_focus: bool,
     pressed_in_filter: bool,
+    /// Where the view is saved when it changes (`after_input`) and when
+    /// the window closes; `None` keeps nothing (the tests, a snapshot).
+    prefs_store: Option<PrefsStore>,
+    /// Starts the Repo Browser for 差分を見る.
+    repo_browser: Box<dyn Launcher>,
     #[cfg(test)]
     panels: [Option<WidgetId>; 5],
     /// Lets the tests drive `wheel` as if the pager took the event: U1's
@@ -461,11 +540,14 @@ impl std::ops::Deref for Dashboard {
 }
 
 impl Dashboard {
-    /// The demo: the canned fleet.
+    /// The demo: the canned fleet. Only the tests start so; the app starts
+    /// from the saved view (`with_prefs`).
+    #[cfg(test)]
     pub fn new(grouping: Grouping) -> Self {
         Self::showing(View::of(grouping))
     }
 
+    #[cfg(test)]
     fn showing(view: View) -> Self {
         Self::start(view, Feed::demo())
     }
@@ -487,6 +569,8 @@ impl Dashboard {
     }
 
     /// Fed by the live feed, connecting until its first snapshot arrives.
+    /// As `new`, for the tests (`live_with_prefs`).
+    #[cfg(test)]
     pub fn live(grouping: Grouping, channel: Channel) -> Self {
         let feed = Feed {
             link: Some(Link::Connecting),
@@ -496,7 +580,65 @@ impl Dashboard {
         Self::start(View::of(grouping), feed)
     }
 
-    /// Switches to an initial tab (e.g. from `--tab=...`) before the first frame.
+    /// The demo of `fleet` (`fleet::canned`), starting from `prefs`.
+    pub fn with_prefs(prefs: &Prefs, fleet: Fleet) -> Self {
+        let feed = Feed {
+            fleet,
+            ..Feed::default()
+        };
+        Self::start(View::from_prefs(prefs), feed)
+            .offline(DEMO_NO_LAUNCH)
+            .with_filter(prefs.filter.clone())
+    }
+
+    /// `live`, starting from `prefs`.
+    pub fn live_with_prefs(prefs: &Prefs, channel: Channel) -> Self {
+        let feed = Feed {
+            link: Some(Link::Connecting),
+            channel: Some(channel),
+            ..Feed::default()
+        };
+        Self::start(View::from_prefs(prefs), feed).with_filter(prefs.filter.clone())
+    }
+
+    /// `of_snapshot`, starting from `prefs`.
+    pub fn of_snapshot_with_prefs(prefs: &Prefs, snapshot: Snapshot) -> Self {
+        Self::from_snapshot(View::from_prefs(prefs), snapshot)
+            .offline(SNAPSHOT_NO_LAUNCH)
+            .with_filter(prefs.filter.clone())
+    }
+
+    /// Saves the view in `store` from now on, whenever it changes and when
+    /// the window closes. The view shown now is taken as saved: the
+    /// command line's values are kept only once the user changes the view.
+    pub fn persisting(mut self, mut store: PrefsStore) -> Self {
+        store.start_from(self.prefs());
+        self.prefs_store = Some(store);
+        self
+    }
+
+    /// The view as it is kept across runs.
+    fn prefs(&self) -> Prefs {
+        Prefs {
+            tab: self.view.tab,
+            grouping: self.view.grouping,
+            shown: self.view.shown,
+            map_axis: self.view.map_axis,
+            time_scale: self.view.time_scale,
+            filter: self.filter.query.clone(),
+        }
+    }
+
+    fn save_prefs(&mut self) {
+        let prefs = self.prefs();
+        if let Some(store) = &mut self.prefs_store {
+            store.save(&prefs);
+        }
+    }
+
+    /// Switches to an initial tab before the first frame. The app's
+    /// `--tab` goes through `Prefs::overridden`.
+    #[cfg(test)]
     pub fn with_tab(mut self, tab: Tab) -> Self {
         if self.view.tab == tab {
             return self;
@@ -507,8 +649,8 @@ impl Dashboard {
         self
     }
 
-    /// Applies an initial filter query (e.g. from `--filter=...`) before the
-    /// first frame.
+    /// Applies an initial filter query (the saved one, or `--filter`) before
+    /// the first frame.
     pub fn with_filter(mut self, query: String) -> Self {
         let query = fleet::one_line(&query);
         if query.is_empty() {
@@ -525,9 +667,11 @@ impl Dashboard {
         self
     }
 
-    /// One live snapshot, with no feed behind it.
+    /// One live snapshot, with no feed behind it. As `new`, for the tests
+    /// (`of_snapshot_with_prefs`).
+    #[cfg(test)]
     pub fn of_snapshot(grouping: Grouping, snapshot: Snapshot) -> Self {
-        Self::from_snapshot(View::of(grouping), snapshot)
+        Self::from_snapshot(View::of(grouping), snapshot).offline(SNAPSHOT_NO_LAUNCH)
     }
 
     /// The header shows the snapshot's age as of when it was taken in: the
@@ -623,6 +767,7 @@ impl Dashboard {
         self.view.detail = None;
         self.view.result = None;
         self.view.confirm_close = None;
+        self.close_ended = None;
         self.view.expanded = None;
         self.drafts.clear();
         self.send_caret = None;
@@ -1034,6 +1179,7 @@ impl Dashboard {
         let drafts = Drafts {
             text: std::mem::take(&mut self.drafts),
             caret: self.send_caret,
+            close_ended: self.close_ended.take(),
         };
         let mut built = Self::build(tree, view, feed, filter, refocus, preview, drafts);
         if refocus_send && let Some((id, _)) = built.registry.send_field {
@@ -1049,8 +1195,11 @@ impl Dashboard {
         }
         self.held = old.held;
         self.close_until = old.close_until;
+        self.shift_up = old.shift_up;
         self.filter_had_focus = old.filter_had_focus;
         self.pressed_in_filter = old.pressed_in_filter;
+        self.prefs_store = old.prefs_store;
+        self.repo_browser = old.repo_browser;
         self.watch();
         self.lay_out_again(text);
     }
@@ -1128,8 +1277,12 @@ impl Dashboard {
             held: Vec::new(),
             shielded: Vec::new(),
             close_until: None,
+            close_ended: drafts.close_ended,
+            shift_up: false,
             filter_had_focus: false,
             pressed_in_filter: false,
+            prefs_store: None,
+            repo_browser: Box::new(repo_browser::System),
             #[cfg(test)]
             panels: [None; 5],
             #[cfg(test)]
@@ -1339,6 +1492,10 @@ impl Dashboard {
         let Some(worker) = self.feed.fleet.worker(pane) else {
             return;
         };
+        if worker.is_closed() {
+            self.show_notice(drawer::CLOSED_PANE.to_owned());
+            return;
+        }
         let status = match &self.feed.channel {
             Some(_) if self.feed.link != Some(Link::Live) => {
                 "ペインへ移動できません: Noa に接続していません".to_owned()
@@ -1416,6 +1573,12 @@ impl Dashboard {
         let preview = self.preview.as_ref().map(|(_, _, preview)| preview);
         let draft = self.drafts.get(&pane).map_or("", String::as_str);
         let confirm_close = self.view.confirm_close == Some(pane);
+        let ended_workers = self.ended_workers();
+        let ended = ended_workers.len();
+        // Armed only for the workers it named: for others the next click
+        // names them again (`request_close_ended`), and the button says so.
+        let armed = self.close_ended.as_ref() == Some(&ended_workers);
+        let close_ended = (ended > 0).then_some((ended, armed));
         let buttons = drawer::build(
             &mut self.tree,
             root,
@@ -1429,11 +1592,16 @@ impl Dashboard {
                     _ => draft.len(),
                 },
                 confirm_close,
+                close_ended,
             },
             &mut self.registry,
         );
-        self.registry.open_buttons.push((buttons.open, pane));
-        self.registry.close_pane_button = Some((buttons.close_pane, pane));
+        self.registry
+            .open_buttons
+            .extend(buttons.open.map(|id| (id, pane)));
+        self.registry.close_pane_button = buttons.close_pane.map(|id| (id, pane));
+        self.registry.close_ended_button = buttons.close_ended.map(|id| (id, ended));
+        self.registry.diff_button = buttons.diff.map(|id| (id, pane));
         self.registry.drawer = Some((root, buttons.close));
         self.registry.result_toggle = buttons.result;
         self.registry.result_reload = buttons.result_reload;
@@ -1449,6 +1617,8 @@ impl Dashboard {
         }
         self.registry.open_buttons.clear();
         self.registry.close_pane_button = None;
+        self.registry.close_ended_button = None;
+        self.registry.diff_button = None;
         self.registry.result_toggle = None;
         self.registry.result_reload = None;
         self.registry.result_copy = None;
@@ -1493,7 +1663,9 @@ impl Dashboard {
         let root = self.tree.open_overlay(
             Container::new(Style {
                 flex_direction: FlexDirection::Column,
-                gap: gap(6.0),
+                // 5, not more: every row then fits the smallest window
+                // (1100 x 700) with the ⇧X row too.
+                gap: gap(5.0),
                 padding: LayoutRect::length(16.0),
                 size: LayoutSize {
                     width: length(HELP_WIDTH),
@@ -1550,7 +1722,9 @@ impl Dashboard {
             .into_iter()
             .flatten()
         {
-            if !panes.contains(&pane) {
+            // A closed worker has no pane to fetch a screen from.
+            let closed = self.feed.fleet.worker(pane).is_some_and(Worker::is_closed);
+            if !closed && !panes.contains(&pane) {
                 panes.push(pane);
             }
         }
@@ -1567,7 +1741,15 @@ impl Dashboard {
         let detail = self.view.detail;
         self.filter = Filter { query, caret };
         self.reselect(&old, Vanish::Neighbour);
-        if self.view.detail != detail {
+        // Other workers to close at once: a close armed for the old ones is
+        // taken back, and the drawer's button names the new count.
+        let ended = self.ended_workers();
+        let disarmed = self.close_ended.take_if(|armed| *armed != ended).is_some();
+        let stale = self
+            .registry
+            .close_ended_button
+            .map_or(!ended.is_empty(), |(_, count)| count != ended.len());
+        if self.view.detail != detail || (self.view.detail.is_some() && (disarmed || stale)) {
             self.close_drawer(text);
             self.open_drawer();
         }
@@ -1639,6 +1821,10 @@ impl Dashboard {
             return;
         };
         let label = worker.label.clone();
+        if worker.is_closed() {
+            self.show_notice(drawer::CLOSED_SEND_GUARD.to_owned());
+            return;
+        }
         if worker.state == State::Permission {
             self.show_notice(drawer::PERMISSION_SEND_GUARD.to_owned());
             return;
@@ -1659,6 +1845,10 @@ impl Dashboard {
             }
             (Some(_), _) if !self.feed.can_input => {
                 self.show_notice(format!("送信できません: {}", drawer::NEEDS_INPUT));
+                return;
+            }
+            (Some(_), _) if !self.feed.safe_send => {
+                self.show_notice(crate::live::UNSAFE_SEND.to_owned());
                 return;
             }
             (Some(channel), Some(instance)) => {
@@ -1691,7 +1881,17 @@ impl Dashboard {
         let Some(worker) = self.feed.fleet.worker(pane) else {
             return;
         };
+        if worker.is_closed() {
+            self.show_notice(drawer::CLOSED_PANE.to_owned());
+            return;
+        }
         let label = worker.label.clone();
+        if self.close_ended.take().is_some()
+            && self.view.detail.is_some_and(|detail| detail != pane)
+        {
+            // Its drawer no longer says 本当にまとめて閉じる.
+            self.reopen_drawer(text);
+        }
         if self.view.confirm_close != Some(pane) {
             self.view.confirm_close = Some(pane);
             self.close_until = Some(Instant::now() + NOTICE_FOR);
@@ -1741,6 +1941,136 @@ impl Dashboard {
                 self.show_notice(format!("{label} のペインを閉じました"));
             }
         }
+    }
+
+    /// The workers ⇧X closes: those the filter shows that have ended
+    /// (finished or failed), in the fleet's order. One running or waiting
+    /// on a person is never among them.
+    fn ended_workers(&self) -> Vec<u64> {
+        self.feed
+            .fleet
+            .workers
+            .iter()
+            .filter(|w| w.can_close_unseen() && self.filter.matches(w))
+            .map(|w| w.pane)
+            .collect()
+    }
+
+    /// Two-step confirmation to close every ended worker the filter shows
+    /// (`ended_workers`). The first press names them; the second closes
+    /// them when they are still the same, and else names the new ones.
+    ///
+    /// `pressed_again`: whether this is a second press, not ⇧X held down
+    /// (`shift_up`); a click always is.
+    fn request_close_ended(&mut self, pressed_again: bool, text: &mut TextStore) {
+        let ended = self.ended_workers();
+        let single = self.view.confirm_close.take();
+        if ended.is_empty() {
+            self.close_ended = None;
+            self.close_until = None;
+            if single.is_some() && single == self.view.detail {
+                self.reopen_drawer(text);
+            }
+            self.show_notice("まとめて閉じる完了・失敗のワーカーはありません".to_owned());
+            return;
+        }
+        if self.close_ended.as_ref() == Some(&ended) && !pressed_again {
+            // The key repeating while held: still the first press.
+            return;
+        }
+        if self.close_ended.as_ref() != Some(&ended) {
+            let names = bulk_names(&self.feed.fleet, &ended);
+            let count = ended.len();
+            self.close_ended = Some(ended);
+            self.shift_up = false;
+            self.close_until = Some(Instant::now() + NOTICE_FOR);
+            if self.view.detail.is_some() {
+                self.reopen_drawer(text);
+            }
+            self.show_notice(format!(
+                "完了・失敗の {count} 件を閉じますか？ {names} — もう一度 ⇧X または「本当にまとめて閉じる」で実行（⇧X は Shift を離してから。Esc でキャンセル）"
+            ));
+            return;
+        }
+        self.close_ended = None;
+        self.close_until = None;
+        let count = ended.len();
+        match &self.feed.channel {
+            Some(_) if self.feed.link != Some(Link::Live) => {
+                self.show_notice("ペインを閉じられません: Noa に接続していません".to_owned());
+            }
+            Some(_) if !self.feed.can_focus => {
+                self.show_notice(
+                    "ペインを閉じられません: Noa の server-scopes に control がありません（例: server-scopes = read,control）"
+                        .to_owned(),
+                );
+            }
+            Some(channel) => {
+                // Each as shown now: the feed leaves one that changed since.
+                let targets = ended
+                    .iter()
+                    .filter_map(|pane| self.feed.fleet.worker(*pane))
+                    .map(|worker| CloseTarget {
+                        pane: worker.pane,
+                        state: worker.state,
+                        seq: worker.reports,
+                    })
+                    .collect();
+                if let Some(instance) = &self.feed.instance {
+                    channel.send(Command::CloseMany {
+                        instance: instance.clone(),
+                        targets,
+                    });
+                }
+                self.show_notice(format!("{count} 件のペインを閉じます"));
+            }
+            None => {
+                let old = self.order();
+                self.feed.fleet.workers.retain(|w| !ended.contains(&w.pane));
+                for pane in &ended {
+                    self.drafts.remove(pane);
+                }
+                self.reselect(&old, Vanish::Neighbour);
+                self.rebuilt(self.view, text);
+                self.show_notice(format!("{count} 件のペインを閉じました"));
+                return;
+            }
+        }
+        if self.view.detail.is_some() {
+            self.reopen_drawer(text);
+        }
+    }
+
+    /// 差分を見る: the Repo Browser on the worktree holding the worker's
+    /// cwd, open or closed. The notice says it started, or why not.
+    fn view_diff(&mut self, pane: u64) {
+        let Some(worker) = self.feed.fleet.worker(pane) else {
+            return;
+        };
+        let label = worker.label.clone();
+        if worker.cwd.is_empty() {
+            self.show_notice(format!("{label} の作業ディレクトリがわかりません"));
+            return;
+        }
+        let cwd = worker.cwd.clone();
+        let notice = match self.repo_browser.launch(&cwd) {
+            Ok(()) => format!("{label} の作業ツリーを Repo Browser で開きます"),
+            Err(why) => why,
+        };
+        self.show_notice(notice);
+    }
+
+    /// Starts no other program from now on: the demo and a snapshot show
+    /// what the app does without doing it. `notice` is said instead.
+    fn offline(mut self, notice: &'static str) -> Self {
+        self.repo_browser = Box::new(repo_browser::Offline(notice));
+        self
+    }
+
+    /// Lets a test start a Repo Browser of its own.
+    #[cfg(test)]
+    fn set_launcher(&mut self, launcher: impl Launcher + 'static) {
+        self.repo_browser = Box::new(launcher);
     }
 
     fn copy_screen_tail(&mut self) {
@@ -1842,16 +2172,19 @@ impl Dashboard {
     /// ペインを閉じる again.
     fn disarm_close(&mut self, text: &mut TextStore) {
         self.close_until = None;
-        if let Some(pane) = self.view.confirm_close.take()
-            && self.view.detail == Some(pane)
-        {
+        let bulk = self.close_ended.take().is_some();
+        let single = self.view.confirm_close.take();
+        if self.view.detail.is_some() && (bulk || single == self.view.detail) {
             self.reopen_drawer(text);
         }
     }
 
     fn act(&mut self, action: Action, text: &mut TextStore) {
         // Only the second X confirms a close (Esc says it was cancelled).
-        if !matches!(action, Action::ClosePane | Action::Back) {
+        if !matches!(
+            action,
+            Action::ClosePane | Action::CloseEnded | Action::Back
+        ) {
             self.disarm_close(text);
         }
         match action {
@@ -1881,12 +2214,12 @@ impl Dashboard {
             },
             Action::StartSend => match self.view.selected {
                 Some(pane) => {
-                    if self
-                        .feed
-                        .fleet
-                        .worker(pane)
-                        .is_some_and(|w| w.state == State::Permission)
-                    {
+                    let worker = self.feed.fleet.worker(pane);
+                    if worker.is_some_and(Worker::is_closed) {
+                        self.show_notice(drawer::CLOSED_SEND_GUARD.to_owned());
+                        return;
+                    }
+                    if worker.is_some_and(|w| w.state == State::Permission) {
                         self.show_notice(drawer::PERMISSION_SEND_GUARD.to_owned());
                         return;
                     }
@@ -1915,6 +2248,11 @@ impl Dashboard {
             }
             Action::ClosePane => match self.view.selected {
                 Some(pane) => self.request_close_pane(pane, text),
+                None => self.show_notice(NOTHING_SELECTED.to_owned()),
+            },
+            Action::CloseEnded => self.request_close_ended(self.shift_up, text),
+            Action::ViewDiff => match self.view.selected {
+                Some(pane) => self.view_diff(pane),
                 None => self.show_notice(NOTHING_SELECTED.to_owned()),
             },
             Action::CycleGrouping => {
@@ -1953,7 +2291,13 @@ impl Dashboard {
                 self.filter.caret = self.filter.query.len();
             }
             Action::Back => {
-                if let Some(pane) = self.view.confirm_close.take() {
+                if self.close_ended.take().is_some() {
+                    self.close_until = None;
+                    if self.view.detail.is_some() {
+                        self.reopen_drawer(text);
+                    }
+                    self.show_notice("まとめて閉じるのをキャンセルしました".to_owned());
+                } else if let Some(pane) = self.view.confirm_close.take() {
                     if self.view.detail == Some(pane) {
                         self.reopen_drawer(text);
                     }
@@ -2072,6 +2416,11 @@ impl Screen for Dashboard {
         let Some(event) = self.track_press(event) else {
             return;
         };
+        if let Event::ModifiersChanged(modifiers) = &event
+            && !modifiers.shift
+        {
+            self.shift_up = true;
+        }
         let mode = self.mode();
         let in_filter = mode == Mode::Filter;
         let (press, release) = match event {
@@ -2143,6 +2492,15 @@ impl Screen for Dashboard {
 
     fn before_frame(&mut self, text: &mut TextStore) {
         self.frame(Instant::now(), text);
+    }
+
+    /// Every view change comes from input: the view is saved after each.
+    fn after_input(&mut self) {
+        self.save_prefs();
+    }
+
+    fn close_requested(&mut self) {
+        self.save_prefs();
     }
 
     fn handle(&mut self, message: Message, text: &mut TextStore) {
@@ -2239,15 +2597,24 @@ impl Screen for Dashboard {
         let confirms = self
             .registry
             .close_pane_button
-            .is_some_and(|(id, _)| id == source);
-        let disarmed = if confirms {
-            None
+            .is_some_and(|(id, _)| id == source)
+            || self
+                .registry
+                .close_ended_button
+                .is_some_and(|(id, _)| id == source);
+        let (disarmed, bulk) = if confirms {
+            (None, false)
         } else {
             self.close_until = None;
-            self.view.confirm_close.take()
+            (
+                self.view.confirm_close.take(),
+                self.close_ended.take().is_some(),
+            )
         };
         self.click(source, text);
-        if disarmed.is_some() && disarmed == self.view.detail {
+        if (disarmed.is_some() && disarmed == self.view.detail)
+            || (bulk && self.view.detail.is_some())
+        {
             self.reopen_drawer(text);
         }
     }
@@ -2297,6 +2664,14 @@ impl Dashboard {
             .filter(|(id, _)| *id == source)
         {
             self.request_close_pane(pane, text);
+        } else if self
+            .registry
+            .close_ended_button
+            .is_some_and(|(id, _)| id == source)
+        {
+            self.request_close_ended(true, text);
+        } else if let Some((_, pane)) = self.registry.diff_button.filter(|(id, _)| *id == source) {
+            self.view_diff(pane);
         } else if self
             .registry
             .drawer

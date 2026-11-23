@@ -149,6 +149,7 @@ fn permission_worker_cannot_be_sent_messages_and_missing_scope_keeps_draft() {
     snapshots
         .send(Snapshot {
             can_input: false,
+            safe_send: true,
             ..live(fleet::canned(), 0)
         })
         .unwrap();

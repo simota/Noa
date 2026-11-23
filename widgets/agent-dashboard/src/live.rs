@@ -8,9 +8,15 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use noa_ipc::{Client, ClientError, EventKind, Notification, Panel, Scope, ScopeSet, TextSource};
+use noa_ipc::{
+    Client, ClientError, ErrorCode, EventKind, Notification, Panel, Scope, ScopeSet,
+    SendTextOptions, TextSource,
+};
 
 use crate::fleet::{Fleet, Orchestrator, Phase, State, Worker, minutes_text, one_line};
+
+mod journal;
+use journal::{Archive, Gone, Journal};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(4);
@@ -53,6 +59,10 @@ pub struct Snapshot {
     pub can_focus: bool,
     /// Whether Noa granted the `input` scope `noa.sendText` needs.
     pub can_input: bool,
+    /// Whether this Noa is known to refuse a message for a pane back at its
+    /// shell (`refuseShell`, Noa 0.9.12 and later). Without that, the
+    /// dashboard sends nothing: the text would run there as a command line.
+    pub safe_send: bool,
     /// The server instance the fleet's pane ids belong to
     /// (`Client::server_instance_id`); `None` while the link is down. A
     /// restarted Noa gives its ids out again, to other panes.
@@ -85,6 +95,24 @@ pub enum Command {
         instance: String,
         pane: u64,
     },
+    /// Closes each of `targets` that is still as the dashboard confirmed
+    /// it (ended, the same state and report count) when the feed comes to
+    /// it, then lists the panes once. As `Close`: refused on another
+    /// instance.
+    CloseMany {
+        instance: String,
+        targets: Vec<CloseTarget>,
+    },
+}
+
+/// A pane a bulk close takes, as the dashboard showed it when the close
+/// was confirmed: its state and its agent's report count (`Worker::reports`,
+/// `agent.seq`), which any new report moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloseTarget {
+    pub pane: u64,
+    pub state: State,
+    pub seq: u64,
 }
 
 /// A `Command::Send` the feed did not deliver, given back with the server
@@ -100,7 +128,9 @@ impl Command {
     /// The server instance a worker action was chosen on.
     fn instance(&self) -> Option<&str> {
         match self {
-            Command::Send { instance, .. } | Command::Close { instance, .. } => Some(instance),
+            Command::Send { instance, .. }
+            | Command::Close { instance, .. }
+            | Command::CloseMany { instance, .. } => Some(instance),
             Command::Watch(_) | Command::Focus(_) => None,
         }
     }
@@ -166,15 +196,19 @@ impl Channel {
 /// Starts the feed thread. `wake` is called after each snapshot it sends,
 /// and every `HEARTBEAT` until the channel is dropped.
 pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
-    start_with(wake, HEARTBEAT, connect)
+    start_with(wake, HEARTBEAT, connect, journal::default_dir())
 }
 
 /// `start` with the heartbeat's period and the way the feed reaches Noa
 /// given (the tests give a Noa of their own).
+/// `journals`: the directory of the spawners' journals, where the workers
+/// of orchestrators no longer open are found; `None` looks only at the
+/// journals of open orchestrators.
 fn start_with<C: Noa + 'static>(
     wake: impl Fn() + Send + Sync + 'static,
     every: Duration,
     connect: impl FnMut() -> Result<C, String> + Send + 'static,
+    journals: Option<PathBuf>,
 ) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
@@ -182,7 +216,7 @@ fn start_with<C: Noa + 'static>(
     let (unsent_tx, unsent) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let (heartbeat, _thread) = heartbeat(every, Arc::clone(&wake));
-    let feed = Feed::new(
+    let mut feed = Feed::new(
         snapshot_tx,
         notice_tx,
         unsent_tx,
@@ -190,6 +224,7 @@ fn start_with<C: Noa + 'static>(
         wake,
         Box::new(Instant::now),
     );
+    feed.tracker.archive = Archive::at(journals);
     std::thread::Builder::new()
         .name("live-feed".into())
         .spawn(move || feed.run(connect))
@@ -239,12 +274,23 @@ trait Noa {
     fn instance(&self) -> &str;
     fn can_focus(&self) -> bool;
     fn can_input(&self) -> bool;
+    /// Whether the server honours `refuseShell` (`Connection`).
+    fn refuses_shell(&self) -> bool;
     fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError>;
     /// Subscribes to every pane's state changes.
     fn subscribe(&mut self) -> Result<(), ClientError>;
     fn next_notification(&mut self, wait: Duration) -> Result<Option<Notification>, ClientError>;
     fn focus_pane(&mut self, pane: u64) -> Result<(), ClientError>;
-    fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError>;
+    /// With `refuse_shell`, Noa writes nothing and answers `NotReady` when
+    /// the pane's foreground process, probed at the moment of the request,
+    /// is a plain shell (`noa.sendText`'s `refuseShell`).
+    fn send_text(
+        &mut self,
+        pane: u64,
+        text: &str,
+        paste: bool,
+        refuse_shell: bool,
+    ) -> Result<(), ClientError>;
     fn close_pane(&mut self, pane: u64) -> Result<(), ClientError>;
     /// Pause between pasting text and submitting Enter.
     fn submit_delay(&self) -> Duration {
@@ -254,47 +300,126 @@ trait Noa {
     fn screen(&mut self, pane: u64) -> Result<String, ClientError>;
 }
 
-impl Noa for Client {
+/// A control connection, with what its `noa.hello` said of the server's
+/// version (`server_version`).
+struct Connection {
+    client: Client,
+    /// The server is Noa `REFUSE_SHELL_SINCE` or later.
+    refuses_shell: bool,
+}
+
+impl Noa for Connection {
     fn instance(&self) -> &str {
-        self.server_instance_id()
+        self.client.server_instance_id()
     }
 
     fn can_focus(&self) -> bool {
-        self.granted_scopes().contains(Scope::Control)
+        self.client.granted_scopes().contains(Scope::Control)
     }
 
     fn can_input(&self) -> bool {
-        self.granted_scopes().contains(Scope::Input)
+        self.client.granted_scopes().contains(Scope::Input)
+    }
+
+    fn refuses_shell(&self) -> bool {
+        self.refuses_shell
     }
 
     fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError> {
-        Client::list_panels(self)
+        self.client.list_panels()
     }
 
     fn subscribe(&mut self) -> Result<(), ClientError> {
-        Client::subscribe(self, &[EventKind::StateChanged], None).map(drop)
+        self.client
+            .subscribe(&[EventKind::StateChanged], None)
+            .map(drop)
     }
 
     fn next_notification(&mut self, wait: Duration) -> Result<Option<Notification>, ClientError> {
-        Client::next_notification(self, wait)
+        self.client.next_notification(wait)
     }
 
     fn focus_pane(&mut self, pane: u64) -> Result<(), ClientError> {
-        Client::focus_pane(self, pane)
+        self.client.focus_pane(pane)
     }
 
-    fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError> {
-        Client::send_text(self, pane, text, paste)
+    fn send_text(
+        &mut self,
+        pane: u64,
+        text: &str,
+        paste: bool,
+        refuse_shell: bool,
+    ) -> Result<(), ClientError> {
+        let options = SendTextOptions {
+            paste,
+            require_paste_mode: false,
+            refuse_shell,
+        };
+        self.client.send_text_with(pane, text, options)
     }
 
     fn close_pane(&mut self, pane: u64) -> Result<(), ClientError> {
-        Client::close_pane(self, pane)
+        self.client.close_pane(pane)
     }
 
     fn screen(&mut self, pane: u64) -> Result<String, ClientError> {
-        let result = self.get_text(pane, TextSource::Screen, Some(SCREEN_MAX_BYTES))?;
+        let result = self
+            .client
+            .get_text(pane, TextSource::Screen, Some(SCREEN_MAX_BYTES))?;
         Ok(result.text)
     }
+}
+
+/// The first Noa whose `noa.sendText` honours `refuseShell` (#229): an
+/// older one ignores the field and types the text into the shell.
+const REFUSE_SHELL_SINCE: (u64, u64, u64) = (0, 9, 12);
+
+/// Whether `version` (`noa.hello`'s `serverVersion`, Noa's own version) is
+/// `REFUSE_SHELL_SINCE` or later. A version that does not parse is not.
+fn honours_refuse_shell(version: &str) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or("");
+    let parts: Vec<u64> = core.split('.').map_while(|n| n.parse().ok()).collect();
+    match parts[..] {
+        [major, minor, patch] => (major, minor, patch) >= REFUSE_SHELL_SINCE,
+        _ => false,
+    }
+}
+
+/// The server's version from a `noa.hello` of our own: `noa_ipc::Client`
+/// reads it but does not keep it. `None` when it cannot be read.
+fn server_version(url: &str, token: &str) -> Option<String> {
+    use tungstenite::stream::MaybeTlsStream;
+    let (mut socket, _) = tungstenite::connect(url).ok()?;
+    if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .ok()?;
+    }
+    let hello = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "noa.hello",
+        "params": {
+            "protocolVersion": noa_ipc::PROTOCOL_VERSION,
+            "token": token,
+            "scopes": ["read"],
+        },
+    });
+    socket
+        .send(tungstenite::Message::Text(hello.to_string()))
+        .ok()?;
+    let version = loop {
+        let tungstenite::Message::Text(text) = socket.read().ok()? else {
+            continue;
+        };
+        let reply: serde_json::Value = serde_json::from_str(&text).ok()?;
+        if reply["id"] == 1 {
+            break reply["result"]["serverVersion"].as_str().map(str::to_owned);
+        }
+    };
+    let _ = socket.close(None);
+    version
 }
 
 /// Where the feed reads the time: `Instant::now`, or a test's own clock.
@@ -389,6 +514,7 @@ impl Feed {
                 synced_secs: 0,
                 can_focus: false,
                 can_input: false,
+                safe_send: false,
                 instance: None,
             };
             if self.publish(down).is_err() || !self.pause(backoff) {
@@ -417,7 +543,7 @@ impl Feed {
                     self.notice("送信できません: Noa に接続していません".to_owned());
                     self.give_back(instance, pane, text);
                 }
-                Ok(Command::Close { .. }) => {
+                Ok(Command::Close { .. } | Command::CloseMany { .. }) => {
                     self.notice("ペインを閉じられません: Noa に接続していません".to_owned());
                 }
                 Err(RecvTimeoutError::Timeout) => return true,
@@ -472,6 +598,7 @@ impl Feed {
         self.tracker.replace(panels, unix_now());
         self.tracker.read_journals();
         self.tracker.read_results();
+        self.tracker.find_gone(unix_now());
         Ok(())
     }
 
@@ -517,6 +644,11 @@ impl Feed {
                     self.last_list = self.now();
                     self.last_contact = self.last_list;
                     self.tracker.replace(panels, unix_now());
+                    if !client.refuses_shell() {
+                        self.notice(UNSAFE_SEND.to_owned());
+                        self.give_back(instance, pane, text);
+                        continue;
+                    }
                     if self
                         .tracker
                         .panels
@@ -530,19 +662,30 @@ impl Feed {
                         self.give_back(instance, pane, text);
                         continue;
                     }
-                    match client.send_text(pane, &text, true) {
+                    // Both writes refuse a pane back at its shell: the text
+                    // meant for the agent would run there as a command line.
+                    // Noa probes the real foreground process at the moment
+                    // of each write; the panel's `process` can lag seconds.
+                    match client.send_text(pane, &text, true, true) {
                         Ok(()) => {
                             let delay = client.submit_delay();
                             if !delay.is_zero() {
                                 std::thread::sleep(delay);
                             }
-                            match client.send_text(pane, "\r", false) {
+                            match client.send_text(pane, "\r", false, true) {
                                 Ok(()) => self.last_contact = self.now(),
+                                Err(err) if refused_as_shell(&err) => {
+                                    self.notice(SHELL_SUBMIT_REFUSED.to_owned());
+                                }
                                 Err(ClientError::Rpc { message, .. }) => {
                                     self.notice(format!("送信の確定に失敗しました: {message}"));
                                 }
                                 Err(err) => return Err(err.into()),
                             }
+                        }
+                        Err(err) if refused_as_shell(&err) => {
+                            self.notice(SHELL_SEND_REFUSED.to_owned());
+                            self.give_back(instance, pane, text);
                         }
                         Err(ClientError::Rpc { message, .. }) => {
                             self.notice(format!("送信できません: {message}"));
@@ -564,10 +707,64 @@ impl Feed {
                     }
                     Err(err) => return Err(err.into()),
                 },
+                Ok(Command::CloseMany { targets, .. }) => self.close_many(client, &targets)?,
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => return Err(Stop::Gone),
             }
         }
+    }
+
+    /// Closes each of `targets` that is still as the dashboard confirmed
+    /// it: an ended worker in the same state with the same report count.
+    /// Each pane is read again right before it is closed, so one given more
+    /// work meanwhile (by another client, or a message sent here) is left
+    /// open. A pane can still change between that read and its close: only
+    /// a close the server makes conditional on the state would rule that
+    /// out. The panes are listed once more at the end, so the closed ones
+    /// leave the dashboard at once.
+    fn close_many(&mut self, client: &mut impl Noa, targets: &[CloseTarget]) -> Result<(), Stop> {
+        let mut changed: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+        for target in targets {
+            let panels = client.list_panels()?;
+            self.last_list = self.now();
+            self.last_contact = self.last_list;
+            self.tracker.replace(panels, unix_now());
+            let Some(panel) = self.tracker.panels.get(&target.pane) else {
+                // Gone already: nothing to close.
+                continue;
+            };
+            let state = state_of(panel);
+            let seq = panel.agent.as_ref().map_or(0, |agent| agent.seq);
+            let unchanged = is_worker(panel)
+                && matches!(state, State::Finished | State::Error)
+                && state == target.state
+                && seq == target.seq;
+            if !unchanged {
+                changed.push(name_of(panel));
+                continue;
+            }
+            match client.close_pane(target.pane) {
+                Ok(()) => self.last_contact = self.now(),
+                Err(ClientError::Rpc { message, .. }) => failed.push(message),
+                Err(err) => return Err(err.into()),
+            }
+        }
+        self.relist(client)?;
+        if !changed.is_empty() {
+            self.notice(format!(
+                "{} 件は確認した後に状態が変わったため閉じませんでした: {}",
+                changed.len(),
+                changed.join("、")
+            ));
+        }
+        if let Some(first) = failed.first() {
+            self.notice(format!(
+                "{} 件のペインを閉じられませんでした: {first}",
+                failed.len()
+            ));
+        }
+        Ok(())
     }
 
     /// A `Watch` from the dashboard: panes of the instance it was last
@@ -637,6 +834,7 @@ impl Feed {
             synced_secs: now.saturating_duration_since(self.last_contact).as_secs(),
             can_focus: client.can_focus(),
             can_input: client.can_input(),
+            safe_send: client.refuses_shell(),
             instance: Some(client.instance().to_owned()),
         })?;
         // From now on the dashboard can have this instance's panes to
@@ -671,9 +869,10 @@ impl Feed {
     }
 }
 
-/// A control connection to the Noa this user's config names, with the
-/// `read` and `control` scopes only.
-fn connect() -> Result<Client, String> {
+/// A control connection to the Noa this user's config names, asking for
+/// the `read`, `control` and `input` scopes, and whether that Noa honours
+/// `refuseShell` (its version, from a hello of our own).
+fn connect() -> Result<Connection, String> {
     let (config, _diagnostics) =
         noa_config::load_startup_config(noa_config::ConfigOverrides::default())
             .map_err(|err| format!("設定を読めません: {err:#}"))?;
@@ -693,7 +892,7 @@ fn connect() -> Result<Client, String> {
         }
     };
     let url = control_url(&config.server_bind, config.server_port);
-    Client::connect(
+    let client = Client::connect(
         &url,
         &token,
         ScopeSet::from_strings(["read", "control", "input"]),
@@ -701,7 +900,31 @@ fn connect() -> Result<Client, String> {
     .map_err(|err| match err {
         ClientError::Rpc { .. } => rpc_reason(&err),
         other => format!("{url} に接続できません: {other}"),
+    })?;
+    let refuses_shell = server_version(&url, &token).is_some_and(|v| honours_refuse_shell(&v));
+    Ok(Connection {
+        client,
+        refuses_shell,
     })
+}
+
+/// Why nothing is sent to a Noa not known to honour `refuseShell`.
+pub(crate) const UNSAFE_SEND: &str =
+    "送信しません: この Noa はシェルに戻ったペインへの送信を防げません（Noa 0.9.12 以降が必要）";
+
+/// What the notice line says when Noa refused a message because the pane
+/// is back at its shell (`refused_as_shell`): the message is the draft again.
+pub(crate) const SHELL_SEND_REFUSED: &str =
+    "エージェントが終了してシェルに戻ったペインには送信しませんでした（下書きに戻しました）";
+/// The same refusal for the Enter after a delivered paste: the agent left
+/// between the two writes, and its input (with the text) went with it.
+pub(crate) const SHELL_SUBMIT_REFUSED: &str =
+    "送信の確定（Enter）をやめました: エージェントが終了してシェルに戻っています";
+
+/// Whether `err` is Noa refusing a `refuseShell` write: `NotReady`, the one
+/// refusal such a write (without `requirePasteMode`) can get.
+fn refused_as_shell(err: &ClientError) -> bool {
+    matches!(err, ClientError::Rpc { code, .. } if *code == ErrorCode::NotReady.code())
 }
 
 fn rpc_reason(err: &ClientError) -> String {
@@ -817,11 +1040,15 @@ struct Tracker {
     journals: HashMap<String, Journal>,
     /// The ended panes known to have left a result file, and that file.
     results: HashMap<u64, PathBuf>,
-}
-
-struct Journal {
-    modified: Option<SystemTime>,
-    spawns: HashMap<u64, Spawned>,
+    /// The journals of orchestrators not open: they outlive a change of
+    /// server instance, being files.
+    archive: Archive,
+    /// The worker panes the feed saw leave this instance: when, and when
+    /// the pane had started (a closed worker's end when its journal has
+    /// no `close`: the dashboard's own close is not journaled).
+    vanished: HashMap<u64, (f64, Option<u64>)>,
+    /// The workers the journals record whose panes are gone.
+    gone: Vec<Gone>,
 }
 
 /// What a spawner's journal says of the latest worker it spawned in a pane.
@@ -841,6 +1068,7 @@ impl Tracker {
         if other {
             *self = Tracker {
                 instance: instance.to_owned(),
+                archive: std::mem::take(&mut self.archive),
                 ..Tracker::default()
             };
         }
@@ -853,6 +1081,14 @@ impl Tracker {
 
     fn replace(&mut self, panels: Vec<Panel>, now: f64) {
         let live: Vec<u64> = panels.iter().map(|p| p.pane_id.0).collect();
+        for (pane, panel) in &self.panels {
+            if !live.contains(pane) && is_worker(panel) {
+                let started = panel.spawn.as_ref().map(|spawn| spawn.started_at);
+                self.vanished.insert(*pane, (now, started));
+            }
+        }
+        self.vanished
+            .retain(|_, (at, _)| now - *at <= journal::CLOSED_MAX_AGE_SECS);
         self.panels.retain(|pane, _| live.contains(pane));
         self.seen.retain(|pane, _| live.contains(pane));
         self.merge(panels, now);
@@ -877,10 +1113,11 @@ impl Tracker {
         }
     }
 
-    /// Reads again each spawner's journal that changed on disk. A missing
+    /// Reads again each spawner's journal that changed on disk: the open
+    /// spawners of workers, and those of closed ones still open. A missing
     /// or unreadable journal gives no tasks.
     fn read_journals(&mut self) {
-        let surfaces: Vec<String> = self
+        let mut surfaces: Vec<String> = self
             .panels
             .values()
             .filter(|panel| is_worker(panel))
@@ -891,25 +1128,47 @@ impl Tracker {
                     .clone()
             })
             .collect();
+        // A spawner whose last worker closed keeps its journal while it is
+        // open: its closed workers are there.
+        let open: Vec<&str> = self
+            .panels
+            .values()
+            .filter_map(|panel| panel.surface_id.as_deref())
+            .collect();
         self.journals
-            .retain(|surface, _| surfaces.contains(surface));
+            .retain(|surface, _| surfaces.contains(surface) || open.contains(&surface.as_str()));
+        for surface in self.journals.keys() {
+            if !surfaces.contains(surface) {
+                surfaces.push(surface.clone());
+            }
+        }
         for surface in surfaces {
             let Some(path) = noa_config::ctl_journal_path(&surface) else {
                 continue;
             };
-            let modified = modified(&path);
+            let stamp = stamp(&path);
             if self
                 .journals
                 .get(&surface)
-                .is_some_and(|journal| journal.modified == modified)
+                .is_some_and(|journal| journal.stamp == stamp)
             {
                 continue;
             }
-            let spawns = std::fs::read_to_string(&path)
-                .map(|text| journal_spawns(&text))
-                .unwrap_or_default();
-            self.journals.insert(surface, Journal { modified, spawns });
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let journal =
+                Journal::parsed(journal::file_name(&surface), stamp, &text).of_this_instance();
+            self.journals.insert(surface, journal);
         }
+    }
+
+    /// Finds the workers the journals record whose panes are gone: those
+    /// of the open orchestrators' journals, and of the journal directory's
+    /// others (looked through at most every `journal::ARCHIVE_SCAN_SECS`).
+    fn find_gone(&mut self, now: f64) {
+        let open = self.journals.values().map(|j| j.name.clone()).collect();
+        self.archive.scan(now, &open);
+        let journals = self.journals.values().chain(self.archive.journals.values());
+        self.gone = journal::gone(journals, &self.panels, &self.vanished, now);
     }
 
     /// Looks again at each ended worker's own result file (one that failed
@@ -972,6 +1231,12 @@ impl Tracker {
                 ))
             })
             .collect();
+        let mut workers = workers;
+        workers.extend(
+            self.gone
+                .iter()
+                .map(|gone| journal::closed_worker(gone, now)),
+        );
         let mut orchestrators: Vec<Orchestrator> = Vec::new();
         for worker in &workers {
             let known = orchestrators
@@ -991,8 +1256,11 @@ impl Tracker {
     }
 }
 
-fn modified(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok()?.modified().ok()
+/// When the file at `path` last changed, and its length: a journal is
+/// read again when either differs.
+fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 /// A worker is an agent pane or a pane an orchestrator spawned, but not a
@@ -1155,43 +1423,9 @@ fn placement(pane: u64, panels: &HashMap<u64, Panel>) -> Placement {
 /// Each pane's latest `spawn` in a journal (pane ids are given out again
 /// after Noa restarts): its result path, and the first non-empty line of the
 /// latest `send` after it as the task. Answers to prompts are not tasks.
+#[cfg(test)]
 fn journal_spawns(text: &str) -> HashMap<u64, Spawned> {
-    let mut spawns: HashMap<u64, Spawned> = HashMap::new();
-    for line in text.lines() {
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(pane) = event["pane"].as_u64() else {
-            continue;
-        };
-        match event["ev"].as_str() {
-            Some("spawn") => {
-                let result = event["result"].as_str().map(PathBuf::from);
-                spawns.insert(
-                    pane,
-                    Spawned {
-                        result,
-                        ..Spawned::default()
-                    },
-                );
-            }
-            Some("send") if event["answer"].as_bool() != Some(true) => {
-                if let (Some(spawned), Some(text)) = (spawns.get_mut(&pane), event["text"].as_str())
-                {
-                    spawned.task = first_line(text).to_owned();
-                }
-            }
-            _ => {}
-        }
-    }
-    spawns
-}
-
-fn first_line(text: &str) -> &str {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
+    Journal::parsed(String::new(), None, text).spawns
 }
 
 /// The last lines of a screen with text on them.
@@ -1344,6 +1578,8 @@ fn worker_of(
         took_minutes,
         has_result: result.is_some(),
         result,
+        closed_pane: None,
+        cwd: panel.cwd.clone(),
         screen_tail: screen_tail.to_vec(),
         lines_per_tick: if running {
             buckets(&seen.changes, now)
@@ -1362,7 +1598,10 @@ fn worker_of(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod actions;
+    mod closed;
     mod performance;
+    mod review;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1657,10 +1896,7 @@ pub(crate) mod tests {
     }
 
     fn with_journal(tracker: &mut Tracker, surface: &str, text: &str) {
-        let journal = Journal {
-            modified: None,
-            spawns: journal_spawns(text),
-        };
+        let journal = Journal::parsed(journal::file_name(surface), None, text).of_this_instance();
         tracker.journals.insert(surface.to_owned(), journal);
     }
 
@@ -2271,6 +2507,9 @@ pub(crate) mod tests {
         feed.shown = Some(instance.to_owned());
     }
 
+    /// What another client does to the panels left after a pane closed.
+    type AfterClose = Box<dyn FnMut(u64, &mut Vec<Panel>)>;
+
     /// A Noa that answers from a script: the panels it lists and the
     /// screens it shows. Its connection is lost once it has waited
     /// `waits` times for a notification. Its answers take no time on the
@@ -2294,8 +2533,20 @@ pub(crate) mod tests {
         focused: Vec<u64>,
         /// Texts sent to panes: `(pane, text, paste)`.
         sent: Vec<(u64, String, bool)>,
+        /// Each write's `refuse_shell`, in the order asked (refused ones too).
+        refuse_shell: Vec<bool>,
+        /// The panes whose foreground process is a plain shell: a write
+        /// with `refuse_shell` to one is refused, as Noa refuses it. The
+        /// number is how many writes go through first (an agent that exits
+        /// between the paste and the Enter).
+        shells: HashMap<u64, usize>,
+        /// Whether this Noa honours `refuseShell` (an older one does not).
+        refuses_shell_known: bool,
         /// The panes asked to be closed, in order.
         closed: Vec<u64>,
+        /// Runs after each pane closed, on the panels left: what another
+        /// client does to them meanwhile.
+        after_close: Option<AfterClose>,
         /// The panes whose screens were asked for, in order.
         fetched: Vec<u64>,
         /// Runs during each wait for a notification, as what the window
@@ -2323,7 +2574,11 @@ pub(crate) mod tests {
                 focus_takes: Duration::ZERO,
                 focused: Vec::new(),
                 sent: Vec::new(),
+                refuse_shell: Vec::new(),
+                shells: HashMap::new(),
+                refuses_shell_known: true,
                 closed: Vec::new(),
+                after_close: None,
                 fetched: Vec::new(),
                 on_wait: None,
             }
@@ -2341,6 +2596,10 @@ pub(crate) mod tests {
 
         fn can_input(&self) -> bool {
             true
+        }
+
+        fn refuses_shell(&self) -> bool {
+            self.refuses_shell_known
         }
 
         fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError> {
@@ -2379,7 +2638,23 @@ pub(crate) mod tests {
             Ok(())
         }
 
-        fn send_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), ClientError> {
+        fn send_text(
+            &mut self,
+            pane: u64,
+            text: &str,
+            paste: bool,
+            refuse_shell: bool,
+        ) -> Result<(), ClientError> {
+            self.refuse_shell.push(refuse_shell);
+            if refuse_shell && let Some(left) = self.shells.get_mut(&pane) {
+                if *left == 0 {
+                    return Err(ClientError::Rpc {
+                        code: ErrorCode::NotReady.code(),
+                        message: format!("pane {pane} is at a shell prompt"),
+                    });
+                }
+                *left -= 1;
+            }
             self.sent.push((pane, text.to_owned(), paste));
             Ok(())
         }
@@ -2387,6 +2662,9 @@ pub(crate) mod tests {
         fn close_pane(&mut self, pane: u64) -> Result<(), ClientError> {
             self.closed.push(pane);
             self.panels.retain(|panel| panel.pane_id.0 != pane);
+            if let Some(after) = &mut self.after_close {
+                after(pane, &mut self.panels);
+            }
             Ok(())
         }
 
@@ -2740,7 +3018,7 @@ pub(crate) mod tests {
             let _ = hang.recv();
             Err::<ScriptedNoa, String>("released".into())
         };
-        let channel = start_with(wake, Duration::from_millis(5), connect);
+        let channel = start_with(wake, Duration::from_millis(5), connect, None);
         for n in 0..3 {
             assert!(wakes.recv_timeout(PATIENCE).is_ok(), "wake {n}");
         }

@@ -1,6 +1,7 @@
 mod dashboard;
 mod fleet;
 mod live;
+mod repo_browser;
 
 use std::path::PathBuf;
 use std::sync::mpsc::RecvTimeoutError;
@@ -11,21 +12,24 @@ use noa_gpui_platform::{App, AppOptions, Headless, Screen};
 use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 
-use crate::dashboard::{Dashboard, Tab};
+use crate::dashboard::{Dashboard, PrefsStore, Tab};
 use crate::fleet::Grouping;
 use crate::live::{Link, Snapshot};
 
-const USAGE: &str = "usage: agent-dashboard [--demo] [--group=parent|agent|model|none] \
-                     [--tab=ops|analytics|map|timeline] [--filter=QUERY] \
+const USAGE: &str = "usage: agent-dashboard [--demo | --demo-closed] [--group=parent|agent|model|none] \
+                     [--tab=ops|analytics|map|timeline] [--filter=QUERY] [--prefs=FILE] \
                      [--snapshot=FILE.png [--size=WxH] [--keys=SEQ]]\n  \
-                     --tab: initial view tab (default ops); \
-                     --filter: initial filter query (e.g. 'parent:release -state:done'); \
+                     --group, --tab, --filter: the initial grouping, tab and filter query \
+                     (e.g. 'parent:release -state:done'), over the saved view; \
+                     --prefs: where the view is saved and restored (default \
+                     <data-dir>/noa/agent-dashboard/view.json; a snapshot keeps none \
+                     unless given); \
                      --size: snapshot size in logical pixels (default 1440x900; at most \
                      4096 a side and about 8.3 million pixels, e.g. 3840x2160); \
                      --keys: keys sent before the snapshot, e.g. 'jj/codex<Enter>' \
                      (<Enter> <Esc> <Space> <Down> <Up> are named keys; any other < is typed)\n  \
                      live data from the running Noa's control server by default; \
-                     --demo shows canned data";
+                     --demo shows canned data, --demo-closed with two closed workers";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
 const SNAPSHOT_SCALE: f32 = 2.0;
 /// How long `--snapshot` waits for the live feed's first snapshot.
@@ -209,7 +213,11 @@ fn parse_keys(seq: &str) -> Result<Vec<Event>, String> {
             let (key, text) = named_key("Space").expect("Space is a named key");
             typed(key, text, false, &mut events);
         } else if let Some(base) = shifted_base(c) {
+            // Shift goes down for the key and up after it, as the
+            // platform reports it (a held key repeats without either).
+            events.push(Event::ModifiersChanged(modifiers(true)));
             typed(Key::Char(base), Some(&c.to_string()), true, &mut events);
+            events.push(Event::ModifiersChanged(modifiers(false)));
         } else {
             typed(Key::Char(c), Some(&c.to_string()), false, &mut events);
         }
@@ -261,59 +269,84 @@ fn first_live_snapshot() -> Result<Snapshot, String> {
 
 fn main() -> Result<(), String> {
     let mut snapshot_path = None;
-    let mut grouping = Grouping::Orchestrator;
-    let mut tab = Tab::Operations;
-    let mut initial_filter = String::new();
+    let mut grouping = None;
+    let mut tab = None;
+    let mut initial_filter = None;
+    let mut prefs_path = None;
     let mut demo = false;
+    let mut demo_closed = false;
     let mut size = DEFAULT_SIZE;
     let mut keys = Vec::new();
     for arg in std::env::args().skip(1) {
         if let Some(path) = arg.strip_prefix("--snapshot=") {
             snapshot_path = Some(PathBuf::from(path));
         } else if let Some(name) = arg.strip_prefix("--group=") {
-            grouping =
-                Grouping::parse(name).ok_or_else(|| format!("unknown group {name:?}\n{USAGE}"))?;
+            grouping = Some(
+                Grouping::parse(name).ok_or_else(|| format!("unknown group {name:?}\n{USAGE}"))?,
+            );
         } else if let Some(name) = arg.strip_prefix("--tab=") {
-            tab = Tab::parse(name).ok_or_else(|| format!("unknown tab {name:?}\n{USAGE}"))?;
+            tab = Some(Tab::parse(name).ok_or_else(|| format!("unknown tab {name:?}\n{USAGE}"))?);
         } else if let Some(query) = arg.strip_prefix("--filter=") {
-            initial_filter = query.to_owned();
+            initial_filter = Some(query.to_owned());
+        } else if let Some(path) = arg.strip_prefix("--prefs=") {
+            prefs_path = Some(PathBuf::from(path));
         } else if let Some(arg) = arg.strip_prefix("--size=") {
             size = parse_size(arg)?;
         } else if let Some(seq) = arg.strip_prefix("--keys=") {
             keys = parse_keys(seq)?;
         } else if arg == "--demo" {
             demo = true;
+        } else if arg == "--demo-closed" {
+            demo = true;
+            demo_closed = true;
         } else {
             return Err(format!("unknown option {arg:?}\n{USAGE}"));
         }
     }
-    if let Some(path) = snapshot_path {
-        let mut screen = if demo {
-            Dashboard::new(grouping)
+    // A snapshot leaves the person's saved view alone unless given a file.
+    let prefs_path = match prefs_path {
+        Some(path) => Some(path),
+        None if snapshot_path.is_some() => None,
+        None => dashboard::default_prefs_path(),
+    };
+    let mut store = prefs_path.map(PrefsStore::at);
+    let prefs = store
+        .as_mut()
+        .map(PrefsStore::load)
+        .unwrap_or_default()
+        .overridden(tab, grouping, initial_filter);
+    let canned = move || {
+        if demo_closed {
+            fleet::canned_with_closed()
         } else {
-            Dashboard::of_snapshot(grouping, first_live_snapshot()?)
+            fleet::canned()
         }
-        .with_tab(tab)
-        .with_filter(initial_filter);
+    };
+    let persisting = |screen: Dashboard, store: Option<PrefsStore>| match store {
+        Some(store) => screen.persisting(store),
+        None => screen,
+    };
+    if let Some(path) = snapshot_path {
+        let screen = if demo {
+            Dashboard::with_prefs(&prefs, canned())
+        } else {
+            Dashboard::of_snapshot_with_prefs(&prefs, first_live_snapshot()?)
+        };
+        let mut screen = persisting(screen, store);
         snapshot(&path, &mut screen, size, keys)?;
         println!("wrote {}", path.display());
         return Ok(());
     }
     App::new(options(), move |setup| {
         if demo {
-            return Box::new(
-                Dashboard::new(grouping)
-                    .with_tab(tab)
-                    .with_filter(initial_filter),
-            );
+            return Box::new(persisting(Dashboard::with_prefs(&prefs, canned()), store));
         }
         let waker = setup.waker.clone();
         let channel = live::start(move || waker.wake());
-        Box::new(
-            Dashboard::live(grouping, channel)
-                .with_tab(tab)
-                .with_filter(initial_filter),
-        )
+        Box::new(persisting(
+            Dashboard::live_with_prefs(&prefs, channel),
+            store,
+        ))
     })
     .run()
     .map_err(|e| e.to_string())
@@ -412,21 +445,25 @@ mod tests {
         );
     }
 
+    /// Shift held down for a shifted character, and up after it.
+    fn shifted(base: char, c: &str) -> Vec<Event> {
+        vec![
+            Event::ModifiersChanged(modifiers(true)),
+            key_down(Key::Char(base), true),
+            text(c),
+            Event::ModifiersChanged(modifiers(false)),
+        ]
+    }
+
     #[test]
     fn shifted_characters_report_their_unshifted_key() {
-        assert_eq!(
-            keys("?"),
-            events(vec![key_down(Key::Char('/'), true), text("?")])
-        );
-        assert_eq!(
-            keys("J"),
-            events(vec![key_down(Key::Char('j'), true), text("J")])
-        );
+        assert_eq!(keys("?"), events(shifted('/', "?")));
+        assert_eq!(keys("J"), events(shifted('j', "J")));
     }
 
     #[test]
     fn a_lone_less_than_is_a_character() {
-        let lt = vec![key_down(Key::Char(','), true), text("<")];
+        let lt = shifted(',', "<");
         assert_eq!(keys("<"), events(lt.clone()));
         assert_eq!(keys("a<b"), {
             let mut e = vec![key_down(Key::Char('a'), false), text("a")];
@@ -444,10 +481,12 @@ mod tests {
         let mut e = Vec::new();
         for c in s.chars() {
             match shifted_base(c) {
-                Some(base) => e.push(key_down(Key::Char(base), true)),
-                None => e.push(key_down(Key::Char(c), false)),
+                Some(base) => e.extend(shifted(base, &c.to_string())),
+                None => {
+                    e.push(key_down(Key::Char(c), false));
+                    e.push(text(&c.to_string()));
+                }
             }
-            e.push(text(&c.to_string()));
         }
         e
     }

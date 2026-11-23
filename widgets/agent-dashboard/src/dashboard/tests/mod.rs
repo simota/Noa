@@ -6,6 +6,8 @@ use noa_gpui_scene::{Border, DisplayList, DrawCommand, Point, Size};
 use super::*;
 
 mod actions;
+mod bulk_close;
+mod closed_workers;
 mod details;
 mod feed;
 mod filtering;
@@ -22,10 +24,12 @@ mod paragraphs;
 mod queue_cards;
 mod rebuild;
 mod relations;
+mod saved_view;
 mod selection;
 mod tabs;
 mod triage;
 mod urgency_steps;
+mod view_diff;
 mod window_sizes;
 
 fn window() -> Size {
@@ -150,6 +154,7 @@ fn live(fleet: Fleet, synced_secs: u64) -> Snapshot {
         synced_secs,
         can_focus: true,
         can_input: true,
+        safe_send: true,
         instance: Some(INSTANCE.to_owned()),
     }
 }

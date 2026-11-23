@@ -21,10 +21,15 @@ use noa_gpui_text::TextStore;
 use crate::live::{Link, Snapshot};
 use crate::ui::Competition;
 
-const USAGE: &str = "usage: competition [--demo] [--snapshot=FILE.png [--size=WxH]]\n       \
+const USAGE: &str = "usage: competition [--demo [--start | --held] | --session=DIR] \
+                     [--snapshot=FILE.png [--size=WxH]]\n       \
                      competition --check=ENTRY_DIR [--out=DIR]\n  \
                      the live competition by default; \
-                     --demo shows a canned multi-round competition; \
+                     --demo shows a canned multi-round competition \
+                     (--start: the demo's start view, with past competitions; \
+                     --held: held after its last judged round); \
+                     --session shows the competition stored in DIR \
+                     (<data>/noa/competitions/comp-*) read-only; \
                      --check runs the snapshot check a submission gets (viewer copy, \
                      screenshots, manifest) on ENTRY_DIR";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
@@ -140,6 +145,9 @@ fn main() -> Result<(), String> {
     let mut size = DEFAULT_SIZE;
     let mut check_entry = None;
     let mut check_out = None;
+    let mut session_dir = None;
+    let mut start_view = false;
+    let mut held = false;
 
     for arg in std::env::args().skip(1) {
         if let Some(path) = arg.strip_prefix("--check=") {
@@ -150,8 +158,14 @@ fn main() -> Result<(), String> {
             snapshot_path = Some(PathBuf::from(path));
         } else if let Some(raw) = arg.strip_prefix("--size=") {
             size = parse_size(raw)?;
+        } else if let Some(dir) = arg.strip_prefix("--session=") {
+            session_dir = Some(PathBuf::from(dir));
         } else if arg == "--demo" {
             demo = true;
+        } else if arg == "--start" {
+            start_view = true;
+        } else if arg == "--held" {
+            held = true;
         } else if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
             return Ok(());
@@ -163,10 +177,25 @@ fn main() -> Result<(), String> {
     if let Some(entry) = check_entry {
         return run_check(&entry, check_out);
     }
+    if (start_view || held) && !demo {
+        return Err(format!("--start and --held need --demo\n{USAGE}"));
+    }
+    if start_view && held {
+        return Err(format!("--start and --held do not go together\n{USAGE}"));
+    }
+    if demo && session_dir.is_some() {
+        return Err(format!("--demo and --session do not go together\n{USAGE}"));
+    }
 
     if let Some(path) = snapshot_path {
-        let mut screen = if demo {
+        let mut screen = if demo && start_view {
+            Competition::demo_start()
+        } else if demo && held {
+            Competition::demo_held()
+        } else if demo {
             Competition::demo()
+        } else if let Some(dir) = &session_dir {
+            Competition::stored(dir)?
         } else {
             Competition::of_snapshot(first_live_snapshot()?)
         };
@@ -175,13 +204,27 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
 
+    if let Some(dir) = &session_dir {
+        // Fails here, before a window opens, on a log that cannot be read.
+        competition::store::read_session(dir)
+            .map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
+    }
     App::new(options(), move |setup| {
+        if demo && start_view {
+            return Box::new(Competition::demo_start());
+        }
+        if demo && held {
+            return Box::new(Competition::demo_held());
+        }
         if demo {
             return Box::new(Competition::demo());
         }
         let waker = setup.waker.clone();
         let channel = live::start(move || waker.wake());
-        Box::new(Competition::live(channel))
+        match &session_dir {
+            Some(dir) => Box::new(Competition::live_stored(channel, dir)),
+            None => Box::new(Competition::live(channel)),
+        }
     })
     .run()
     .map_err(|e| e.to_string())

@@ -14,6 +14,8 @@ use discussion::model::types::{MODERATOR_ID, PartId, Session};
 use super::{caption, clear_children, fill, gap, note, part_name};
 
 pub(super) struct Parts {
+    /// The whole composer, hidden while a stored discussion is shown.
+    pub(super) root: WidgetId,
     recipients_host: WidgetId,
     pub(super) recipients: WidgetId,
     pub(super) area: WidgetId,
@@ -88,6 +90,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         "介入はログに残り、次のラウンドのブリーフで全員に届きます。宛先は誰への発言かを示します",
     );
     Parts {
+        root,
         recipients_host,
         recipients,
         area,

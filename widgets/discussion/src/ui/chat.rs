@@ -9,7 +9,7 @@ use noa_gpui_core::widgets::Container;
 use noa_gpui_core::widgets::{Button, ControlSize, Label, Pressable, Tag, Tone, Truncation};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
-use discussion::model::types::{IssueId, Message, MsgKind, RoundKind, Session};
+use discussion::model::types::{Author, IssueId, Message, MsgKind, PartId, RoundKind, Session};
 
 use super::{
     Action, Delivery, author_color, author_name, caption, debate_in_play, gap, is_about,
@@ -37,9 +37,10 @@ pub(super) fn insert(
     host: WidgetId,
     session: &Session,
     filter: Option<&IssueId>,
+    live: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
-    brief_bar(tree, host, session, actions);
+    brief_bar(tree, host, session, live, actions);
     debate_banner(tree, host, session, actions);
     if let Some(issue) = filter {
         filter_bar(tree, host, session, issue, actions);
@@ -63,7 +64,7 @@ pub(super) fn insert(
         );
     }
     for message in messages {
-        message_card(tree, list, session, message, actions);
+        message_card(tree, list, session, message, live, actions);
     }
 }
 
@@ -97,6 +98,7 @@ fn brief_bar(
     tree: &mut UiTree,
     host: WidgetId,
     session: &Session,
+    live: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let row = bar(tree, host, Role::SurfaceAlt);
@@ -114,18 +116,25 @@ fn brief_bar(
         tag(tree, row, &format!("⚔ 討論 {id}"), Tone::Warning);
     }
     caption(tree, row, phase_label(round.phase));
+    if session.waits_to_continue() {
+        tag(tree, row, "一時停止中", Tone::Warning);
+        caption(tree, row, "介入は次のラウンドのブリーフに入ります");
+    }
     for brief in round.briefs.iter().chain(&round.moderator_brief) {
         let delivery = Delivery::of(&brief.receipt);
         let (state, tone) = delivery.tag();
-        let id = tag(
-            tree,
-            row,
-            &format!("{} {state}", part_name(&brief.to)),
-            tone,
-        );
-        if let Some(why) = &brief.receipt.failed {
-            tree.set_accessible_label(id, format!("{}: {why}", part_name(&brief.to)));
-        }
+        let name = part_name(&brief.to);
+        // A click shows the agent's pane: what it is doing, or the prompt
+        // it waits on.
+        let link = pane_link(tree, row, &brief.to, live, actions);
+        let shown = tag(tree, link.unwrap_or(row), &format!("{name} {state}"), tone);
+        let label = match (&brief.receipt.failed, link) {
+            (Some(why), Some(_)) => format!("{name}: {why}（クリックでペインを表示）"),
+            (None, Some(_)) => format!("{name} のペインを表示"),
+            (Some(why), None) => format!("{name}: {why}"),
+            (None, None) => continue,
+        };
+        tree.set_accessible_label(link.unwrap_or(shown), label);
     }
     // Offered only when the engine would take it (the same rule).
     if !session.closed && !round.retryable().is_empty() {
@@ -213,6 +222,7 @@ pub(super) fn message_card(
     parent: WidgetId,
     session: &Session,
     message: &Message,
+    live: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) -> WidgetId {
     let question = message.kind == MsgKind::Brief;
@@ -253,13 +263,18 @@ pub(super) fn message_card(
         Some(card),
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
-    tree.insert(
-        Some(head),
-        Label::new(author_name(&message.author))
-            .font_size(12.0)
-            .weight(600)
-            .color(author_color(session, &message.author)),
-    );
+    let author = Label::new(author_name(&message.author))
+        .font_size(12.0)
+        .weight(600)
+        .color(author_color(session, &message.author));
+    let link = match &message.author {
+        Author::Part(part) => pane_link(tree, head, part, live, actions),
+        Author::User => None,
+    };
+    if let (Some(link), Author::Part(part)) = (link, &message.author) {
+        tree.set_accessible_label(link, format!("{} のペインを表示", part_name(part)));
+    }
+    tree.insert(Some(link.unwrap_or(head)), author);
     if !message.to.is_empty() {
         caption(
             tree,
@@ -296,6 +311,24 @@ pub(super) fn message_card(
             .selectable(true),
     );
     card
+}
+
+/// A participant's name or tag (the caller puts it inside): a click brings
+/// the participant's pane to the front in Noa. `None` when nothing runs
+/// the discussion (`live` false): the name is then plain, not a control.
+pub(super) fn pane_link(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    part: &PartId,
+    live: bool,
+    actions: &mut Vec<(WidgetId, Action)>,
+) -> Option<WidgetId> {
+    if !live {
+        return None;
+    }
+    let link = tree.insert(Some(parent), Pressable::new(Style::default()).radius(9.0));
+    actions.push((link, Action::Focus(part.clone())));
+    Some(link)
 }
 
 /// `[B]`: a tag that filters the chat to the issue.

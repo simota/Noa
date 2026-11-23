@@ -133,6 +133,17 @@ fn reply(header: &str, body: &str) -> String {
 
 /// The demo session, folded from the scripted run.
 pub fn session() -> Session {
+    run(false)
+}
+
+/// The demo held after round 4 (`--demo-held`): the user paused the
+/// discussion before the summary, so round 5 waits for the user, who has
+/// written an intervention meanwhile.
+pub fn held() -> Session {
+    run(true)
+}
+
+fn run(held: bool) -> Session {
     let config = Config {
         debate_max_exchanges: 2,
         ..Config::default()
@@ -301,6 +312,10 @@ pub fn session() -> Session {
     }));
 
     // ── Round 4: debate, second exchange and the verdict ───────────────────
+    if held {
+        let at = s.tick();
+        s.feed(Input::UserSetHold { hold: true, at });
+    }
     s.panel(&[
         (
             "codex",
@@ -349,6 +364,9 @@ pub fn session() -> Session {
         &["codex"],
         "C については、移行ツールの制約も確認してから答えてください。",
     );
+    if held {
+        return s.engine.session().clone();
+    }
     for part in ["claude", "codex", "agy"] {
         s.deliver(part);
     }
@@ -362,6 +380,42 @@ pub fn session() -> Session {
         ),
     );
     s.engine.session().clone()
+}
+
+/// Stored discussions for the demo's start view (`--demo-start`): one
+/// that ended, one still going, one whose log does not fold.
+pub fn history() -> Vec<discussion::store::Summary> {
+    use discussion::store::{Outline, Summary};
+    let session = session();
+    let base = std::path::PathBuf::from("/demo/discussions");
+    let ended = Outline {
+        closed: true,
+        ..Outline::of(&session)
+    };
+    let going = Outline {
+        topic: "CI のキャッシュ戦略をどうするか".into(),
+        rounds: 2,
+        max_rounds: Some(5),
+        closed: false,
+        created_at: session.created_at + 86_400_000,
+    };
+    vec![
+        Summary {
+            id: SessionId::new("disc-demo-3"),
+            dir: base.join("disc-demo-3"),
+            state: Ok(going),
+        },
+        Summary {
+            id: SessionId::new("disc-demo-2"),
+            dir: base.join("disc-demo-2"),
+            state: Err("events.jsonl line 4 is damaged: expected value".into()),
+        },
+        Summary {
+            id: SessionId::new("disc-demo-1"),
+            dir: base.join("disc-demo-1"),
+            state: Ok(ended),
+        },
+    ]
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ use competition::model::types::{JUDGE_ID, PartId, Session};
 use super::{caption, clear_children, fill, gap, note};
 
 pub(super) struct Parts {
+    pub(super) root: WidgetId,
     recipients_host: WidgetId,
     pub(super) recipients: WidgetId,
     pub(super) area: WidgetId,
@@ -85,6 +86,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）",
     );
     Parts {
+        root,
         recipients_host,
         recipients,
         area,
@@ -123,6 +125,12 @@ pub(super) fn text(tree: &UiTree, parts: &Parts) -> String {
     tree.get::<TextArea>(parts.area)
         .map(|a| a.text().trim().to_owned())
         .unwrap_or_default()
+}
+
+/// Empties the draft and has the recipients rebuilt for the next session.
+pub(super) fn reset(tree: &mut UiTree, parts: &mut Parts) {
+    clear(tree, parts);
+    parts.built_for = None;
 }
 
 pub(super) fn clear(tree: &mut UiTree, parts: &Parts) {

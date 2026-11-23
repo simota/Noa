@@ -201,6 +201,7 @@ mod tests {
             rounds,
             winner: None,
             closed: false,
+            hold: false,
         }
     }
 

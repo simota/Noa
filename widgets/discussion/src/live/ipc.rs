@@ -107,6 +107,9 @@ pub trait Noa {
     /// (refused with [`NoaError::NotReady`] while the pane has not enabled
     /// it, when `text` holds a control character), else as raw bytes.
     fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), NoaError>;
+    /// Brings `pane` to the front of its window and gives it keyboard focus
+    /// (`noa.focusPane`).
+    fn focus(&mut self, pane: u64) -> Result<(), NoaError>;
 }
 
 /// Opens connections to Noa; the runner calls it again after a lost one.
@@ -295,6 +298,10 @@ impl Noa for IpcNoa {
         self.client
             .send_text_with(pane, text, options)
             .map_err(noa_error)
+    }
+
+    fn focus(&mut self, pane: u64) -> Result<(), NoaError> {
+        self.client.focus_pane(pane).map_err(noa_error)
     }
 }
 

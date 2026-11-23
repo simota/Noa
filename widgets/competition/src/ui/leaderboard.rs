@@ -1,5 +1,6 @@
-//! Left pane: leaderboard with score history, current round status, and
-//! round selector (marking Blind vs Peer-Reveal rounds).
+//! Left pane: leaderboard with score history, current round status, a jump
+//! to each agent's pane (the judge's too), and round selector (marking Blind
+//! vs Peer-Reveal rounds).
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
@@ -17,8 +18,18 @@ pub(super) fn insert(
     session: &Session,
     selected_round: Option<RoundNo>,
     filter_part: Option<&PartId>,
+    can_focus: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
+    let focus_button = |tree: &mut UiTree, row: WidgetId, actions: &mut Vec<_>, part: &PartId| {
+        if can_focus {
+            let btn = tree.insert(
+                Some(row),
+                Button::new("ペインを開く").control_size(ControlSize::Small),
+            );
+            actions.push((btn, Action::FocusPane(part.clone())));
+        }
+    };
     heading(tree, host, "リーダーボード");
     let list = scroll_column(tree, host, 10.0);
     keep_scroll(tree, list, session, "leaderboard");
@@ -70,6 +81,11 @@ pub(super) fn insert(
         );
         spacer(tree, top);
         let score_hist = session.score_history(part);
+        // Which model and effort this entry runs on: what tells two entries
+        // of one CLI apart.
+        if let Some(setup) = session.participant(part).and_then(|p| p.setup.label()) {
+            caption(tree, card, setup);
+        }
         if let Some(&(_, score)) = score_hist.last() {
             tag(tree, top, format!("{score} pt"), Tone::Accent);
         } else {
@@ -87,16 +103,20 @@ pub(super) fn insert(
             super::note(tree, card, line);
         }
 
-        if let Some(cur) = session.current_round()
-            && let Some(brief) = cur.brief(part)
-        {
-            let (status_text, tone) = super::progress::delivery(&brief.receipt);
+        let brief = session
+            .current_round()
+            .and_then(|cur| Some((cur.no, cur.brief(part)?)));
+        if brief.is_some() || can_focus {
             let row = tree.insert(
                 Some(card),
                 Container::row().align_items(AlignItems::CENTER).gap(6.0),
             );
-            tag(tree, row, format!("R{} {status_text}", cur.no), tone);
+            if let Some((no, brief)) = brief {
+                let (status_text, tone) = super::progress::delivery(&brief.receipt);
+                tag(tree, row, format!("R{no} {status_text}"), tone);
+            }
             spacer(tree, row);
+            focus_button(tree, row, actions, part);
             let btn = tree.insert(
                 Some(row),
                 Button::new(if is_selected { "解除" } else { "絞込" })
@@ -110,6 +130,8 @@ pub(super) fn insert(
             actions.push((btn, action));
         }
     }
+
+    judge_card(tree, list, session, &focus_button, actions);
 
     let rhead = tree.insert(
         Some(list),
@@ -147,4 +169,49 @@ pub(super) fn insert(
         );
         actions.push((btn, Action::SelectRound(round.no)));
     }
+}
+
+/// The judge, below the contestants: its agent, what it is doing this
+/// round, and the jump to its pane.
+fn judge_card(
+    tree: &mut UiTree,
+    list: WidgetId,
+    session: &Session,
+    focus_button: &impl Fn(&mut UiTree, WidgetId, &mut Vec<(WidgetId, Action)>, &PartId),
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
+    let judge = &session.judge;
+    let card = tree.insert(
+        Some(list),
+        Container::new(Style {
+            flex_direction: FlexDirection::Column,
+            gap: gap(4.0),
+            padding: LayoutRect::length(10.0),
+            size: LayoutSize {
+                width: percent(1.0),
+                height: auto(),
+            },
+            ..Default::default()
+        })
+        .background(Role::SurfaceAlt)
+        .border(1.0, Role::Separator)
+        .radius(8.0),
+    );
+    let label = match judge.setup.label() {
+        Some(setup) => format!("審判 · {} ({setup})", judge.kind.command()),
+        None => format!("審判 · {}", judge.kind.command()),
+    };
+    tree.insert(Some(card), Label::new(label).font_size(12.5).weight(600));
+    let row = tree.insert(
+        Some(card),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
+    if let Some(cur) = session.current_round()
+        && let Some(brief) = cur.brief(&judge.id)
+    {
+        let (status_text, tone) = super::progress::delivery(&brief.receipt);
+        tag(tree, row, format!("R{} {status_text}", cur.no), tone);
+    }
+    spacer(tree, row);
+    focus_button(tree, row, actions, &judge.id);
 }

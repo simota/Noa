@@ -21,6 +21,10 @@ pub const DEFAULT_REVEAL_INTERVAL: RoundNo = 5;
 /// Default maximum rounds for a competition (allows two 5-round sprints).
 pub const DEFAULT_MAX_ROUNDS: RoundNo = 10;
 
+/// The most contestants one competition takes: each runs in a split of
+/// one Noa tab.
+pub const MAX_PANEL: usize = 6;
+
 /// The id of the judge agent ("Judge").
 pub const JUDGE_ID: &str = "judge";
 
@@ -531,6 +535,9 @@ pub struct Receipt {
     pub failed: Option<String>,
     /// Why the last reply file was turned down; the agent is asked to fix it.
     pub rejected: Option<String>,
+    /// [`crate::store::digest`] of the reply that was turned down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_digest: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -620,6 +627,10 @@ pub struct Session {
     #[serde(default)]
     pub winner: Option<PartId>,
     pub closed: bool,
+    /// The user holds the competition after each judged round: the next
+    /// round waits for them.
+    #[serde(default)]
+    pub hold: bool,
 }
 
 fn default_reveal_interval() -> RoundNo {
@@ -627,6 +638,54 @@ fn default_reveal_interval() -> RoundNo {
 }
 
 impl Session {
+    /// Whether the competition waits for the user to start its next round:
+    /// held, with the last round judged.
+    pub fn waits_to_continue(&self) -> bool {
+        !self.closed
+            && self.hold
+            && self
+                .current_round()
+                .is_some_and(|round| round.phase == Phase::Closed)
+    }
+
+    /// Whether the user may add rounds, or why not. The competition must
+    /// have a round limit; once ended, it must have ended by running all
+    /// its rounds (not by the judge closing it early or by the user). While
+    /// the final round runs, its briefs say FINAL (those sent and those
+    /// waiting to go out), so rounds are added once its verdict is in.
+    pub fn extendable(&self) -> Result<(), &'static str> {
+        let Some(max) = self.max_rounds else {
+            return Err("ラウンド上限のないコンペです");
+        };
+        let at_limit = self.rounds.len() as RoundNo >= max;
+        let phase = self.current_round().map(|round| round.phase);
+        if !self.closed {
+            return if at_limit {
+                Err("最終ラウンドの進行中です（最終判定の後に追加できます）")
+            } else {
+                Ok(())
+            };
+        }
+        if at_limit && phase == Some(Phase::Closed) {
+            Ok(())
+        } else {
+            Err("ラウンド上限の前に終了したコンペです")
+        }
+    }
+
+    /// The judge's final verdict on the winner now decided: that of the
+    /// last judged round, when it named the current winner. An earlier
+    /// verdict (before the competition was extended, or one a later manual
+    /// choice overrode) stays with its round and is not the result.
+    pub fn final_verdict(&self) -> Option<&str> {
+        let winner = self.winner.as_ref()?;
+        let outcome = self.rounds.iter().rev().find_map(|r| r.outcome.as_ref())?;
+        outcome
+            .final_verdict
+            .as_deref()
+            .filter(|_| outcome.winner.as_ref() == Some(winner))
+    }
+
     pub fn participant(&self, id: &PartId) -> Option<&Participant> {
         std::iter::once(&self.judge)
             .chain(&self.contestants)
@@ -923,6 +982,7 @@ mod tests {
             ],
             winner: None,
             closed: false,
+            hold: false,
         };
         assert_eq!(s.round(0), None);
         assert_eq!(s.round(1).map(|r| r.no), Some(1));

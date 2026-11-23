@@ -401,6 +401,7 @@ mod tests {
             }],
             winner: None,
             closed: false,
+            hold: false,
         }
     }
 

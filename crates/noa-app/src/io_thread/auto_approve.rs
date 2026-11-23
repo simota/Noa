@@ -50,12 +50,21 @@ pub(super) fn detect_auto_approve_candidate(
     publish: &AutoApprovePublish,
     state: &mut AutoApproveState,
 ) -> Option<AutoApproveCandidate> {
-    if !publish.enabled.lock().load(Ordering::Relaxed) {
+    detect_auto_approve_candidate_at(term, publish, state, Instant::now())
+}
+
+pub(super) fn detect_auto_approve_candidate_at(
+    term: &Terminal,
+    publish: &AutoApprovePublish,
+    state: &mut AutoApproveState,
+    now: Instant,
+) -> Option<AutoApproveCandidate> {
+    if !publish.enabled.lock().load(Ordering::Acquire) {
         state.reset_for_mode_off();
         return None;
     }
     let ctx = DetectContext {
-        now: Instant::now(),
+        now,
         alt_screen: term.active_is_alt,
         scrollback_offset: term.viewport_offset(),
         guards: *publish.guards.lock(),
@@ -102,4 +111,62 @@ pub(super) fn auto_approve_rescan_deadline(
     state
         .needs_static_rescan()
         .then_some(now + AUTO_APPROVE_STABILITY_RESCAN_DELAY)
+}
+
+/// Run one auto-approve scan against the locked terminal and recompute the
+/// stability-rescan deadline. Shared between the explicit mode-ON rescan
+/// channel and the elapsed stability-rescan timer in `io_thread::spawn`.
+pub(super) fn rescan_auto_approve_at(
+    terminal: &Mutex<Terminal>,
+    publish: &AutoApprovePublish,
+    state: &mut AutoApproveState,
+    rescan_at: &mut Option<Instant>,
+    now: Instant,
+) -> Option<AutoApproveCandidate> {
+    let candidate = {
+        let term = terminal.lock();
+        detect_auto_approve_candidate_at(&term, publish, state, now)
+    };
+    *rescan_at = auto_approve_rescan_deadline(state, now);
+    candidate
+}
+
+fn request_rescan_on_enable<'a>(
+    was_enabled: bool,
+    now_enabled: bool,
+    io_threads: impl IntoIterator<Item = &'a super::IoThreadHandle>,
+) {
+    if !was_enabled && now_enabled {
+        for io_thread in io_threads {
+            io_thread.request_auto_approve_rescan();
+        }
+    }
+}
+
+/// Update a tab's shared auto-approve flag and wake every local pane's io
+/// thread on an OFF -> ON transition so an already-static dialog is scanned
+/// without waiting for new pty output.
+pub(crate) fn set_tab_auto_approve_enabled<'a>(
+    tab_flag: &AtomicBool,
+    enabled: bool,
+    io_threads: impl IntoIterator<Item = &'a super::IoThreadHandle>,
+) {
+    let was_enabled = tab_flag.swap(enabled, Ordering::AcqRel);
+    request_rescan_on_enable(was_enabled, enabled, io_threads);
+}
+
+/// Re-point a moved local pane's auto-approve flag holder at `dest_flag` and
+/// wake its io thread if the pane's effective mode transitioned OFF -> ON.
+pub(crate) fn retarget_pane_auto_approve(
+    holder: &Mutex<Arc<AtomicBool>>,
+    dest_flag: &Arc<AtomicBool>,
+    io_thread: Option<&super::IoThreadHandle>,
+) {
+    let (was_enabled, now_enabled) = {
+        let mut guard = holder.lock();
+        let prev = guard.load(Ordering::Acquire);
+        *guard = dest_flag.clone();
+        (prev, dest_flag.load(Ordering::Acquire))
+    };
+    request_rescan_on_enable(was_enabled, now_enabled, io_thread);
 }

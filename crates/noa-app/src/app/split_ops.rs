@@ -192,10 +192,14 @@ pub(super) fn retarget_surface_io(
         // destination tab's flag. A one-time value copy would not be
         // enough (a later toggle of either tab's checkbox would then be
         // invisible to this pane), so this swaps the *holder*'s contents
-        // — the io thread re-reads through `AutoApprovePublish::enabled`
-        // on every batch, so it starts following the destination flag,
-        // including its future toggles, from the very next feed.
-        *local.auto_approve_flag.lock() = dest_auto_approve_enabled.clone();
+        // and wakes the io thread on an OFF -> ON transition so an
+        // already-static prompt is scanned without waiting for new pty
+        // output.
+        crate::io_thread::retarget_pane_auto_approve(
+            &local.auto_approve_flag,
+            dest_auto_approve_enabled,
+            local.io_thread.as_ref(),
+        );
         // P2-4: same re-attach, for the pane's redraw-pacing clock — see
         // `RedrawFloorHandle`. Without this the moved pane keeps
         // coalescing redraws against the source tab's (now orphaned)

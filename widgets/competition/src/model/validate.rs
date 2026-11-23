@@ -652,6 +652,85 @@ mod tests {
     }
 
     #[test]
+    fn an_amendment_reorders_its_round_and_the_standing_stays_positive() {
+        let mut s = judged_round_one();
+        let claude = PartId::new("claude");
+        let raw = r#"{
+  "overview": "R2",
+  "evaluations": {
+    "claude": { "score": 75, "feedback": "a" },
+    "codex": { "score": 82, "feedback": "b" }
+  },
+  "ranking": ["codex", "claude"],
+  "amendments": [ { "round": 1, "contestant": "codex", "score": 60, "reason": "misread" } ]
+}"#;
+        let out = parse_judge(raw, &s, 2).unwrap();
+        crate::model::reduce::apply(
+            &mut s,
+            &[crate::model::reduce::Event::JudgeAccepted {
+                round: 2,
+                output: out,
+            }],
+        )
+        .unwrap();
+        let first = s.round(1).unwrap().outcome.as_ref().unwrap();
+        assert_eq!(first.ranking, vec![claude.clone(), PartId::new("codex")]);
+        // The R1 standing, as a contestant whose last judged round is R1 sees it.
+        s.round_mut(2).unwrap().outcome = None;
+        let brief = crate::model::brief::contestant_brief(
+            &s,
+            &claude,
+            2,
+            std::path::Path::new("/tmp/e"),
+            std::path::Path::new("/tmp/c"),
+            std::path::Path::new("/tmp/c/r2/report-claude.md"),
+        );
+        assert!(
+            brief.body.contains("rank 1 of 2, you lead by 10 point(s)"),
+            "{}",
+            brief.body
+        );
+    }
+
+    #[test]
+    fn a_second_correction_records_the_score_it_replaced() {
+        let mut s = judged_round_one();
+        let amend = |score: u8, round: RoundNo| {
+            format!(
+                r#"{{"overview":"R{round}","evaluations":{{"claude":{{"score":75,"feedback":"a"}},"codex":{{"score":82,"feedback":"b"}}}},"ranking":["codex","claude"],"amendments":[{{"round":1,"contestant":"claude","score":{score},"reason":"r"}}]}}"#
+            )
+        };
+        let out = parse_judge(&amend(80, 2), &s, 2).unwrap();
+        crate::model::reduce::apply(
+            &mut s,
+            &[crate::model::reduce::Event::JudgeAccepted {
+                round: 2,
+                output: out,
+            }],
+        )
+        .unwrap();
+        let mut third = s.rounds[1].clone();
+        third.no = 3;
+        third.outcome = None;
+        s.rounds.push(third);
+        let out = parse_judge(&amend(90, 3), &s, 3).unwrap();
+        crate::model::reduce::apply(
+            &mut s,
+            &[crate::model::reduce::Event::JudgeAccepted {
+                round: 3,
+                output: out,
+            }],
+        )
+        .unwrap();
+        let ev = &s.round(1).unwrap().outcome.as_ref().unwrap().evaluations[&PartId::new("claude")];
+        assert_eq!(ev.score, 90);
+        assert_eq!(
+            ev.amended.as_ref().map(|n| (n.from, n.by_round)),
+            Some((80, 3))
+        );
+    }
+
+    #[test]
     fn submission_parser_extracts_summary_line() {
         let parsed =
             parse_submission("# Summary: Refined hero typography\n\nDetails here.").unwrap();

@@ -9,6 +9,7 @@
 //! `index.html` and inlines the local stylesheets, scripts, images and fonts it
 //! references, so the viewer can frame the entry exactly as submitted.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -208,11 +209,81 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// Rewrites every local `url(...)` in a stylesheet to a data URI. `base` is
-/// the stylesheet's directory relative to `root`.
+/// How deep `@import` chains are followed before the rest stay as they are.
+const MAX_IMPORT_DEPTH: usize = 8;
+
+/// Points a reference the copy leaves as is back at the entry: the copy sits
+/// one directory down, in `.preview/`. `base` is the directory (relative to
+/// the entry) of the file the reference was written in. Fragment-only,
+/// absolute, remote and data references stay as they are.
+fn rebase(reference: &str, base: &Path) -> Option<String> {
+    let trimmed = reference.trim();
+    let path_part = trimmed.split(['?', '#']).next().unwrap_or_default();
+    if trimmed.is_empty()
+        || trimmed.starts_with('#')
+        || trimmed.starts_with('/')
+        || path_part.contains(':')
+    {
+        return None;
+    }
+    let mut rebased = String::from("../");
+    for part in base.components() {
+        rebased.push_str(&part.as_os_str().to_string_lossy());
+        rebased.push('/');
+    }
+    rebased.push_str(trimmed);
+    Some(rebased)
+}
+
+/// Inlines a stylesheet: leading `@import`s become the imported sheets
+/// (inlined in turn, under `@media` when the import names one), and every
+/// local `url(...)` becomes a data URI. `base` is the stylesheet's
+/// directory relative to the entry root.
 fn inline_css(css: &str, ctx: &Ctx, base: &Path) -> String {
+    inline_css_at(css, ctx, base, 0)
+}
+
+fn inline_css_at(css: &str, ctx: &Ctx, base: &Path, depth: usize) -> String {
     let mut out = String::with_capacity(css.len());
     let mut rest = css;
+    // `@import` is only valid before every other rule, after `@charset`.
+    loop {
+        let trimmed = rest.trim_start();
+        let lead = &rest[..rest.len() - trimmed.len()];
+        let is_import = trimmed
+            .get(..7)
+            .is_some_and(|head| head.eq_ignore_ascii_case("@import"));
+        let Some(end) = is_import.then(|| trimmed.find(';')).flatten() else {
+            break;
+        };
+        let statement = &trimmed[7..end];
+        rest = &trimmed[end + 1..];
+        out.push_str(lead);
+        let (target, media) = split_import(statement);
+        let inlined = (depth < MAX_IMPORT_DEPTH)
+            .then(|| resolve(ctx, base, &target))
+            .flatten()
+            .and_then(|file| {
+                let sheet = fs::read_to_string(&file).ok()?;
+                let sheet_base = file
+                    .strip_prefix(ctx.root)
+                    .ok()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default();
+                Some(inline_css_at(&sheet, ctx, &sheet_base, depth + 1))
+            });
+        match inlined {
+            Some(sheet) if media.is_empty() => out.push_str(&sheet),
+            Some(sheet) => {
+                let _ = write!(out, "@media {media} {{{sheet}}}");
+            }
+            None => {
+                let target = rebase(&target, base).unwrap_or(target);
+                let _ = write!(out, "@import url(\"{target}\") {media};");
+            }
+        }
+    }
     while let Some(at) = rest.find("url(") {
         let (head, tail) = rest.split_at(at + 4);
         out.push_str(head);
@@ -228,12 +299,38 @@ fn inline_css(css: &str, ctx: &Ctx, base: &Path) -> String {
                 out.push_str(&uri);
                 out.push('"');
             }
-            None => out.push_str(raw),
+            None => match rebase(target, base) {
+                Some(rebased) => {
+                    out.push('"');
+                    out.push_str(&rebased);
+                    out.push('"');
+                }
+                None => out.push_str(raw),
+            },
         }
         rest = &tail[close..];
     }
     out.push_str(rest);
     out
+}
+
+/// The target and media list of an `@import` statement's body.
+fn split_import(statement: &str) -> (String, String) {
+    let s = statement.trim();
+    let (target, after) = if let Some(inner) = s.strip_prefix("url(") {
+        let close = inner.find(')').unwrap_or(inner.len());
+        (&inner[..close], inner.get(close + 1..).unwrap_or_default())
+    } else if let Some(quote) = s.chars().next().filter(|c| *c == '"' || *c == '\'') {
+        let inner = &s[1..];
+        let close = inner.find(quote).unwrap_or(inner.len());
+        (&inner[..close], inner.get(close + 1..).unwrap_or_default())
+    } else {
+        (s, "")
+    };
+    (
+        target.trim().trim_matches(['"', '\'']).to_owned(),
+        after.trim().to_owned(),
+    )
 }
 
 /// One attribute of a start tag.
@@ -448,10 +545,10 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
             // document order. Inlined copies run where they stand, so every
             // such script, local or remote, moves before `</body>` without
             // `defer`, keeping the order among them.
+            let module = tag.get("type") == Some("module");
             let late = name == "script"
-                && tag.has("src")
                 && !tag.has("async")
-                && (tag.has("defer") || tag.get("type") == Some("module"));
+                && (module || (tag.has("src") && tag.has("defer")));
             let local = (name == "script")
                 .then(|| tag.get("src").and_then(|src| resolve(ctx, base, src)))
                 .flatten()
@@ -510,21 +607,48 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
             }
         }
         // Links to other pages stay links; resource URLs become data URIs.
+        // Whatever stays a reference is pointed back at the entry, since the
+        // copy lives one directory down.
         let navigates = name == "a" || name == "area" || name == "form";
-        if !navigates {
-            for attr in URL_ATTRS {
-                if let Some(uri) = tag
-                    .get(attr)
-                    .and_then(|v| resolve(ctx, base, v))
-                    .filter(|p| !is_page(p))
-                    .and_then(|p| data_uri(&p))
-                {
-                    tag.set(attr, uri);
-                }
+        for attr in URL_ATTRS.iter().chain(&["action"]) {
+            let Some(value) = tag.get(attr).map(str::to_owned) else {
+                continue;
+            };
+            let inlined = (!navigates && *attr != "action")
+                .then(|| resolve(ctx, base, &value))
+                .flatten()
+                .filter(|p| !is_page(p))
+                .and_then(|p| data_uri(&p));
+            if let Some(uri) = inlined.or_else(|| rebase(&value, base)) {
+                tag.set(attr, uri);
+            }
+        }
+        if let Some(srcset) = tag.get("srcset").map(str::to_owned) {
+            let rebased: Vec<String> = srcset
+                .split(',')
+                .map(|candidate| {
+                    let candidate = candidate.trim();
+                    let (url, descriptor) = candidate
+                        .split_once(char::is_whitespace)
+                        .unwrap_or((candidate, ""));
+                    let url = rebase(url, base).unwrap_or_else(|| url.to_owned());
+                    if descriptor.is_empty() {
+                        url
+                    } else {
+                        format!("{url} {}", descriptor.trim())
+                    }
+                })
+                .collect();
+            let rebased = rebased.join(", ");
+            if rebased != srcset {
+                tag.set("srcset", rebased);
             }
         }
         if let Some(style) = tag.get("style").map(str::to_owned) {
-            tag.set("style", inline_css(&style, ctx, base));
+            let inlined = inline_css(&style, ctx, base);
+            if inlined != style {
+                tag.set("style", inlined);
+            }
         }
         out.push_str(&tag.render());
     }
@@ -538,8 +662,13 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("competition-preview-{name}-{}", std::process::id()));
+        // Unique per call: tests run in parallel and several share a name.
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "competition-preview-{name}-{}-{n}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("assets")).unwrap();
         dir
@@ -585,8 +714,8 @@ mod tests {
         assert!(html.contains("<style>body{background:url(\"data:image/png;base64,"));
         assert!(html.contains(r#"<img src="data:image/png;base64,iVBORw==" alt="x">"#));
         assert!(
-            html.contains(r#"<a href="other.html">"#),
-            "page links stay links"
+            html.contains(r#"<a href="../other.html">"#),
+            "page links stay links, pointed back at the entry"
         );
         assert!(html.contains("https://example.com/remote.png"));
         // The deferred script moves to the end of <body>, after the DOM it reads.
@@ -695,6 +824,75 @@ mod tests {
         // Both run after the document, the library first.
         assert!(body < lib && lib < app, "{html}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inline_modules_keep_their_order_after_moved_external_ones() {
+        let dir = scratch("modules");
+        fs::write(dir.join("ready.js"), "globalThis.ready = true;").unwrap();
+        fs::write(
+            dir.join("index.html"),
+            r#"<head><script type="module" src="ready.js"></script><script type="module">use(globalThis.ready);</script></head><body></body>"#,
+        )
+        .unwrap();
+        let html = fs::read_to_string(write(&dir).unwrap().unwrap().page).unwrap();
+        let ready = html.find("globalThis.ready = true").unwrap();
+        let used = html.find("use(globalThis.ready)").unwrap();
+        assert!(ready < used, "{html}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn css_imports_are_inlined_and_missing_ones_reported() {
+        let dir = scratch("imports");
+        fs::write(
+            dir.join("index.html"),
+            r#"<link rel="stylesheet" href="style.css">"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("style.css"),
+            "@import \"css/layout.css\";\n@import url('gone.css') screen;\nbody{margin:0}",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("css")).unwrap();
+        fs::write(dir.join("css/layout.css"), ".a{background:url(bg.png)}").unwrap();
+        fs::write(dir.join("css/bg.png"), [1, 2, 3]).unwrap();
+        let preview = write(&dir).unwrap().unwrap();
+        let html = fs::read_to_string(&preview.page).unwrap();
+        assert!(!html.contains("@import \"css/layout.css\""), "{html}");
+        assert!(
+            html.contains(".a{background:url(\"data:image/png;base64,AQID\")}"),
+            "{html}"
+        );
+        assert!(html.contains("body{margin:0}"));
+        assert!(
+            preview.issues.iter().any(|i| i.starts_with("gone.css")),
+            "{:?}",
+            preview.issues
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn references_left_as_links_still_point_at_the_entry() {
+        let out = inline(
+            r##"<a href="other.html">x</a><a href="#top">t</a><img src="assets/gone.png" srcset="a.png 1x, b.png 2x"><a href="https://example.com/">e</a>"##,
+        );
+        assert!(out.contains(r#"<a href="../other.html">"#), "{out}");
+        assert!(out.contains(r##"<a href="#top">"##), "{out}");
+        assert!(out.contains(r#"src="../assets/gone.png""#), "{out}");
+        assert!(
+            out.contains(r#"srcset="../a.png 1x, ../b.png 2x""#),
+            "{out}"
+        );
+        assert!(out.contains(r#"href="https://example.com/""#), "{out}");
+    }
+
+    #[test]
+    fn a_style_attribute_without_urls_is_kept_as_written() {
+        let html = r#"<p style="--q:&#x201C;&nbsp;">x</p>"#;
+        assert_eq!(inline(html), html);
     }
 
     #[test]

@@ -306,7 +306,7 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
                         amendment.round, amendment.part
                     ));
                 };
-                let from = ev.amended.as_ref().map_or(ev.score, |note| note.from);
+                let from = ev.score;
                 ev.score = amendment.score;
                 // The split no longer adds up to the corrected score.
                 ev.breakdown.clear();
@@ -315,6 +315,23 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
                     by_round: *round,
                     reason: amendment.reason.clone(),
                 });
+            }
+            // A corrected round is re-ranked by its scores (ties keep the
+            // judge's order), so its standings never show a negative gap.
+            let mut amended: Vec<RoundNo> = output.amendments.iter().map(|a| a.round).collect();
+            amended.dedup();
+            for no in amended {
+                if let Some(outcome) = round_mut(session, no)?.outcome.as_mut() {
+                    let evaluations = &outcome.evaluations;
+                    outcome.ranking.sort_by(|a, b| {
+                        let score = |p| {
+                            evaluations
+                                .get(p)
+                                .map_or(0, |e: &super::types::EntryEvaluation| e.score)
+                        };
+                        score(b).cmp(&score(a))
+                    });
+                }
             }
             if let Some(winner) = &output.winner {
                 session.winner = Some(winner.clone());

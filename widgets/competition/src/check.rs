@@ -182,24 +182,47 @@ pub fn check_entry(entry: &Path, out: &Path) -> io::Result<Inspection> {
     let snapshot = out.join("snapshot");
     // The snapshot step deletes its destination first: it must not be, hold,
     // or sit inside the entry, or the entry is lost or copied into itself.
+    // Compared both as written and with symlinks resolved on each side
+    // (`/tmp` is `/private/tmp` on macOS).
     let entry_abs = lexical(&std::path::absolute(entry)?);
     let entry_real = entry.canonicalize()?;
     let out_abs = lexical(&std::path::absolute(out)?);
-    let snapshot_abs = out_abs.join("snapshot");
+    let out_real = real_path(&out_abs)?;
     for e in [&entry_abs, &entry_real] {
-        if e.starts_with(&snapshot_abs) || out_abs.starts_with(e) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "--out {} overlaps the entry {}; pick a directory outside it",
-                    out.display(),
-                    entry.display()
-                ),
-            ));
+        for o in [&out_abs, &out_real] {
+            if e.starts_with(o.join("snapshot")) || o.starts_with(e) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "--out {} overlaps the entry {}; pick a directory outside it",
+                        out.display(),
+                        entry.display()
+                    ),
+                ));
+            }
         }
     }
     crate::store::snapshot_artifacts(entry, &snapshot)?;
     inspect(&snapshot, out)
+}
+
+/// `path` (absolute, lexical) with symlinks resolved: its deepest existing
+/// ancestor canonicalized, the not-yet-created rest appended.
+fn real_path(path: &Path) -> io::Result<PathBuf> {
+    let mut existing = path;
+    let mut rest = Vec::new();
+    while !existing.exists() {
+        let Some(parent) = existing.parent() else {
+            return Ok(path.to_owned());
+        };
+        rest.push(existing.file_name().unwrap_or_default().to_owned());
+        existing = parent;
+    }
+    let mut real = existing.canonicalize()?;
+    for part in rest.iter().rev() {
+        real.push(part);
+    }
+    Ok(real)
 }
 
 /// `path` with `.` and `..` resolved lexically (no symlinks followed).
@@ -241,6 +264,28 @@ mod tests {
         // An output inside the entry would copy the entry into itself.
         assert!(check_entry(&entry, &entry.join("out")).is_err());
         assert!(entry.join("index.html").is_file());
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_output_reached_through_a_symlink_is_still_an_overlap() {
+        let work = scratch("symlink");
+        let real = work.join("real");
+        let entry = real.join("snapshot");
+        fs::create_dir_all(&entry).unwrap();
+        fs::write(entry.join("index.html"), "<p>keep me</p>").unwrap();
+        let link = work.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // `link/snapshot` is the entry itself, reached through the link.
+        assert!(check_entry(&entry, &link).is_err());
+        assert!(entry.join("index.html").is_file(), "the entry was deleted");
+        // `link/snapshot/out` sits inside the entry.
+        assert!(check_entry(&entry, &link.join("snapshot").join("out")).is_err());
+        assert!(
+            !entry.join("out").exists(),
+            "the entry was copied into itself"
+        );
         let _ = fs::remove_dir_all(&work);
     }
 

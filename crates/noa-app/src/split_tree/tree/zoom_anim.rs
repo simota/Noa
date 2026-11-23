@@ -243,6 +243,10 @@ mod tests {
         // Width is round(right) - round(x), not round(width).
         let rect = lerp_rect(Rect::new(0, 0, 3, 3), Rect::new(1, 1, 3, 3), 0.5);
         assert_eq!(rect, Rect::new(1, 1, 3, 3));
+        // Right/bottom stay at 3 while left/top move 1 → 0: the edges give
+        // 3 - round(0.5) = 2, whereas round(lerp(2, 3, 0.5)) would give 3.
+        let rect = lerp_rect(Rect::new(1, 1, 2, 2), Rect::new(0, 0, 3, 3), 0.5);
+        assert_eq!(rect, Rect::new(1, 1, 2, 2));
     }
 
     #[test]

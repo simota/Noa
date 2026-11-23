@@ -209,6 +209,25 @@ fn pane_anchors_hidden_hides_pane_floats_but_not_tab_or_window_floats() {
 }
 
 #[test]
+fn pane_anchors_hidden_keeps_cycle_anchor_off_hidden_panes() {
+    let mut set = FloatSet::default();
+    let float = float_at(&mut set, 1, A, &SPLIT, Rect::new(100, 100, 300, 200));
+    set.cycle_anchor(float, &layout(&SPLIT), M).unwrap();
+    set.cycle_anchor(float, &layout(&SPLIT), M).unwrap();
+    assert_eq!(set.get(float).unwrap().anchor, FloatAnchor::Window);
+    let hidden = FloatLayout {
+        pane_anchors_hidden: true,
+        ..layout(&SPLIT)
+    };
+
+    // The centre (250, 200) lies over A, but A's floats are hidden.
+    assert_eq!(set.cycle_anchor(float, &hidden, M), Ok(None));
+    assert_eq!(set.get(float).unwrap().anchor, FloatAnchor::Window);
+    assert!(set.is_visible(float, &hidden, M));
+    assert_eq!(outer(&set, float, &SPLIT), Rect::new(100, 100, 300, 200));
+}
+
+#[test]
 fn tc_008_cycle_anchor_keeps_the_screen_rect_and_picks_the_pane_under_the_centre() {
     let mut set = FloatSet::default();
     let float = float_at(&mut set, 1, A, &SPLIT, Rect::new(100, 100, 300, 200));

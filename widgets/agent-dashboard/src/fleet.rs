@@ -154,6 +154,11 @@ pub struct Worker {
     /// For a worker whose pane is gone, rebuilt from its spawner's journal:
     /// the id its pane had. `pane` is then a key of its own, never a pane's.
     pub closed_pane: Option<u64>,
+    /// Where it works: its pane's cwd, or for a closed worker the cwd its
+    /// spawn was journaled with; empty when unknown. A path, kept as Noa
+    /// gave it (never put on one line): 差分を見る opens the Repo Browser
+    /// on the worktree holding it.
+    pub cwd: String,
 }
 
 impl Worker {
@@ -437,6 +442,7 @@ pub fn canned() -> Fleet {
             ],
             freshness: 5.0,
             closed_pane: None,
+            cwd: String::new(),
             phases: vec![
                 (Phase::Running, 20.0),
                 (Phase::Permission, 3.0),
@@ -469,6 +475,7 @@ pub fn canned() -> Fleet {
             lines_per_tick: vec![1.0, 1.0, 3.0, 2.0, 5.0, 4.0, 2.0, 6.0, 3.0, 5.0, 4.0, 6.0],
             freshness: 5.0,
             closed_pane: None,
+            cwd: String::new(),
             phases: vec![
                 (Phase::Running, 6.0),
                 (Phase::Input, 1.0),
@@ -503,6 +510,7 @@ pub fn canned() -> Fleet {
             ],
             freshness: 1.0,
             closed_pane: None,
+            cwd: String::new(),
             phases: vec![(Phase::Running, 38.0), (Phase::Quiet, 3.0)],
         },
         Worker {
@@ -536,6 +544,7 @@ pub fn canned() -> Fleet {
             lines_per_tick: Vec::new(),
             freshness: 0.0,
             closed_pane: None,
+            cwd: String::new(),
             phases: vec![(Phase::Running, 18.0), (Phase::Permission, 2.0)],
         },
         Worker {
@@ -568,6 +577,7 @@ pub fn canned() -> Fleet {
             lines_per_tick: Vec::new(),
             freshness: 0.0,
             closed_pane: None,
+            cwd: String::new(),
             phases: vec![(Phase::Running, 9.0), (Phase::Permission, 0.7)],
         },
         Worker {
@@ -600,6 +610,7 @@ pub fn canned() -> Fleet {
             lines_per_tick: Vec::new(),
             freshness: 0.0,
             closed_pane: None,
+            cwd: String::new(),
             phases: vec![(Phase::Running, 7.0), (Phase::Input, 6.0)],
         },
         Worker {
@@ -628,6 +639,7 @@ pub fn canned() -> Fleet {
             lines_per_tick: Vec::new(),
             freshness: 0.0,
             closed_pane: None,
+            cwd: String::new(),
             phases: vec![
                 (Phase::Running, 8.0),
                 (Phase::Permission, 1.0),
@@ -661,6 +673,7 @@ pub fn canned() -> Fleet {
             lines_per_tick: Vec::new(),
             freshness: 0.0,
             closed_pane: None,
+            cwd: String::new(),
             phases: vec![(Phase::Running, 6.0), (Phase::Ended, 11.0)],
         },
         Worker {
@@ -689,11 +702,13 @@ pub fn canned() -> Fleet {
             lines_per_tick: Vec::new(),
             freshness: 0.0,
             closed_pane: None,
+            cwd: String::new(),
             phases: vec![(Phase::Running, 22.0), (Phase::Ended, 1.0)],
         },
     ];
     // Every canned time counts as known.
     for worker in &mut workers {
+        worker.cwd = format!("/work/noa-wt/{}", worker.label);
         worker.started_minutes = Some(worker.total_minutes());
         worker.took_minutes = Some(worker.minutes_where(|phase| phase != Phase::Ended));
         worker.has_result = worker.state == State::Finished;
@@ -738,6 +753,7 @@ pub fn canned_with_closed() -> Fleet {
         freshness: 0.0,
         phases: Vec::new(),
         closed_pane: Some(pane),
+        cwd: String::new(),
     };
     fleet.workers.extend([
         Worker {
@@ -751,6 +767,7 @@ pub fn canned_with_closed() -> Fleet {
             took_minutes: Some(18.0),
             has_result: true,
             phases: vec![(Phase::Running, 18.0), (Phase::Ended, 25.0)],
+            cwd: "/work/noa-wt/bench-ascii".into(),
             ..closed(1, 21, "bench-ascii", "codex", "perf-wish")
         },
         Worker {

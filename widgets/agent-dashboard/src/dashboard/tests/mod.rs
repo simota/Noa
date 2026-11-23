@@ -29,6 +29,7 @@ mod selection;
 mod tabs;
 mod triage;
 mod urgency_steps;
+mod view_diff;
 mod window_sizes;
 
 fn window() -> Size {

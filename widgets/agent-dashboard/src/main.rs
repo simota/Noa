@@ -1,6 +1,7 @@
 mod dashboard;
 mod fleet;
 mod live;
+mod repo_browser;
 
 use std::path::PathBuf;
 use std::sync::mpsc::RecvTimeoutError;

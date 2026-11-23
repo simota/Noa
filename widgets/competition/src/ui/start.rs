@@ -55,7 +55,7 @@ pub(super) struct Parts {
 pub(super) struct PanelRow {
     host: WidgetId,
     pub(super) kind: WidgetId,
-    setup: SetupParts,
+    pub(super) setup: SetupParts,
     pub(super) remove: WidgetId,
 }
 
@@ -625,10 +625,11 @@ pub(super) fn rebuild_past(
             Some(info),
             Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
         );
-        let (status, tone) = match (summary.closed, summary.busy) {
-            (true, _) => ("終了", Tone::Neutral),
-            (false, true) => ("実行中", Tone::Success),
-            (false, false) => ("中断", Tone::Warning),
+        let (status, tone) = match (summary.closed, summary.busy, summary.maybe_running) {
+            (true, _, _) => ("終了", Tone::Neutral),
+            (false, true, _) => ("実行中", Tone::Success),
+            (false, false, true) => ("旧版で実行中の可能性", Tone::Warning),
+            (false, false, false) => ("中断", Tone::Warning),
         };
         tag(tree, tags, status, tone);
         caption(tree, tags, age(now, summary.created_at));
@@ -647,7 +648,7 @@ pub(super) fn rebuild_past(
 
         let buttons = tree.insert(Some(row), Container::row().gap(6.0));
         let dir: PathBuf = listed.dir.clone();
-        let open = if !summary.closed && !summary.busy {
+        let open = if !summary.closed && !summary.busy && !summary.maybe_running {
             let resume = tree.insert(Some(buttons), small("再開").default_button(true));
             (resume, Action::ResumePast(dir.clone()))
         } else {

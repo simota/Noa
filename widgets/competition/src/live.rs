@@ -67,16 +67,25 @@ pub enum Command {
     Leave,
 }
 
+/// A notice for the screen, in the [`Channel::generation`] of the command
+/// (and so of the competition) it is about.
+pub type Notice = (u64, String);
+
 pub struct Channel {
     pub snapshots: Receiver<Snapshot>,
-    pub notices: Receiver<String>,
-    commands: Sender<Command>,
+    pub notices: Receiver<Notice>,
+    /// One `()` each time a runner has stopped and let go of its log, so
+    /// the list of past competitions is read again.
+    pub released: Receiver<()>,
+    commands: Sender<(u64, Command)>,
     generation: Arc<AtomicU64>,
 }
 
 impl Channel {
+    /// Sends `cmd` in the current generation: what it starts, and what is
+    /// said about it, belongs to the competition on screen now.
     pub fn send(&self, cmd: Command) {
-        let _ = self.commands.send(cmd);
+        let _ = self.commands.send((self.generation(), cmd));
     }
 
     /// Bumped each time the screen leaves a competition, so snapshots
@@ -95,6 +104,7 @@ impl Channel {
 pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
+    let (released_tx, released) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let generation = Arc::new(AtomicU64::new(0));
@@ -120,32 +130,46 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
         .expect("spawn competition-clock thread");
     std::thread::Builder::new()
         .name("competition-commands".into())
-        .spawn({
-            let generation = generation.clone();
-            move || run_commands(command_rx, snapshot_tx, notice_tx, wake, generation)
+        .spawn(move || {
+            run_commands(
+                command_rx,
+                Outlets {
+                    snapshots: snapshot_tx,
+                    notices: notice_tx,
+                    released: released_tx,
+                    wake,
+                },
+            )
         })
         .expect("spawn competition-commands thread");
     Channel {
         snapshots,
         notices,
+        released,
         commands,
         generation,
     }
 }
 
-fn run_commands(
-    commands: Receiver<Command>,
+/// Where the command thread and the runners' forwarders deliver to.
+#[derive(Clone)]
+struct Outlets {
     snapshots: Sender<Snapshot>,
-    notices: Sender<String>,
+    notices: Sender<Notice>,
+    released: Sender<()>,
     wake: Arc<dyn Fn() + Send + Sync>,
-    generation: Arc<AtomicU64>,
-) {
+}
+
+fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
     let mut handle: Option<(Sender<Action>, Arc<AtomicBool>)> = None;
-    let notify = |text: &str| {
-        let _ = notices.send(text.to_owned());
-        wake();
-    };
-    for cmd in commands {
+    let Outlets {
+        snapshots, wake, ..
+    } = outlets.clone();
+    for (generation, cmd) in commands {
+        let notify = |text: &str| {
+            let _ = outlets.notices.send((generation, text.to_owned()));
+            wake();
+        };
         if handle
             .as_ref()
             .is_some_and(|(_, ended)| ended.load(Ordering::Acquire))
@@ -161,7 +185,7 @@ fn run_commands(
                     link: Link::Connecting,
                     session: None,
                     artifact_root: None,
-                    generation: generation.load(Ordering::Acquire),
+                    generation,
                 });
                 wake();
                 continue;
@@ -210,11 +234,10 @@ fn run_commands(
         let started = runner::spawn_session(start, || {});
         let ended = Arc::new(AtomicBool::new(false));
         handle = Some((started.actions(), ended.clone()));
-        let (snapshots, notices, wake) = (snapshots.clone(), notices.clone(), wake.clone());
-        let stamp = generation.load(Ordering::Acquire);
+        let outlets = outlets.clone();
         std::thread::Builder::new()
             .name("competition-updates".into())
-            .spawn(move || forward_updates(started, ended, snapshots, notices, wake, stamp))
+            .spawn(move || forward_updates(started, ended, outlets, generation))
             .expect("spawn competition-updates thread");
     }
     if let Some((actions, _)) = handle {
@@ -235,14 +258,20 @@ fn forwarded(cmd: Command) -> Option<Action> {
     })
 }
 
+/// Passes a runner's updates on, stamped with the generation of the
+/// command that started it.
 fn forward_updates(
     handle: SessionHandle,
     ended: Arc<AtomicBool>,
-    snapshots: Sender<Snapshot>,
-    notices: Sender<String>,
-    wake: Arc<dyn Fn() + Send + Sync>,
+    outlets: Outlets,
     generation: u64,
 ) {
+    let Outlets {
+        snapshots,
+        notices,
+        released,
+        wake,
+    } = outlets;
     let mut link = Link::Connecting;
     let mut session = None;
     let mut artifact_root = None;
@@ -278,11 +307,14 @@ fn forward_updates(
                     })
                     .is_ok()
             }
-            Update::Notice(text) => notices.send(text).is_ok(),
+            Update::Notice(text) => notices.send((generation, text)).is_ok(),
             Update::Ended(Ok(())) => break,
             Update::Ended(Err(why)) => {
                 ended.store(true, Ordering::Release);
-                let _ = notices.send(format!("コンペティションを続けられません: {why}"));
+                let _ = notices.send((
+                    generation,
+                    format!("コンペティションを続けられません: {why}"),
+                ));
                 let _ = snapshots.send(Snapshot {
                     link: Link::Down(why),
                     session,
@@ -299,23 +331,42 @@ fn forward_updates(
         }
     }
     ended.store(true, Ordering::Release);
+    // The runner is gone, and its lock on the log with it.
+    let _ = released.send(());
+    wake();
+}
+
+/// The far ends of a [`Channel::fake`].
+#[cfg(test)]
+pub struct FakeLink {
+    pub snapshots: Sender<Snapshot>,
+    pub notices: Sender<Notice>,
+    pub released: Sender<()>,
+    pub commands: Receiver<(u64, Command)>,
 }
 
 #[cfg(test)]
 impl Channel {
-    /// A channel with no command thread behind it, and the sender of its
-    /// snapshots.
-    pub fn fake() -> (Channel, Sender<Snapshot>) {
+    /// A channel with no command thread behind it, and its far ends.
+    pub fn fake() -> (Channel, FakeLink) {
         let (snapshot_tx, snapshots) = mpsc::channel();
-        let (_notice_tx, notices) = mpsc::channel();
-        let (commands, _command_rx) = mpsc::channel();
+        let (notice_tx, notices) = mpsc::channel();
+        let (released_tx, released) = mpsc::channel();
+        let (commands, command_rx) = mpsc::channel();
         let channel = Channel {
             snapshots,
             notices,
+            released,
             commands,
             generation: Arc::new(AtomicU64::new(0)),
         };
-        (channel, snapshot_tx)
+        let link = FakeLink {
+            snapshots: snapshot_tx,
+            notices: notice_tx,
+            released: released_tx,
+            commands: command_rx,
+        };
+        (channel, link)
     }
 }
 
@@ -344,7 +395,40 @@ mod tests {
         channel.send(Command::Focus {
             part: PartId::new("claude"),
         });
-        let notice = channel.notices.recv_timeout(WAIT).unwrap();
+        let (generation, notice) = channel.notices.recv_timeout(WAIT).unwrap();
+        assert_eq!(generation, 0);
         assert!(notice.contains("始まっていません"), "{notice}");
+    }
+
+    /// A runner started by a command is stamped with the generation the
+    /// command was sent in, even when the screen has moved on since.
+    #[test]
+    fn a_runner_keeps_the_generation_of_the_command_that_started_it() {
+        let (snapshot_tx, snapshots) = mpsc::channel();
+        let (notice_tx, notices) = mpsc::channel();
+        let (released_tx, released) = mpsc::channel();
+        let (commands, command_rx) = mpsc::channel();
+        let dir = std::env::temp_dir().join(format!(
+            "noa-competition-no-such-log-{}",
+            std::process::id()
+        ));
+        // Sent in generation 0, handled after the screen left (generation 1).
+        commands.send((0, Command::Resume { dir })).unwrap();
+        drop(commands);
+        run_commands(
+            command_rx,
+            Outlets {
+                snapshots: snapshot_tx,
+                notices: notice_tx,
+                released: released_tx,
+                wake: Arc::new(|| {}),
+            },
+        );
+        let (generation, notice) = notices.recv_timeout(WAIT).unwrap();
+        assert_eq!(generation, 0);
+        assert!(notice.contains("続けられません"), "{notice}");
+        let last = snapshots.recv_timeout(WAIT).unwrap();
+        assert_eq!(last.generation, 0);
+        released.recv_timeout(WAIT).unwrap();
     }
 }

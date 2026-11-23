@@ -535,6 +535,9 @@ pub struct Receipt {
     pub failed: Option<String>,
     /// Why the last reply file was turned down; the agent is asked to fix it.
     pub rejected: Option<String>,
+    /// [`crate::store::digest`] of the reply that was turned down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_digest: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

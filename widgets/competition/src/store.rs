@@ -23,6 +23,13 @@ use crate::model::types::{
 pub const EVENTS_FILE: &str = "events.jsonl";
 pub const JUDGE_FILE: &str = "judge.json";
 pub const VIEWER_FILE: &str = "compare.html";
+/// Beside the log of every competition a lock-taking runner created or
+/// resumed: there, an unlocked log is not running anywhere. Without it the
+/// log may be one a widget from before the lock still appends to.
+pub const LOCKS_FILE: &str = "locks";
+/// How long after its last write a log without [`LOCKS_FILE`] is taken to
+/// be possibly still running in such an older widget.
+pub const LEGACY_QUIET: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
 /// Maximum total bytes copied into one round's artifact snapshot per contestant.
 const MAX_SNAPSHOT_BYTES: u64 = 50 * 1024 * 1024;
@@ -48,6 +55,14 @@ pub fn round_dir(dir: &Path, round: RoundNo) -> PathBuf {
 /// `workdir`: `<workdir>/.noa/competitions/<id>`.
 pub fn workdir_reply_dir(workdir: &Path, id: &SessionId) -> PathBuf {
     workdir.join(".noa").join("competitions").join(id.as_str())
+}
+
+/// A stable 64-bit FNV-1a digest of `text`, which a log may keep: what
+/// identifies a reply file's content across runs.
+pub fn digest(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The root of `session`'s reply files and artifacts: its workdir's
@@ -246,6 +261,9 @@ pub enum StoreError {
     Reduce(ReduceError),
     /// Another runner (in this or another process) holds the log open.
     Busy,
+    /// An unfinished log without [`LOCKS_FILE`] written to lately: a widget
+    /// from before the lock may still be running it.
+    MaybeRunning,
 }
 
 impl fmt::Display for StoreError {
@@ -257,6 +275,11 @@ impl fmt::Display for StoreError {
             }
             StoreError::Reduce(e) => write!(f, "{EVENTS_FILE} does not fold: {e}"),
             StoreError::Busy => f.write_str("別のウィンドウで実行中です"),
+            StoreError::MaybeRunning => write!(
+                f,
+                "旧版のウィジェットで実行中の可能性があります（最後の書き込みから{}分経つと再開できます）",
+                LEGACY_QUIET.as_secs() / 60
+            ),
         }
     }
 }
@@ -293,6 +316,7 @@ impl Store {
             .append(true)
             .open(dir.join(EVENTS_FILE))?;
         lock(&file)?;
+        mark_locking(dir)?;
         let mut store = Store {
             dir: dir.to_owned(),
             file,
@@ -311,6 +335,10 @@ impl Store {
         let text = fs::read(&path)?;
         let parsed = parse(&text)?;
         let session = reduce::replay(&parsed.batches).map_err(StoreError::Reduce)?;
+        if !session.closed && may_run_unlocked(dir) {
+            return Err(StoreError::MaybeRunning);
+        }
+        mark_locking(dir)?;
         if parsed.torn {
             if parsed.kept < text.len() {
                 file.set_len(parsed.kept as u64)?;
@@ -402,6 +430,28 @@ pub fn read_session(dir: &Path) -> Result<Session, StoreError> {
     reduce::replay(&parsed.batches).map_err(StoreError::Reduce)
 }
 
+fn mark_locking(dir: &Path) -> io::Result<()> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(LOCKS_FILE))
+    {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `dir`'s log has no [`LOCKS_FILE`] and was written within
+/// [`LEGACY_QUIET`]: a widget from before the lock may be running it.
+pub fn may_run_unlocked(dir: &Path) -> bool {
+    if dir.join(LOCKS_FILE).exists() {
+        return false;
+    }
+    fs::metadata(dir.join(EVENTS_FILE))
+        .and_then(|m| m.modified())
+        .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < LEGACY_QUIET))
+}
+
 /// Whether a runner holds `dir`'s log open right now.
 pub fn is_busy(dir: &Path) -> bool {
     File::open(dir.join(EVENTS_FILE))
@@ -422,6 +472,9 @@ pub struct Summary {
     pub contestants: Vec<String>,
     /// A runner holds its log: it is running in some window.
     pub busy: bool,
+    /// Unfinished, without [`LOCKS_FILE`], and written lately: it may be
+    /// running in a widget from before the lock.
+    pub maybe_running: bool,
 }
 
 /// A directory under the store root and what reading its log gave.
@@ -470,22 +523,35 @@ fn id_order(name: &str) -> (Millis, u32) {
 
 fn summarize(dir: &Path, session: &Session) -> Summary {
     Summary {
-        dir: dir.to_owned(),
-        id: session.id.clone(),
-        created_at: session.created_at,
-        request: session.request.clone(),
-        winner: session.winner.clone(),
-        closed: session.closed,
-        rounds: session.rounds.len(),
-        contestants: session
-            .contestants
-            .iter()
-            .map(|p| match p.setup.label() {
-                Some(setup) => format!("{} ({setup})", p.id),
-                None => p.id.to_string(),
-            })
-            .collect(),
         busy: is_busy(dir),
+        maybe_running: !session.closed && may_run_unlocked(dir),
+        ..Summary::of(dir, session)
+    }
+}
+
+impl Summary {
+    /// `session` (logged in `dir`) as listed, before its log's lock and
+    /// age are looked at.
+    pub fn of(dir: &Path, session: &Session) -> Summary {
+        Summary {
+            dir: dir.to_owned(),
+            id: session.id.clone(),
+            created_at: session.created_at,
+            request: session.request.clone(),
+            winner: session.winner.clone(),
+            closed: session.closed,
+            rounds: session.rounds.len(),
+            contestants: session
+                .contestants
+                .iter()
+                .map(|p| match p.setup.label() {
+                    Some(setup) => format!("{} ({setup})", p.id),
+                    None => p.id.to_string(),
+                })
+                .collect(),
+            busy: false,
+            maybe_running: false,
+        }
     }
 }
 
@@ -621,6 +687,12 @@ mod tests {
         assert!(list_sessions(&root, 10)[0].summary.as_ref().unwrap().busy);
         assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
         drop(store);
+        // A process another test forks in this instant inherits the open
+        // file (and its lock) until it execs.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while is_busy(&dir) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(!is_busy(&dir));
         let (_reopened, session) = Store::open(&dir).unwrap();
         assert_eq!(session.request, "x");
@@ -640,6 +712,41 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), text);
         Store::open(&dir).unwrap();
         assert!(fs::read(&path).unwrap().len() < text.len());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_log_from_before_the_lock_written_lately_is_not_resumed() {
+        let root = temp_root("legacy");
+        let (store, dir) = create(&root, "comp-12", "x");
+        drop(store);
+        // What a widget from before the lock leaves: no marker, and a log
+        // it may still be appending to.
+        fs::remove_file(dir.join(LOCKS_FILE)).unwrap();
+        let log = File::options()
+            .append(true)
+            .open(dir.join(EVENTS_FILE))
+            .unwrap();
+        log.set_modified(std::time::SystemTime::now()).unwrap();
+        assert!(matches!(Store::open(&dir), Err(StoreError::MaybeRunning)));
+        let listed = list_sessions(&root, 10);
+        assert!(listed[0].summary.as_ref().unwrap().maybe_running);
+
+        // Quiet for long enough: it is taken over, and locked from then on.
+        let long_ago =
+            std::time::SystemTime::now() - LEGACY_QUIET - std::time::Duration::from_secs(1);
+        log.set_modified(long_ago).unwrap();
+        drop(log);
+        assert!(
+            !list_sessions(&root, 10)[0]
+                .summary
+                .as_ref()
+                .unwrap()
+                .maybe_running
+        );
+        let (_store, _) = Store::open(&dir).unwrap();
+        assert!(dir.join(LOCKS_FILE).exists());
+        assert!(!may_run_unlocked(&dir));
         fs::remove_dir_all(&root).unwrap();
     }
 }

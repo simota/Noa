@@ -127,6 +127,12 @@ pub(super) fn text(tree: &UiTree, parts: &Parts) -> String {
         .unwrap_or_default()
 }
 
+/// Empties the draft and has the recipients rebuilt for the next session.
+pub(super) fn reset(tree: &mut UiTree, parts: &mut Parts) {
+    clear(tree, parts);
+    parts.built_for = None;
+}
+
 pub(super) fn clear(tree: &mut UiTree, parts: &Parts) {
     tree.update::<TextArea, _>(parts.area, |a, cx| a.set_text(cx, ""));
 }

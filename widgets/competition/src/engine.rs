@@ -92,6 +92,12 @@ pub enum Input {
     },
     UserRetry,
     UserClose,
+    /// The agent's pane was lost while the competition was stopped: its
+    /// open brief goes out again as it was, without counting a retry.
+    Redeliver {
+        round: RoundNo,
+        part: PartId,
+    },
     Tick {
         now: Millis,
     },
@@ -174,6 +180,62 @@ pub fn participants(judge: &AgentChoice, panel: &[AgentChoice]) -> (Participant,
         setup: judge.setup.clone(),
     };
     (judge, contestants)
+}
+
+/// Why the competition logged in `dir` cannot be resumed from its log.
+/// What the log names is used as paths and in shell scripts, so a log
+/// edited by hand (or moved) gets the checks a new session does: each
+/// agent's setup, the participant ids its panel gives, and every reply
+/// path being the one this competition's directory gives.
+pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
+    if dir.file_name() != Some(std::ffi::OsStr::new(session.id.as_str())) {
+        return Err(format!(
+            "ログのコンペ ID {} がフォルダ名と一致しません",
+            session.id
+        ));
+    }
+    let choice = |p: &Participant| AgentChoice {
+        kind: p.kind,
+        setup: p.setup.clone(),
+    };
+    for part in std::iter::once(&session.judge).chain(&session.contestants) {
+        part.setup.check(part.kind)?;
+    }
+    let panel: Vec<AgentChoice> = session.contestants.iter().map(choice).collect();
+    let (judge, contestants) = participants(&choice(&session.judge), &panel);
+    let same = |a: &Participant, b: &Participant| a.id == b.id && a.role == b.role;
+    if !same(&judge, &session.judge)
+        || contestants.len() != session.contestants.len()
+        || !contestants
+            .iter()
+            .zip(&session.contestants)
+            .all(|(a, b)| same(a, b))
+    {
+        return Err("ログの参加者 ID がパネルと一致しません".to_owned());
+    }
+    let reply_dir = store::reply_dir(dir, session);
+    for round in &session.rounds {
+        for brief in &round.briefs {
+            if !session.is_contestant(&brief.to)
+                || brief.reply_path != store::reply_path(&reply_dir, round.no, &brief.to)
+            {
+                return Err(format!(
+                    "R{} の {} の返答パスがこのコンペの保存先と一致しません",
+                    round.no, brief.to
+                ));
+            }
+        }
+        if let Some(brief) = &round.judge_brief
+            && (brief.to != session.judge.id
+                || brief.reply_path != store::judge_reply_path(&reply_dir, round.no))
+        {
+            return Err(format!(
+                "R{} の審判の返答パスがこのコンペの保存先と一致しません",
+                round.no
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +418,13 @@ impl Engine {
                 out.effects.push(Effect::RefreshViewer);
             }
             Input::UserRetry => self.user_retry(&mut out)?,
+            Input::Redeliver { round, part } => {
+                if let Some(brief) = self.open_brief(round, &part)
+                    && brief.receipt.sent.is_some()
+                {
+                    Self::send(&mut out, round, brief);
+                }
+            }
             Input::UserClose => {
                 self.commit(&mut out, vec![Event::SessionClosed])?;
                 out.effects.push(Effect::RefreshViewer);
@@ -430,6 +499,24 @@ impl Engine {
         let Some(round) = self.session.current_round() else {
             return self.next_round(out, now);
         };
+        // A log cut between a round's start and its briefs (written before
+        // the two went into one batch): the round gets its briefs first.
+        if round.phase == Phase::Briefing {
+            let no = round.no;
+            let missing: Vec<PartId> = self
+                .session
+                .contestant_ids()
+                .filter(|part| round.brief(part).is_none())
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                let batch = self.brief_events(&self.session, no, &missing);
+                self.commit(out, batch)?;
+            }
+        }
+        let Some(round) = self.session.current_round() else {
+            return Ok(());
+        };
         // A resumed session: briefs out before it stopped get their full
         // time again from now, as the agents may have worked meanwhile.
         for brief in round.briefs.iter().chain(&round.judge_brief) {
@@ -484,20 +571,14 @@ impl Engine {
         }
         let no = self.session.rounds.len() as RoundNo + 1;
         let kind = RoundKind::for_round(no, self.session.reveal_interval);
-        self.commit(out, vec![Event::RoundStarted { no, kind, at: now }])?;
-
-        let reply_dir = self.reply_dir();
-        let batch: Vec<Event> = self
-            .session
-            .contestant_ids()
-            .map(|part| {
-                let entry_dir = store::entry_dir(&reply_dir, part);
-                let path = store::reply_path(&reply_dir, no, part);
-                let brief =
-                    brief::contestant_brief(&self.session, part, no, &entry_dir, &reply_dir, &path);
-                Event::BriefIssued { round: no, brief }
-            })
-            .collect();
+        // The round and its briefs go into one batch: a log cut after the
+        // round's start alone would show a round with no one in it.
+        let started = Event::RoundStarted { no, kind, at: now };
+        let mut with_round = self.session.clone();
+        reduce::apply(&mut with_round, std::slice::from_ref(&started))?;
+        let parts: Vec<PartId> = self.session.contestant_ids().cloned().collect();
+        let mut batch = vec![started];
+        batch.extend(self.brief_events(&with_round, no, &parts));
         self.commit(out, batch)?;
         if let Some(round) = self.session.current_round() {
             for brief in &round.briefs {
@@ -506,6 +587,22 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// `BriefIssued` for each of `parts` in round `no`, written from
+    /// `session` (which already holds the round).
+    fn brief_events(&self, session: &Session, no: RoundNo, parts: &[PartId]) -> Vec<Event> {
+        let reply_dir = self.reply_dir();
+        parts
+            .iter()
+            .map(|part| {
+                let entry_dir = store::entry_dir(&reply_dir, part);
+                let path = store::reply_path(&reply_dir, no, part);
+                let brief =
+                    brief::contestant_brief(session, part, no, &entry_dir, &reply_dir, &path);
+                Event::BriefIssued { round: no, brief }
+            })
+            .collect()
     }
 
     fn advance(&mut self, out: &mut Output) -> Result<(), EngineError> {
@@ -756,7 +853,7 @@ impl Engine {
                     }
                 }
                 Err(error) => {
-                    self.reject_reply(out, round, &brief, error.to_string())?;
+                    self.reject_reply(out, round, &brief, content, error.to_string())?;
                 }
             }
         } else {
@@ -794,7 +891,7 @@ impl Engine {
                     out.effects.push(Effect::RefreshViewer);
                 }
                 Err(error) => {
-                    self.reject_reply(out, round, &brief, error.to_string())?;
+                    self.reject_reply(out, round, &brief, content, error.to_string())?;
                 }
             }
         }
@@ -806,6 +903,7 @@ impl Engine {
         out: &mut Output,
         round: RoundNo,
         brief: &Brief,
+        content: &str,
         error: String,
     ) -> Result<(), EngineError> {
         out.effects.push(Effect::ClearReply {
@@ -818,6 +916,7 @@ impl Engine {
                     round,
                     to: brief.to.clone(),
                     error,
+                    digest: Some(store::digest(content)),
                 }],
             )?;
             if let Some(updated) = self.open_brief(round, &brief.to).cloned() {
@@ -1156,5 +1255,118 @@ mod tests {
                 "claude", "claude-2", "claude-3", "claude-4", "claude-5", "claude-6"
             ]
         );
+    }
+
+    #[test]
+    fn a_round_starts_in_one_batch_with_its_briefs() {
+        let setup = Setup {
+            request: "x",
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            workdir: None,
+            judge: AgentKind::Agy.into(),
+            panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+        };
+        let (mut engine, _) = Engine::create_in(
+            SessionId::new("comp-test"),
+            setup,
+            Path::new("/tmp/comp-test"),
+            Config::default(),
+            1,
+        )
+        .unwrap();
+        let out = engine.handle(Input::Start { now: 2 }).unwrap();
+        assert_eq!(out.batches.len(), 1, "{:?}", out.batches);
+        assert!(matches!(out.batches[0][0], Event::RoundStarted { .. }));
+        assert_eq!(out.batches[0].len(), 3);
+    }
+
+    #[test]
+    fn a_log_cut_after_a_rounds_start_briefs_the_round_before_judging_it() {
+        let setup = Setup {
+            request: "x",
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            workdir: None,
+            judge: AgentKind::Agy.into(),
+            panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+        };
+        let (_, created) = Engine::create_in(
+            SessionId::new("comp-test"),
+            setup,
+            Path::new("/tmp/comp-test"),
+            Config::default(),
+            1,
+        )
+        .unwrap();
+        // What an older version left when it stopped between the two lines.
+        let cut = vec![
+            created.batches[0].clone(),
+            vec![Event::RoundStarted {
+                no: 1,
+                kind: RoundKind::Blind,
+                at: 2,
+            }],
+        ];
+        let session = reduce::replay(&cut).unwrap();
+        let mut engine = Engine::resume(session, Path::new("/tmp/comp-test"), Config::default());
+        let out = engine.handle(Input::Start { now: 3 }).unwrap();
+        let round = engine.session().round(1).unwrap();
+        assert_eq!(round.phase, Phase::Briefing);
+        assert_eq!(round.briefs.len(), 2);
+        assert!(round.judge_brief.is_none());
+        let sends = out
+            .effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SendBrief { .. }))
+            .count();
+        assert_eq!(sends, 2);
+    }
+
+    #[test]
+    fn a_brief_lost_with_its_pane_goes_out_again_without_a_retry() {
+        let mut engine = two_contestants();
+        let claude = PartId::new("claude");
+        // claude is on its last try.
+        for _ in 0..Config::default().max_retries {
+            engine
+                .handle(Input::SendFailed {
+                    round: 1,
+                    part: claude.clone(),
+                    error: "x".into(),
+                })
+                .unwrap();
+        }
+        engine
+            .handle(Input::Sent {
+                round: 1,
+                part: claude.clone(),
+                at: 10,
+            })
+            .unwrap();
+        let out = engine
+            .handle(Input::Redeliver {
+                round: 1,
+                part: claude.clone(),
+            })
+            .unwrap();
+        assert!(out.batches.is_empty());
+        assert!(matches!(&out.effects[..], [Effect::SendBrief { part, .. }] if *part == claude));
+        let brief = engine.session().round(1).unwrap().brief(&claude).unwrap();
+        assert!(brief.receipt.failed.is_none());
+    }
+
+    #[test]
+    fn a_turned_down_reply_is_remembered_by_its_digest() {
+        let mut engine = two_contestants();
+        submission(&mut engine, "claude", "  ", 20);
+        let brief = engine
+            .session()
+            .round(1)
+            .unwrap()
+            .brief(&PartId::new("claude"))
+            .unwrap();
+        assert!(brief.receipt.rejected.is_some());
+        assert_eq!(brief.receipt.rejected_digest, Some(store::digest("  ")));
     }
 }

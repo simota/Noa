@@ -2,7 +2,8 @@
 //! deliverables, scores, private feedback, and submission report for a round.
 
 use noa_gpui_core::style::{
-    AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
+    AlignItems, FlexDirection, FlexWrap, Rect as LayoutRect, Size as LayoutSize, auto, length,
+    percent,
 };
 use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
@@ -105,8 +106,11 @@ pub(super) fn insert(
 
     let columns = tree.insert(
         Some(list),
+        // Wraps: six entries do not fit side by side in the center pane,
+        // which does not scroll sideways.
         Container::new(Style {
             flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::STRETCH,
             gap: gap(10.0),
             size: LayoutSize {

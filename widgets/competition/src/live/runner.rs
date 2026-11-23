@@ -6,7 +6,7 @@
 //! (`r<N>/artifacts/<part>/`), regenerates `compare.html`, and feeds back
 //! deliveries, agent states, reply files, and user actions to the [`Engine`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -38,6 +38,11 @@ const TRUST_KEYS_MAX: u8 = 4;
 const TRUST_KEY_SHOWS_IN: Millis = 2_000;
 const REPLY_STABLE_FOR: Millis = 600;
 const MAX_SPAWNS: u8 = 2;
+/// Noa's most panes in one row or column of a tab (`MAX_PANES_PER_AXIS`,
+/// crates/noa-app/src/split_tree/tree/types.rs): a split along a full one
+/// is refused. A tab of three columns of three holds the judge and the
+/// largest panel.
+const PANES_PER_AXIS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
@@ -358,6 +363,9 @@ struct Runner<C: Connect, K: Clock> {
     updates: Sender<Update>,
     wake: Rc<dyn Fn()>,
     panes: BTreeMap<PartId, Pane>,
+    /// The competition tab's panes, column by column (each top to bottom),
+    /// as this runner placed them.
+    layout: Vec<Vec<u64>>,
     sends: Vec<PendingSend>,
     watches: Vec<WatchedReply>,
     last_tick: Millis,
@@ -424,13 +432,15 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             Start::Resume { dir } => {
                 let (store, session) = Store::open(&dir)
                     .map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
-                // The setup is written into the login shell's script, so a
-                // log edited by hand gets the same check a new session does.
-                for part in std::iter::once(&session.judge).chain(&session.contestants) {
-                    part.setup
-                        .check(part.kind)
-                        .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
+                // Checked under the lock: a list shown earlier may be stale.
+                if session.closed {
+                    return Err(format!(
+                        "{} は終了しています（閲覧で開いてください）",
+                        dir.display()
+                    ));
                 }
+                competition::engine::check_resumable(&session, &dir)
+                    .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
                 if let Some(workdir) = &session.workdir {
                     if !workdir.is_dir() {
                         return Err(format!(
@@ -458,6 +468,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             updates,
             wake,
             panes: BTreeMap::new(),
+            layout: Vec::new(),
             sends: Vec::new(),
             watches: Vec::new(),
             last_tick: now,
@@ -570,6 +581,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             let now = self.clock.now();
             self.feed(Input::Start { now })?;
             if self.resumed {
+                self.take_up_states(now)?;
+                self.clear_rejected_leftovers();
                 self.redeliver_lost()?;
             }
         }
@@ -592,7 +605,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             // still carries the label it was started with: ids are reused.
             let found = known_id
                 .and_then(|id| by_id.get(&id).copied())
-                .filter(|v| v.label.as_deref().is_none_or(|l| l == label))
+                .filter(|v| v.label.as_deref() == Some(label.as_str()))
                 .or_else(|| {
                     views
                         .iter()
@@ -727,9 +740,50 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         }
     }
 
+    /// After a resume: what the agents taken up are doing now reaches the
+    /// engine, so a turn started while the competition was stopped counts
+    /// as started, and a prompt waiting for the user holds the time limit.
+    fn take_up_states(&mut self, now: Millis) -> Result<(), Fail> {
+        let states: Vec<(PartId, AgentState)> = self
+            .panes
+            .iter()
+            .filter_map(|(part, pane)| Some((part.clone(), agent_state(pane.state.as_deref())?)))
+            .filter(|(_, state)| matches!(state, AgentState::Running | AgentState::Permission))
+            .collect();
+        for (part, state) in states {
+            self.feed(Input::AgentStateChanged {
+                part,
+                state,
+                at: now,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// After a resume: a reply turned down just before the stop may still
+    /// be on disk (the log took the rejection, the file was not cleared
+    /// yet). Taking it in again would turn it down twice, so it goes now.
+    fn clear_rejected_leftovers(&self) {
+        let Some(round) = self.engine.session().current_round() else {
+            return;
+        };
+        for brief in round.briefs.iter().chain(&round.judge_brief) {
+            let Some(digest) = brief.receipt.rejected_digest else {
+                continue;
+            };
+            if brief.receipt.sent.is_none()
+                && let Ok(Some(text)) = store::read_reply(&brief.reply_path)
+                && store::digest(&text) == digest
+            {
+                let _ = store::clear_reply(&brief.reply_path);
+            }
+        }
+    }
+
     /// After a resume: a brief that went out before the competition
     /// stopped, to an agent whose pane is gone and that left no reply, is
-    /// sent again (as a retry), which starts the agent in a new pane.
+    /// sent again as it was (no retry is counted: the stop lost it, not
+    /// the agent), which starts the agent in a new pane.
     fn redeliver_lost(&mut self) -> Result<(), Fail> {
         let Some(round) = self.engine.session().current_round() else {
             return Ok(());
@@ -745,11 +799,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             .map(|b| b.to.clone())
             .collect();
         for part in lost {
-            self.feed(Input::SendFailed {
-                round: no,
-                part,
-                error: "the agent's pane was gone when the competition resumed".to_owned(),
-            })?;
+            self.feed(Input::Redeliver { round: no, part })?;
         }
         Ok(())
     }
@@ -1068,14 +1118,6 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let Some(participant) = self.engine.session().participant(part).cloned() else {
             return Ok(());
         };
-        let placement = match self.panes.values().next() {
-            None => Placement::NewTab,
-            Some(first) if self.panes.len() == 1 => Placement::Right(first.id),
-            Some(_) => {
-                let anchor = self.panes.values().last().map(|p| p.id).unwrap();
-                Placement::Below(anchor)
-            }
-        };
         let cwd = self
             .engine
             .session()
@@ -1088,12 +1130,98 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             cwd,
             label: self.pane_label(part),
         };
-        let pane_id = conn.spawn(placement, &spec).map_err(link)?;
-        self.panes.insert(part.clone(), Pane::new(pane_id));
-        self.feed(Input::PaneSpawned {
-            part: part.clone(),
-            pane_id,
-        })
+        let mut refused = String::new();
+        for placement in self.placements() {
+            match conn.spawn(placement, &spec) {
+                Ok(pane_id) => {
+                    self.place(placement, pane_id);
+                    self.panes.insert(part.clone(), Pane::new(pane_id));
+                    return self.feed(Input::PaneSpawned {
+                        part: part.clone(),
+                        pane_id,
+                    });
+                }
+                // No room there (or the anchor just closed): the next place.
+                Err(NoaError::Refused(why)) => refused = why,
+                Err(NoaError::PaneGone) => {}
+                Err(other) => return Err(link(other)),
+            }
+        }
+        Err(Fail::Link(format!(
+            "{part} のペインを開けません: {refused}"
+        )))
+    }
+
+    /// Where a new pane may go, best first: a new column while the top row
+    /// has room, then under the shortest column, then next to any pane of
+    /// the competition (those taken up on a resume are not in the layout),
+    /// and last a tab of its own.
+    fn placements(&mut self) -> Vec<Placement> {
+        let alive: BTreeSet<u64> = self.panes.values().map(|p| p.id).collect();
+        for column in &mut self.layout {
+            column.retain(|id| alive.contains(id));
+        }
+        self.layout.retain(|column| !column.is_empty());
+        let mut out = Vec::new();
+        if alive.is_empty() {
+            out.push(Placement::NewTab);
+            return out;
+        }
+        if self.layout.len() < PANES_PER_AXIS
+            && let Some(column) = self.layout.last()
+        {
+            out.push(Placement::Right(column[0]));
+        }
+        let mut columns: Vec<&Vec<u64>> = self
+            .layout
+            .iter()
+            .filter(|c| c.len() < PANES_PER_AXIS)
+            .collect();
+        columns.sort_by_key(|c| c.len());
+        out.extend(
+            columns
+                .iter()
+                .filter_map(|c| c.last())
+                .map(|&id| Placement::Below(id)),
+        );
+        for &id in &alive {
+            for placement in [Placement::Below(id), Placement::Right(id)] {
+                if !out.contains(&placement) {
+                    out.push(placement);
+                }
+            }
+        }
+        out.push(Placement::NewTab);
+        out
+    }
+
+    /// Records where `pane` went.
+    fn place(&mut self, placement: Placement, pane: u64) {
+        let column_of = |layout: &mut Vec<Vec<u64>>, anchor: u64| {
+            layout
+                .iter()
+                .position(|c| c.contains(&anchor))
+                .unwrap_or_else(|| {
+                    layout.push(vec![anchor]);
+                    layout.len() - 1
+                })
+        };
+        match placement {
+            Placement::NewTab => self.layout.push(vec![pane]),
+            Placement::Right(anchor) => {
+                let at = column_of(&mut self.layout, anchor);
+                self.layout.insert(at + 1, vec![pane]);
+            }
+            Placement::Below(anchor) => {
+                let at = column_of(&mut self.layout, anchor);
+                let column = &mut self.layout[at];
+                let below = column
+                    .iter()
+                    .position(|&id| id == anchor)
+                    .map_or(column.len(), |i| i + 1);
+                column.insert(below, pane);
+            }
+        }
     }
 
     fn poll_replies(&mut self) -> Result<(), Fail> {
@@ -1255,7 +1383,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakePane {
-        label: String,
+        label: Option<String>,
         state: Option<String>,
         blocked: Option<String>,
         seq: u64,
@@ -1270,6 +1398,9 @@ mod tests {
         typed: Vec<(u64, String)>,
         focused: Vec<u64>,
         spawned: usize,
+        /// Each tab's panes, column by column, split as Noa splits them
+        /// (at most [`PANES_PER_AXIS`] along a row or a column).
+        tabs: Vec<Vec<Vec<u64>>>,
         /// Panes that are gone by the time they are asked for a paste.
         gone_on_paste: bool,
         rpc_panes: usize,
@@ -1286,7 +1417,7 @@ mod tests {
         fn view(id: u64, pane: &FakePane) -> PaneView {
             PaneView {
                 pane_id: id,
-                label: Some(pane.label.clone()),
+                label: pane.label.clone(),
                 agent_state: pane.state.clone(),
                 agent_seq: pane.seq,
                 agent_blocked: pane.blocked.clone(),
@@ -1311,7 +1442,7 @@ mod tests {
             let w = self.0.borrow();
             *w.panes
                 .iter()
-                .find(|(_, p)| p.label.ends_with(label_end))
+                .find(|(_, p)| p.label.as_deref().is_some_and(|l| l.ends_with(label_end)))
                 .unwrap()
                 .0
         }
@@ -1357,15 +1488,47 @@ mod tests {
             Ok(w.events.pop_front())
         }
 
-        fn spawn(&mut self, _placement: Placement, spec: &PaneSpec) -> Result<u64, NoaError> {
+        fn spawn(&mut self, placement: Placement, spec: &PaneSpec) -> Result<u64, NoaError> {
             let mut w = self.0.borrow_mut();
             let id = w.next_pane;
+            let World { tabs, panes, .. } = &mut *w;
+            for tab in tabs.iter_mut() {
+                for column in tab.iter_mut() {
+                    column.retain(|p| panes.contains_key(p));
+                }
+                tab.retain(|column| !column.is_empty());
+            }
+            let find = |tabs: &Vec<Vec<Vec<u64>>>, anchor: u64| {
+                tabs.iter().enumerate().find_map(|(t, tab)| {
+                    tab.iter().position(|c| c.contains(&anchor)).map(|c| (t, c))
+                })
+            };
+            let full = || NoaError::Refused("split did not create a pane".into());
+            match placement {
+                Placement::NewTab => tabs.push(vec![vec![id]]),
+                Placement::Right(anchor) => {
+                    let (t, c) = find(tabs, anchor).ok_or(NoaError::PaneGone)?;
+                    if tabs[t].len() >= PANES_PER_AXIS {
+                        return Err(full());
+                    }
+                    tabs[t].insert(c + 1, vec![id]);
+                }
+                Placement::Below(anchor) => {
+                    let (t, c) = find(tabs, anchor).ok_or(NoaError::PaneGone)?;
+                    let column = &mut tabs[t][c];
+                    if column.len() >= PANES_PER_AXIS {
+                        return Err(full());
+                    }
+                    let at = column.iter().position(|&p| p == anchor).unwrap() + 1;
+                    column.insert(at, id);
+                }
+            }
             w.next_pane += 1;
             w.spawned += 1;
             w.panes.insert(
                 id,
                 FakePane {
-                    label: spec.label.clone(),
+                    label: Some(spec.label.clone()),
                     state: None,
                     blocked: None,
                     seq: 0,
@@ -1486,6 +1649,15 @@ mod tests {
             .collect()
     }
 
+    /// Waits for `dir`'s log to be unlocked: a process another test forks
+    /// just then inherits the open log (and its lock) until it execs.
+    fn wait_unlocked(dir: &Path) {
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while store::is_busy(dir) && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// A competition whose two contestants took their first brief, then
     /// stopped (the runner is dropped); returns its directory.
     fn stopped_after_first_briefs(fake: &Fake, root: &Path) -> PathBuf {
@@ -1500,7 +1672,10 @@ mod tests {
         for part in [":claude", ":codex"] {
             assert_eq!(fake.pasted(fake.pane_of(part)), 1);
         }
-        runner.engine.dir().to_owned()
+        let dir = runner.engine.dir().to_owned();
+        drop(runner);
+        wait_unlocked(&dir);
+        dir
     }
 
     #[test]
@@ -1564,9 +1739,10 @@ mod tests {
         for part in [":claude", ":codex"] {
             assert_eq!(fake.pasted(fake.pane_of(part)), 1, "{part} not briefed");
         }
+        // The stop lost the brief, not the agent: no retry is counted.
         let round = runner.engine.session().round(1).unwrap();
         let brief = round.brief(&PartId::new("claude")).unwrap();
-        assert_eq!(brief.receipt.retries, 1);
+        assert_eq!(brief.receipt.retries, 0);
         assert!(brief.receipt.failed.is_none());
         let _ = fs::remove_dir_all(root);
     }
@@ -1578,7 +1754,7 @@ mod tests {
         let dir = stopped_after_first_briefs(&fake, &root);
         // Noa restarted: the ids now name panes that are not the agents'.
         for pane in fake.0.borrow_mut().panes.values_mut() {
-            pane.label = "zsh".into();
+            pane.label = Some("zsh".into());
         }
         let (runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir });
         assert!(runner.panes.is_empty(), "{:?}", runner.panes);
@@ -1602,6 +1778,7 @@ mod tests {
         let (runner, _, _) = rig_on(&fake, new_start(&root, panel));
         let dir = runner.engine.dir().to_owned();
         drop(runner);
+        wait_unlocked(&dir);
         let log = dir.join(store::EVENTS_FILE);
         let text = fs::read_to_string(&log).unwrap();
         fs::write(&log, text.replace("\"opus\"", "\"opus;touch x\"")).unwrap();
@@ -1621,6 +1798,7 @@ mod tests {
             .unwrap();
         assert!(err.contains("別のウィンドウで実行中"), "{err}");
         drop(runner);
+        wait_unlocked(&dir);
         assert!(open_wired(&fake, Start::Resume { dir }).is_ok());
         let _ = fs::remove_dir_all(root);
     }
@@ -1857,6 +2035,251 @@ mod tests {
         assert_eq!(codex.unwrap(), "-m opus -c model_reasoning_effort=high");
         let plain = agent_argv(AgentKind::Agy, &AgentSetup::default());
         assert_eq!(run_under_csh(&plain, AgentKind::Agy).unwrap(), "");
+    }
+
+    /// Runs round 1 of `n` claude entries until the judge is briefed: every
+    /// pane (the judge's too) must find room in the competition's tab.
+    fn judge_is_briefed_after(n: usize) {
+        let fake = fake();
+        let root = temp_root();
+        let panel = vec![AgentChoice::from(AgentKind::Claude); n];
+        let (mut runner, _actions, _updates) = rig_on(&fake, new_start(&root, panel));
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.0.borrow().spawned, n);
+        let contestants: Vec<PartId> = runner.engine.session().contestant_ids().cloned().collect();
+        for part in &contestants {
+            fake.report(runner.panes[part].id, "input", None);
+        }
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        let reply_dir = runner.engine.reply_dir();
+        for part in &contestants {
+            assert_eq!(fake.pasted(runner.panes[part].id), 1, "{part} not briefed");
+            fs::write(store::reply_path(&reply_dir, 1, part), "# Summary: done").unwrap();
+        }
+        step(&mut runner, &mut conn);
+        fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+        step(&mut runner, &mut conn);
+        assert_eq!(
+            runner.engine.session().round(1).unwrap().phase,
+            Phase::Judging
+        );
+        step(&mut runner, &mut conn);
+        let judge = PartId::new(JUDGE_ID_FOR_TESTS);
+        let judge_pane = runner.panes[&judge].id;
+        fake.report(judge_pane, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(judge_pane), 1, "the judge was not briefed");
+        let w = fake.0.borrow();
+        assert_eq!(w.spawned, n + 1);
+        assert_eq!(w.tabs.len(), 1, "{:?}", w.tabs);
+        assert!(w.tabs[0].len() <= PANES_PER_AXIS);
+        assert!(w.tabs[0].iter().all(|c| c.len() <= PANES_PER_AXIS));
+        drop(w);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    const JUDGE_ID_FOR_TESTS: &str = competition::model::types::JUDGE_ID;
+
+    #[test]
+    fn four_entries_and_the_judge_fit_in_one_tab() {
+        judge_is_briefed_after(4);
+    }
+
+    #[test]
+    fn six_entries_and_the_judge_fit_in_one_tab() {
+        judge_is_briefed_after(6);
+    }
+
+    #[test]
+    fn a_pane_without_the_label_is_not_taken_for_the_agent_by_its_id() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_first_briefs(&fake, &root);
+        let claude = fake.pane_of(":claude");
+        // Noa restarted: claude's old id now names an unlabelled shell, and
+        // claude's own pane has another id.
+        let mut w = fake.0.borrow_mut();
+        let mut own = w.panes.remove(&claude).unwrap();
+        w.panes.insert(
+            claude,
+            FakePane {
+                label: None,
+                state: Some("input".into()),
+                blocked: None,
+                seq: 0,
+            },
+        );
+        own.seq = 0;
+        w.panes.insert(500, own);
+        drop(w);
+        let (runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir });
+        assert_eq!(runner.panes[&PartId::new("claude")].id, 500);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resumed_agent_already_at_work_is_not_retried_for_not_starting() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_first_briefs(&fake, &root);
+        // While stopped, claude started its turn (and codex sits on a prompt).
+        fake.report(fake.pane_of(":claude"), "running", None);
+        fake.report(fake.pane_of(":codex"), "permission", Some("permission"));
+        fake.0.borrow_mut().events.clear();
+
+        let (mut runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir });
+        let mut conn = fake.clone();
+        fake.0.borrow_mut().now += CONFIG.start_timeout + 1;
+        step(&mut runner, &mut conn);
+        let brief = |runner: &Runner<Fake, Fake>, part: &str| {
+            let round = runner.engine.session().round(1).unwrap();
+            round.brief(&PartId::new(part)).unwrap().receipt.clone()
+        };
+        let claude = brief(&runner, "claude");
+        assert!(claude.started.is_some());
+        assert_eq!(claude.retries, 0, "retried an agent at work");
+        // A prompt holds the time limit however long it waits.
+        fake.0.borrow_mut().now += 2 * CONFIG.reply_timeout;
+        step(&mut runner, &mut conn);
+        assert_eq!(
+            brief(&runner, "codex").retries,
+            0,
+            "retried an agent on a prompt"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_last_try_lost_with_its_pane_is_sent_again_not_failed() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+        let claude = PartId::new("claude");
+        for _ in 0..CONFIG.max_retries {
+            assert!(
+                runner
+                    .feed(Input::SendFailed {
+                        round: 1,
+                        part: claude.clone(),
+                        error: "x".into(),
+                    })
+                    .is_ok()
+            );
+        }
+        step(&mut runner, &mut conn);
+        fake.report(fake.pane_of(":claude"), "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(fake.pane_of(":claude")), 1);
+        let dir = runner.engine.dir().to_owned();
+        drop(runner);
+        wait_unlocked(&dir);
+        fake.0.borrow_mut().panes.clear();
+
+        let (mut runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir });
+        step(&mut runner, &mut conn);
+        let pane = fake.pane_of(":claude");
+        fake.report(pane, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(pane), 1, "the last try was not sent again");
+        let brief = runner
+            .engine
+            .session()
+            .round(1)
+            .unwrap()
+            .brief(&claude)
+            .unwrap()
+            .clone();
+        assert!(brief.receipt.failed.is_none(), "{:?}", brief.receipt);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_reply_turned_down_just_before_a_stop_is_not_turned_down_twice() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let pane = fake.pane_of(":claude");
+        fake.report(pane, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        let claude = PartId::new("claude");
+        let reply = store::reply_path(&runner.engine.reply_dir(), 1, &claude);
+        fs::write(&reply, "  ").unwrap();
+        step(&mut runner, &mut conn);
+        fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+        step(&mut runner, &mut conn);
+        let retries = |runner: &Runner<Fake, Fake>| {
+            let round = runner.engine.session().round(1).unwrap();
+            round.brief(&claude).unwrap().receipt.retries
+        };
+        assert_eq!(retries(&runner), 1);
+        // The stop came after the rejection was logged, before the file
+        // was cleared.
+        fs::write(&reply, "  ").unwrap();
+        let dir = runner.engine.dir().to_owned();
+        drop(runner);
+        wait_unlocked(&dir);
+
+        let (mut runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir });
+        assert!(!reply.exists(), "the turned-down reply is still there");
+        for _ in 0..2 {
+            step(&mut runner, &mut conn);
+            fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+        }
+        step(&mut runner, &mut conn);
+        assert_eq!(retries(&runner), 1, "turned down twice");
+        assert_eq!(fake.pasted(pane), 2, "the correction was not sent");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_finished_competition_is_not_resumed() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, _actions, _updates) = rig_on(
+            &fake,
+            new_start(
+                &root,
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+            ),
+        );
+        assert!(runner.feed_user(Input::UserClose).is_ok());
+        let dir = runner.engine.dir().to_owned();
+        drop(runner);
+        wait_unlocked(&dir);
+        let err = open_wired(&fake, Start::Resume { dir }).err().unwrap();
+        assert!(err.contains("終了しています"), "{err}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_log_whose_reply_paths_lead_elsewhere_is_not_resumed() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_first_briefs(&fake, &root);
+        let log = dir.join(store::EVENTS_FILE);
+        let text = fs::read_to_string(&log).unwrap();
+        let elsewhere = root.join("victim.txt");
+        fs::write(&elsewhere, "keep me").unwrap();
+        let from = store::reply_path(&dir, 1, &PartId::new("codex"));
+        let edited = text.replace(
+            &from.display().to_string(),
+            &elsewhere.display().to_string(),
+        );
+        assert_ne!(edited, text);
+        fs::write(&log, edited).unwrap();
+        let err = open_wired(&fake, Start::Resume { dir }).err().unwrap();
+        assert!(err.contains("返答パス"), "{err}");
+        assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "keep me");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

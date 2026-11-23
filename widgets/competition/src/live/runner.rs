@@ -18,6 +18,7 @@ use competition::model::export;
 use competition::model::types::{
     AgentChoice, AgentKind, AgentSetup, Millis, PartId, Phase, RoundNo, Session, SessionId,
 };
+use competition::model::viewer::ViewerCache;
 use competition::store::{self, Store};
 use competition::{check, preview, shots};
 
@@ -348,6 +349,8 @@ struct Runner<C: Connect, K: Clock> {
     link_state: Link,
     /// Problems reported by snapshot checks running on their own threads.
     check_notes: (Sender<String>, Receiver<String>),
+    /// Cached per-snapshot file previews reused across `Effect::RefreshViewer`.
+    viewer_cache: ViewerCache,
 }
 
 impl<C: Connect, K: Clock> Runner<C, K> {
@@ -414,6 +417,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             started: false,
             link_state: Link::Connecting,
             check_notes: mpsc::channel(),
+            viewer_cache: ViewerCache::new(),
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
@@ -732,7 +736,11 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 }
                 Effect::RefreshViewer => {
                     let reply_dir = self.engine.reply_dir();
-                    if let Err(e) = store::write_viewer(&reply_dir, self.engine.session()) {
+                    if let Err(e) = store::write_viewer_cached(
+                        &reply_dir,
+                        self.engine.session(),
+                        &mut self.viewer_cache,
+                    ) {
                         self.notice(format!("比較ビューアーの更新に失敗しました: {e}"));
                     }
                 }
@@ -1005,6 +1013,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 let dst = store::artifact_snapshot_dir(&reply_dir, round, &part);
                 match store::snapshot_artifacts(&src, &dst) {
                     Ok(files) => {
+                        self.viewer_cache.invalidate(round, &part);
                         let checks = store::checks_dir(&reply_dir, round, &part);
                         self.check_snapshot(&part, &dst, &checks);
                         files

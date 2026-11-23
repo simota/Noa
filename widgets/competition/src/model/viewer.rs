@@ -3,63 +3,120 @@
 //! SVG, PNG/JPG/WebP images) and code/text reports can be compared side by side
 //! in the system browser across rounds.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::Path;
 
 use serde::Serialize;
 
-use super::types::{ArtifactKind, PartId, RoundKind, RoundNo, Session};
+use super::types::{ArtifactFile, ArtifactKind, PartId, Phase, Round, RoundKind, RoundNo, Session};
 use crate::{preview, store};
 
 #[derive(Serialize)]
-struct ViewerData {
-    id: String,
-    request: String,
+struct ViewerHeader<'a> {
+    id: &'a str,
+    request: &'a str,
     reveal_interval: u32,
-    winner: Option<String>,
-    contestants: Vec<String>,
-    rounds: Vec<ViewerRound>,
+    winner: Option<&'a str>,
+    contestants: Vec<&'a str>,
+    rounds: [(); 0],
 }
 
 #[derive(Serialize)]
-struct ViewerRound {
+struct ViewerRound<'a> {
     no: u32,
     kind: &'static str,
-    overview: Option<String>,
-    ranking: Vec<String>,
-    final_verdict: Option<String>,
-    entries: Vec<ViewerEntry>,
+    overview: Option<&'a str>,
+    ranking: Vec<&'a str>,
+    final_verdict: Option<&'a str>,
+    entries: Vec<ViewerEntry<'a>>,
 }
 
 #[derive(Serialize)]
-struct ViewerEntry {
-    part: String,
+struct ViewerEntry<'a> {
+    part: &'a str,
     score: Option<u8>,
-    strengths: String,
-    feedback: String,
+    strengths: &'a str,
+    feedback: &'a str,
     /// "basis: claim" lines the judge scored on.
     evidence: Vec<String>,
     /// How a later round corrected this score, if it did.
     amended: Option<String>,
     /// "axis score/max" lines, when the judge split the score.
     breakdown: Vec<String>,
-    summary: String,
-    report: String,
-    files: Vec<ViewerFile>,
+    summary: &'a str,
+    report: &'a str,
+    files: Vec<ViewerFile<'a>>,
 }
 
 #[derive(Serialize)]
-struct ViewerFile {
-    rel_path: String,
+struct ViewerFile<'a> {
+    rel_path: &'a str,
     /// Relative URL from `compare.html` to the round snapshot file.
-    href: String,
+    href: Cow<'a, str>,
     /// What the preview frame loads instead of `href`: the generated
     /// self-contained copy of a root `index.html`, when one exists.
-    frame_href: Option<String>,
+    frame_href: Option<Cow<'a, str>>,
     kind: &'static str,
     bytes: u64,
     /// Inline preview text for code/markdown files (truncated for large files).
+    preview: Option<Cow<'a, str>>,
+}
+
+/// Cached per-snapshot file previews and serialized closed-round JSON across
+/// `RefreshViewer` calls so immutable prior rounds are neither re-read from
+/// disk nor re-serialized on every new submission or judgment.
+#[derive(Debug, Default)]
+pub struct ViewerCache {
+    entries: HashMap<(RoundNo, PartId), CachedEntry>,
+    rounds: HashMap<RoundNo, CachedRound>,
+}
+
+#[derive(Debug)]
+struct CachedEntry {
+    artifacts: Vec<ArtifactFile>,
+    files: Vec<CachedFile>,
+}
+
+#[derive(Debug)]
+struct CachedFile {
+    href: String,
+    frame_href: Option<String>,
     preview: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RoundStamp {
+    kind: RoundKind,
+    contestants: Vec<PartId>,
+    submissions: Vec<(PartId, u64, usize)>,
+    ranking: Vec<PartId>,
+    scores: Vec<(PartId, u8, Option<RoundNo>)>,
+    has_outcome: bool,
+}
+
+#[derive(Debug)]
+struct CachedRound {
+    stamp: RoundStamp,
+    /// Contestants whose `index.html` lacked `.preview/index.html` when serialized.
+    unframed_html_parts: Vec<PartId>,
+    /// Already `<`-escaped JSON for this `ViewerRound`.
+    json: String,
+}
+
+impl ViewerCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drops any cached entry and serialized round for `(round, part)` (call
+    /// after writing a fresh artifact snapshot for that round and contestant).
+    pub fn invalidate(&mut self, round: RoundNo, part: &PartId) {
+        self.entries.remove(&(round, part.clone()));
+        self.rounds.remove(&round);
+    }
 }
 
 const MAX_INLINE_TEXT_BYTES: usize = 32_768;
@@ -76,14 +133,23 @@ fn artifact_kind_tag(kind: ArtifactKind) -> &'static str {
 }
 
 fn read_text_preview(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let slice = if bytes.len() > MAX_INLINE_TEXT_BYTES {
+    let file = std::fs::File::open(path).ok()?;
+    let cap = file.metadata().ok().map_or(0, |m| {
+        m.len().min(MAX_INLINE_TEXT_BYTES as u64 + 1) as usize
+    });
+    // +1 avoids a reallocation when `read_to_end` probes for EOF.
+    let mut bytes = Vec::with_capacity(cap + 1);
+    file.take(MAX_INLINE_TEXT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let truncated = bytes.len() > MAX_INLINE_TEXT_BYTES;
+    let slice = if truncated {
         &bytes[..MAX_INLINE_TEXT_BYTES]
     } else {
         &bytes
     };
     let text = String::from_utf8_lossy(slice);
-    if bytes.len() > MAX_INLINE_TEXT_BYTES {
+    if truncated {
         Some(format!("{text}\n\n… (truncated)"))
     } else {
         Some(text.into_owned())
@@ -103,144 +169,356 @@ fn file_href(round: RoundNo, part: &PartId, rel_path: &str) -> String {
     href
 }
 
-/// Build the viewer's HTML document for `session`, referencing artifact
-/// snapshots under `artifact_root` (where `compare.html` will be written).
-pub fn render_html(session: &Session, artifact_root: &Path) -> String {
-    let rounds = session
-        .rounds
+fn frame_href_for(
+    round: RoundNo,
+    part: &PartId,
+    snap_dir: &Path,
+    rel_path: &str,
+) -> Option<String> {
+    (rel_path == preview::ENTRY_PAGE && preview::preview_path(snap_dir).is_file()).then(|| {
+        file_href(
+            round,
+            part,
+            &format!("{}/{}", preview::PREVIEW_DIR, preview::ENTRY_PAGE),
+        )
+    })
+}
+
+fn build_cached_files(
+    artifact_root: &Path,
+    round: RoundNo,
+    part: &PartId,
+    artifacts: &[ArtifactFile],
+) -> Vec<CachedFile> {
+    if artifacts.is_empty() {
+        return Vec::new();
+    }
+    let snap_dir = store::artifact_snapshot_dir(artifact_root, round, part);
+    artifacts
         .iter()
-        .map(|r| {
-            let entries = session
-                .contestant_ids()
-                .map(|part| {
-                    let ev = r.outcome.as_ref().and_then(|o| o.evaluations.get(part));
-                    let sub = r.submissions.get(part);
-                    let files = sub
-                        .map(|s| {
-                            s.artifacts
-                                .iter()
-                                .map(|f| {
-                                    let href = file_href(r.no, part, &f.rel_path);
-                                    let preview = match f.kind {
-                                        ArtifactKind::Code | ArtifactKind::Markdown => {
-                                            read_text_preview(
-                                                &store::artifact_snapshot_dir(
-                                                    artifact_root,
-                                                    r.no,
-                                                    part,
-                                                )
-                                                .join(&f.rel_path),
-                                            )
-                                        }
-                                        _ => None,
-                                    };
-                                    let frame_href = (f.rel_path == preview::ENTRY_PAGE
-                                        && preview::preview_path(&store::artifact_snapshot_dir(
-                                            artifact_root,
-                                            r.no,
-                                            part,
-                                        ))
-                                        .is_file())
-                                    .then(|| {
-                                        file_href(
-                                            r.no,
-                                            part,
-                                            &format!(
-                                                "{}/{}",
-                                                preview::PREVIEW_DIR,
-                                                preview::ENTRY_PAGE
-                                            ),
-                                        )
-                                    });
-                                    ViewerFile {
-                                        rel_path: f.rel_path.clone(),
-                                        href,
-                                        frame_href,
-                                        kind: artifact_kind_tag(f.kind),
-                                        bytes: f.bytes,
-                                        preview,
+        .map(|f| {
+            let href = file_href(round, part, &f.rel_path);
+            let preview = match f.kind {
+                ArtifactKind::Code | ArtifactKind::Markdown => {
+                    read_text_preview(&snap_dir.join(&f.rel_path))
+                }
+                _ => None,
+            };
+            let frame_href = frame_href_for(round, part, &snap_dir, &f.rel_path);
+            CachedFile {
+                href,
+                frame_href,
+                preview,
+            }
+        })
+        .collect()
+}
+
+/// Appends `json` into `out`, escaping every `<` as `\u003c` so embedded JSON
+/// can neither close the `<script>` tag (`</script>`) nor open a comment that
+/// keeps it from closing (`<!--`).
+fn push_escaped_lt(out: &mut String, mut json: &str) {
+    while let Some(at) = json.find('<') {
+        out.push_str(&json[..at]);
+        out.push_str("\\u003c");
+        json = &json[at + 1..];
+    }
+    out.push_str(json);
+}
+
+fn escape_lt_owned(json: String) -> String {
+    if !json.contains('<') {
+        return json;
+    }
+    let mut out = String::with_capacity(json.len() + 64);
+    push_escaped_lt(&mut out, &json);
+    out
+}
+
+fn round_stamp(session: &Session, r: &Round) -> RoundStamp {
+    let (ranking, scores, has_outcome) = match &r.outcome {
+        Some(o) => (
+            o.ranking.clone(),
+            o.evaluations
+                .iter()
+                .map(|(p, e)| (p.clone(), e.score, e.amended.as_ref().map(|a| a.by_round)))
+                .collect(),
+            true,
+        ),
+        None => (Vec::new(), Vec::new(), false),
+    };
+    RoundStamp {
+        kind: r.kind,
+        contestants: session.contestant_ids().cloned().collect(),
+        submissions: r
+            .submissions
+            .iter()
+            .map(|(p, s)| (p.clone(), s.at, s.artifacts.len()))
+            .collect(),
+        ranking,
+        scores,
+        has_outcome,
+    }
+}
+
+fn build_viewer_round<'a>(
+    session: &'a Session,
+    r: &'a Round,
+    artifact_root: &Path,
+    cache: Option<&'a ViewerCache>,
+) -> ViewerRound<'a> {
+    let entries = session
+        .contestant_ids()
+        .map(|part| {
+            let ev = r.outcome.as_ref().and_then(|o| o.evaluations.get(part));
+            let sub = r.submissions.get(part);
+            let files: Vec<ViewerFile<'a>> = match sub {
+                Some(s) if !s.artifacts.is_empty() => {
+                    if let Some(cached) = cache
+                        .and_then(|c| c.entries.get(&(r.no, part.clone())))
+                        .filter(|c| c.files.len() == s.artifacts.len())
+                    {
+                        s.artifacts
+                            .iter()
+                            .zip(&cached.files)
+                            .map(|(f, cf)| ViewerFile {
+                                rel_path: f.rel_path.as_str(),
+                                href: Cow::Borrowed(cf.href.as_str()),
+                                frame_href: cf.frame_href.as_deref().map(Cow::Borrowed),
+                                kind: artifact_kind_tag(f.kind),
+                                bytes: f.bytes,
+                                preview: cf.preview.as_deref().map(Cow::Borrowed),
+                            })
+                            .collect()
+                    } else {
+                        let snap_dir = store::artifact_snapshot_dir(artifact_root, r.no, part);
+                        s.artifacts
+                            .iter()
+                            .map(|f| {
+                                let href = file_href(r.no, part, &f.rel_path);
+                                let preview = match f.kind {
+                                    ArtifactKind::Code | ArtifactKind::Markdown => {
+                                        read_text_preview(&snap_dir.join(&f.rel_path))
                                     }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    ViewerEntry {
-                        part: part.to_string(),
-                        score: ev.map(|e| e.score),
-                        strengths: ev.map(|e| e.strengths.clone()).unwrap_or_default(),
-                        feedback: ev.map(|e| e.feedback.clone()).unwrap_or_default(),
-                        evidence: ev
-                            .map(|e| {
-                                e.evidence
-                                    .iter()
-                                    .map(|item| format!("{}: {}", item.basis.as_str(), item.claim))
-                                    .collect()
+                                    _ => None,
+                                };
+                                let frame_href = frame_href_for(r.no, part, &snap_dir, &f.rel_path);
+                                ViewerFile {
+                                    rel_path: f.rel_path.as_str(),
+                                    href: Cow::Owned(href),
+                                    frame_href: frame_href.map(Cow::Owned),
+                                    kind: artifact_kind_tag(f.kind),
+                                    bytes: f.bytes,
+                                    preview: preview.map(Cow::Owned),
+                                }
                             })
-                            .unwrap_or_default(),
-                        breakdown: ev
-                            .map(|e| {
-                                e.breakdown
-                                    .iter()
-                                    .map(|a| format!("{} {}/{}", a.axis, a.score, a.max))
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        amended: ev.and_then(|e| e.amended.as_ref()).map(|note| {
-                            format!(
-                                "R{} で {} → 訂正: {}",
-                                note.by_round, note.from, note.reason
-                            )
-                        }),
-                        summary: sub.map(|s| s.summary.clone()).unwrap_or_default(),
-                        report: sub.map(|s| s.body.clone()).unwrap_or_default(),
-                        files,
+                            .collect()
                     }
-                })
-                .collect();
-            ViewerRound {
-                no: r.no,
-                kind: match r.kind {
-                    RoundKind::Blind => "blind",
-                    RoundKind::Reveal => "reveal",
-                },
-                overview: r.outcome.as_ref().map(|o| o.overview.clone()),
-                ranking: r
-                    .outcome
-                    .as_ref()
-                    .map(|o| o.ranking.iter().map(|p| p.to_string()).collect())
+                }
+                _ => Vec::new(),
+            };
+            ViewerEntry {
+                part: part.as_str(),
+                score: ev.map(|e| e.score),
+                strengths: ev.map_or("", |e| e.strengths.as_str()),
+                feedback: ev.map_or("", |e| e.feedback.as_str()),
+                evidence: ev
+                    .map(|e| {
+                        e.evidence
+                            .iter()
+                            .map(|item| format!("{}: {}", item.basis.as_str(), item.claim))
+                            .collect()
+                    })
                     .unwrap_or_default(),
-                final_verdict: r.outcome.as_ref().and_then(|o| o.final_verdict.clone()),
-                entries,
+                breakdown: ev
+                    .map(|e| {
+                        e.breakdown
+                            .iter()
+                            .map(|a| format!("{} {}/{}", a.axis, a.score, a.max))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                amended: ev.and_then(|e| e.amended.as_ref()).map(|note| {
+                    format!(
+                        "R{} で {} → 訂正: {}",
+                        note.by_round, note.from, note.reason
+                    )
+                }),
+                summary: sub.map_or("", |s| s.summary.as_str()),
+                report: sub.map_or("", |s| s.body.as_str()),
+                files,
             }
         })
         .collect();
+    ViewerRound {
+        no: r.no,
+        kind: match r.kind {
+            RoundKind::Blind => "blind",
+            RoundKind::Reveal => "reveal",
+        },
+        overview: r.outcome.as_ref().map(|o| o.overview.as_str()),
+        ranking: r
+            .outcome
+            .as_ref()
+            .map(|o| o.ranking.iter().map(PartId::as_str).collect())
+            .unwrap_or_default(),
+        final_verdict: r.outcome.as_ref().and_then(|o| o.final_verdict.as_deref()),
+        entries,
+    }
+}
 
-    let data = ViewerData {
-        id: session.id.to_string(),
-        request: session.request.clone(),
+fn assemble_html<'a>(
+    session: &Session,
+    round_jsons: impl ExactSizeIterator<Item = &'a str> + Clone,
+) -> String {
+    let header = ViewerHeader {
+        id: session.id.as_str(),
+        request: session.request.as_str(),
         reveal_interval: session.reveal_interval,
-        winner: session.winner.as_ref().map(|w| w.to_string()),
-        contestants: session.contestant_ids().map(|p| p.to_string()).collect(),
-        rounds,
+        winner: session.winner.as_ref().map(PartId::as_str),
+        contestants: session.contestant_ids().map(PartId::as_str).collect(),
+        rounds: [],
     };
+    let header_json = serde_json::to_string(&header).unwrap_or_else(|_| "{}".to_owned());
+    let rounds_bytes: usize = round_jsons.clone().map(|s| s.len() + 1).sum();
+    let mut html = String::with_capacity(
+        HTML_PREFIX.len() + HTML_SUFFIX.len() + header_json.len() + rounds_bytes + 64,
+    );
+    html.push_str(HTML_PREFIX);
+    if let Some(prefix) = header_json.strip_suffix("]}") {
+        push_escaped_lt(&mut html, prefix);
+        for (i, rj) in round_jsons.enumerate() {
+            if i > 0 {
+                html.push(',');
+            }
+            html.push_str(rj);
+        }
+        html.push_str("]}");
+    } else {
+        push_escaped_lt(&mut html, &header_json);
+    }
+    html.push_str(HTML_SUFFIX);
+    html
+}
 
-    // Escape every `<` so embedded JSON can neither close the `<script>` tag
-    // (`</script>`) nor open a comment that keeps it from closing (`<!--`).
-    let json = serde_json::to_string(&data)
-        .unwrap_or_else(|_| "{}".to_owned())
-        .replace('<', "\\u003c");
+/// Build the viewer's HTML document for `session`, referencing artifact
+/// snapshots under `artifact_root` (where `compare.html` will be written).
+pub fn render_html(session: &Session, artifact_root: &Path) -> String {
+    let round_jsons: Vec<String> = session
+        .rounds
+        .iter()
+        .map(|r| {
+            let vr = build_viewer_round(session, r, artifact_root, None);
+            escape_lt_owned(serde_json::to_string(&vr).unwrap_or_else(|_| "{}".to_owned()))
+        })
+        .collect();
+    assemble_html(session, round_jsons.iter().map(String::as_str))
+}
 
-    let mut html = String::with_capacity(16_384);
-    let _ = write!(
-        html,
-        r##"<!DOCTYPE html>
+/// Like [`render_html`], reusing cached artifact previews and serialized
+/// closed-round JSON across refreshes.
+pub fn render_html_cached(
+    session: &Session,
+    artifact_root: &Path,
+    cache: &mut ViewerCache,
+) -> String {
+    let mut ephemeral: Vec<Option<String>> = Vec::with_capacity(session.rounds.len());
+    for r in &session.rounds {
+        let stamp = (r.phase == Phase::Closed).then(|| round_stamp(session, r));
+        let round_hit = stamp.as_ref().is_some_and(|st| {
+            cache.rounds.get(&r.no).is_some_and(|cr| {
+                cr.stamp == *st
+                    && !cr.unframed_html_parts.iter().any(|part| {
+                        preview::preview_path(&store::artifact_snapshot_dir(
+                            artifact_root,
+                            r.no,
+                            part,
+                        ))
+                        .is_file()
+                    })
+            })
+        });
+        if round_hit {
+            ephemeral.push(None);
+            continue;
+        }
+        let mut unframed_html_parts = Vec::new();
+        for part in session.contestant_ids() {
+            let Some(sub) = r.submissions.get(part) else {
+                continue;
+            };
+            let key = (r.no, part.clone());
+            let needs_build = cache
+                .entries
+                .get(&key)
+                .is_none_or(|c| c.artifacts != sub.artifacts);
+            if needs_build {
+                let files = build_cached_files(artifact_root, r.no, part, &sub.artifacts);
+                cache.entries.insert(
+                    key.clone(),
+                    CachedEntry {
+                        artifacts: sub.artifacts.clone(),
+                        files,
+                    },
+                );
+            } else if let Some(entry) = cache.entries.get_mut(&key) {
+                let mut snap_dir = None;
+                for (art, cached) in sub.artifacts.iter().zip(&mut entry.files) {
+                    if art.rel_path == preview::ENTRY_PAGE && cached.frame_href.is_none() {
+                        let dir = snap_dir.get_or_insert_with(|| {
+                            store::artifact_snapshot_dir(artifact_root, r.no, part)
+                        });
+                        cached.frame_href = frame_href_for(r.no, part, dir, &art.rel_path);
+                    }
+                }
+            }
+            if let Some(entry) = cache.entries.get(&key)
+                && sub
+                    .artifacts
+                    .iter()
+                    .zip(&entry.files)
+                    .any(|(art, cf)| art.rel_path == preview::ENTRY_PAGE && cf.frame_href.is_none())
+            {
+                unframed_html_parts.push(part.clone());
+            }
+        }
+        let vr = build_viewer_round(session, r, artifact_root, Some(cache));
+        let json = escape_lt_owned(serde_json::to_string(&vr).unwrap_or_else(|_| "{}".to_owned()));
+        if let Some(stamp) = stamp {
+            cache.rounds.insert(
+                r.no,
+                CachedRound {
+                    stamp,
+                    unframed_html_parts,
+                    json,
+                },
+            );
+            ephemeral.push(None);
+        } else {
+            ephemeral.push(Some(json));
+        }
+    }
+
+    let slices: Vec<&str> = session
+        .rounds
+        .iter()
+        .zip(&ephemeral)
+        .map(|(r, eph)| match eph {
+            Some(s) => s.as_str(),
+            None => cache.rounds[&r.no].json.as_str(),
+        })
+        .collect();
+    assemble_html(session, slices.into_iter())
+}
+
+const HTML_PREFIX: &str = r##"<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Noa Competition Viewer</title>
 <style>
-  :root {{
+  :root {
     color-scheme: dark;
     --bg: #0f1117;
     --surface: #171a23;
@@ -251,15 +529,15 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
     --accent: #6aa6ff;
     --gold: #f5c451;
     --reveal: #a78bfa;
-  }}
-  * {{ box-sizing: border-box; }}
-  body {{
+  }
+  * { box-sizing: border-box; }
+  body {
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--bg);
     color: var(--text);
-  }}
-  header {{
+  }
+  header {
     position: sticky;
     top: 0;
     z-index: 10;
@@ -272,25 +550,25 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
     gap: 12px;
     align-items: center;
     justify-content: space-between;
-  }}
-  .title-block h1 {{
+  }
+  .title-block h1 {
     margin: 0;
     font-size: 16px;
     font-weight: 600;
-  }}
-  .title-block p {{
+  }
+  .title-block p {
     margin: 4px 0 0;
     font-size: 12px;
     color: var(--muted);
     max-width: 720px;
-  }}
-  .controls {{
+  }
+  .controls {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
-  }}
-  select, button {{
+  }
+  select, button {
     background: var(--surface-alt);
     color: var(--text);
     border: 1px solid var(--border);
@@ -298,12 +576,12 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
     padding: 6px 10px;
     font-size: 12px;
     cursor: pointer;
-  }}
-  button.active {{
+  }
+  button.active {
     border-color: var(--accent);
     color: var(--accent);
-  }}
-  .banner {{
+  }
+  .banner {
     margin: 12px 18px 0;
     padding: 10px 14px;
     border-radius: 8px;
@@ -311,57 +589,57 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
     border: 1px solid var(--border);
     font-size: 13px;
     line-height: 1.5;
-  }}
-  .badge {{
+  }
+  .badge {
     display: inline-block;
     padding: 2px 8px;
     border-radius: 999px;
     font-size: 11px;
     font-weight: 600;
     margin-right: 6px;
-  }}
-  .badge.blind {{ background: #262d3d; color: var(--muted); }}
-  .badge.reveal {{ background: rgba(167, 139, 250, 0.18); color: var(--reveal); }}
-  .badge.winner {{ background: rgba(245, 196, 81, 0.18); color: var(--gold); }}
-  .grid {{
+  }
+  .badge.blind { background: #262d3d; color: var(--muted); }
+  .badge.reveal { background: rgba(167, 139, 250, 0.18); color: var(--reveal); }
+  .badge.winner { background: rgba(245, 196, 81, 0.18); color: var(--gold); }
+  .grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
     gap: 14px;
     padding: 14px 18px 32px;
-  }}
-  .card {{
+  }
+  .card {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-  }}
-  .card.winner-card {{
+  }
+  .card.winner-card {
     border-color: var(--gold);
-  }}
-  .card-head {{
+  }
+  .card-head {
     padding: 12px 14px;
     border-bottom: 1px solid var(--border);
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 8px;
-  }}
-  .score {{
+  }
+  .score {
     font-size: 18px;
     font-weight: 700;
     color: var(--accent);
-  }}
-  .file-tabs {{
+  }
+  .file-tabs {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
     padding: 8px 14px;
     background: var(--surface-alt);
     border-bottom: 1px solid var(--border);
-  }}
-  .preview-box {{
+  }
+  .preview-box {
     background: #0b0d12;
     min-height: 360px;
     display: flex;
@@ -370,29 +648,29 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
     justify-content: safe center;
     overflow: auto;
     position: relative;
-  }}
-  .frame-note {{
+  }
+  .frame-note {
     position: absolute;
     right: 8px;
     bottom: 6px;
     font-size: 11px;
     color: var(--muted);
-  }}
-  .preview-box iframe {{
+  }
+  .preview-box iframe {
     /* Keep a fixed viewport's size: a flex item would shrink to the card. */
     flex: none;
     border: 0;
     background: #fff;
     height: 460px;
     transition: width 0.15s ease;
-  }}
-  .preview-box img {{
+  }
+  .preview-box img {
     max-width: 100%;
     max-height: 460px;
     object-fit: contain;
     cursor: zoom-in;
-  }}
-  .preview-box pre {{
+  }
+  .preview-box pre {
     margin: 0;
     padding: 12px;
     width: 100%;
@@ -403,30 +681,30 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
-  }}
-  .meta {{
+  }
+  .meta {
     padding: 12px 14px;
     font-size: 12px;
     line-height: 1.55;
     border-top: 1px solid var(--border);
-  }}
-  .meta h4 {{
+  }
+  .meta h4 {
     margin: 8px 0 4px;
     font-size: 11px;
     text-transform: uppercase;
     color: var(--muted);
     letter-spacing: 0.04em;
-  }}
-  .meta h4:first-child {{ margin-top: 0; }}
-  .report-body {{
+  }
+  .meta h4:first-child { margin-top: 0; }
+  .report-body {
     white-space: pre-wrap;
     max-height: 220px;
     overflow: auto;
     background: var(--surface-alt);
     padding: 8px 10px;
     border-radius: 6px;
-  }}
-  .modal {{
+  }
+  .modal {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.85);
@@ -435,9 +713,9 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
     justify-content: center;
     z-index: 100;
     padding: 24px;
-  }}
-  .modal.open {{ display: flex; }}
-  .modal img {{ max-width: 95vw; max-height: 92vh; object-fit: contain; }}
+  }
+  .modal.open { display: flex; }
+  .modal img { max-width: 95vw; max-height: 92vh; object-fit: contain; }
 </style>
 </head>
 <body>
@@ -459,15 +737,17 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
 <main id="grid" class="grid"></main>
 <div id="modal" class="modal"><img id="modalImg" alt="zoom"></div>
 <script>
-const DATA = {json};
+const DATA = "##;
+
+const HTML_SUFFIX: &str = r##";
 let viewportWidth = "100%";
 let viewportHeight = "460px";
 // The sizes the judge's screenshots use: width × height, height = first view.
-function applyViewport(frame) {{
+function applyViewport(frame) {
   frame.style.width = viewportWidth;
   frame.style.height = viewportHeight;
-}}
-const selectedFile = {{}};
+}
+const selectedFile = {};
 
 const roundSelect = document.getElementById("roundSelect");
 const banner = document.getElementById("banner");
@@ -477,57 +757,57 @@ const modalImg = document.getElementById("modalImg");
 modal.addEventListener("click", () => modal.classList.remove("open"));
 
 document.getElementById("request").textContent = DATA.request || "";
-document.querySelectorAll("button[data-vp]").forEach(btn => {{
-  btn.addEventListener("click", () => {{
+document.querySelectorAll("button[data-vp]").forEach(btn => {
+  btn.addEventListener("click", () => {
     const [w, h] = btn.dataset.vp.split("x");
     viewportWidth = h ? w + "px" : w;
     viewportHeight = h ? h + "px" : "460px";
     document.querySelectorAll("button[data-vp]").forEach(b => b.classList.toggle("active", b === btn));
     document.querySelectorAll(".preview-box iframe").forEach(applyViewport);
-  }});
-}});
+  });
+});
 
-function init() {{
+function init() {
   roundSelect.innerHTML = "";
-  if (!DATA.rounds.length) {{
+  if (!DATA.rounds.length) {
     banner.textContent = "まだ提出されたラウンドがありません。";
     return;
-  }}
-  DATA.rounds.forEach((r, idx) => {{
+  }
+  DATA.rounds.forEach((r, idx) => {
     const opt = document.createElement("option");
     opt.value = idx;
     const tag = r.kind === "reveal" ? " [相互閲覧]" : " [ブラインド]";
     opt.textContent = "Round " + r.no + tag;
     roundSelect.appendChild(opt);
-  }});
+  });
   roundSelect.value = String(DATA.rounds.length - 1);
   roundSelect.addEventListener("change", () => renderRound(Number(roundSelect.value)));
   renderRound(DATA.rounds.length - 1);
-}}
+}
 
-function pickDefaultFile(entry) {{
+function pickDefaultFile(entry) {
   const key = entry.part;
-  if (selectedFile[key] && entry.files.some(f => f.rel_path === selectedFile[key])) {{
+  if (selectedFile[key] && entry.files.some(f => f.rel_path === selectedFile[key])) {
     return selectedFile[key];
-  }}
+  }
   const visual = entry.files.find(f => f.rel_path === "index.html")
     || entry.files.find(f => f.kind === "html")
     || entry.files.find(f => f.kind === "image" || f.kind === "svg")
     || entry.files[0];
   return visual ? visual.rel_path : null;
-}}
+}
 
-function renderPreview(box, file) {{
+function renderPreview(box, file) {
   box.innerHTML = "";
-  if (!file) {{
+  if (!file) {
     const p = document.createElement("p");
     p.style.color = "var(--muted)";
     p.style.fontSize = "12px";
     p.textContent = "成果物ファイルなし";
     box.appendChild(p);
     return;
-  }}
-  if (file.kind === "html") {{
+  }
+  if (file.kind === "html") {
     const iframe = document.createElement("iframe");
     iframe.src = file.frame_href || file.href;
     applyViewport(iframe);
@@ -535,38 +815,38 @@ function renderPreview(box, file) {{
     // page (`parent.document`) and rewrite scores or other entries.
     iframe.setAttribute("sandbox", "allow-scripts");
     box.appendChild(iframe);
-    if (file.frame_href) {{
+    if (file.frame_href) {
       const note = document.createElement("a");
       note.className = "frame-note";
       note.href = file.href;
       note.target = "_blank";
       note.textContent = "自動インライン版を表示中 · 元の index.html";
       box.appendChild(note);
-    }}
-  }} else if (file.kind === "image" || file.kind === "svg") {{
+    }
+  } else if (file.kind === "image" || file.kind === "svg") {
     const img = document.createElement("img");
     img.src = file.href;
     img.alt = file.rel_path;
-    img.addEventListener("click", () => {{
+    img.addEventListener("click", () => {
       modalImg.src = file.href;
       modal.classList.add("open");
-    }});
+    });
     box.appendChild(img);
-  }} else if (file.preview !== null && file.preview !== undefined) {{
+  } else if (file.preview !== null && file.preview !== undefined) {
     const pre = document.createElement("pre");
     pre.textContent = file.preview;
     box.appendChild(pre);
-  }} else {{
+  } else {
     const a = document.createElement("a");
     a.href = file.href;
     a.target = "_blank";
     a.style.color = "var(--accent)";
     a.textContent = file.rel_path + " を開く";
     box.appendChild(a);
-  }}
-}}
+  }
+}
 
-function renderRound(idx) {{
+function renderRound(idx) {
   const r = DATA.rounds[idx];
   if (!r) return;
   banner.innerHTML = "";
@@ -574,19 +854,19 @@ function renderRound(idx) {{
   badge.className = "badge " + r.kind;
   badge.textContent = r.kind === "reveal" ? "👁 相互閲覧ラウンド" : "🔒 ブラインドラウンド";
   banner.appendChild(badge);
-  if (DATA.winner) {{
+  if (DATA.winner) {
     const w = document.createElement("span");
     w.className = "badge winner";
     w.textContent = "🏆 優勝: " + DATA.winner;
     banner.appendChild(w);
-  }}
+  }
   const txt = document.createElement("span");
   txt.textContent = r.final_verdict || r.overview || "審判の採点待ちです。";
   banner.appendChild(txt);
 
   grid.innerHTML = "";
   const order = r.ranking.length ? r.ranking : DATA.contestants;
-  order.forEach((part, rankIdx) => {{
+  order.forEach((part, rankIdx) => {
     const entry = r.entries.find(e => e.part === part);
     if (!entry) return;
     const card = document.createElement("section");
@@ -609,29 +889,29 @@ function renderRound(idx) {{
     const previewBox = document.createElement("div");
     previewBox.className = "preview-box";
     const activeRel = pickDefaultFile(entry);
-    entry.files.forEach(file => {{
+    entry.files.forEach(file => {
       const b = document.createElement("button");
       b.textContent = file.rel_path;
       if (file.rel_path === activeRel) b.classList.add("active");
-      b.addEventListener("click", () => {{
+      b.addEventListener("click", () => {
         selectedFile[part] = file.rel_path;
         tabs.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
         renderPreview(previewBox, file);
-      }});
+      });
       tabs.appendChild(b);
-    }});
-    if (entry.files.length) {{
+    });
+    if (entry.files.length) {
       const activeFile = entry.files.find(f => f.rel_path === activeRel) || entry.files[0];
       renderPreview(previewBox, activeFile);
-    }} else {{
+    } else {
       renderPreview(previewBox, null);
-    }}
+    }
     card.appendChild(tabs);
     card.appendChild(previewBox);
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    const addBlock = (label, content, isPre) => {{
+    const addBlock = (label, content, isPre) => {
       if (!content) return;
       const h = document.createElement("h4");
       h.textContent = label;
@@ -640,7 +920,7 @@ function renderRound(idx) {{
       d.textContent = content;
       meta.appendChild(h);
       meta.appendChild(d);
-    }};
+    };
     addBlock("サマリー", entry.summary, false);
     addBlock("評価された点", entry.strengths, false);
     addBlock("審判フィードバック", entry.feedback, false);
@@ -651,17 +931,14 @@ function renderRound(idx) {{
     card.appendChild(meta);
 
     grid.appendChild(card);
-  }});
-}}
+  });
+}
 
 init();
 </script>
 </body>
 </html>
-"##
-    );
-    html
-}
+"##;
 
 #[cfg(test)]
 mod tests {
@@ -792,5 +1069,154 @@ mod tests {
             file_href(3, &part, &file.rel_path),
             "r3/artifacts/claude/pages/design%231%20v%3F2%25.html"
         );
+    }
+
+    #[test]
+    fn text_preview_truncation_matches_exact_boundary_including_utf8() {
+        let dir =
+            std::env::temp_dir().join(format!("competition-viewer-trunc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let exact_path = dir.join("exact.txt");
+        let exact_bytes = vec![b'a'; MAX_INLINE_TEXT_BYTES];
+        std::fs::write(&exact_path, &exact_bytes).unwrap();
+        let exact = read_text_preview(&exact_path).unwrap();
+        assert_eq!(exact.len(), MAX_INLINE_TEXT_BYTES);
+        assert!(!exact.ends_with("… (truncated)"));
+
+        let over_path = dir.join("over.txt");
+        let mut over_bytes = vec![b'a'; MAX_INLINE_TEXT_BYTES - 1];
+        // 3-byte UTF-8 char straddling the 32,768-byte cutoff.
+        over_bytes.extend_from_slice("あ".as_bytes());
+        std::fs::write(&over_path, &over_bytes).unwrap();
+        let over = read_text_preview(&over_path).unwrap();
+        assert!(over.ends_with("\n\n… (truncated)"));
+        assert!(over.contains('\u{FFFD}'));
+        let expected_prefix = String::from_utf8_lossy(&over_bytes[..MAX_INLINE_TEXT_BYTES]);
+        assert_eq!(over, format!("{expected_prefix}\n\n… (truncated)"));
+
+        assert_eq!(read_text_preview(&dir.join("missing.txt")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_viewer_render_matches_uncached_across_updates_and_invalidation() {
+        let root =
+            std::env::temp_dir().join(format!("competition-viewer-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude = PartId::new("claude");
+        let snap1 = store::artifact_snapshot_dir(&root, 1, &claude);
+        std::fs::create_dir_all(&snap1).unwrap();
+        std::fs::write(snap1.join("index.html"), "<h1>v1</h1>").unwrap();
+        std::fs::write(snap1.join("app.js"), "const a = 1;").unwrap();
+
+        let p = |id: &str, kind, role| Participant {
+            id: PartId::new(id),
+            kind,
+            role,
+            pane_id: None,
+            setup: Default::default(),
+        };
+        let mut subs = BTreeMap::new();
+        subs.insert(
+            claude.clone(),
+            Submission {
+                part: claude.clone(),
+                summary: "v1".into(),
+                body: "report <script>".into(),
+                artifacts: vec![
+                    ArtifactFile {
+                        rel_path: "index.html".into(),
+                        kind: ArtifactKind::Html,
+                        bytes: 11,
+                    },
+                    ArtifactFile {
+                        rel_path: "app.js".into(),
+                        kind: ArtifactKind::Code,
+                        bytes: 12,
+                    },
+                ],
+                at: 2,
+            },
+        );
+        let session = Session {
+            id: SessionId::new("comp-cache"),
+            request: "req".into(),
+            workdir: None,
+            max_rounds: Some(3),
+            reveal_interval: 5,
+            rev: 1,
+            created_at: 1,
+            judge: p(JUDGE_ID, AgentKind::Claude, Role::Judge),
+            contestants: vec![p("claude", AgentKind::Claude, Role::Contestant)],
+            messages: vec![],
+            rounds: vec![Round {
+                no: 1,
+                kind: RoundKind::Blind,
+                phase: Phase::Closed,
+                started_at: 1,
+                briefs: vec![],
+                submissions: subs,
+                judge_brief: None,
+                outcome: None,
+            }],
+            winner: None,
+            closed: false,
+        };
+
+        let mut cache = ViewerCache::new();
+        assert_eq!(
+            render_html_cached(&session, &root, &mut cache),
+            render_html(&session, &root)
+        );
+        // When `.preview/index.html` appears later, cached render picks it up.
+        let prev = preview::preview_path(&snap1);
+        std::fs::create_dir_all(prev.parent().unwrap()).unwrap();
+        std::fs::write(&prev, "<h1>v1-inlined</h1>").unwrap();
+        assert_eq!(
+            render_html_cached(&session, &root, &mut cache),
+            render_html(&session, &root)
+        );
+        // After snapshot overwrite + invalidate, cached render picks up new file text.
+        std::fs::write(snap1.join("app.js"), "const a = 2;").unwrap();
+        cache.invalidate(1, &claude);
+        let after = render_html_cached(&session, &root, &mut cache);
+        assert_eq!(after, render_html(&session, &root));
+        assert!(after.contains("const a = 2;"));
+
+        // An amendment to a closed round invalidates its cached JSON automatically.
+        let mut amended = session;
+        let mut evals = BTreeMap::new();
+        evals.insert(
+            claude.clone(),
+            super::super::types::EntryEvaluation {
+                score: 91,
+                strengths: "s".into(),
+                feedback: "f".into(),
+                evidence: vec![],
+                amended: Some(super::super::types::AmendNote {
+                    from: 80,
+                    by_round: 2,
+                    reason: "corrected".into(),
+                }),
+                breakdown: vec![],
+            },
+        );
+        amended.rounds[0].outcome = Some(super::super::types::JudgeOutput {
+            overview: "ov".into(),
+            evaluations: evals,
+            ranking: vec![claude.clone()],
+            winner: None,
+            final_verdict: None,
+            close: false,
+            amendments: vec![],
+            checklist: vec![],
+        });
+        let after_amend = render_html_cached(&amended, &root, &mut cache);
+        assert_eq!(after_amend, render_html(&amended, &root));
+        assert!(after_amend.contains("91"));
+        assert!(after_amend.contains("corrected"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

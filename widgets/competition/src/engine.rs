@@ -608,7 +608,9 @@ impl Engine {
             .max_rounds
             .unwrap_or_default()
             .max(self.session.rounds.len() as RoundNo);
-        let max_rounds = base.saturating_add(by);
+        let Some(max_rounds) = base.checked_add(by) else {
+            return rejected(format!("ラウンド上限をこれ以上増やせません（{base}）"));
+        };
         self.commit(out, vec![Event::RoundsExtended { max_rounds, at }])?;
         out.effects.push(Effect::RefreshViewer);
         self.next_round(out, at)
@@ -1737,6 +1739,91 @@ mod tests {
         assert_eq!(l.engine.session().round(1).unwrap().phase, Phase::Judging);
         let judge = &l.engine.session().round(1).unwrap().judge_brief;
         assert!(judge.as_ref().unwrap().body.contains("FINAL"));
-        assert!(refused(&mut l).contains("採点中"));
+        assert!(refused(&mut l).contains("最終ラウンドの進行中"));
+        // Nor before it is judged: its briefs, sent or waiting, say FINAL.
+        let mut l = Logged::new(Some(1));
+        assert_eq!(l.engine.session().round(1).unwrap().phase, Phase::Briefing);
+        assert!(
+            l.engine.session().round(1).unwrap().briefs[0]
+                .body
+                .contains("FINAL")
+        );
+        assert!(refused(&mut l).contains("最終ラウンドの進行中"));
+    }
+
+    #[test]
+    fn a_verdict_is_the_result_only_while_its_winner_is() {
+        let mut l = Logged::new(Some(2));
+        l.round(1, false);
+        l.round(2, true);
+        let verdict = "Codex delivered a sharper UI.";
+        let md = crate::model::export::result_markdown(l.engine.session());
+        assert!(md.contains("## 最終講評") && md.contains(verdict), "{md}");
+
+        // Going on: no result yet, though round 2 keeps its verdict.
+        l.feed(Input::UserExtend { by: 1, at: 300 });
+        let md = crate::model::export::result_markdown(l.engine.session());
+        assert!(!md.contains("## 最終講評"), "{md}");
+        assert_eq!(l.engine.session().final_verdict(), None);
+
+        // The user picks claude: codex's verdict is not claude's.
+        l.feed(Input::UserSelectWinner {
+            winner: PartId::new("claude"),
+        });
+        assert_eq!(l.engine.session().winner, Some(PartId::new("claude")));
+        assert_eq!(l.engine.session().final_verdict(), None);
+        let md = crate::model::export::result_markdown(l.engine.session());
+        assert!(!md.contains(verdict), "{md}");
+        l.folds();
+    }
+
+    /// A held competition whose last judged round is its limit ends rather
+    /// than waiting: on resume, and when the user continues. (The judge's
+    /// final verdict closes it itself, so this reaches the limit check
+    /// only from a log whose final round closed without that.)
+    #[test]
+    fn the_round_limit_comes_before_the_hold() {
+        let mut l = Logged::new(Some(2));
+        l.feed(Input::UserSetHold { hold: true, at: 3 });
+        l.round(1, false);
+        let held = l.engine.session().clone();
+        assert!(held.waits_to_continue());
+        let at_limit = |session: &Session| {
+            let mut session = session.clone();
+            session.max_rounds = Some(1);
+            Engine::resume(session, Path::new("/tmp/comp-test"), Config::default())
+        };
+
+        let mut e = at_limit(&held);
+        e.handle(Input::Start { now: 400 }).unwrap();
+        assert!(e.session().closed, "held past its limit on resume");
+
+        let mut e = at_limit(&held);
+        e.handle(Input::UserContinue { at: 400 }).unwrap();
+        assert!(e.session().closed, "a round past the limit started");
+        assert_eq!(e.session().rounds.len(), 1);
+
+        // Before the limit, the hold keeps it waiting.
+        let mut e = Engine::resume(held, Path::new("/tmp/comp-test"), Config::default());
+        e.handle(Input::Start { now: 400 }).unwrap();
+        assert!(!e.session().closed);
+        assert_eq!(e.session().rounds.len(), 1);
+    }
+
+    #[test]
+    fn an_extension_past_the_largest_limit_is_refused_whole() {
+        let l = Logged::new(Some(2));
+        let mut session = l.engine.session().clone();
+        session.max_rounds = Some(RoundNo::MAX - 1);
+        let mut e = Engine::resume(session, Path::new("/tmp/comp-test"), Config::default());
+        let err = e
+            .handle(Input::UserExtend { by: 3, at: 5 })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("これ以上増やせません"), "{err}");
+        assert_eq!(e.session().max_rounds, Some(RoundNo::MAX - 1));
+        let out = e.handle(Input::UserExtend { by: 1, at: 6 }).unwrap();
+        assert_eq!(out.batches.len(), 1);
+        assert_eq!(e.session().max_rounds, Some(RoundNo::MAX));
     }
 }

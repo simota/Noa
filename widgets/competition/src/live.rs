@@ -232,8 +232,6 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     root,
                 }
             }
-            (Command::Resume { dir }, None) => runner::Start::Resume { dir },
-            (Command::ExtendStored { dir, by }, None) => runner::Start::Extend { dir, by },
             (
                 Command::Start { .. } | Command::Resume { .. } | Command::ExtendStored { .. },
                 Some(_),
@@ -241,10 +239,13 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                 notify("コンペティションはすでに始まっています");
                 continue;
             }
-            (_, None) => {
-                notify("コンペティションが始まっていません");
-                continue;
-            }
+            (cmd, None) => match stored_start(cmd) {
+                Some(start) => start,
+                None => {
+                    notify("コンペティションが始まっていません");
+                    continue;
+                }
+            },
             (cmd, Some((actions, _))) => {
                 if let Some(action) = forwarded(cmd) {
                     let _ = actions.send(action);
@@ -263,6 +264,15 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
     }
     if let Some((actions, _)) = handle {
         let _ = actions.send(Action::Stop);
+    }
+}
+
+/// The runner start a command on a stored competition asks for.
+fn stored_start(cmd: Command) -> Option<runner::Start> {
+    match cmd {
+        Command::Resume { dir } => Some(runner::Start::Resume { dir }),
+        Command::ExtendStored { dir, by } => Some(runner::Start::Extend { dir, by }),
+        _ => None,
     }
 }
 
@@ -443,6 +453,28 @@ mod tests {
             by: 1,
         };
         assert_eq!(forwarded(stored), None);
+    }
+
+    /// What each command on a stored competition starts (the runner's tests
+    /// cover what `Start::Extend` and `Start::Resume` then do).
+    #[test]
+    fn a_stored_competition_is_extended_by_an_extending_start() {
+        let dir = PathBuf::from("/x/comp-1");
+        assert_eq!(
+            stored_start(Command::ExtendStored {
+                dir: dir.clone(),
+                by: 3
+            }),
+            Some(runner::Start::Extend {
+                dir: dir.clone(),
+                by: 3
+            })
+        );
+        assert_eq!(
+            stored_start(Command::Resume { dir: dir.clone() }),
+            Some(runner::Start::Resume { dir })
+        );
+        assert_eq!(stored_start(Command::Continue), None);
     }
 
     /// Extending a stored competition starts a runner on it, whose refusal

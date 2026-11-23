@@ -134,6 +134,12 @@ pub struct Competition {
     past_root: Option<PathBuf>,
     /// The log of the read-only competition on screen, when it is one.
     stored_dir: Option<PathBuf>,
+    /// That log is free to write: no runner holds it, and no widget from
+    /// before the lock may (read when it was opened).
+    stored_free: bool,
+    /// Rounds were asked for on the read-only competition on screen: it
+    /// stays shown until the runner's first snapshot of it arrives.
+    extending: bool,
     /// What the board was last built from: the session revision, the link,
     /// and the clock minute while some agent's elapsed time is running.
     built: Option<BuiltKey>,
@@ -298,6 +304,8 @@ impl Competition {
             past: Vec::new(),
             past_root: store::default_root(),
             stored_dir: None,
+            stored_free: false,
+            extending: false,
             built: None,
             start,
             board,
@@ -397,6 +405,7 @@ impl Competition {
         self.artifact_root = None;
         self.read_only = false;
         self.stored_dir = None;
+        self.extending = false;
         self.tab = CenterTab::Compare;
         self.selected_round = None;
         self.filter_part = None;
@@ -406,14 +415,15 @@ impl Competition {
         self.refresh_past();
     }
 
-    /// Resumes the stored competition in `dir` with `by` more rounds: the
-    /// screen leaves what it shows, and the runner's snapshots follow.
+    /// Resumes the stored competition in `dir` with `by` more rounds. A
+    /// read-only view of it stays until the runner's first snapshot of it
+    /// (a refused extension leaves it as it was, with the notice why).
     fn extend_stored(&mut self, dir: PathBuf, by: RoundNo, text: &mut TextStore) {
         if !matches!(self.source, Source::Live(_)) {
             self.toast("デモ表示では操作を送信できません");
             return;
         }
-        self.leave();
+        self.extending = self.read_only;
         self.send_cmd(Command::ExtendStored { dir, by });
         self.rebuild(text);
     }
@@ -425,6 +435,7 @@ impl Competition {
         self.artifact_root = root;
         self.read_only = true;
         self.stored_dir = Some(dir.to_owned());
+        self.stored_free = !store::is_busy(dir) && !store::may_run_unlocked(dir);
         self.rebuild(text);
         Ok(())
     }
@@ -644,7 +655,11 @@ impl Competition {
             }
             // A stored competition that ran all its rounds is resumed to go on.
             if session.extendable().is_ok()
-                && (!self.read_only || (session.closed && self.stored_dir.is_some()))
+                && (!self.read_only
+                    || (session.closed
+                        && self.stored_dir.is_some()
+                        && self.stored_free
+                        && !self.extending))
             {
                 if let Some(max) = session.max_rounds {
                     caption(
@@ -731,8 +746,24 @@ impl Competition {
         if let Some(snapshot) = latest {
             self.link = snapshot.link;
             if self.read_only {
-                // No runner drives a read-only session.
-                return self.rebuild_if_changed(text);
+                let shown = self.session.as_ref().map(|s| s.id.clone());
+                match &snapshot.session {
+                    // The extended competition, now driven by its runner.
+                    Some(next) if self.extending && Some(&next.id) == shown.as_ref() => {
+                        self.read_only = false;
+                        self.extending = false;
+                        self.stored_dir = None;
+                        self.built = None;
+                    }
+                    // The extension failed (the runner ended without it).
+                    None if self.extending && matches!(self.link, Link::Down(_)) => {
+                        self.extending = false;
+                        self.built = None;
+                        return self.rebuild_if_changed(text);
+                    }
+                    // No runner drives a read-only session.
+                    _ => return self.rebuild_if_changed(text),
+                }
             }
             self.session = snapshot.session;
             if snapshot.artifact_root.is_some() {
@@ -1870,6 +1901,15 @@ mod tests {
             .map(|(id, _)| *id)
     }
 
+    /// The generation the screen's commands go out in (what the runner
+    /// they start stamps its snapshots and notices with).
+    fn generation(screen: &Competition) -> u64 {
+        match &screen.source {
+            Source::Live(channel) => channel.generation(),
+            _ => 0,
+        }
+    }
+
     fn commands(link: &crate::live::FakeLink) -> Vec<Command> {
         link.commands.try_iter().map(|(_, cmd)| cmd).collect()
     }
@@ -1920,11 +1960,22 @@ mod tests {
 
     #[test]
     fn rounds_are_offered_only_where_they_can_be_added() {
+        // The rounds each "+N" shown adds: all of them, or none.
         let offered = |session: Session| {
             let screen =
                 Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
-            widget_for(&screen, &Action::Extend(1)).is_some()
-                && widget_for(&screen, &Action::Extend(3)).is_some()
+            let shown: Vec<RoundNo> = actions(&screen)
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::Extend(by) => Some(by),
+                    _ => None,
+                })
+                .collect();
+            match shown.as_slice() {
+                [] => false,
+                [1, 3] => true,
+                other => panic!("only some of the rounds offered: {other:?}"),
+            }
         };
         let base = crate::demo::session();
         // Running, with a limit.
@@ -1942,12 +1993,14 @@ mod tests {
         let mut unlimited = base.clone();
         unlimited.max_rounds = None;
         assert!(!offered(unlimited));
-        // The judge scores the final round.
-        let mut judging = base;
-        judging.max_rounds = Some(judging.rounds.len() as RoundNo);
-        let last = judging.rounds.len() - 1;
-        judging.rounds[last].phase = Phase::Judging;
-        assert!(!offered(judging));
+        // The final round under way: judged, or still with its contestants.
+        for phase in [Phase::Judging, Phase::Competing, Phase::Briefing] {
+            let mut last_round = base.clone();
+            last_round.max_rounds = Some(last_round.rounds.len() as RoundNo);
+            let last = last_round.rounds.len() - 1;
+            last_round.rounds[last].phase = phase;
+            assert!(!offered(last_round), "{phase:?}");
+        }
     }
 
     #[test]
@@ -1960,23 +2013,84 @@ mod tests {
         let _ = commands(&link);
         let more = widget_for(&screen, &Action::Extend(3)).expect("+3 on the stored view");
         click(&mut screen, more, &mut text);
-        let sent: Vec<(u64, Command)> = link.commands.try_iter().collect();
-        assert_eq!(sent.len(), 2, "{sent:?}");
-        assert_eq!(sent[0].1, Command::Leave);
         assert_eq!(
-            sent[1],
-            (
-                sent[0].0,
-                Command::ExtendStored {
-                    dir: dir.clone(),
-                    by: 3
-                }
-            )
+            commands(&link),
+            [Command::ExtendStored {
+                dir: dir.clone(),
+                by: 3
+            }]
         );
-        assert!(screen.session.is_none() && !screen.read_only);
-        // No hold toggle or next round on a stored view.
+        // Still shown, read-only, until the runner has it; no second "+3".
+        assert!(screen.read_only && screen.session.is_some());
+        assert!(widget_for(&screen, &Action::Extend(3)).is_none());
+
+        // The runner's first snapshot of it: the board is live.
+        let mut extended = store::read_session(&dir).unwrap();
+        extended.closed = false;
+        extended.rev += 1;
+        link.snapshots
+            .send(Snapshot {
+                link: Link::Live,
+                session: Some(Arc::new(extended)),
+                artifact_root: None,
+                generation: generation(&screen),
+            })
+            .unwrap();
+        screen.poll_live(&mut text);
+        assert!(!screen.read_only);
+        assert!(widget_for(&screen, &Action::SetHold(true)).is_some());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_refused_extension_keeps_the_stored_view() {
+        let root = temp_root("extend-refused");
+        let dir = stored_competition_of(&root, 1);
+        let (mut screen, link, mut text) = live_on(&root);
+        screen.handle_action(Action::OpenPast(dir.clone()), &mut text);
+        screen.handle_action(Action::Extend(1), &mut text);
+        // The runner could not open it: its notice, then its last snapshot.
+        link.notices
+            .send((
+                generation(&screen),
+                "コンペティションを続けられません: busy".into(),
+            ))
+            .unwrap();
+        link.snapshots
+            .send(Snapshot {
+                link: Link::Down("busy".into()),
+                session: None,
+                artifact_root: None,
+                generation: generation(&screen),
+            })
+            .unwrap();
+        screen.poll_live(&mut text);
+        assert!(screen.read_only);
+        assert_eq!(
+            screen.session.as_ref().map(|s| s.id.clone()),
+            Some(store::read_session(&dir).unwrap().id)
+        );
+        // It can be asked for again.
+        assert!(widget_for(&screen, &Action::Extend(1)).is_some());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_stored_view_of_a_log_in_use_offers_no_rounds() {
+        let root = temp_root("extend-busy");
+        let dir = stored_competition_of(&root, 1);
+        // The window that ran it still holds its log.
+        let (held, _) = Store::open(&dir).unwrap();
+        let (mut screen, _link, mut text) = live_on(&root);
+        assert!(
+            !actions(&screen)
+                .iter()
+                .any(|a| matches!(a, Action::ExtendPast(..)))
+        );
         screen.handle_action(Action::OpenPast(dir), &mut text);
-        assert!(widget_for(&screen, &Action::SetHold(true)).is_none());
+        assert!(screen.read_only);
+        assert!(widget_for(&screen, &Action::Extend(1)).is_none());
+        drop(held);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -2002,11 +2116,27 @@ mod tests {
         let (mut screen, link, mut text) = live_on(&root);
         let more = widget_for(&screen, &Action::ExtendPast(dir.clone(), 1)).expect("+1 row");
         click(&mut screen, more, &mut text);
-        assert_eq!(
-            commands(&link),
-            [Command::Leave, Command::ExtendStored { dir, by: 1 }]
-        );
+        assert_eq!(commands(&link), [Command::ExtendStored { dir, by: 1 }]);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A rematch takes the limit the competition last had (an extended
+    /// one included), within what the form takes (1 to 50).
+    #[test]
+    fn a_rematch_takes_the_last_limit_within_the_form() {
+        let with_limit = |max| {
+            let mut session = crate::demo::session();
+            session.max_rounds = Some(max);
+            start::Form::of_session(&session).max_rounds
+        };
+        assert_eq!(with_limit(12), 12);
+        assert_eq!(with_limit(53), 50);
+        let mut unlimited = crate::demo::session();
+        unlimited.max_rounds = None;
+        assert_eq!(
+            start::Form::of_session(&unlimited).max_rounds,
+            competition::model::types::DEFAULT_MAX_ROUNDS
+        );
     }
 
     #[test]

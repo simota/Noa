@@ -335,7 +335,10 @@ impl Store {
         let text = fs::read(&path)?;
         let parsed = parse(&text)?;
         let session = reduce::replay(&parsed.batches).map_err(StoreError::Reduce)?;
-        if !session.closed && may_run_unlocked(dir) {
+        // Finished logs too: a widget from before the lock keeps taking a
+        // manual winner on a finished competition, and this open is to
+        // write (an extension reopens it).
+        if may_run_unlocked(dir) {
             return Err(StoreError::MaybeRunning);
         }
         mark_locking(dir)?;
@@ -543,7 +546,7 @@ fn id_order(name: &str) -> (Millis, u32) {
 fn summarize(dir: &Path, session: &Session) -> Summary {
     Summary {
         busy: is_busy(dir),
-        maybe_running: !session.closed && may_run_unlocked(dir),
+        maybe_running: may_run_unlocked(dir),
         ..Summary::of(dir, session)
     }
 }
@@ -815,6 +818,33 @@ mod tests {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         spawner.join().unwrap();
         assert_eq!(failures, 0, "a starting child's hold counted as busy");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A log as widgets before round control wrote it (only the events
+    /// they knew), read the way a stored competition is: from the file.
+    #[test]
+    fn a_log_from_before_round_control_reads_as_it_did() {
+        let root = temp_root("before-round-control");
+        let dir = root.join("comp-1700000000000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(EVENTS_FILE),
+            include_str!("model/testdata/before-round-control.events.jsonl"),
+        )
+        .unwrap();
+        let session = read_session(&dir).unwrap();
+        assert!(session.closed);
+        assert!(!session.hold);
+        assert_eq!(session.winner, Some(PartId::new("claude-2")));
+        assert_eq!(session.max_rounds, Some(3));
+        assert_eq!(session.rounds.len(), 1);
+        // Closed by the judge before its limit: nothing to extend.
+        assert!(session.extendable().is_err());
+        let listed = list_sessions(&root, 10);
+        let summary = listed[0].summary.as_ref().unwrap();
+        assert!(summary.closed && !summary.extendable);
+        assert_eq!(summary.winner, Some(PartId::new("claude-2")));
         fs::remove_dir_all(&root).unwrap();
     }
 }

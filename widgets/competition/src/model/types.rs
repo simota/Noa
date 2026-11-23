@@ -646,10 +646,21 @@ impl Session {
     }
 
     pub fn round(&self, no: RoundNo) -> Option<&Round> {
+        if let Some(idx) = no.checked_sub(1).map(|i| i as usize)
+            && let Some(round) = self.rounds.get(idx)
+            && round.no == no
+        {
+            return Some(round);
+        }
         self.rounds.iter().find(|round| round.no == no)
     }
 
     pub fn round_mut(&mut self, no: RoundNo) -> Option<&mut Round> {
+        if let Some(idx) = no.checked_sub(1).map(|i| i as usize)
+            && self.rounds.get(idx).is_some_and(|round| round.no == no)
+        {
+            return self.rounds.get_mut(idx);
+        }
         self.rounds.iter_mut().find(|round| round.no == no)
     }
 
@@ -672,7 +683,12 @@ impl Session {
 
     /// Latest known score for `part`.
     pub fn latest_score(&self, part: &PartId) -> Option<u8> {
-        self.score_history(part).last().map(|(_, s)| *s)
+        self.rounds.iter().rev().find_map(|r| {
+            r.outcome
+                .as_ref()
+                .and_then(|o| o.evaluations.get(part))
+                .map(|ev| ev.score)
+        })
     }
 
     /// Latest ranking from the most recent judged round, or contestants in
@@ -837,5 +853,97 @@ mod tests {
         assert!(ArtifactKind::Html.is_visual());
         assert!(ArtifactKind::Svg.is_visual());
         assert!(!ArtifactKind::Code.is_visual());
+    }
+
+    #[test]
+    fn round_and_latest_score_handle_sequential_sparse_and_amended_rounds() {
+        let p = |id: &str, kind, role| Participant {
+            id: PartId::new(id),
+            kind,
+            role,
+            pane_id: None,
+            setup: Default::default(),
+        };
+        let claude = PartId::new("claude");
+        let codex = PartId::new("codex");
+        let make_round = |no: RoundNo, claude_score: Option<u8>| {
+            let outcome = claude_score.map(|score| {
+                let mut evaluations = BTreeMap::new();
+                evaluations.insert(
+                    claude.clone(),
+                    EntryEvaluation {
+                        score,
+                        strengths: String::new(),
+                        feedback: String::new(),
+                        evidence: Vec::new(),
+                        amended: None,
+                        breakdown: Vec::new(),
+                    },
+                );
+                JudgeOutput {
+                    overview: String::new(),
+                    evaluations,
+                    ranking: vec![claude.clone()],
+                    winner: None,
+                    final_verdict: None,
+                    close: false,
+                    amendments: Vec::new(),
+                    checklist: Vec::new(),
+                }
+            });
+            Round {
+                no,
+                kind: RoundKind::Blind,
+                phase: Phase::Closed,
+                started_at: u64::from(no),
+                briefs: Vec::new(),
+                submissions: BTreeMap::new(),
+                judge_brief: None,
+                outcome,
+            }
+        };
+        let mut s = Session {
+            id: SessionId::new("comp-t"),
+            request: "req".into(),
+            workdir: None,
+            max_rounds: None,
+            reveal_interval: 5,
+            rev: 1,
+            created_at: 0,
+            judge: p(JUDGE_ID, AgentKind::Claude, Role::Judge),
+            contestants: vec![
+                p("claude", AgentKind::Claude, Role::Contestant),
+                p("codex", AgentKind::Codex, Role::Contestant),
+            ],
+            messages: Vec::new(),
+            rounds: vec![
+                make_round(1, Some(72)),
+                make_round(2, None),
+                make_round(3, Some(85)),
+            ],
+            winner: None,
+            closed: false,
+        };
+        assert_eq!(s.round(0), None);
+        assert_eq!(s.round(1).map(|r| r.no), Some(1));
+        assert_eq!(s.round(3).map(|r| r.no), Some(3));
+        assert_eq!(s.round(4), None);
+        assert_eq!(s.latest_score(&claude), Some(85));
+        assert_eq!(s.latest_score(&codex), None);
+        s.round_mut(3)
+            .unwrap()
+            .outcome
+            .as_mut()
+            .unwrap()
+            .evaluations
+            .get_mut(&claude)
+            .unwrap()
+            .score = 88;
+        assert_eq!(s.latest_score(&claude), Some(88));
+        // Non-sequential round numbers must still be found via fallback.
+        s.rounds.push(make_round(10, Some(91)));
+        assert_eq!(s.round(10).map(|r| r.no), Some(10));
+        assert_eq!(s.round_mut(10).map(|r| r.no), Some(10));
+        assert_eq!(s.latest_score(&claude), Some(91));
     }
 }

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -71,7 +72,7 @@ pub enum Link {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     Session {
-        session: Box<Session>,
+        session: Arc<Session>,
         artifact_root: PathBuf,
     },
     Link(Link),
@@ -351,6 +352,8 @@ struct Runner<C: Connect, K: Clock> {
     check_notes: (Sender<String>, Receiver<String>),
     /// Cached per-snapshot file previews reused across `Effect::RefreshViewer`.
     viewer_cache: ViewerCache,
+    /// Headless Chrome path discovered lazily once per runner.
+    chrome: Option<Option<PathBuf>>,
 }
 
 impl<C: Connect, K: Clock> Runner<C, K> {
@@ -418,6 +421,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             link_state: Link::Connecting,
             check_notes: mpsc::channel(),
             viewer_cache: ViewerCache::new(),
+            chrome: None,
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
@@ -431,7 +435,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
 
     fn emit_session(&self) {
         self.emit(Update::Session {
-            session: Box::new(self.engine.session().clone()),
+            session: Arc::new(self.engine.session().clone()),
             artifact_root: self.engine.reply_dir(),
         });
     }
@@ -752,8 +756,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     fn deliver_sends(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
         let mut idx = 0;
         while idx < self.sends.len() {
-            let pending = self.sends[idx].clone();
-            if !in_play(self.engine.session(), pending.round, &pending.part) {
+            let round = self.sends[idx].round;
+            let spawns = self.sends[idx].spawns;
+            let queued_at = self.sends[idx].queued_at;
+            if !in_play(self.engine.session(), round, &self.sends[idx].part) {
                 self.sends.remove(idx);
                 continue;
             }
@@ -763,65 +769,69 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             if self
                 .watches
                 .iter()
-                .any(|w| w.round == pending.round && w.part == pending.part && w.path.exists())
+                .any(|w| w.round == round && w.part == self.sends[idx].part && w.path.exists())
             {
                 self.sends[idx].queued_at = now;
                 idx += 1;
                 continue;
             }
-            if !self.panes.contains_key(&pending.part) {
-                if pending.spawns >= MAX_SPAWNS {
-                    self.sends.remove(idx);
+            if !self.panes.contains_key(&self.sends[idx].part) {
+                if spawns >= MAX_SPAWNS {
+                    let removed = self.sends.remove(idx);
                     self.feed(Input::SendFailed {
-                        round: pending.round,
-                        part: pending.part,
+                        round: removed.round,
+                        part: removed.part,
                         error: "agent pane exited repeatedly".to_owned(),
                     })?;
                     continue;
                 }
+                let part = self.sends[idx].part.clone();
                 self.sends[idx].spawns += 1;
-                self.spawn_pane(conn, &pending.part)?;
+                self.spawn_pane(conn, &part)?;
                 idx += 1;
                 continue;
             }
             // Checked before the pane counts as ready from an earlier brief: a
             // retry or correction must wait for the agent's turn to end, and a
             // prompt from a later turn is the user's to answer.
-            if let Some(p) = self.panes.get_mut(&pending.part)
-                && (p.held() || p.busy())
-            {
-                p.ready = false;
-                p.quiet = None;
-            }
-            let pane = self.panes[&pending.part].clone();
-            if !pane.ready {
-                if self.try_ready(conn, &pending.part, now)? {
+            let ready = {
+                let p = self
+                    .panes
+                    .get_mut(&self.sends[idx].part)
+                    .expect("pane exists");
+                if p.held() || p.busy() {
+                    p.ready = false;
+                    p.quiet = None;
+                }
+                p.ready
+            };
+            if !ready {
+                let part = self.sends[idx].part.clone();
+                if self.try_ready(conn, &part, now)? {
                     // Ready now; send on this pass.
                 } else {
                     // `try_ready` drops a pane found gone; the next pass starts it again.
-                    let Some(pane_now) = self.panes.get(&pending.part) else {
+                    let Some(pane_now) = self.panes.get_mut(&part) else {
                         idx += 1;
                         continue;
                     };
                     if pane_now.held() {
-                        if !pane_now.told_held {
-                            if let Some(p) = self.panes.get_mut(&pending.part) {
-                                p.told_held = true;
-                            }
+                        let notify = !pane_now.told_held;
+                        pane_now.told_held = true;
+                        if notify {
                             self.notice(format!(
-                                "{} が確認プロンプトで待機中です（Noa のペインで許可してください）",
-                                pending.part
+                                "{part} が確認プロンプトで待機中です（Noa のペインで許可してください）"
                             ));
                         }
                         self.sends[idx].queued_at = now;
                     } else if pane_now.busy() {
                         // The time limit starts again once the turn ends.
                         self.sends[idx].queued_at = now;
-                    } else if now.saturating_sub(pending.queued_at) >= READY_LIMIT {
-                        self.sends.remove(idx);
+                    } else if now.saturating_sub(queued_at) >= READY_LIMIT {
+                        let removed = self.sends.remove(idx);
                         self.feed(Input::SendFailed {
-                            round: pending.round,
-                            part: pending.part,
+                            round: removed.round,
+                            part: removed.part,
                             error: "pane did not become ready in time".to_owned(),
                         })?;
                         continue;
@@ -830,46 +840,46 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     continue;
                 }
             }
-            let pane_id = self.panes[&pending.part].id;
-            match conn.type_text(pane_id, &pending.body, true) {
+            let pane_id = self.panes[&self.sends[idx].part].id;
+            match conn.type_text(pane_id, &self.sends[idx].body, true) {
                 Ok(()) => {
                     self.clock.sleep(SUBMIT_DELAY);
                     if let Err(e) = conn.type_text(pane_id, "\r", false) {
                         match e {
                             NoaError::PaneGone => {
-                                self.panes.remove(&pending.part);
+                                self.panes.remove(&self.sends[idx].part);
                                 idx += 1;
                                 continue;
                             }
                             other => return Err(link(other)),
                         }
                     }
-                    if let Some(p) = self.panes.get_mut(&pending.part) {
+                    if let Some(p) = self.panes.get_mut(&self.sends[idx].part) {
                         p.briefed = true;
                     }
-                    self.sends.remove(idx);
+                    let removed = self.sends.remove(idx);
                     let at = self.clock.now();
                     self.feed(Input::Sent {
-                        round: pending.round,
-                        part: pending.part,
+                        round: removed.round,
+                        part: removed.part,
                         at,
                     })?;
                 }
                 Err(NoaError::NotReady) => {
-                    if let Some(p) = self.panes.get_mut(&pending.part) {
+                    if let Some(p) = self.panes.get_mut(&self.sends[idx].part) {
                         p.ready = false;
                     }
                     idx += 1;
                 }
                 Err(NoaError::PaneGone) => {
-                    self.panes.remove(&pending.part);
+                    self.panes.remove(&self.sends[idx].part);
                     idx += 1;
                 }
                 Err(NoaError::Refused(why)) => {
-                    self.sends.remove(idx);
+                    let removed = self.sends.remove(idx);
                     self.feed(Input::SendFailed {
-                        round: pending.round,
-                        part: pending.part,
+                        round: removed.round,
+                        part: removed.part,
                         error: why,
                     })?;
                 }
@@ -880,30 +890,32 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     fn try_ready(&mut self, conn: &mut C::Conn, part: &PartId, now: Millis) -> Result<bool, Fail> {
-        let Some(pane) = self.panes.get(part).cloned() else {
-            return Ok(false);
-        };
-        if pane.reports_ready() {
-            if let Some(p) = self.panes.get_mut(part) {
-                p.ready = true;
+        let (pane_id, try_trust, skip_ready) = {
+            let Some(pane) = self.panes.get_mut(part) else {
+                return Ok(false);
+            };
+            if pane.reports_ready() {
+                pane.ready = true;
+                return Ok(true);
             }
-            return Ok(true);
-        }
+            let try_trust = self.engine.session().workdir.is_none()
+                && pane.is_claude_trust()
+                && pane.trust_keys < TRUST_KEYS_MAX;
+            (pane.id, try_trust, pane.held() || pane.busy())
+        };
         // Auto-trust Claude Code folder prompt only when running in our managed
         // competitions directory (never in a user's own repository).
-        if self.engine.session().workdir.is_none()
-            && pane.is_claude_trust()
-            && pane.trust_keys < TRUST_KEYS_MAX
-        {
-            let screen = conn.screen(pane.id).unwrap_or_default();
-            let can_press = match &pane.trust_screen {
-                None => true,
-                Some((prev, at)) => {
+        if try_trust {
+            let screen = conn.screen(pane_id).unwrap_or_default();
+            let can_press = self
+                .panes
+                .get(part)
+                .and_then(|p| p.trust_screen.as_ref())
+                .is_none_or(|(prev, at)| {
                     *prev != screen || now.saturating_sub(*at) >= TRUST_KEY_SHOWS_IN
-                }
-            };
+                });
             if can_press && screen.contains(CLAUDE_TRUST_YES) {
-                let _ = conn.type_text(pane.id, "\r", false);
+                let _ = conn.type_text(pane_id, "\r", false);
                 if let Some(p) = self.panes.get_mut(part) {
                     p.trust_keys += 1;
                     p.trust_screen = Some((screen, now));
@@ -911,12 +923,12 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 return Ok(false);
             }
         }
-        if pane.held() || pane.busy() {
+        if skip_ready {
             return Ok(false);
         }
-        match conn.paste_ready(pane.id) {
+        match conn.paste_ready(pane_id) {
             Ok(true) => {
-                let screen = conn.screen(pane.id).unwrap_or_default();
+                let screen = conn.screen(pane_id).unwrap_or_default();
                 if let Some(p) = self.panes.get_mut(part) {
                     match &p.quiet {
                         Some((prev, since)) if *prev == screen => {
@@ -1040,9 +1052,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     /// Starts the snapshot check on a submitted entry; see [`start_check`].
-    fn check_snapshot(&self, part: &PartId, snapshot: &Path, out: &Path) {
+    fn check_snapshot(&mut self, part: &PartId, snapshot: &Path, out: &Path) {
+        let chrome = self.chrome.get_or_insert_with(shots::find_chrome).clone();
         let notes = self.check_notes.0.clone();
-        if let Err(e) = start_check(part, snapshot, out, shots::find_chrome(), notes) {
+        if let Err(e) = start_check(part, snapshot, out, chrome, notes) {
             self.notice(format!("{part} のスナップショット確認に失敗しました: {e}"));
         }
     }
@@ -1148,6 +1161,10 @@ mod tests {
         spawned: usize,
         /// Panes that are gone by the time they are asked for a paste.
         gone_on_paste: bool,
+        rpc_panes: usize,
+        rpc_changes: usize,
+        rpc_paste_ready: usize,
+        rpc_screen: usize,
     }
 
     /// A fake Noa and clock sharing one world.
@@ -1218,12 +1235,15 @@ mod tests {
 
     impl Noa for Fake {
         fn panes(&mut self) -> Result<Vec<PaneView>, NoaError> {
-            let w = self.0.borrow();
+            let mut w = self.0.borrow_mut();
+            w.rpc_panes += 1;
             Ok(w.panes.iter().map(|(id, p)| Fake::view(*id, p)).collect())
         }
 
         fn changes(&mut self, _wait: Duration) -> Result<Option<Changes>, NoaError> {
-            Ok(self.0.borrow_mut().events.pop_front())
+            let mut w = self.0.borrow_mut();
+            w.rpc_changes += 1;
+            Ok(w.events.pop_front())
         }
 
         fn spawn(&mut self, _placement: Placement, spec: &PaneSpec) -> Result<u64, NoaError> {
@@ -1245,6 +1265,7 @@ mod tests {
 
         fn paste_ready(&mut self, pane: u64) -> Result<bool, NoaError> {
             let mut w = self.0.borrow_mut();
+            w.rpc_paste_ready += 1;
             if w.gone_on_paste {
                 w.panes.remove(&pane);
                 return Err(NoaError::PaneGone);
@@ -1253,6 +1274,7 @@ mod tests {
         }
 
         fn screen(&mut self, _pane: u64) -> Result<String, NoaError> {
+            self.0.borrow_mut().rpc_screen += 1;
             Ok("> ".to_owned())
         }
 
@@ -1500,5 +1522,46 @@ mod tests {
         assert_eq!(codex.unwrap(), "-m opus -c model_reasoning_effort=high");
         let plain = agent_argv(AgentKind::Agy, &AgentSetup::default());
         assert_eq!(run_under_csh(&plain, AgentKind::Agy).unwrap(), "");
+    }
+
+    #[test]
+    #[ignore = "perf probe: counts IPC calls per tick"]
+    fn probe_ipc_counts_per_tick() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let claude = fake.pane_of(":claude");
+        let codex = fake.pane_of(":codex");
+        fake.report(claude, "input", None);
+        fake.report(codex, "input", None);
+        for _ in 0..5 {
+            step(&mut runner, &mut conn);
+        }
+        assert_eq!(fake.pasted(claude), 1);
+        assert_eq!(fake.pasted(codex), 1);
+        let (startup_panes, startup_paste, startup_screen, startup_changes) = {
+            let w = fake.0.borrow();
+            (w.rpc_panes, w.rpc_paste_ready, w.rpc_screen, w.rpc_changes)
+        };
+        for _ in 0..100 {
+            step(&mut runner, &mut conn);
+        }
+        let (steady_panes, steady_paste, steady_screen, steady_changes) = {
+            let w = fake.0.borrow();
+            (
+                w.rpc_panes - startup_panes,
+                w.rpc_paste_ready - startup_paste,
+                w.rpc_screen - startup_screen,
+                w.rpc_changes - startup_changes,
+            )
+        };
+        println!(
+            "competition runner IPC counts:\n  \
+             startup (2 idle contestants): panes={startup_panes} paste_ready={startup_paste} screen={startup_screen} changes={startup_changes}\n  \
+             steady-state (100 ticks):     panes={steady_panes} paste_ready={steady_paste} screen={steady_screen} changes={steady_changes}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }

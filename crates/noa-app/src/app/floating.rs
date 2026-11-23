@@ -195,6 +195,7 @@ impl FloatGeometry {
             window: self.window,
             panes: &self.panes,
             zoomed: self.zoomed,
+            pane_anchors_hidden: false,
         }
     }
 }

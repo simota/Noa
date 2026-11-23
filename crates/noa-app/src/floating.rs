@@ -133,6 +133,11 @@ pub struct FloatLayout<'a> {
     /// Every split pane of the tab with its laid-out rect.
     pub panes: &'a [(PaneId, Rect)],
     pub zoomed: Option<PaneId>,
+    /// A split-zoom transition is live: pane-anchored floats are hidden for
+    /// every pane (they are overlay groups with no scissor and no alpha, so
+    /// they would sit outside the clip or over fading panes). Tab- and
+    /// window-anchored floats are unaffected.
+    pub pane_anchors_hidden: bool,
 }
 
 impl FloatLayout<'_> {
@@ -149,7 +154,9 @@ impl FloatLayout<'_> {
 
     fn anchor_shown(&self, anchor: FloatAnchor) -> bool {
         match anchor {
-            FloatAnchor::Pane(pane) => self.zoomed.is_none_or(|zoomed| zoomed == pane),
+            FloatAnchor::Pane(pane) => {
+                !self.pane_anchors_hidden && self.zoomed.is_none_or(|zoomed| zoomed == pane)
+            }
             FloatAnchor::Tab | FloatAnchor::Window => true,
         }
     }
@@ -1093,6 +1100,9 @@ fn stowed_rect(anchor: Rect) -> Rect {
 }
 
 fn pane_under(point: Point, layout: &FloatLayout<'_>) -> Option<PaneId> {
+    if layout.pane_anchors_hidden {
+        return None;
+    }
     let shown = |pane: &PaneId| layout.zoomed.is_none_or(|zoomed| zoomed == *pane);
     layout
         .panes

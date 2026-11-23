@@ -16,6 +16,7 @@ mod resize;
 mod tests;
 mod types;
 mod zoom;
+mod zoom_anim;
 
 pub use close::{CloseOutcome, close_pane};
 pub use commands::{ImeOp, focus_switch_plan, resolve_pane_command_target};
@@ -36,4 +37,8 @@ pub use types::{
 pub use zoom::{
     ZoomCloseOutcome, ZoomDecision, ZoomMoveOutcome, ZoomSwapOutcome, close_pane_with_zoom,
     move_pane_with_zoom, swap_pane_with_zoom, zoom_decision, zoom_resize_targets, zoom_toggle,
+};
+pub use zoom_anim::{
+    SplitZoomAnim, ZoomFrame, draw_zoomed, grid_zoomed, lerp_rect, live_split_zoom_anim,
+    next_split_zoom_anim, pane_mapping_rect, transition_hit_layout, zoom_frame,
 };

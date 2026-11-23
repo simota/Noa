@@ -8085,7 +8085,13 @@ mod tests {
             all.contains("結果  24 バイト · 0 秒前に書かれました · r で表示"),
             "{all}"
         );
-        assert!(all.contains(&result.to_string_lossy().to_string()), "{all}");
+        // The path wraps where it is longer than the pane is wide (the temp
+        // dir's length varies): join the wrapped lines before looking.
+        let joined: String = all.lines().map(str::trim).collect();
+        assert!(
+            joined.contains(&result.to_string_lossy().to_string()),
+            "{all}"
+        );
         // The screen is still there below.
         assert!(all.contains("画面"), "{all}");
         for (cols, rows) in [(80, 30), (80, 20), (40, 16), (MIN_COLS, MIN_ROWS)] {

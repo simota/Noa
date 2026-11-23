@@ -1037,6 +1037,18 @@ impl App {
                     let r = render_pane_rect(*rect);
                     crate::macos_overlay::PaneRectPt::from_px(r.x, r.y, r.w, r.h, scale)
                 });
+            let had_modal = state.native_overlays.has_modal();
+            let has_modal = focused_rect.is_some()
+                && (palette_card.is_some()
+                    || send_selection_picker_card.is_some()
+                    || remote_ui_card.is_some()
+                    || theme_settings_card.is_some()
+                    || process_monitor_card.is_some()
+                    || dialog_card.is_some()
+                    || title_prompt_input.is_some());
+            if has_modal {
+                state.ax.set_modal_open(true);
+            }
             crate::macos_overlay::sync_command_palette(
                 &state.window,
                 &mut state.native_overlays,
@@ -1075,6 +1087,9 @@ impl App {
                 title_prompt_input.as_deref().zip(focused_rect),
                 &colors,
             );
+            if had_modal && !state.native_overlays.has_modal() {
+                state.ax.restore_focus_after_modal();
+            }
             let toast_now = Instant::now();
             let toast_text = state
                 .resize_overlay

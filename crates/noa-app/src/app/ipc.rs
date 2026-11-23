@@ -289,6 +289,8 @@ impl App {
                     state.group.0,
                     key.0,
                     attachable,
+                    self.session_store
+                        .pending_agent_kind(Self::session_card_id(window_id, pane_id)),
                     surface_facts(surface),
                 ));
                 terminals.insert(key, surface.terminal.clone());

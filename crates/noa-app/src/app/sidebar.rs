@@ -9,10 +9,10 @@
 //! (NFR-1/AC-17).
 
 use super::*;
-use crate::session_store::{SessionCard, SessionDelta, StatusDot, status_dot};
+use crate::session_store::{AgentKind, SessionCard, SessionDelta, StatusDot, status_dot};
 use crate::sidebar::{
-    AgentKind, CARD_MENU_ITEMS, CardLines, CardRects, SidebarMetrics, SidebarRect,
-    agent_display_name, card_lines, classify_agent, icon_glyph,
+    CARD_MENU_ITEMS, CardLines, CardRects, SidebarMetrics, SidebarRect, agent_display_name,
+    card_lines, icon_glyph,
 };
 use noa_core::Rgb;
 use std::collections::HashSet;
@@ -100,8 +100,8 @@ const AGENT_AGY_FG: Rgb = Rgb::new(0x42, 0x85, 0xf4); // Google blue
 /// generic process keeps the busy/idle dot semantics (green `✳` while running,
 /// dim `❯` while idle). Glyphs: `✳` (proven), `◆` for Codex (a hexagon risks
 /// tofu), `✦` for agy (a distinct four-point star; `★` is the safe fallback).
-fn process_badge(process: &str, busy: bool) -> (String, Rgb) {
-    match classify_agent(process) {
+fn process_badge(kind: AgentKind, process: &str, busy: bool) -> (String, Rgb) {
+    match kind {
         AgentKind::ClaudeCode => (
             format!("✳ {}", agent_display_name(AgentKind::ClaudeCode, process)),
             AGENT_CLAUDE_FG,

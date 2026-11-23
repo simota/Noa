@@ -1,7 +1,8 @@
 use crate::macos_overlay::model::{
-    OverlayColors, PaneRectPt, ProcessMonitorViewModel, SETTINGS_DESCRIPTION_H, SETTINGS_FOOTER_H,
-    SETTINGS_ROW_H, SETTINGS_SEARCH_H, SETTINGS_TOP, THEME_FILTER_TOP, THEME_LIST_TOP, THEME_ROW_H,
-    ThemeSettingsLayout, ThemeSettingsViewModel, Tone, overlay_scroll_window,
+    ModalAxActions, OverlayColors, PaneRectPt, ProcessMonitorViewModel, SETTINGS_DESCRIPTION_H,
+    SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_H, SETTINGS_TOP, THEME_FILTER_TOP,
+    THEME_LIST_TOP, THEME_ROW_H, ThemeSettingsLayout, ThemeSettingsViewModel, Tone, format_ax_item,
+    overlay_scroll_window, process_monitor_row_ax_label, theme_row_ax_label,
 };
 use crate::theme_settings::{Liveness, ThemeSettingsMode};
 use noa_render::{CommandPaletteSnapshot, ConfirmDialogSnapshot, PaletteRow};
@@ -10,6 +11,30 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
 use winit::window::Window;
+
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {
+    static NSAccessibilityFocusedUIElementChangedNotification: *const AnyObject;
+    static NSAccessibilityLayoutChangedNotification: *const AnyObject;
+    static NSAccessibilityAnnouncementRequestedNotification: *const AnyObject;
+    static NSAccessibilityAnnouncementKey: *const AnyObject;
+    static NSAccessibilityPriorityKey: *const AnyObject;
+    static NSAccessibilityGroupRole: *const AnyObject;
+    static NSAccessibilityDialogSubrole: *const AnyObject;
+    static NSAccessibilityTextFieldRole: *const AnyObject;
+    static NSAccessibilityRowRole: *const AnyObject;
+
+    fn NSAccessibilityPostNotification(element: *mut AnyObject, notification: *const AnyObject);
+    fn NSAccessibilityPostNotificationWithUserInfo(
+        element: *mut AnyObject,
+        notification: *const AnyObject,
+        user_info: *mut AnyObject,
+    );
+}
+
+// `NSAccessibilityPriorityLevel` (AppKit/NSAccessibilityConstants.h).
+const AX_PRIORITY_MEDIUM: isize = 50;
+const AX_PRIORITY_HIGH: isize = 90;
 
 // NSVisualEffectView constants (ABI-stable enum values).
 const MATERIAL_POPOVER: isize = 6;
@@ -35,6 +60,16 @@ const ID_TITLE_PROMPT: &str = "noa.native-overlay.title-prompt";
 const ID_TOAST: &str = "noa.native-overlay.toast";
 const ID_SCRATCH_BADGE: &str = "noa.native-overlay.scratch-badge";
 const ID_CHILD_EXITED: &str = "noa.native-overlay.child-exited";
+
+/// Modal overlay identifiers in focus-fallback priority order (confirm and
+/// title prompt sit above the workspace overlays).
+const MODAL_OVERLAY_IDS: &[&str] = &[
+    ID_CONFIRM,
+    ID_TITLE_PROMPT,
+    ID_PALETTE,
+    ID_THEME,
+    ID_PROCESS_MONITOR,
+];
 
 /// Palette metrics (points). The widths/row heights the IME caret anchor
 /// also needs live in `model.rs` so the two can't drift.
@@ -102,6 +137,204 @@ unsafe fn remove_subview(view: *mut AnyObject, identifier: &str) {
         let subview = find_subview(view, identifier);
         if !subview.is_null() {
             let _: () = msg_send![subview, removeFromSuperview];
+        }
+    }
+}
+
+unsafe fn post_ax_notification(element: *mut AnyObject, notification: *const AnyObject) {
+    if !element.is_null() && !notification.is_null() {
+        unsafe {
+            NSAccessibilityPostNotification(element, notification);
+        }
+    }
+}
+
+/// Ask VoiceOver (or any active AX client) to speak `text`. Posted on
+/// `NSApp` per `NSAccessibilityConstants.h`, falling back to
+/// `fallback_element` if `sharedApplication` is unavailable.
+unsafe fn post_ax_announcement(fallback_element: *mut AnyObject, text: &str, high_priority: bool) {
+    if text.is_empty() {
+        return;
+    }
+    unsafe {
+        if NSAccessibilityAnnouncementRequestedNotification.is_null()
+            || NSAccessibilityAnnouncementKey.is_null()
+            || NSAccessibilityPriorityKey.is_null()
+        {
+            return;
+        }
+        let (Some(dict_class), Some(num_class)) = (
+            AnyClass::get(c"NSMutableDictionary"),
+            AnyClass::get(c"NSNumber"),
+        ) else {
+            return;
+        };
+        let dict: *mut AnyObject = msg_send![dict_class, dictionary];
+        if dict.is_null() {
+            return;
+        }
+        let text_ns = NSString::from_str(text);
+        let priority = if high_priority {
+            AX_PRIORITY_HIGH
+        } else {
+            AX_PRIORITY_MEDIUM
+        };
+        let prio_ns: *mut AnyObject = msg_send![num_class, numberWithInteger: priority];
+        if prio_ns.is_null() {
+            return;
+        }
+        let _: () = msg_send![dict, setObject: &*text_ns, forKey: NSAccessibilityAnnouncementKey];
+        let _: () = msg_send![dict, setObject: prio_ns, forKey: NSAccessibilityPriorityKey];
+        let target = AnyClass::get(c"NSApplication")
+            .map(|cls| -> *mut AnyObject { msg_send![cls, sharedApplication] })
+            .filter(|app| !app.is_null())
+            .unwrap_or(fallback_element);
+        if !target.is_null() {
+            NSAccessibilityPostNotificationWithUserInfo(
+                target,
+                NSAccessibilityAnnouncementRequestedNotification,
+                dict,
+            );
+        }
+    }
+}
+
+/// Expose a modal overlay root as an `AXGroup` / `AXDialog` modal container
+/// with `label` as its accessible name and title.
+unsafe fn apply_modal_ax(root: *mut AnyObject, label: &str) {
+    if root.is_null() {
+        return;
+    }
+    unsafe {
+        let _: () = msg_send![root, setAccessibilityElement: true];
+        if !NSAccessibilityGroupRole.is_null() {
+            let _: () = msg_send![root, setAccessibilityRole: NSAccessibilityGroupRole];
+        }
+        if !NSAccessibilityDialogSubrole.is_null() {
+            let _: () = msg_send![root, setAccessibilitySubrole: NSAccessibilityDialogSubrole];
+        }
+        let _: () = msg_send![root, setAccessibilityModal: true];
+        let label_ns = NSString::from_str(label);
+        let _: () = msg_send![root, setAccessibilityLabel: &*label_ns];
+        let _: () = msg_send![root, setAccessibilityTitle: &*label_ns];
+    }
+}
+
+/// Expose a display-only input label (`NSTextField`) as an `AXTextField`
+/// carrying the clean `value` (without the visual caret glyph) on both the
+/// control and its cell.
+unsafe fn apply_text_field_ax(
+    field: *mut AnyObject,
+    label: &str,
+    value: &str,
+    placeholder: Option<&str>,
+) {
+    if field.is_null() {
+        return;
+    }
+    unsafe {
+        let _: () = msg_send![field, setAccessibilityElement: true];
+        if !NSAccessibilityTextFieldRole.is_null() {
+            let _: () = msg_send![field, setAccessibilityRole: NSAccessibilityTextFieldRole];
+        }
+        let label_ns = NSString::from_str(label);
+        let _: () = msg_send![field, setAccessibilityLabel: &*label_ns];
+        let value_ns = NSString::from_str(value);
+        let _: () = msg_send![field, setAccessibilityValue: &*value_ns];
+        if let Some(placeholder) = placeholder {
+            let placeholder_ns = NSString::from_str(placeholder);
+            let _: () = msg_send![field, setAccessibilityPlaceholderValue: &*placeholder_ns];
+        }
+        let cell: *mut AnyObject = msg_send![field, cell];
+        if !cell.is_null() {
+            if !NSAccessibilityTextFieldRole.is_null() {
+                let _: () = msg_send![cell, setAccessibilityRole: NSAccessibilityTextFieldRole];
+            }
+            let _: () = msg_send![cell, setAccessibilityValue: &*value_ns];
+            if let Some(placeholder) = placeholder {
+                let placeholder_ns = NSString::from_str(placeholder);
+                let _: () = msg_send![cell, setAccessibilityPlaceholderValue: &*placeholder_ns];
+            }
+        }
+    }
+}
+
+/// A layer-backed `NSView` representing one selectable list row (`AXRow`
+/// with `AXSelected` and an accessible label).
+unsafe fn make_ax_row(frame: NSRect, label: &str, selected: bool) -> *mut AnyObject {
+    unsafe {
+        let row = make_view(frame);
+        if row.is_null() {
+            return row;
+        }
+        let _: () = msg_send![row, setAccessibilityElement: true];
+        if !NSAccessibilityRowRole.is_null() {
+            let _: () = msg_send![row, setAccessibilityRole: NSAccessibilityRowRole];
+        }
+        let label_ns = NSString::from_str(label);
+        let _: () = msg_send![row, setAccessibilityLabel: &*label_ns];
+        let _: () = msg_send![row, setAccessibilitySelected: selected];
+        row
+    }
+}
+
+/// Mark `root` as the AX-focused modal in `view` (clearing `AXFocused` on
+/// any lower modal) and post `AXFocusedUIElementChanged`.
+unsafe fn focus_modal_root(view: *mut AnyObject, root: *mut AnyObject) {
+    if root.is_null() {
+        return;
+    }
+    unsafe {
+        for &id in MODAL_OVERLAY_IDS {
+            let other = find_subview(view, id);
+            if !other.is_null() && other != root {
+                let _: () = msg_send![other, setAccessibilityFocused: false];
+            }
+        }
+        let _: () = msg_send![root, setAccessibilityFocused: true];
+        post_ax_notification(root, NSAccessibilityFocusedUIElementChangedNotification);
+    }
+}
+
+/// Apply the accessibility notifications planned for a mounted modal card.
+unsafe fn apply_modal_ax_actions(
+    view: *mut AnyObject,
+    root: *mut AnyObject,
+    actions: &ModalAxActions,
+) {
+    unsafe {
+        if actions.layout_changed {
+            post_ax_notification(view, NSAccessibilityLayoutChangedNotification);
+        }
+        if actions.focus_modal {
+            focus_modal_root(view, root);
+        }
+        if let Some((text, high_priority)) = &actions.announcement {
+            post_ax_announcement(root, text, *high_priority);
+        }
+    }
+}
+
+/// Remove a modal subview, notify AX clients of the layout change, and if
+/// another modal remains mounted underneath, move AX focus to it.
+unsafe fn remove_modal_subview(view: *mut AnyObject, identifier: &str, actions: &ModalAxActions) {
+    unsafe {
+        let subview = find_subview(view, identifier);
+        if !subview.is_null() {
+            let _: () = msg_send![subview, setAccessibilityFocused: false];
+            let _: () = msg_send![subview, removeFromSuperview];
+        }
+        if actions.layout_changed {
+            post_ax_notification(view, NSAccessibilityLayoutChangedNotification);
+        }
+        if !subview.is_null() {
+            for &id in MODAL_OVERLAY_IDS {
+                let remaining = find_subview(view, id);
+                if !remaining.is_null() {
+                    focus_modal_root(view, remaining);
+                    break;
+                }
+            }
         }
     }
 }
@@ -357,6 +590,7 @@ unsafe fn card_for(
     material: isize,
     colors: &OverlayColors,
     radius: f64,
+    modal_label: Option<&str>,
 ) -> (*mut AnyObject, *mut AnyObject) {
     unsafe {
         let root = find_subview(view, identifier);
@@ -367,6 +601,9 @@ unsafe fn card_for(
                 let _: () = msg_send![root, setFrame: frame_in_view(view, pane)];
                 if scrim {
                     tint_layer(root, ns_color([0.0, 0.0, 0.0, 1.0], SCRIM_ALPHA), 0.0);
+                }
+                if let Some(label) = modal_label {
+                    apply_modal_ax(root, label);
                 }
                 let _: () = msg_send![host, setFrame: card_frame];
                 let bounds = NSRect::new(NSPoint::new(0.0, 0.0), card_frame.size);
@@ -379,7 +616,7 @@ unsafe fn card_for(
             // build below (shouldn't happen) — discard and rebuild fresh.
             let _: () = msg_send![root, removeFromSuperview];
         }
-        let root = make_modal_root(view, identifier, pane, scrim);
+        let root = make_modal_root(view, identifier, pane, scrim, modal_label);
         if root.is_null() {
             return (std::ptr::null_mut(), std::ptr::null_mut());
         }
@@ -581,14 +818,15 @@ unsafe fn make_spans_label(
     }
 }
 
-/// The full-pane modal root: scrim + identifier, added to the content
-/// view. Returns `(root, pane_h_pt)`; children are laid out in the root's
+/// The full-pane modal root: scrim + identifier + optional `AXDialog`
+/// semantics, added to the content view. Children are laid out in the root's
 /// unflipped coordinates via [`from_top`].
 unsafe fn make_modal_root(
     view: *mut AnyObject,
     identifier: &str,
     pane: PaneRectPt,
     scrim: bool,
+    modal_label: Option<&str>,
 ) -> *mut AnyObject {
     unsafe {
         let frame = frame_in_view(view, pane);
@@ -600,6 +838,9 @@ unsafe fn make_modal_root(
         let _: () = msg_send![root, setIdentifier: &*ident];
         if scrim {
             tint_layer(root, ns_color([0.0, 0.0, 0.0, 1.0], SCRIM_ALPHA), 0.0);
+        }
+        if let Some(label) = modal_label {
+            apply_modal_ax(root, label);
         }
         let _: () = msg_send![view, addSubview: root];
         release_owned(root);
@@ -615,6 +856,7 @@ pub(in crate::macos_overlay) fn rebuild_palette(
     window: &Window,
     model: Option<(&CommandPaletteSnapshot, PaneRectPt)>,
     colors: &OverlayColors,
+    ax: &ModalAxActions,
 ) {
     let view = content_view(window);
     if view.is_null() {
@@ -622,7 +864,7 @@ pub(in crate::macos_overlay) fn rebuild_palette(
     }
     unsafe {
         let Some((snap, pane)) = model else {
-            remove_subview(view, ID_PALETTE);
+            remove_modal_subview(view, ID_PALETTE, ax);
             return;
         };
 
@@ -649,6 +891,7 @@ pub(in crate::macos_overlay) fn rebuild_palette(
             MATERIAL_POPOVER,
             colors,
             CARD_RADIUS,
+            Some("Command Palette"),
         );
         if root.is_null() || effect.is_null() {
             return;
@@ -698,6 +941,12 @@ pub(in crate::macos_overlay) fn rebuild_palette(
             make_match_label(&text, &[caret_pos], 15.0, fg, accent, query_frame)
         };
         if !query_label.is_null() {
+            apply_text_field_ax(
+                query_label,
+                "Command Palette",
+                &snap.query,
+                Some("Type a command\u{2026}"),
+            );
             let _: () = msg_send![effect, addSubview: query_label];
         }
         if let Some(counter) = counter {
@@ -743,88 +992,94 @@ pub(in crate::macos_overlay) fn rebuild_palette(
                 set_alignment(label, ALIGN_CENTER);
                 let _: () = msg_send![effect, addSubview: label];
             }
-            return;
-        }
-
-        let mut y_top = QUERY_ROW_H + 1.0 + LIST_PAD_V;
-        for (i, row) in visible.iter().enumerate() {
-            match row {
-                PaletteRow::Header { label } => {
-                    let header = make_label(
-                        &label.to_uppercase(),
-                        system_font(10.5, WEIGHT_SEMIBOLD),
-                        muted,
-                        NSRect::new(
-                            NSPoint::new(
-                                CARD_PAD_H,
-                                from_top(card_h, y_top + HEADER_ROW_H - 16.0, 13.0),
-                            ),
-                            NSSize::new(card_w - CARD_PAD_H * 2.0, 13.0),
-                        ),
-                    );
-                    if !header.is_null() {
-                        let _: () = msg_send![effect, addSubview: header];
-                    }
-                    y_top += HEADER_ROW_H;
-                }
-                PaletteRow::Entry {
-                    title,
-                    hint,
-                    match_positions,
-                    enabled,
-                } => {
-                    let selected = offset + i == snap.selected;
-                    if selected {
-                        let bg = make_view(NSRect::new(
-                            NSPoint::new(8.0, from_top(card_h, y_top, ENTRY_ROW_H)),
-                            NSSize::new(card_w - 16.0, ENTRY_ROW_H),
-                        ));
-                        if !bg.is_null() {
-                            tint_layer(bg, ns_color(colors.selected_bg, 1.0), 6.0);
-                            let _: () = msg_send![effect, addSubview: bg];
-                            release_owned(bg);
-                        }
-                    }
-                    let hint_w = if hint.is_some() { 110.0 } else { 0.0 };
-                    let title_frame = NSRect::new(
-                        NSPoint::new(CARD_PAD_H, from_top(card_h, y_top + 5.0, 17.0)),
-                        NSSize::new(card_w - CARD_PAD_H * 2.0 - hint_w, 17.0),
-                    );
-                    let title_fg = if *enabled { fg } else { muted };
-                    let match_accent = if *enabled { accent } else { muted };
-                    let title_label = make_match_label(
-                        title,
-                        match_positions,
-                        13.0,
-                        title_fg,
-                        match_accent,
-                        title_frame,
-                    );
-                    if !title_label.is_null() {
-                        let _: () = msg_send![effect, addSubview: title_label];
-                    }
-                    if let Some(hint) = hint {
-                        let label = make_label(
-                            hint,
-                            system_font(12.0, WEIGHT_REGULAR),
+        } else {
+            let mut y_top = QUERY_ROW_H + 1.0 + LIST_PAD_V;
+            for (i, row) in visible.iter().enumerate() {
+                match row {
+                    PaletteRow::Header { label } => {
+                        let header = make_label(
+                            &label.to_uppercase(),
+                            system_font(10.5, WEIGHT_SEMIBOLD),
                             muted,
                             NSRect::new(
                                 NSPoint::new(
-                                    card_w - CARD_PAD_H - hint_w,
-                                    from_top(card_h, y_top + 6.0, 15.0),
+                                    CARD_PAD_H,
+                                    from_top(card_h, y_top + HEADER_ROW_H - 16.0, 13.0),
                                 ),
-                                NSSize::new(hint_w, 15.0),
+                                NSSize::new(card_w - CARD_PAD_H * 2.0, 13.0),
                             ),
                         );
-                        if !label.is_null() {
-                            set_alignment(label, ALIGN_RIGHT);
-                            let _: () = msg_send![effect, addSubview: label];
+                        if !header.is_null() {
+                            let _: () = msg_send![effect, addSubview: header];
                         }
+                        y_top += HEADER_ROW_H;
                     }
-                    y_top += ENTRY_ROW_H;
+                    PaletteRow::Entry {
+                        title,
+                        hint,
+                        match_positions,
+                        enabled,
+                    } => {
+                        let selected = offset + i == snap.selected;
+                        let row_w = card_w - 16.0;
+                        let row_view = make_ax_row(
+                            NSRect::new(
+                                NSPoint::new(8.0, from_top(card_h, y_top, ENTRY_ROW_H)),
+                                NSSize::new(row_w, ENTRY_ROW_H),
+                            ),
+                            &format_ax_item(title, hint.as_deref()),
+                            selected,
+                        );
+                        if selected && !row_view.is_null() {
+                            tint_layer(row_view, ns_color(colors.selected_bg, 1.0), 6.0);
+                        }
+                        let hint_w = if hint.is_some() { 110.0 } else { 0.0 };
+                        let title_frame = NSRect::new(
+                            NSPoint::new(CARD_PAD_H - 8.0, from_top(ENTRY_ROW_H, 5.0, 17.0)),
+                            NSSize::new(card_w - CARD_PAD_H * 2.0 - hint_w, 17.0),
+                        );
+                        let title_fg = if *enabled { fg } else { muted };
+                        let match_accent = if *enabled { accent } else { muted };
+                        let title_label = make_match_label(
+                            title,
+                            match_positions,
+                            13.0,
+                            title_fg,
+                            match_accent,
+                            title_frame,
+                        );
+                        let container = if row_view.is_null() { effect } else { row_view };
+                        if !title_label.is_null() {
+                            let _: () = msg_send![container, addSubview: title_label];
+                        }
+                        if let Some(hint) = hint {
+                            let label = make_label(
+                                hint,
+                                system_font(12.0, WEIGHT_REGULAR),
+                                muted,
+                                NSRect::new(
+                                    NSPoint::new(
+                                        row_w - (CARD_PAD_H - 8.0) - hint_w,
+                                        from_top(ENTRY_ROW_H, 6.0, 15.0),
+                                    ),
+                                    NSSize::new(hint_w, 15.0),
+                                ),
+                            );
+                            if !label.is_null() {
+                                set_alignment(label, ALIGN_RIGHT);
+                                let _: () = msg_send![container, addSubview: label];
+                            }
+                        }
+                        if !row_view.is_null() {
+                            let _: () = msg_send![effect, addSubview: row_view];
+                            release_owned(row_view);
+                        }
+                        y_top += ENTRY_ROW_H;
+                    }
                 }
             }
         }
+        apply_modal_ax_actions(view, root, ax);
     }
 }
 
@@ -836,6 +1091,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
     window: &Window,
     model: Option<(ThemeSettingsViewModel, PaneRectPt)>,
     colors: &OverlayColors,
+    ax: &ModalAxActions,
 ) {
     let view = content_view(window);
     if view.is_null() {
@@ -843,7 +1099,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
     }
     unsafe {
         let Some((vm, pane)) = model else {
-            remove_subview(view, ID_THEME);
+            remove_modal_subview(view, ID_THEME, ax);
             return;
         };
 
@@ -894,6 +1150,10 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
             ),
             NSSize::new(card_w, card_h),
         );
+        let title_text = match vm.mode {
+            ThemeSettingsMode::Theme => "Theme",
+            ThemeSettingsMode::Settings => "Settings",
+        };
         let (root, effect) = card_for(
             view,
             ID_THEME,
@@ -903,6 +1163,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
             MATERIAL_POPOVER,
             colors,
             CARD_RADIUS,
+            Some(title_text),
         );
         if root.is_null() || effect.is_null() {
             return;
@@ -914,10 +1175,6 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
         let danger = ns_color(colors.danger, 1.0);
 
         // Title row + save badge.
-        let title_text = match vm.mode {
-            ThemeSettingsMode::Theme => "Theme",
-            ThemeSettingsMode::Settings => "Settings",
-        };
         let title = make_label(
             title_text,
             system_font(15.0, WEIGHT_SEMIBOLD),
@@ -991,6 +1248,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                     ),
                 );
                 if !filter.is_null() {
+                    apply_text_field_ax(filter, "Filter themes", &vm.filter, None);
                     let _: () = msg_send![effect, addSubview: filter];
                 }
                 let match_count = make_label(
@@ -1107,16 +1365,17 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                     .enumerate()
                 {
                     let y_top = list_top + i as f64 * row_h;
-                    if *highlighted {
-                        let bg = make_view(NSRect::new(
-                            NSPoint::new(pad - 8.0, from_top(card_h, y_top, row_h)),
+                    let row_x = pad - 8.0;
+                    let row_view = make_ax_row(
+                        NSRect::new(
+                            NSPoint::new(row_x, from_top(card_h, y_top, row_h)),
                             NSSize::new(col_split - pad, row_h),
-                        ));
-                        if !bg.is_null() {
-                            tint_layer(bg, ns_color(colors.selected_bg, 1.0), 6.0);
-                            let _: () = msg_send![effect, addSubview: bg];
-                            release_owned(bg);
-                        }
+                        ),
+                        &theme_row_ax_label(name, *favorite),
+                        *highlighted,
+                    );
+                    if *highlighted && !row_view.is_null() {
+                        tint_layer(row_view, ns_color(colors.selected_bg, 1.0), 6.0);
                     }
                     // R-29 (§4): a star only on favorited rows, at the row's
                     // right end — the name label's width shrinks to leave
@@ -1139,12 +1398,13 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                             fg
                         },
                         NSRect::new(
-                            NSPoint::new(pad, from_top(card_h, y_top + 4.0, 17.0)),
+                            NSPoint::new(pad - row_x, from_top(row_h, 4.0, 17.0)),
                             NSSize::new(col_split - pad - 12.0 - star_w, 17.0),
                         ),
                     );
+                    let container = if row_view.is_null() { effect } else { row_view };
                     if !label.is_null() {
-                        let _: () = msg_send![effect, addSubview: label];
+                        let _: () = msg_send![container, addSubview: label];
                     }
                     if *favorite {
                         let star = make_label(
@@ -1153,15 +1413,19 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                             accent,
                             NSRect::new(
                                 NSPoint::new(
-                                    col_split - pad - star_w,
-                                    from_top(card_h, y_top + 4.0, 17.0),
+                                    col_split - pad - star_w - row_x,
+                                    from_top(row_h, 4.0, 17.0),
                                 ),
                                 NSSize::new(star_w, 17.0),
                             ),
                         );
                         if !star.is_null() {
-                            let _: () = msg_send![effect, addSubview: star];
+                            let _: () = msg_send![container, addSubview: star];
                         }
+                    }
+                    if !row_view.is_null() {
+                        let _: () = msg_send![effect, addSubview: row_view];
+                        release_owned(row_view);
                     }
                 }
 
@@ -1347,6 +1611,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                         ),
                     );
                     if !search_line.is_null() {
+                        apply_text_field_ax(search_line, "Search settings", &vm.search_query, None);
                         let _: () = msg_send![effect, addSubview: search_line];
                     }
                 }
@@ -1391,22 +1656,24 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                         // contrasts its surface, which is the closest
                         // available guarantee here.
                         let flashing = row.selected && vm.reset_flash;
-                        if row.selected {
-                            let bg = make_view(NSRect::new(
-                                NSPoint::new(pad - 8.0, from_top(card_h, y_top, srow_h)),
+                        let row_x = pad - 8.0;
+                        let row_view = make_ax_row(
+                            NSRect::new(
+                                NSPoint::new(row_x, from_top(card_h, y_top, srow_h)),
                                 NSSize::new(card_w - pad * 2.0 + 16.0, srow_h),
-                            ));
-                            if !bg.is_null() {
-                                let bg_color = if flashing {
-                                    colors.accent
-                                } else {
-                                    colors.selected_bg
-                                };
-                                tint_layer(bg, ns_color(bg_color, 1.0), 6.0);
-                                let _: () = msg_send![effect, addSubview: bg];
-                                release_owned(bg);
-                            }
+                            ),
+                            &format_ax_item(&row.label, Some(&row.value)),
+                            row.selected,
+                        );
+                        if row.selected && !row_view.is_null() {
+                            let bg_color = if flashing {
+                                colors.accent
+                            } else {
+                                colors.selected_bg
+                            };
+                            tint_layer(row_view, ns_color(bg_color, 1.0), 6.0);
                         }
+                        let container = if row_view.is_null() { effect } else { row_view };
                         let label = make_label(
                             &row.label,
                             system_font(12.5, WEIGHT_REGULAR),
@@ -1416,12 +1683,12 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                                 fg
                             },
                             NSRect::new(
-                                NSPoint::new(pad, from_top(card_h, y_top + 4.0, 16.0)),
+                                NSPoint::new(pad - row_x, from_top(srow_h, 4.0, 16.0)),
                                 NSSize::new(170.0, 16.0),
                             ),
                         );
                         if !label.is_null() {
-                            let _: () = msg_send![effect, addSubview: label];
+                            let _: () = msg_send![container, addSubview: label];
                         }
                         // D-2 (authoritative, absolute pt): label x=20 w=170
                         // · badge x=172 w=70 (right edge 242) · value
@@ -1445,13 +1712,13 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                             system_font(9.5, WEIGHT_SEMIBOLD),
                             badge_color,
                             NSRect::new(
-                                NSPoint::new(172.0, from_top(card_h, y_top + 4.0, 14.0)),
+                                NSPoint::new(172.0 - row_x, from_top(srow_h, 4.0, 14.0)),
                                 NSSize::new(70.0, 14.0),
                             ),
                         );
                         if !badge.is_null() {
                             set_alignment(badge, ALIGN_RIGHT);
-                            let _: () = msg_send![effect, addSubview: badge];
+                            let _: () = msg_send![container, addSubview: badge];
                         }
                         let reason = row.restart_reason.note();
                         let value_text = match reason {
@@ -1467,12 +1734,16 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                                 fg
                             },
                             NSRect::new(
-                                NSPoint::new(pad + 230.0, from_top(card_h, y_top + 4.0, 16.0)),
+                                NSPoint::new(pad + 230.0 - row_x, from_top(srow_h, 4.0, 16.0)),
                                 NSSize::new(card_w - pad * 2.0 - 230.0, 16.0),
                             ),
                         );
                         if !value_label.is_null() {
-                            let _: () = msg_send![effect, addSubview: value_label];
+                            let _: () = msg_send![container, addSubview: value_label];
+                        }
+                        if !row_view.is_null() {
+                            let _: () = msg_send![effect, addSubview: row_view];
+                            release_owned(row_view);
                         }
                     }
                 }
@@ -1510,6 +1781,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
         if !footer.is_null() {
             let _: () = msg_send![effect, addSubview: footer];
         }
+        apply_modal_ax_actions(view, root, ax);
     }
 }
 
@@ -1532,6 +1804,7 @@ pub(in crate::macos_overlay) fn rebuild_process_monitor(
     window: &Window,
     model: Option<(ProcessMonitorViewModel, PaneRectPt)>,
     colors: &OverlayColors,
+    ax: &ModalAxActions,
 ) {
     let view = content_view(window);
     if view.is_null() {
@@ -1539,7 +1812,7 @@ pub(in crate::macos_overlay) fn rebuild_process_monitor(
     }
     unsafe {
         let Some((vm, pane)) = model else {
-            remove_subview(view, ID_PROCESS_MONITOR);
+            remove_modal_subview(view, ID_PROCESS_MONITOR, ax);
             return;
         };
 
@@ -1562,6 +1835,7 @@ pub(in crate::macos_overlay) fn rebuild_process_monitor(
             ),
             NSSize::new(card_w, card_h),
         );
+        let title_text = format!("Process Monitor \u{b7} sort: {}", vm.sort_label);
         let (root, effect) = card_for(
             view,
             ID_PROCESS_MONITOR,
@@ -1571,6 +1845,7 @@ pub(in crate::macos_overlay) fn rebuild_process_monitor(
             MATERIAL_POPOVER,
             colors,
             CARD_RADIUS,
+            Some(&title_text),
         );
         if root.is_null() || effect.is_null() {
             return;
@@ -1580,7 +1855,6 @@ pub(in crate::macos_overlay) fn rebuild_process_monitor(
         let muted = ns_color(colors.muted, 1.0);
         let accent = ns_color(colors.accent, 1.0);
 
-        let title_text = format!("Process Monitor \u{b7} sort: {}", vm.sort_label);
         let title = make_label(
             &title_text,
             system_font(15.0, WEIGHT_SEMIBOLD),
@@ -1665,6 +1939,16 @@ pub(in crate::macos_overlay) fn rebuild_process_monitor(
         let row_font = monospace_font(12.0);
         for (i, row) in vm.rows.iter().enumerate() {
             let y = rows_top + i as f64 * PM_ROW_H;
+            let row_x = pad - 8.0;
+            let row_view = make_ax_row(
+                NSRect::new(
+                    NSPoint::new(row_x, from_top(card_h, y, PM_ROW_H)),
+                    NSSize::new(card_w - pad * 2.0 + 16.0, PM_ROW_H),
+                ),
+                &process_monitor_row_ax_label(row),
+                row.selected,
+            );
+            let container = if row_view.is_null() { effect } else { row_view };
             let text_color = if row.selected { accent } else { fg };
             for (text, x, w, align) in [
                 (
@@ -1708,17 +1992,19 @@ pub(in crate::macos_overlay) fn rebuild_process_monitor(
                     text,
                     row_font,
                     text_color,
-                    NSRect::new(
-                        NSPoint::new(pad + x, from_top(card_h, y, PM_ROW_H)),
-                        NSSize::new(w, PM_ROW_H),
-                    ),
+                    NSRect::new(NSPoint::new(pad + x - row_x, 0.0), NSSize::new(w, PM_ROW_H)),
                 );
                 if !field.is_null() {
                     set_alignment(field, align);
-                    let _: () = msg_send![effect, addSubview: field];
+                    let _: () = msg_send![container, addSubview: field];
                 }
             }
+            if !row_view.is_null() {
+                let _: () = msg_send![effect, addSubview: row_view];
+                release_owned(row_view);
+            }
         }
+        apply_modal_ax_actions(view, root, ax);
     }
 }
 
@@ -1730,6 +2016,7 @@ pub(in crate::macos_overlay) fn rebuild_confirm(
     window: &Window,
     model: Option<(&ConfirmDialogSnapshot, PaneRectPt)>,
     colors: &OverlayColors,
+    ax: &ModalAxActions,
 ) {
     let view = content_view(window);
     if view.is_null() {
@@ -1737,7 +2024,7 @@ pub(in crate::macos_overlay) fn rebuild_confirm(
     }
     unsafe {
         let Some((snap, pane)) = model else {
-            remove_subview(view, ID_CONFIRM);
+            remove_modal_subview(view, ID_CONFIRM, ax);
             return;
         };
 
@@ -1759,6 +2046,7 @@ pub(in crate::macos_overlay) fn rebuild_confirm(
             MATERIAL_POPOVER,
             colors,
             CARD_RADIUS,
+            Some(&snap.message),
         );
         if root.is_null() || effect.is_null() {
             return;
@@ -1790,6 +2078,7 @@ pub(in crate::macos_overlay) fn rebuild_confirm(
             set_alignment(hint, ALIGN_CENTER);
             let _: () = msg_send![effect, addSubview: hint];
         }
+        apply_modal_ax_actions(view, root, ax);
     }
 }
 
@@ -1801,6 +2090,7 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
     window: &Window,
     model: Option<(&str, PaneRectPt)>,
     colors: &OverlayColors,
+    ax: &ModalAxActions,
 ) {
     let view = content_view(window);
     if view.is_null() {
@@ -1808,7 +2098,7 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
     }
     unsafe {
         let Some((input, pane)) = model else {
-            remove_subview(view, ID_TITLE_PROMPT);
+            remove_modal_subview(view, ID_TITLE_PROMPT, ax);
             return;
         };
 
@@ -1830,6 +2120,7 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
             MATERIAL_POPOVER,
             colors,
             CARD_RADIUS,
+            Some("Set Tab Title"),
         );
         if root.is_null() || effect.is_null() {
             return;
@@ -1865,6 +2156,7 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
         );
         if !input_label.is_null() {
             set_alignment(input_label, ALIGN_CENTER);
+            apply_text_field_ax(input_label, "Tab Title", input, None);
             let _: () = msg_send![effect, addSubview: input_label];
         }
         let hint = make_label(
@@ -1880,6 +2172,7 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
             set_alignment(hint, ALIGN_CENTER);
             let _: () = msg_send![effect, addSubview: hint];
         }
+        apply_modal_ax_actions(view, root, ax);
     }
 }
 
@@ -1923,6 +2216,7 @@ pub(in crate::macos_overlay) fn rebuild_toast(
             MATERIAL_HUD_WINDOW,
             colors,
             pill_h / 2.0,
+            None,
         );
         if root.is_null() || effect.is_null() {
             return;
@@ -2002,6 +2296,7 @@ pub(in crate::macos_overlay) fn rebuild_scratch_badge(
             MATERIAL_HUD_WINDOW,
             colors,
             pill_h / 2.0,
+            None,
         );
         if root.is_null() || effect.is_null() {
             return;

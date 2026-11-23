@@ -75,7 +75,7 @@ params: `{}` / result: `{"panels":[Panel]}` (all panels across all window groups
 | params | type | required | description |
 |--------|----|------|------|
 | `paneId` | string | ✓ | |
-| `source` | `"screen"` \| `"scrollback"` | ✓ | screen = visible screen only / scrollback = scrollback + visible screen combined |
+| `source` | `"screen"` \| `"scrollback"` | ✓ | screen = live screen only (regardless of the pane's local scrollback position) / scrollback = scrollback + live screen combined |
 | `maxBytes` | number | — (default 262144) | UTF-8 byte limit. Server-side **clamped to 1 MiB (1048576 bytes)** (requesting more isn't rejected, just clamped) |
 
 result: `{"paneId":"1","text":"..."}`; when truncated, the **tail is kept in preference** and `"truncated":true` is added (only appears when true). `"alternateScreen":true` (only appears when true) means the pane's active screen was the alternate screen at the time of the read: it keeps no scrollback, so a `scrollback` read returns only what the screen shows.

@@ -1081,7 +1081,7 @@ impl App {
     /// floats get.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_float_surface(
-        &self,
+        &mut self,
         window_id: WindowId,
         id: PaneId,
         grid_size: GridSize,

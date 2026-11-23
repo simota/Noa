@@ -85,6 +85,7 @@ mod font_cache;
 mod helpers;
 mod idle_ember;
 mod input_ops;
+mod text_worker;
 pub(crate) use input_ops::ime_trace_enabled;
 mod ipc;
 mod lifecycle;
@@ -184,9 +185,6 @@ pub struct App {
     /// Grid padding derived once from `window-padding-x/y`, applied to every
     /// pane's geometry.
     padding: GridPadding,
-    /// Initial cursor style from `cursor-style` / `cursor-style-blink`, applied
-    /// to each terminal at creation. `None` keeps the terminal default.
-    initial_cursor_style: Option<CursorStyle>,
     /// Static or directory-backed `background-image` runtime. Static mode keeps
     /// the existing one decoded PNG; slideshow mode owns the directory snapshot
     /// and the current decoded image.
@@ -308,6 +306,7 @@ pub struct App {
     /// The open search prompt (Cmd+F), if any — see [`SearchPromptSession`].
     search_prompt: Option<SearchPromptSession>,
     search_worker: Option<crate::search_worker::SearchWorker>,
+    text_worker: Option<text_worker::TextWorker>,
     /// Keyboard copy mode, bound to exactly one focused window/pane.
     copy_mode: Option<CopyModeSession>,
     /// Physical presses consumed by copy mode whose matching Kitty release
@@ -817,8 +816,6 @@ impl App {
         startup_tasks: StartupTasks,
     ) -> Self {
         let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
-        let initial_cursor_style =
-            resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
         let background_image = load_background_image_runtime(&config);
         let (mut keybinds, keybind_diagnostics) =
             KeybindEngine::from_config(&config.keybinds, config.sidebar_hotkey.as_deref());
@@ -874,7 +871,6 @@ impl App {
             // `theme_appearance` pair happens after that point.
             system_appearance: winit::window::Theme::Light,
             padding,
-            initial_cursor_style,
             background_image,
             live_wallpaper_deadline: None,
             live_wallpaper_transition: None,
@@ -923,6 +919,7 @@ impl App {
             next_path_probe_generation: 0,
             search_prompt: None,
             search_worker: None,
+            text_worker: None,
             copy_mode: None,
             copy_mode_suppressed_releases: HashSet::new(),
             copy_mode_suppressed_repeats: HashSet::new(),

@@ -24,8 +24,7 @@ use crate::session_store::{SessionCardId, SessionDelta, SessionWindowId};
 use crate::split_tree::PaneId;
 
 use super::auto_approve::{
-    AutoApproveFeedback, AutoApprovePublish, auto_approve_rescan_deadline,
-    detect_auto_approve_candidate,
+    AutoApproveFeedback, AutoApprovePublish, auto_approve_rescan_deadline, rescan_auto_approve_at,
 };
 use super::feed::{
     PtyDrainTerminalEvent, capture_pty_bytes, drain_queued_pty_data, exit_code_after_read_error,
@@ -158,6 +157,7 @@ pub(crate) struct IoThreadHandle {
     pub(super) shutdown_tx: Sender<()>,
     pub(super) ipc_output_refresh_tx: Sender<()>,
     pub(super) reply_flush_tx: Sender<()>,
+    pub(super) auto_approve_rescan_tx: Sender<()>,
     pub(super) join: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -177,6 +177,14 @@ impl IoThreadHandle {
     /// in queue order. The bounded channel coalesces repeated requests.
     pub(crate) fn request_reply_flush(&self) {
         let _ = self.reply_flush_tx.try_send(());
+    }
+
+    /// Ask the io thread to rescan the terminal for an auto-approve prompt now
+    /// (after a tab turns OFF -> ON or a pane moves into an ON tab while a
+    /// dialog is already static on screen). The bounded channel coalesces
+    /// repeated requests and never blocks the event loop.
+    pub(crate) fn request_auto_approve_rescan(&self) {
+        let _ = self.auto_approve_rescan_tx.try_send(());
     }
 
     /// Signal shutdown and reap the io thread off the caller (Item 6): a pty
@@ -262,6 +270,7 @@ pub fn spawn(
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
     let (ipc_output_refresh_tx, ipc_output_refresh_rx) = crossbeam_channel::bounded(1);
     let (reply_flush_tx, reply_flush_rx) = crossbeam_channel::bounded::<()>(1);
+    let (auto_approve_rescan_tx, auto_approve_rescan_rx) = crossbeam_channel::bounded::<()>(1);
     let join = std::thread::spawn(move || {
         let writer = pty.writer();
         let mut stream = noa_vt::Stream::with_shared_parser(raw_attach.parser());
@@ -331,10 +340,10 @@ pub fn spawn(
         // per-read chunk size) means every park below stays a plain block,
         // exactly as before the spin existed.
         let mut spin_traffic = SpinTraffic::default();
-        // One reusable seven-op `Select` for every park below, built once:
+        // One reusable eight-op `Select` for every park below, built once:
         // during a reader-bottlenecked flood this thread parks once per pty
         // sliver (tens of thousands of times per second), and re-registering
-        // all seven channels per park was measurable overhead. `ready`/
+        // all eight channels per park was measurable overhead. `ready`/
         // `ready_timeout` only report readiness — the fast-path `try_recv`s
         // at the top of the loop complete the actual operations — so the
         // registration list never needs to change between parks.
@@ -346,6 +355,7 @@ pub fn spawn(
         sel.recv(&resize_rx);
         sel.recv(&input_rx);
         sel.recv(&auto_approve_feedback_rx);
+        sel.recv(&auto_approve_rescan_rx);
         loop {
             // Fast path: poll every channel with `try_recv` before falling
             // back to a blocking `Select`. During sustained output the pty
@@ -423,6 +433,33 @@ pub fn spawn(
                     did_work = true;
                 }
                 Err(TryRecvError::Disconnected) => break, // main thread / App dropped
+                Err(TryRecvError::Empty) => {}
+            }
+            // Polled after `auto_approve_feedback_rx` so a tight breaker-off
+            // -> re-enable sequence applies the consumed feedback before
+            // scanning the still-visible prompt.
+            match auto_approve_rescan_rx.try_recv() {
+                Ok(()) => {
+                    if let Some(candidate) = rescan_auto_approve_at(
+                        &terminal,
+                        &auto_approve,
+                        &mut auto_approve_state,
+                        &mut auto_approve_rescan_at,
+                        Instant::now(),
+                    ) && proxy
+                        .send_event(UserEvent::AutoApprove {
+                            id: current_card_target(&window_id, pane_id).1,
+                            signature: candidate.signature,
+                            region_hash: candidate.region_hash,
+                            disable_after: candidate.disable_after,
+                        })
+                        .is_err()
+                    {
+                        break; // event loop gone
+                    }
+                    did_work = true;
+                }
+                Err(TryRecvError::Disconnected) => break,
                 Err(TryRecvError::Empty) => {}
             }
             match pty.event_rx().try_recv() {
@@ -744,21 +781,20 @@ pub fn spawn(
             }
             if auto_approve_rescan_at.is_some_and(|deadline| now >= deadline) {
                 deadline_elapsed = true;
-                let candidate = {
-                    let term = terminal.lock();
-                    detect_auto_approve_candidate(&term, &auto_approve, &mut auto_approve_state)
-                };
-                auto_approve_rescan_at =
-                    auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
-                if let Some(candidate) = candidate
-                    && proxy
-                        .send_event(UserEvent::AutoApprove {
-                            id: current_card_target(&window_id, pane_id).1,
-                            signature: candidate.signature,
-                            region_hash: candidate.region_hash,
-                            disable_after: candidate.disable_after,
-                        })
-                        .is_err()
+                if let Some(candidate) = rescan_auto_approve_at(
+                    &terminal,
+                    &auto_approve,
+                    &mut auto_approve_state,
+                    &mut auto_approve_rescan_at,
+                    Instant::now(),
+                ) && proxy
+                    .send_event(UserEvent::AutoApprove {
+                        id: current_card_target(&window_id, pane_id).1,
+                        signature: candidate.signature,
+                        region_hash: candidate.region_hash,
+                        disable_after: candidate.disable_after,
+                    })
+                    .is_err()
                 {
                     break; // event loop gone
                 }
@@ -806,6 +842,7 @@ pub fn spawn(
                         || !ipc_output_refresh_rx.is_empty()
                         || !reply_flush_rx.is_empty()
                         || !auto_approve_feedback_rx.is_empty()
+                        || !auto_approve_rescan_rx.is_empty()
                     {
                         ready = true;
                         break;
@@ -847,6 +884,7 @@ pub fn spawn(
         shutdown_tx,
         ipc_output_refresh_tx,
         reply_flush_tx,
+        auto_approve_rescan_tx,
         join: Some(join),
     }
 }

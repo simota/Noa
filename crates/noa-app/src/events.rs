@@ -89,6 +89,7 @@ pub enum UserEvent {
     /// New terminal output is available; request a redraw.
     Redraw(WindowId, PaneId),
     SearchUpdated(WindowId, PaneId),
+    TextReady,
     /// A hover-path existence probe finished on its worker thread
     /// (`App::hover_link_target` never stats the filesystem on the main
     /// thread — a network volume can block a metadata query indefinitely).

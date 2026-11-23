@@ -53,7 +53,7 @@ pub use osc::{
 pub use path::{PathMatch, detect_path_at_column};
 pub use screen::{KittyParent, KittyPlacement, Screen, VisibleKittyPlacement, kitty_image_size};
 pub use search::{SearchAnchor, SearchMatch, SearchState};
-pub use selection::{Selection, SelectionPoint};
+pub use selection::{Selection, SelectionPoint, SelectionSnapshot};
 pub use snapshot::{ScrollbackSnapshot, ScrollbackSnapshotInput};
 pub use tabstops::Tabstops;
 pub use terminal::{

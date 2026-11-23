@@ -1082,7 +1082,7 @@ impl App {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_pane_surface(
-        &self,
+        &mut self,
         window_id: WindowId,
         pane_id: PaneId,
         grid_size: GridSize,
@@ -1110,7 +1110,7 @@ impl App {
     /// `NOA_QUICK_TERMINAL=1` (Ghostty's `GHOSTTY_QUICK_TERMINAL`).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_pane_surface_in(
-        &self,
+        &mut self,
         window_id: WindowId,
         pane_id: PaneId,
         grid_size: GridSize,
@@ -1144,6 +1144,12 @@ impl App {
                 .env
                 .insert(0, ("NOA_QUICK_TERMINAL".to_string(), "1".to_string()));
         }
+        let spawn_kind = pty_config
+            .command
+            .as_ref()
+            .and_then(|argv| argv.first())
+            .map(|argv0| crate::session_store::AgentKind::from_spawn(argv0))
+            .unwrap_or_default();
         // The first spawn normally consumes the child already booted in
         // parallel by `App::new` (see `App::prespawned_pty`) — the `-e`
         // command when one was given, the default shell otherwise.
@@ -1275,14 +1281,14 @@ impl App {
         surface.surface_id = surface_id;
         surface.child_command = Some(child_command);
         surface.wait_after_command = script.is_some_and(|spawn| spawn.wait_after_command);
+        self.session_store
+            .register_spawn(Self::session_card_id(window_id, pane_id), spawn_kind);
         Ok(surface)
     }
 
     fn new_terminal(&self, grid_size: GridSize) -> Terminal {
         let mut terminal = Terminal::new(grid_size);
-        if let Some(style) = self.initial_cursor_style {
-            terminal.set_default_cursor_style(style);
-        }
+        self.config.apply_default_cursor_style(&mut terminal);
         terminal.title_report = self.config.title_report;
         apply_xt_checksum_policy(&mut terminal, &self.config);
         terminal.scrollback_compression = self.config.scrollback_compression;

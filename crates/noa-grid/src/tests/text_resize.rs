@@ -278,6 +278,42 @@ fn visible_rows_into_reuses_live_row_storage() {
 }
 
 #[test]
+fn live_rows_ignores_viewport_scrollback() {
+    let mut t = run_size(10, 3, b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+    t.scroll_viewport_up(2);
+    assert_eq!(t.viewport_offset(), 2);
+
+    let visible: Vec<String> = t
+        .active()
+        .visible_rows()
+        .iter()
+        .map(|row| {
+            row.cells
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    let live: Vec<String> = t
+        .active()
+        .live_rows()
+        .map(|row| {
+            row.cells
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+
+    assert_eq!(visible, vec!["one", "two", "three"]);
+    assert_eq!(live, vec!["three", "four", "five"]);
+}
+
+#[test]
 fn resize_shrink_rows_keeps_cursor_on_its_content() {
     // Cursor mid-screen (row 11 → y=10) with a marker on its line; shrinking
     // to 10 rows must keep the cursor on that same content, not drop it.

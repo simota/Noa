@@ -28,7 +28,7 @@ use noa_ipc::{
 
 use crate::events::UserEvent;
 use crate::io_thread::{PtyInputQueue, QueueInputResult, RawAttachTap};
-use crate::session_store::{PreviewLine, SessionCard, SessionCardId};
+use crate::session_store::{AgentKind, PreviewLine, SessionCard, SessionCardId};
 
 /// Maps IPC-visible pane ids (minted, monotonic u64s — DEC-B) to/from the
 /// internal `(WindowId, PaneId)` address a caller resolves through `App`. A
@@ -306,6 +306,28 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// what limits a response.
 const MAX_GRID_ROWS_PER_REQUEST: u64 = 2048;
 
+fn terminal_text_result(
+    terminal: &mut Terminal,
+    source: TextSource,
+    max_bytes: usize,
+) -> TextResult {
+    let (text, truncated) = match source {
+        // Read the live bottom rows regardless of local scrollback so IPC
+        // readers (e.g. `+ctl wait --stall`, `read`, board) observe ongoing
+        // output while a user scrolls through history.
+        TextSource::Screen => (screen_text(terminal.active().live_rows()), false),
+        // Walks rows from the tail under the lock rather than
+        // materializing the full `scrollback_text()` and truncating
+        // after the fact (F-1 / NFR-4).
+        TextSource::Scrollback => terminal.scrollback_text_tail(max_bytes).unwrap_or_default(),
+    };
+    TextResult {
+        text,
+        truncated,
+        alternate_screen: terminal.active_is_alt,
+    }
+}
+
 fn terminal_grid_result(terminal: &Terminal, start_row: u64, row_count: u64) -> GridResult {
     let cols = terminal.active().cols as u32;
     let coordinate_generation = terminal.grid_coordinate_generation();
@@ -413,18 +435,7 @@ impl IpcBackend for AppIpcBackend {
     ) -> Result<TextResult, IpcError> {
         let terminal = self.resolve_terminal(pane)?;
         let mut terminal = terminal.lock();
-        let (text, truncated) = match source {
-            TextSource::Screen => (screen_text(&terminal.active().visible_rows()), false),
-            // Walks rows from the tail under the lock rather than
-            // materializing the full `scrollback_text()` and truncating
-            // after the fact (F-1 / NFR-4).
-            TextSource::Scrollback => terminal.scrollback_text_tail(max_bytes).unwrap_or_default(),
-        };
-        Ok(TextResult {
-            text,
-            truncated,
-            alternate_screen: terminal.active_is_alt,
-        })
+        Ok(terminal_text_result(&mut terminal, source, max_bytes))
     }
 
     fn get_grid(
@@ -521,14 +532,15 @@ impl IpcBackend for AppIpcBackend {
     }
 }
 
-/// Join visible screen rows into `noa.getText(source: "screen")` plain text
-/// (R-2). Trailing spaces are trimmed per unwrapped row — a soft-wrapped
-/// row is full width, so its trailing spaces are real content continued on
-/// the next row and must survive the join (mirrors `noa-grid`'s
-/// `push_selected_row_text`). The trim tracks each row's own start offset
-/// so it can never eat into a preceding wrapped row's real trailing spaces.
-pub(crate) fn screen_text(rows: &[GridRow]) -> String {
-    rows.iter().fold(String::new(), |mut out, row| {
+/// Join screen rows into plain text for `noa.getText(source: "screen")` (live
+/// rows) and AppleScript `contents` (visible viewport) (R-2). Trailing spaces
+/// are trimmed per unwrapped row — a soft-wrapped row is full width, so its
+/// trailing spaces are real content continued on the next row and must survive
+/// the join (mirrors `noa-grid`'s `push_selected_row_text`). The trim tracks
+/// each row's own start offset so it can never eat into a preceding wrapped
+/// row's real trailing spaces.
+pub(crate) fn screen_text<'a>(rows: impl IntoIterator<Item = &'a GridRow>) -> String {
+    rows.into_iter().fold(String::new(), |mut out, row| {
         let before_len = out.len();
         // A wide glyph's spacer and the pad before a wide glyph wrapped to
         // the next row are layout, not text (as in selection extraction).
@@ -641,8 +653,7 @@ pub(crate) struct PanelSurfaceFacts {
     /// The directory the pane was spawned in, for `Panel.cwd` until shell
     /// integration (OSC 7) reports one.
     pub(crate) cwd: Option<String>,
-    /// What an IPC spawn ran here (`Panel.spawn`); its `argv[0]` also names
-    /// the agent when no foreground process was sampled.
+    /// What an IPC spawn ran here (`Panel.spawn`).
     pub(crate) spawn: Option<noa_ipc::PanelSpawn>,
 }
 
@@ -679,14 +690,7 @@ pub(crate) fn card_to_panel(
             .map(|(row, line)| preview_line_to_row(row as u64, line))
             .collect(),
         surface_id: facts.surface_id,
-        agent: panel_agent(
-            card,
-            facts
-                .spawn
-                .as_ref()
-                .and_then(|spawn| spawn.argv.first())
-                .map(String::as_str),
-        ),
+        agent: panel_agent(card),
         exit: facts.exit.map(|exit| PanelExit {
             code: exit.exit_code,
         }),
@@ -705,6 +709,7 @@ pub(crate) fn bare_panel(
     window_group_id: u64,
     window_id: u64,
     attachable: bool,
+    agent_kind: AgentKind,
     facts: PanelSurfaceFacts,
 ) -> Panel {
     Panel {
@@ -720,18 +725,13 @@ pub(crate) fn bare_panel(
         attachable,
         preview: Vec::new(),
         surface_id: facts.surface_id,
-        agent: facts
-            .spawn
-            .as_ref()
-            .and_then(|spawn| spawn.argv.first())
-            .and_then(|argv0| spawn_agent_kind(argv0))
-            .map(|kind| PanelAgent {
-                kind: Some(kind.to_string()),
-                state: None,
-                detail: None,
-                seq: 0,
-                blocked: None,
-            }),
+        agent: agent_wire_kind(agent_kind).map(|kind| PanelAgent {
+            kind: Some(kind.to_string()),
+            state: None,
+            detail: None,
+            seq: 0,
+            blocked: None,
+        }),
         exit: facts.exit.map(|exit| PanelExit {
             code: exit.exit_code,
         }),
@@ -744,24 +744,8 @@ pub(crate) fn bare_panel(
 /// `Panel.agent`: present when the pane runs a recognized agent or any
 /// report has arrived (a report survives its agent leaving only until the
 /// session store clears it).
-///
-/// The kind comes from the foreground process, else the `app=` of the last
-/// `OSC 7501` report, else the argv an IPC spawn ran (`spawn_argv0`). A pane
-/// spawned straight into an agent (no shell) can have no process name: the
-/// one sample taken at spawn lands before the pane's card exists, so the
-/// store drops it, and a name that never changes is not posted again.
-fn panel_agent(card: &SessionCard, spawn_argv0: Option<&str>) -> Option<PanelAgent> {
-    use crate::sidebar::classify_agent;
-    let reported_app = card
-        .agent_status
-        .as_ref()
-        .and_then(|status| status.app.as_deref());
-    let kind = card
-        .process
-        .as_deref()
-        .and_then(|process| agent_wire_kind(classify_agent(process)))
-        .or_else(|| reported_app.and_then(|app| agent_wire_kind(app_agent_kind(app))))
-        .or_else(|| spawn_argv0.and_then(spawn_agent_kind));
+fn panel_agent(card: &SessionCard) -> Option<PanelAgent> {
+    let kind = agent_wire_kind(card.agent.kind);
     if kind.is_none() && card.agent_status.is_none() && card.agent_seq == 0 {
         return None;
     }
@@ -785,22 +769,7 @@ fn panel_agent(card: &SessionCard, spawn_argv0: Option<&str>) -> Option<PanelAge
     })
 }
 
-/// The wire kind of the agent a spawn's `argv[0]` runs, if it is one.
-pub(crate) fn spawn_agent_kind(argv0: &str) -> Option<&'static str> {
-    agent_wire_kind(crate::sidebar::classify_agent(argv0))
-}
-
-/// The agent an `OSC 7501` `app=` names: `claude-code` and `codex` read
-/// like their executables; agy reports itself as `antigravity`.
-fn app_agent_kind(app: &str) -> crate::sidebar::AgentKind {
-    match app {
-        "antigravity" => crate::sidebar::AgentKind::Agy,
-        app => crate::sidebar::classify_agent(app),
-    }
-}
-
-fn agent_wire_kind(kind: crate::sidebar::AgentKind) -> Option<&'static str> {
-    use crate::sidebar::AgentKind;
+fn agent_wire_kind(kind: AgentKind) -> Option<&'static str> {
     match kind {
         AgentKind::ClaudeCode => Some("claude"),
         AgentKind::Codex => Some("codex"),
@@ -847,6 +816,7 @@ pub(crate) fn registry_key(id: SessionCardId) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_store::{SessionDelta, SessionStore, SessionWindowId};
     use noa_core::Rgb;
     use noa_grid::cell::Cell;
 
@@ -954,7 +924,10 @@ mod tests {
             card_to_panel(8, 1, 2, &card, true, facts.clone()).cwd,
             "/repo-wt/fix"
         );
-        assert_eq!(bare_panel(8, 1, 2, true, facts.clone()).cwd, "/repo-wt/fix");
+        assert_eq!(
+            bare_panel(8, 1, 2, true, AgentKind::Generic, facts.clone()).cwd,
+            "/repo-wt/fix"
+        );
 
         card.cwd = "/repo-wt/fix/crates".to_string();
         assert_eq!(
@@ -967,25 +940,29 @@ mod tests {
     // bare until its first output; its argv already names the agent.
     #[test]
     fn a_bare_panel_takes_its_agent_kind_from_the_spawn_argv() {
-        let spawn = |argv0: &str| PanelSurfaceFacts {
-            spawn: Some(noa_ipc::PanelSpawn {
-                argv: vec![argv0.to_string()],
-                started_at: 0,
-            }),
-            ..PanelSurfaceFacts::default()
-        };
-        let agent = bare_panel(8, 1, 2, true, spawn("/usr/local/bin/codex")).agent;
-        assert_eq!(agent.and_then(|agent| agent.kind).as_deref(), Some("codex"));
-        assert!(
-            bare_panel(8, 1, 2, true, spawn("./deploy.sh"))
-                .agent
-                .is_none()
-        );
-        assert!(
-            bare_panel(8, 1, 2, true, PanelSurfaceFacts::default())
-                .agent
-                .is_none()
-        );
+        let id = SessionCardId::new(SessionWindowId(2), noa_grid_pane(8));
+        for (argv0, expected) in [
+            (Some("/usr/local/bin/codex"), Some("codex")),
+            (Some("./deploy.sh"), None),
+            (None, None),
+        ] {
+            let mut store = SessionStore::new();
+            if let Some(argv0) = argv0 {
+                store.register_spawn(id, AgentKind::from_spawn(argv0));
+            }
+            let panel = bare_panel(
+                8,
+                1,
+                2,
+                true,
+                store.pending_agent_kind(id),
+                PanelSurfaceFacts::default(),
+            );
+            assert_eq!(
+                panel.agent.and_then(|agent| agent.kind).as_deref(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -1016,36 +993,42 @@ mod tests {
     // ever recorded for it. The report's app names it, else the spawn argv.
     #[test]
     fn a_pane_without_a_process_takes_its_kind_from_the_report_or_the_spawn() {
-        let mut card = agent_card(None);
-        card.agent_seq = 2;
-        card.agent_status = Some(noa_grid::AgentStatus {
-            state: noa_grid::AgentState::Running,
-            detail: String::new(),
-            blocked: None,
-            app: Some("antigravity".to_string()),
-        });
-        let spawned = |argv0: &str| PanelSurfaceFacts {
-            spawn: Some(noa_ipc::PanelSpawn {
-                argv: vec![argv0.to_string()],
-                started_at: 0,
-            }),
-            ..PanelSurfaceFacts::default()
-        };
-        let kind = |card: &SessionCard, facts| {
-            card_to_panel(8, 1, 2, card, true, facts)
-                .agent
-                .and_then(|agent| agent.kind)
-        };
-
-        assert_eq!(kind(&card, spawned("claude")).as_deref(), Some("agy"));
-
-        card.agent_status.as_mut().unwrap().app = None;
-        assert_eq!(
-            kind(&card, spawned("/opt/bin/claude")).as_deref(),
-            Some("claude")
-        );
-        assert_eq!(kind(&card, PanelSurfaceFacts::default()), None);
-        assert_eq!(kind(&card, spawned("make")), None);
+        let id = SessionCardId::new(SessionWindowId(2), noa_grid_pane(8));
+        for (argv0, app, expected) in [
+            (Some("claude"), Some("antigravity"), Some("agy")),
+            (Some("/opt/bin/claude"), None, Some("claude")),
+            (None, None, None),
+            (Some("make"), None, None),
+        ] {
+            let mut store = SessionStore::new();
+            if let Some(argv0) = argv0 {
+                store.register_spawn(id, AgentKind::from_spawn(argv0));
+            }
+            let at = crate::localtime::wall_clock_now();
+            store.apply(SessionDelta::Upsert {
+                id,
+                name: "worker".into(),
+                cwd: String::new(),
+                busy: false,
+                preview: None,
+                updated_at: at,
+                seq: 1,
+            });
+            store.apply(SessionDelta::AgentStatus {
+                id,
+                status: Some(noa_grid::AgentStatus {
+                    state: noa_grid::AgentState::Running,
+                    detail: String::new(),
+                    blocked: None,
+                    app: app.map(str::to_string),
+                }),
+                at,
+                reports: 1,
+            });
+            let card = store.get(&id).unwrap();
+            let panel = card_to_panel(8, 1, 2, card, true, PanelSurfaceFacts::default());
+            assert_eq!(panel.agent.unwrap().kind.as_deref(), expected);
+        }
     }
 
     // AU-01: `blocked` comes only from an `OSC 7501` blocked report, so a
@@ -1439,5 +1422,68 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].row, oldest);
         assert!(!result.has_more);
+    }
+
+    #[test]
+    fn text_result_screen_reads_live_rows_when_scrolled_back() {
+        let mut terminal = Terminal::new(noa_core::GridSize::new(80, 24));
+        let mut stream = noa_vt::Stream::new();
+        let mut bytes = Vec::new();
+        for i in 0..100 {
+            bytes.extend_from_slice(format!("line-{i:03}\r\n").as_bytes());
+        }
+        stream.feed(&bytes, &mut terminal);
+        terminal.scroll_viewport_up(30);
+        assert_eq!(terminal.viewport_offset(), 30);
+
+        stream.feed(b"LIVE-1\r\n", &mut terminal);
+        let first = terminal_text_result(
+            &mut terminal,
+            TextSource::Screen,
+            noa_ipc::protocol::DEFAULT_TEXT_MAX_BYTES,
+        );
+        assert!(
+            first.text.contains("LIVE-1"),
+            "screen text must read the live rows while scrolled back: {:?}",
+            first.text
+        );
+        assert!(
+            !first.text.contains("line-050"),
+            "screen text must not return the scrolled-back viewport: {:?}",
+            first.text
+        );
+
+        // Further output pushes more rows into scrollback (pinning the scrolled
+        // viewport), while live rows keep changing — stall detection depends on
+        // getText(screen) observing the live change.
+        stream.feed(b"LIVE-2\r\n", &mut terminal);
+        let second = terminal_text_result(
+            &mut terminal,
+            TextSource::Screen,
+            noa_ipc::protocol::DEFAULT_TEXT_MAX_BYTES,
+        );
+        assert_ne!(
+            first.text, second.text,
+            "screen text must reflect live updates while scrolled back"
+        );
+        assert!(second.text.contains("LIVE-2"));
+
+        // Matches the active screen's tail `rows` (active_next_row - rows .. active_next_row).
+        let rows = usize::from(terminal.active().rows);
+        let next = terminal.active_next_row();
+        let tail_rows: Vec<GridRow> = (next.saturating_sub(rows)..next)
+            .filter_map(|y| terminal.active_absolute_row(y))
+            .collect();
+        assert_eq!(second.text, screen_text(&tail_rows));
+
+        // Scrolling back to bottom must produce the exact same screen text.
+        terminal.scroll_viewport_to_bottom();
+        assert_eq!(terminal.viewport_offset(), 0);
+        let at_bottom = terminal_text_result(
+            &mut terminal,
+            TextSource::Screen,
+            noa_ipc::protocol::DEFAULT_TEXT_MAX_BYTES,
+        );
+        assert_eq!(second.text, at_bottom.text);
     }
 }

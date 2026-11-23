@@ -91,6 +91,27 @@ pub(super) fn script_scroll_delta(
     }
 }
 
+/// Whether any native modal overlay session is active on a window, used to
+/// suppress terminal-pane `AXFocused` while a modal card holds input.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn window_modal_overlay_open(
+    confirm: bool,
+    title_prompt: bool,
+    palette: bool,
+    send_selection_picker: bool,
+    remote_ui: bool,
+    theme_settings: bool,
+    process_monitor: bool,
+) -> bool {
+    confirm
+        || title_prompt
+        || palette
+        || send_selection_picker
+        || remote_ui
+        || theme_settings
+        || process_monitor
+}
+
 /// Whether a key leaves a pane held by `wait after command` open: a bare
 /// modifier, or a Cmd shortcut (agent-automation REQ-005).
 pub(super) fn closes_held_pane_exempt(key: &Key, modifiers: ModifiersState) -> bool {
@@ -345,7 +366,23 @@ impl App {
     /// (agent-automation REQ-015). Only the visible panes are listed: a
     /// zoomed tab shows just its zoomed pane.
     pub(super) fn sync_accessibility(&mut self) {
-        for state in self.windows.values_mut() {
+        let confirm_win = self.confirm_dialog.as_ref().map(|s| s.window_id);
+        let title_win = self.tab_title_prompt.as_ref().map(|s| s.window_id);
+        let palette_win = self.command_palette.as_ref().map(|s| s.window_id);
+        let picker_win = self.send_selection_picker.as_ref().map(|s| s.window_id);
+        let remote_win = self.remote_ui.as_ref().map(|s| s.window_id);
+        let theme_win = self.theme_settings.as_ref().map(|s| s.window_id);
+        let monitor_win = self.process_monitor.as_ref().map(|s| s.window_id);
+        for (&window_id, state) in &mut self.windows {
+            let modal_open = window_modal_overlay_open(
+                confirm_win == Some(window_id),
+                title_win == Some(window_id),
+                palette_win == Some(window_id),
+                picker_win == Some(window_id),
+                remote_win == Some(window_id),
+                theme_win == Some(window_id),
+                monitor_win == Some(window_id),
+            ) || state.native_overlays.has_modal();
             let mut panes: Vec<crate::macos_accessibility::AxPane> = state
                 .surfaces
                 .iter()
@@ -360,7 +397,9 @@ impl App {
                 .collect();
             panes.sort_by_key(|pane| pane.id);
             let scale_factor = state.window.scale_factor();
-            state.ax.sync(&state.window, scale_factor, &panes);
+            state
+                .ax
+                .sync(&state.window, scale_factor, &panes, modal_open);
         }
     }
 
@@ -1091,5 +1130,22 @@ mod tests {
         let point =
             mouse::physical_position_to_grid_point(pos.x, pos.y, 16.0, 32.0, grid, padding2);
         assert_eq!((point.x + 1, point.y + 1), (38, 8));
+    }
+
+    #[test]
+    fn window_modal_overlay_open_detects_every_modal_kind() {
+        assert!(!window_modal_overlay_open(
+            false, false, false, false, false, false, false
+        ));
+        for idx in 0..7 {
+            let mut flags = [false; 7];
+            flags[idx] = true;
+            assert!(
+                window_modal_overlay_open(
+                    flags[0], flags[1], flags[2], flags[3], flags[4], flags[5], flags[6],
+                ),
+                "flag {idx} must report modal open"
+            );
+        }
     }
 }

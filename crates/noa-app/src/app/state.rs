@@ -8,7 +8,6 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use super::*;
-use crate::theme_settings::{RevertValues, ThemePairContext};
 
 /// App-wide GPU and glyph state shared by every tab/window.
 pub(super) struct GpuState {
@@ -482,31 +481,9 @@ pub(super) struct Toast {
     pub(super) kind: ToastKind,
 }
 
-/// R-31/FM-08: an Undo toast's payload — the pre-commit snapshot to restore
-/// plus the pair context a pair-aware undo write needs (mirrors why
-/// `commit_updates` itself needs the pair context — undoing a pair commit
-/// must restore `light:X,dark:Y` syntax, not clobber it with a bare name).
-/// A deliberate widening of the spec's literal `ToastKind::Undo(Box<RevertValues>)`
-/// signature: `RevertValues` alone can't reconstruct pair syntax on its own,
-/// and losing that would silently reintroduce the exact bug R-34 exists to
-/// fix, just on the undo path instead of the commit path.
-///
-/// FM-08's "invalidate after a later commit/reopen" guard needs no extra
-/// field here: a later *commit* replaces this whole `Toast` outright (the
-/// single-slot "new toast replaces old" rule already gives every commit its
-/// own fresh, correct Undo payload), and a later *reopen*
-/// (`App::open_theme_settings_session`) clears the slot unconditionally
-/// before building the new session — so by the time `⌘Z` can fire, either
-/// this exact payload is still the right one, or the slot is empty/holds a
-/// different toast and `⌘Z` is correctly a no-op.
-pub(super) struct UndoPayload {
-    pub(super) revert: RevertValues,
-    pub(super) theme_pair: Option<ThemePairContext>,
-}
-
 pub(super) enum ToastKind {
     Resize,
-    Undo(Box<UndoPayload>),
+    Undo(noa_config::ConfigUndo),
 }
 
 /// How long the `visual-bell` flash stays up.

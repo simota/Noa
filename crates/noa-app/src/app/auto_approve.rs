@@ -1,10 +1,22 @@
 use super::*;
 use crate::auto_approve::{self, AutoApproveSignature, DetectContext};
-use crate::io_thread::{AutoApproveFeedback, QueueInputResult};
+use crate::io_thread::{AutoApproveFeedback, QueueInputResult, set_tab_auto_approve_enabled};
 use crate::session_store::{AutoApproveAuditEntry, SessionDelta};
-use crate::sidebar::{agent_display_name, classify_agent};
+use crate::sidebar::agent_display_name;
 
 const AUTO_APPROVE_FLASH_DURATION: Duration = Duration::from_millis(700);
+
+fn local_io_threads(
+    state: &WindowState,
+) -> impl Iterator<Item = &crate::io_thread::IoThreadHandle> {
+    state
+        .surfaces
+        .values()
+        .filter_map(|surface| match &surface.transport {
+            SurfaceTransport::Local(local) => local.io_thread.as_ref(),
+            SurfaceTransport::Remote(_) => None,
+        })
+}
 
 impl App {
     pub(super) fn handle_auto_approve(
@@ -51,18 +63,13 @@ impl App {
             return;
         }
 
-        let Some(process) = self
+        let agent = signature.agent();
+        if !self
             .session_store
             .get(&id)
-            .and_then(|card| card.process.clone())
-        else {
-            reject("no foreground process name yet");
-            return;
-        };
-        if classify_agent(&process) != signature.agent() {
-            reject(&format!(
-                "foreground process {process:?} is not the prompt's agent"
-            ));
+            .is_some_and(|card| card.agent.can_auto_approve(agent))
+        {
+            reject("pane executable does not match the prompt's agent");
             return;
         }
 
@@ -108,7 +115,7 @@ impl App {
             }
         }
         if auto_approve::trace_enabled() {
-            eprintln!("[auto-approve] sent {signature:?} to {process:?}");
+            eprintln!("[auto-approve] sent {signature:?} to {agent:?}");
         }
         let _ = feedback_tx.send(AutoApproveFeedback {
             signature,
@@ -120,7 +127,7 @@ impl App {
             id,
             AutoApproveAuditEntry {
                 at: crate::localtime::wall_clock_now(),
-                agent: agent_display_name(signature.agent(), &process).to_string(),
+                agent: agent_display_name(agent, "").to_string(),
                 prompt: signature.label().to_string(),
             },
         );
@@ -129,7 +136,11 @@ impl App {
 
         if disable_after {
             if let Some(state) = self.windows.get(&window_id) {
-                state.auto_approve_enabled.store(false, Ordering::Relaxed);
+                set_tab_auto_approve_enabled(
+                    &state.auto_approve_enabled,
+                    false,
+                    local_io_threads(state),
+                );
             }
             self.session_store
                 .set_auto_approve_for_window(id.window_id, false);
@@ -161,7 +172,11 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        state.auto_approve_enabled.store(enabled, Ordering::Relaxed);
+        set_tab_auto_approve_enabled(
+            &state.auto_approve_enabled,
+            enabled,
+            local_io_threads(state),
+        );
         self.session_store
             .set_auto_approve_for_window(SessionWindowId(u64::from(window_id)), enabled);
         // The menu mirrors the focused tab; a background tab's change shows

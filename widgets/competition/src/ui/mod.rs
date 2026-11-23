@@ -10,7 +10,7 @@ mod progress;
 mod start;
 mod timeline;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as OsCommand;
 use std::sync::Arc;
 
@@ -29,10 +29,14 @@ use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 
 use competition::model::export;
-use competition::model::types::{AgentKind, Millis, PartId, Phase, RoundKind, RoundNo, Session};
+use competition::model::types::{
+    AgentChoice, AgentKind, AgentSetup, MAX_PANEL, Millis, PartId, Phase, RoundKind, RoundNo,
+    Session,
+};
 use competition::store;
 
 use crate::live::{Channel, Command, Link, Snapshot};
+use competition::store::Listed;
 
 const LEFT_WIDTH: f32 = 280.0;
 const RIGHT_WIDTH: f32 = 310.0;
@@ -67,6 +71,21 @@ pub enum Action {
     Send,
     Retry,
     Close,
+    AddPanelRow,
+    RemovePanelRow(usize),
+    /// Shows a stored competition read-only (no runner, no agents).
+    OpenPast(PathBuf),
+    /// Continues a stored, unfinished competition.
+    ResumePast(PathBuf),
+    /// Fills the start form with a stored competition's settings.
+    RematchPast(PathBuf),
+    /// Leaves the competition on screen for a clean start view.
+    NewCompetition,
+    /// Leaves the competition on screen for the start view, filled with
+    /// its settings.
+    Rematch,
+    /// Brings a participant's (or the judge's) pane to the front in Noa.
+    FocusPane(PartId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +112,11 @@ pub struct Competition {
     filter_part: Option<PartId>,
     pending_intervention: Option<String>,
     file_dialogs: Vec<FileDialogRequest>,
+    /// The session on screen was read from its log: no runner drives it,
+    /// so nothing is sent for it.
+    read_only: bool,
+    /// The past competitions the start view lists.
+    past: Vec<Listed>,
     /// What the board was last built from: the session revision, the link,
     /// and the clock minute while some agent's elapsed time is running.
     built: Option<BuiltKey>,
@@ -131,6 +155,47 @@ impl Competition {
             snapshot.session,
             snapshot.artifact_root,
         )
+    }
+
+    /// The demo's start view: a panel with two claude entries above canned
+    /// past competitions.
+    pub fn demo_start() -> Self {
+        let mut screen = Self::build(Source::Demo, Link::Live, None, None);
+        let mut text = TextStore::new(Default::default());
+        let form = start::Form {
+            request: crate::demo::session().request,
+            judge: AgentChoice {
+                kind: AgentKind::Claude,
+                setup: AgentSetup {
+                    model: Some("opus".into()),
+                    effort: None,
+                },
+            },
+            panel: crate::demo::start_panel(),
+            ..start::Form::default()
+        };
+        start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+        screen.rebuild(&mut text);
+        screen
+    }
+
+    /// The competition logged in `dir`, read-only.
+    pub fn stored(dir: &Path) -> Result<Self, String> {
+        let mut screen = Self::build(Source::Snapshot, Link::Live, None, None);
+        let mut text = TextStore::new(Default::default());
+        screen.show_stored(dir, &mut text)?;
+        Ok(screen)
+    }
+
+    /// The live screen, showing the competition logged in `dir` read-only
+    /// (the start view, with why, when it cannot be read).
+    pub fn live_stored(channel: Channel, dir: &Path) -> Self {
+        let mut screen = Self::live(channel);
+        let mut text = TextStore::new(Default::default());
+        if let Err(why) = screen.show_stored(dir, &mut text) {
+            screen.toast(why);
+        }
+        screen
     }
 
     fn build(
@@ -205,6 +270,8 @@ impl Competition {
             filter_part: None,
             pending_intervention: None,
             file_dialogs: Vec::new(),
+            read_only: false,
+            past: Vec::new(),
             built: None,
             start,
             board,
@@ -217,6 +284,7 @@ impl Competition {
             status_trailing: status.trailing,
             actions: Vec::new(),
         };
+        screen.refresh_past();
         let mut text = TextStore::new(Default::default());
         screen.rebuild(&mut text);
         screen
@@ -250,9 +318,68 @@ impl Competition {
             self.rebuild_composer(text);
         } else {
             start::rebuild_note(&mut self.tree, &self.start, &self.link, text);
-            self.actions.push((self.start.start_button, Action::Start));
+            start::actions(&self.start, &mut self.actions);
+            start::rebuild_past(
+                &mut self.tree,
+                &self.start,
+                &self.past,
+                system_now(),
+                &mut self.actions,
+                text,
+            );
         }
         self.rebuild_status(text);
+    }
+
+    /// Lists the past competitions under the store root (the demo's
+    /// canned ones in the demo).
+    fn refresh_past(&mut self) {
+        self.past = match &self.source {
+            Source::Demo => crate::demo::past(),
+            Source::Live(_) | Source::Snapshot => store::default_root()
+                .map(|root| store::list_sessions(&root, start::PAST_LIMIT))
+                .unwrap_or_default(),
+        };
+    }
+
+    /// The session logged in `dir` (the demo's own, in the demo).
+    fn load_stored(&self, dir: &Path) -> Result<(Session, Option<PathBuf>), String> {
+        if let Source::Demo = self.source {
+            return Ok((crate::demo::session(), None));
+        }
+        let session =
+            store::read_session(dir).map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
+        let root = store::reply_dir(dir, &session);
+        Ok((session, Some(root)))
+    }
+
+    /// Leaves whatever competition is on screen: its runner stops (an
+    /// unfinished one stays resumable from the list).
+    fn leave(&mut self) {
+        if let Source::Live(channel) = &self.source {
+            channel.leave();
+            if !self.read_only && self.session.as_ref().is_some_and(|s| !s.closed) {
+                self.toast("コンペを中断しました（過去のコンペから再開できます）");
+            }
+        }
+        self.session = None;
+        self.artifact_root = None;
+        self.read_only = false;
+        self.tab = CenterTab::Compare;
+        self.selected_round = None;
+        self.filter_part = None;
+        self.pending_intervention = None;
+        self.refresh_past();
+    }
+
+    fn show_stored(&mut self, dir: &Path, text: &mut TextStore) -> Result<(), String> {
+        let (session, root) = self.load_stored(dir)?;
+        self.leave();
+        self.session = Some(Arc::new(session));
+        self.artifact_root = root;
+        self.read_only = true;
+        self.rebuild(text);
+        Ok(())
     }
 
     fn rebuild_left(&mut self, text: &mut TextStore) {
@@ -266,6 +393,7 @@ impl Competition {
             session,
             self.selected_round,
             self.filter_part.as_ref(),
+            !self.read_only,
             &mut self.actions,
         );
     }
@@ -342,6 +470,7 @@ impl Competition {
                 session,
                 self.selected_round,
                 self.filter_part.as_ref(),
+                !self.read_only,
                 &mut self.actions,
             ),
             CenterTab::Timeline => timeline::insert(
@@ -364,13 +493,23 @@ impl Competition {
         let Some(session) = &self.session else {
             return;
         };
-        judge::insert(&mut self.tree, self.right_host, session, &mut self.actions);
+        judge::insert(
+            &mut self.tree,
+            self.right_host,
+            session,
+            !self.read_only,
+            &mut self.actions,
+        );
     }
 
     fn rebuild_composer(&mut self, text: &mut TextStore) {
+        self.tree.set_hidden(self.composer.root, self.read_only);
         let Some(session) = &self.session else {
             return;
         };
+        if self.read_only {
+            return;
+        }
         composer::sync(&mut self.tree, &mut self.composer, session, text);
         if let Some(pending) = &self.pending_intervention
             && session
@@ -394,7 +533,10 @@ impl Competition {
             Link::Connecting => ("Noa 接続待ち…", Tone::Warning),
             Link::Down(_) => ("Noa 未接続", Tone::Critical),
         };
-        tag(&mut self.tree, self.status_leading, link_label, link_tone);
+        // A read-only competition has no runner, so no link of its own.
+        if !self.read_only {
+            tag(&mut self.tree, self.status_leading, link_label, link_tone);
+        }
 
         if let Some(session) = &self.session {
             let phase_text = if session.closed {
@@ -415,8 +557,27 @@ impl Competition {
                 "準備中".to_owned()
             };
             caption(&mut self.tree, self.status_leading, phase_text);
+            if self.read_only {
+                tag(
+                    &mut self.tree,
+                    self.status_leading,
+                    "閲覧専用",
+                    Tone::Neutral,
+                );
+            }
 
-            if !session.closed
+            let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+            let new = self
+                .tree
+                .insert(Some(self.status_trailing), small("新しいコンペ"));
+            self.actions.push((new, Action::NewCompetition));
+            let rematch = self
+                .tree
+                .insert(Some(self.status_trailing), small("同じ設定でリマッチ"));
+            self.actions.push((rematch, Action::Rematch));
+
+            if !self.read_only
+                && !session.closed
                 && session
                     .current_round()
                     .is_some_and(|r| !r.retryable().is_empty())
@@ -427,7 +588,7 @@ impl Competition {
                 );
                 self.actions.push((retry, Action::Retry));
             }
-            if !session.closed {
+            if !self.read_only && !session.closed {
                 let close = self.tree.insert(
                     Some(self.status_trailing),
                     Button::new("コンペを終了").control_size(ControlSize::Small),
@@ -441,8 +602,13 @@ impl Competition {
         let mut latest = None;
         let mut notices = Vec::new();
         if let Source::Live(channel) = &self.source {
+            // Snapshots sent before the screen last left a competition
+            // belong to that one.
+            let current = channel.generation();
             while let Ok(snapshot) = channel.snapshots.try_recv() {
-                latest = Some(snapshot);
+                if snapshot.generation >= current {
+                    latest = Some(snapshot);
+                }
             }
             while let Ok(notice) = channel.notices.try_recv() {
                 notices.push(notice);
@@ -453,11 +619,19 @@ impl Competition {
         }
         if let Some(snapshot) = latest {
             self.link = snapshot.link;
+            if self.read_only {
+                // No runner drives a read-only session.
+                return self.rebuild_if_changed(text);
+            }
             self.session = snapshot.session;
             if snapshot.artifact_root.is_some() {
                 self.artifact_root = snapshot.artifact_root;
             }
         }
+        self.rebuild_if_changed(text);
+    }
+
+    fn rebuild_if_changed(&mut self, text: &mut TextStore) {
         let next = self.built_key();
         if let Some(prev) = &self.built {
             if prev == &next {
@@ -530,6 +704,10 @@ impl Competition {
                 }
                 if form.panel.len() < 2 {
                     self.toast("参加パネルを2体以上選んでください");
+                    return;
+                }
+                if form.panel.len() > MAX_PANEL {
+                    self.toast(format!("参加パネルは{MAX_PANEL}体までです"));
                     return;
                 }
                 let workdir = match start::workdir(&form.workdir) {
@@ -627,6 +805,49 @@ impl Competition {
             }
             Action::Retry => self.send_cmd(Command::Retry),
             Action::Close => self.send_cmd(Command::Close),
+            Action::AddPanelRow => {
+                start::add_row(&mut self.tree, &mut self.start);
+                self.rebuild(text);
+            }
+            Action::RemovePanelRow(index) => {
+                start::remove_row(&mut self.tree, &mut self.start, index, text);
+                self.rebuild(text);
+            }
+            Action::OpenPast(dir) => {
+                if let Err(why) = self.show_stored(&dir, text) {
+                    self.toast(why);
+                }
+            }
+            Action::ResumePast(dir) => self.send_cmd(Command::Resume { dir }),
+            Action::RematchPast(dir) => match self.load_stored(&dir) {
+                Ok((session, _)) => {
+                    let form = start::Form::of_session(&session);
+                    start::fill(&mut self.tree, &mut self.start, &form, text);
+                    self.rebuild(text);
+                    self.toast("前回の設定をフォームに入れました");
+                }
+                Err(why) => self.toast(why),
+            },
+            Action::NewCompetition => {
+                self.leave();
+                start::fill(
+                    &mut self.tree,
+                    &mut self.start,
+                    &start::Form::default(),
+                    text,
+                );
+                self.rebuild(text);
+            }
+            Action::Rematch => {
+                let Some(session) = self.session.clone() else {
+                    return;
+                };
+                self.leave();
+                let form = start::Form::of_session(&session);
+                start::fill(&mut self.tree, &mut self.start, &form, text);
+                self.rebuild(text);
+            }
+            Action::FocusPane(part) => self.send_cmd(Command::Focus { part }),
         }
     }
 }
@@ -653,6 +874,11 @@ impl Screen for Competition {
             && message.downcast_ref::<SelectionChanged>().is_some()
         {
             start::judge_kind_changed(&mut self.tree, &mut self.start, text);
+            return;
+        }
+        if message.downcast_ref::<SelectionChanged>().is_some()
+            && start::row_kind_changed(&mut self.tree, &mut self.start, message.source, text)
+        {
             return;
         }
         if message.downcast_ref::<ButtonClicked>().is_some()
@@ -906,6 +1132,321 @@ mod tests {
             screen.tree.children(screen.right_host),
             right_before.as_slice()
         );
+    }
+
+    use competition::engine::{Config, Engine, Input, Setup};
+    use competition::model::types::{AgentChoice, AgentSetup, JUDGE_ID, SessionId};
+    use competition::store::Store;
+
+    fn temp_root(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "noa-competition-ui-{}-{name}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A finished one-round competition of claude on opus against claude
+    /// on sonnet (`claude-2`), judged by codex, logged under `root`.
+    fn stored_competition(root: &Path) -> PathBuf {
+        let on = |model: &str| AgentChoice {
+            kind: AgentKind::Claude,
+            setup: AgentSetup {
+                model: Some(model.into()),
+                effort: None,
+            },
+        };
+        let panel = [on("opus"), on("sonnet")];
+        let id = SessionId::new("comp-1700000000000");
+        let dir = store::session_dir(root, &id);
+        let setup = Setup {
+            request: "音楽プレイヤーのミニマルな UI を作る",
+            max_rounds: Some(3),
+            reveal_interval: 5,
+            workdir: None,
+            judge: AgentKind::Codex.into(),
+            panel: &panel,
+        };
+        let (mut engine, out) =
+            Engine::create_in(id, setup, &dir, Config::default(), 1_700_000_000_000).unwrap();
+        let mut store = Store::create(&dir, &out.batches[0]).unwrap();
+        let mut feed = |engine: &mut Engine, input| {
+            let out = engine.handle(input).unwrap();
+            store.append_all(&out.batches).unwrap();
+        };
+        let at = 1_700_000_000_000;
+        feed(&mut engine, Input::Start { now: at });
+        for part in ["claude", "claude-2"] {
+            let part = PartId::new(part);
+            feed(
+                &mut engine,
+                Input::Sent {
+                    round: 1,
+                    part: part.clone(),
+                    at,
+                },
+            );
+            feed(
+                &mut engine,
+                Input::ReplyFileWritten {
+                    round: 1,
+                    content: format!("# Summary: {part} の案\n\n{part} が作りました。"),
+                    part,
+                    artifacts: vec![],
+                    at: at + 60_000,
+                },
+            );
+        }
+        let judge = PartId::new(JUDGE_ID);
+        feed(
+            &mut engine,
+            Input::Sent {
+                round: 1,
+                part: judge.clone(),
+                at: at + 61_000,
+            },
+        );
+        let json = r#"{
+  "overview": "sonnet の案が操作性で上回りました。",
+  "evaluations": {
+    "claude": { "score": 78, "strengths": "余白", "feedback": "CTA を強めてください" },
+    "claude-2": { "score": 84, "strengths": "操作性", "feedback": "配色を詰めてください" }
+  },
+  "ranking": ["claude-2", "claude"],
+  "winner": "claude-2",
+  "final_verdict": "claude-2 が操作性と完成度で勝ちました。",
+  "close": true
+}"#;
+        feed(
+            &mut engine,
+            Input::ReplyFileWritten {
+                round: 1,
+                part: judge,
+                content: json.into(),
+                artifacts: vec![],
+                at: at + 120_000,
+            },
+        );
+        assert!(engine.session().closed, "{:?}", engine.session().rounds);
+        dir
+    }
+
+    fn actions(screen: &Competition) -> Vec<Action> {
+        screen.actions.iter().map(|(_, a)| a.clone()).collect()
+    }
+
+    /// The fixture stays on disk when `COMPETITION_FIXTURE_OUT` names a
+    /// directory, for `--session=DIR --snapshot=…`.
+    #[test]
+    fn a_stored_competition_opens_read_only() {
+        let keep = std::env::var_os("COMPETITION_FIXTURE_OUT").map(PathBuf::from);
+        let root = keep.clone().unwrap_or_else(|| temp_root("stored"));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = stored_competition(&root);
+        let mut screen = Competition::stored(&dir).unwrap();
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(Size::new(1440.0, 900.0), &mut text);
+
+        let session = screen.session.clone().unwrap();
+        assert_eq!(session.winner, Some(PartId::new("claude-2")));
+        assert!(screen.read_only);
+        assert_eq!(screen.artifact_root.as_deref(), Some(dir.as_path()));
+        assert!(screen.tree.is_hidden(screen.start.root));
+        assert!(screen.tree.is_hidden(screen.composer.root));
+        let acts = actions(&screen);
+        assert!(acts.contains(&Action::NewCompetition));
+        assert!(acts.contains(&Action::Rematch));
+        for a in &acts {
+            assert!(
+                !matches!(
+                    a,
+                    Action::SelectWinner(_)
+                        | Action::Adopt { .. }
+                        | Action::FocusPane(_)
+                        | Action::Send
+                        | Action::Retry
+                        | Action::Close
+                ),
+                "{a:?} on a read-only competition"
+            );
+        }
+        if keep.is_none() {
+            std::fs::remove_dir_all(&root).unwrap();
+        } else {
+            println!("fixture: {}", dir.display());
+        }
+    }
+
+    #[test]
+    fn a_rematch_fills_the_form_with_every_panel_row() {
+        let root = temp_root("rematch");
+        let dir = stored_competition(&root);
+        let mut screen = Competition::stored(&dir).unwrap();
+        let mut text = TextStore::new(Default::default());
+        screen.handle_action(Action::Rematch, &mut text);
+
+        assert!(screen.session.is_none() && !screen.read_only);
+        assert!(!screen.tree.is_hidden(screen.start.root));
+        let form = start::read(&screen.tree, &screen.start);
+        let stored = store::read_session(&dir).unwrap();
+        assert_eq!(form, start::Form::of_session(&stored));
+        let models: Vec<_> = form
+            .panel
+            .iter()
+            .map(|c| (c.kind, c.setup.model.as_deref()))
+            .collect();
+        assert_eq!(
+            models,
+            [
+                (AgentKind::Claude, Some("opus")),
+                (AgentKind::Claude, Some("sonnet"))
+            ]
+        );
+        assert_eq!(form.judge.kind, AgentKind::Codex);
+        assert_eq!(form.max_rounds, 3);
+        let (_, contestants) = competition::engine::participants(&form.judge, &form.panel);
+        let ids: Vec<&str> = contestants.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["claude", "claude-2"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn new_competition_returns_to_a_clean_start_view() {
+        let mut screen = Competition::demo();
+        let mut text = TextStore::new(Default::default());
+        assert!(screen.tree.is_hidden(screen.start.root));
+        screen.handle_action(Action::NewCompetition, &mut text);
+        assert!(screen.session.is_none());
+        assert!(!screen.tree.is_hidden(screen.start.root));
+        assert!(screen.tree.is_hidden(screen.board));
+        assert_eq!(
+            start::read(&screen.tree, &screen.start),
+            start::Form::default()
+        );
+        let acts = actions(&screen);
+        assert!(acts.contains(&Action::Start));
+        // The demo's past competitions are listed with what each allows.
+        assert!(acts.iter().any(|a| matches!(a, Action::ResumePast(_))));
+        assert!(acts.iter().any(|a| matches!(a, Action::OpenPast(_))));
+        assert!(acts.iter().any(|a| matches!(a, Action::RematchPast(_))));
+    }
+
+    #[test]
+    fn opening_a_past_competition_shows_it_read_only() {
+        let mut screen = Competition::demo();
+        let mut text = TextStore::new(Default::default());
+        screen.handle_action(Action::NewCompetition, &mut text);
+        screen.handle_action(Action::OpenPast(PathBuf::from("/demo/comp-2")), &mut text);
+        assert!(screen.read_only && screen.session.is_some());
+        assert!(!screen.tree.is_hidden(screen.board));
+    }
+
+    #[test]
+    fn panel_rows_are_added_and_removed_within_the_limits() {
+        let mut screen = Competition::demo();
+        let mut text = TextStore::new(Default::default());
+        screen.handle_action(Action::NewCompetition, &mut text);
+        let rows = |s: &Competition| start::read(&s.tree, &s.start).panel.len();
+        assert_eq!(rows(&screen), 3);
+        for _ in 0..5 {
+            screen.handle_action(Action::AddPanelRow, &mut text);
+        }
+        assert_eq!(rows(&screen), MAX_PANEL);
+        assert!(!screen.tree.is_enabled(screen.start.add_row));
+        let panel = start::read(&screen.tree, &screen.start).panel;
+        // A new row takes the last row's kind.
+        assert!(panel[3..].iter().all(|c| c.kind == AgentKind::Agy));
+        let (_, contestants) = competition::engine::participants(&panel[0], &panel);
+        assert_eq!(contestants[5].id.as_str(), "agy-4");
+        // The remove buttons are wired to their rows.
+        assert_eq!(
+            actions(&screen)
+                .iter()
+                .filter(|a| matches!(a, Action::RemovePanelRow(_)))
+                .count(),
+            MAX_PANEL
+        );
+
+        screen.handle_action(Action::RemovePanelRow(0), &mut text);
+        let panel = start::read(&screen.tree, &screen.start).panel;
+        assert_eq!(panel.len(), MAX_PANEL - 1);
+        assert_eq!(panel[0].kind, AgentKind::Codex);
+        assert!(screen.tree.is_enabled(screen.start.add_row));
+        for _ in 0..10 {
+            screen.handle_action(Action::RemovePanelRow(0), &mut text);
+        }
+        assert_eq!(rows(&screen), 2);
+        assert!(
+            screen
+                .start
+                .panel
+                .iter()
+                .all(|row| !screen.tree.is_enabled(row.remove))
+        );
+    }
+
+    #[test]
+    fn a_row_kind_change_offers_that_kinds_models() {
+        let mut screen = Competition::demo_start();
+        let mut text = TextStore::new(Default::default());
+        let row = screen.start.panel[1].kind;
+        screen
+            .tree
+            .update::<noa_gpui_core::widgets::PopUpButton, _>(row, |p, cx| p.set_selected(cx, 1));
+        assert!(start::row_kind_changed(
+            &mut screen.tree,
+            &mut screen.start,
+            row,
+            &mut text
+        ));
+        let panel = start::read(&screen.tree, &screen.start).panel;
+        assert_eq!(panel[1], AgentChoice::from(AgentKind::Codex));
+        assert_eq!(panel[0].setup.model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn every_agent_and_the_judge_has_a_pane_button() {
+        let screen = Competition::demo();
+        let focus: Vec<String> = actions(&screen)
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::FocusPane(part) => Some(part.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(focus, ["claude", "codex", "agy", "judge"]);
+    }
+
+    #[test]
+    fn snapshots_of_a_left_competition_are_dropped() {
+        let (channel, snapshots) = Channel::fake();
+        let mut screen = Competition::live(channel);
+        let mut text = TextStore::new(Default::default());
+        let snapshot = |generation| Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(crate::demo::session())),
+            artifact_root: None,
+            generation,
+        };
+        snapshots.send(snapshot(0)).unwrap();
+        screen.poll_live(&mut text);
+        assert!(screen.session.is_some());
+
+        screen.handle_action(Action::NewCompetition, &mut text);
+        assert!(screen.session.is_none());
+        // Still in flight from the runner that was stopped.
+        snapshots.send(snapshot(0)).unwrap();
+        screen.poll_live(&mut text);
+        assert!(screen.session.is_none());
+        assert!(!screen.tree.is_hidden(screen.start.root));
+        // The next competition's are taken.
+        snapshots.send(snapshot(1)).unwrap();
+        screen.poll_live(&mut text);
+        assert!(screen.session.is_some());
     }
 
     #[test]

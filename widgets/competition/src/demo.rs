@@ -4,11 +4,97 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use competition::store::{Listed, Summary};
+
 use competition::model::types::{
-    AgentKind, ArtifactFile, ArtifactKind, Author, Brief, EntryEvaluation, JUDGE_ID, JudgeOutput,
-    Message, MessageId, MsgKind, PartId, Participant, Phase, Receipt, Role, Round, RoundKind,
-    Session, SessionId, Submission,
+    AgentChoice, AgentKind, AgentSetup, ArtifactFile, ArtifactKind, Author, Brief, EntryEvaluation,
+    JUDGE_ID, JudgeOutput, Message, MessageId, Millis, MsgKind, PartId, Participant, Phase,
+    Receipt, Role, Round, RoundKind, Session, SessionId, Submission,
 };
+
+/// The start view's demo panel: the same CLI on two models, and codex.
+pub fn start_panel() -> Vec<AgentChoice> {
+    let on = |kind, model: &str, effort: Option<&str>| AgentChoice {
+        kind,
+        setup: AgentSetup {
+            model: Some(model.into()),
+            effort: effort.map(Into::into),
+        },
+    };
+    vec![
+        on(AgentKind::Claude, "opus", Some("high")),
+        on(AgentKind::Claude, "sonnet", None),
+        on(AgentKind::Codex, "gpt-6.2-sol", Some("xhigh")),
+    ]
+}
+
+/// Canned past competitions for the demo's start view, newest first.
+pub fn past() -> Vec<Listed> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as Millis);
+    let summary = |id: &str,
+                   ago: Millis,
+                   request: &str,
+                   rounds,
+                   winner: Option<&str>,
+                   closed,
+                   busy,
+                   contestants: &[&str]| {
+        let dir = PathBuf::from("/demo").join(id);
+        Listed {
+            dir: dir.clone(),
+            summary: Ok(Summary {
+                dir,
+                id: SessionId::new(id),
+                created_at: now.saturating_sub(ago),
+                request: request.into(),
+                winner: winner.map(PartId::new),
+                closed,
+                rounds,
+                contestants: contestants.iter().map(|c| (*c).to_owned()).collect(),
+                busy,
+            }),
+        }
+    };
+    let hour = 3_600_000;
+    vec![
+        summary(
+            "comp-4",
+            2 * hour,
+            "音楽プレイヤーのミニマルな UI を設計・実装する（index.html で確認可能にすること）",
+            3,
+            None,
+            false,
+            false,
+            &["claude (opus · high)", "claude-2 (sonnet)", "codex"],
+        ),
+        summary(
+            "comp-3",
+            5 * hour,
+            "社内ダッシュボードの KPI カードを 3 案作る",
+            2,
+            None,
+            false,
+            true,
+            &["claude", "codex", "agy"],
+        ),
+        summary(
+            "comp-2",
+            3 * 24 * hour,
+            "スペシャルティコーヒー焙煎所のブランドランディングページをデザイン・実装する（HTML/CSS/JS で比較可能にすること）",
+            6,
+            Some("claude"),
+            true,
+            false,
+            &["claude", "codex", "agy"],
+        ),
+        Listed {
+            dir: PathBuf::from("/demo/comp-1"),
+            summary: Err("events.jsonl line 4 is damaged: EOF while parsing".into()),
+        },
+    ]
+}
 
 pub fn session() -> Session {
     let p = |id: &str, kind, role| Participant {

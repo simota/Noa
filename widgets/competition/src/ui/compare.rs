@@ -17,6 +17,7 @@ pub(super) fn insert(
     session: &Session,
     selected_round: Option<RoundNo>,
     filter_part: Option<&PartId>,
+    can_act: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let list = scroll_column(tree, host, 12.0);
@@ -163,7 +164,7 @@ pub(super) fn insert(
         }
         // In the header, not after the report: a long report or artifact
         // list must not push the choice out of reach.
-        if round.submissions.contains_key(part) && !is_winner {
+        if can_act && round.submissions.contains_key(part) && !is_winner {
             let win_btn = tree.insert(
                 Some(col),
                 Button::new("この案を優勝に選ぶ").control_size(ControlSize::Small),

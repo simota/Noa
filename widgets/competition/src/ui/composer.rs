@@ -13,6 +13,7 @@ use competition::model::types::{JUDGE_ID, PartId, Session};
 use super::{caption, clear_children, fill, gap, note};
 
 pub(super) struct Parts {
+    pub(super) root: WidgetId,
     recipients_host: WidgetId,
     pub(super) recipients: WidgetId,
     pub(super) area: WidgetId,
@@ -85,6 +86,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）",
     );
     Parts {
+        root,
         recipients_host,
         recipients,
         area,

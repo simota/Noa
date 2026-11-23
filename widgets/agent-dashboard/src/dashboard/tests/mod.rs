@@ -23,6 +23,7 @@ mod paragraphs;
 mod queue_cards;
 mod rebuild;
 mod relations;
+mod saved_view;
 mod selection;
 mod tabs;
 mod triage;

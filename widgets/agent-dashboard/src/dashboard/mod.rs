@@ -33,6 +33,7 @@ mod keymap;
 mod mindmap;
 mod pager;
 mod panel;
+mod prefs;
 mod queue;
 mod select;
 mod style;
@@ -47,6 +48,7 @@ use keymap::{Action, Mode, Route};
 use mindmap::MapAxis;
 use pager::ListParts;
 use panel::{Panel, empty, history_row, panel};
+pub use prefs::{Prefs, PrefsStore, default_path as default_prefs_path};
 use queue::{QueueButtons, queue, queue_since};
 use select::Step;
 use style::{GUTTER, HEADER_HEIGHT, fill_remaining, gap, set_label, set_tag};
@@ -136,6 +138,34 @@ impl View {
             help: false,
             first: [0; 5],
             reveal: None,
+        }
+    }
+
+    /// The view a run starts with: what `prefs` keeps, nothing selected.
+    fn from_prefs(prefs: &Prefs) -> Self {
+        View {
+            tab: prefs.tab,
+            map_axis: prefs.map_axis,
+            time_scale: prefs.time_scale,
+            shown: prefs.shown,
+            ..View::of(prefs.grouping)
+        }
+    }
+}
+
+impl Prefs {
+    /// The command line's values over the saved ones: each one given wins.
+    pub fn overridden(
+        self,
+        tab: Option<Tab>,
+        grouping: Option<Grouping>,
+        filter: Option<String>,
+    ) -> Prefs {
+        Prefs {
+            tab: tab.unwrap_or(self.tab),
+            grouping: grouping.unwrap_or(self.grouping),
+            filter: filter.unwrap_or(self.filter),
+            ..self
         }
     }
 }
@@ -467,6 +497,9 @@ pub struct Dashboard {
     /// before the release activates it (a grouping segment, a button).
     filter_had_focus: bool,
     pressed_in_filter: bool,
+    /// Where the view is saved when it changes (`after_input`) and when
+    /// the window closes; `None` keeps nothing (the tests, a snapshot).
+    prefs_store: Option<PrefsStore>,
     #[cfg(test)]
     panels: [Option<WidgetId>; 5],
     /// Lets the tests drive `wheel` as if the pager took the event: U1's
@@ -487,7 +520,9 @@ impl std::ops::Deref for Dashboard {
 }
 
 impl Dashboard {
-    /// The demo: the canned fleet.
+    /// The demo: the canned fleet. Only the tests start so; the app starts
+    /// from the saved view (`with_prefs`).
+    #[cfg(test)]
     pub fn new(grouping: Grouping) -> Self {
         Self::showing(View::of(grouping))
     }
@@ -513,6 +548,8 @@ impl Dashboard {
     }
 
     /// Fed by the live feed, connecting until its first snapshot arrives.
+    /// As `new`, for the tests (`live_with_prefs`).
+    #[cfg(test)]
     pub fn live(grouping: Grouping, channel: Channel) -> Self {
         let feed = Feed {
             link: Some(Link::Connecting),
@@ -522,7 +559,57 @@ impl Dashboard {
         Self::start(View::of(grouping), feed)
     }
 
-    /// Switches to an initial tab (e.g. from `--tab=...`) before the first frame.
+    /// The demo, starting from `prefs`.
+    pub fn with_prefs(prefs: &Prefs) -> Self {
+        Self::showing(View::from_prefs(prefs)).with_filter(prefs.filter.clone())
+    }
+
+    /// `live`, starting from `prefs`.
+    pub fn live_with_prefs(prefs: &Prefs, channel: Channel) -> Self {
+        let feed = Feed {
+            link: Some(Link::Connecting),
+            channel: Some(channel),
+            ..Feed::default()
+        };
+        Self::start(View::from_prefs(prefs), feed).with_filter(prefs.filter.clone())
+    }
+
+    /// `of_snapshot`, starting from `prefs`.
+    pub fn of_snapshot_with_prefs(prefs: &Prefs, snapshot: Snapshot) -> Self {
+        Self::from_snapshot(View::from_prefs(prefs), snapshot).with_filter(prefs.filter.clone())
+    }
+
+    /// Saves the view in `store` from now on, whenever it changes and when
+    /// the window closes. The view shown now is taken as saved: the
+    /// command line's values are kept only once the user changes the view.
+    pub fn persisting(mut self, mut store: PrefsStore) -> Self {
+        store.start_from(self.prefs());
+        self.prefs_store = Some(store);
+        self
+    }
+
+    /// The view as it is kept across runs.
+    fn prefs(&self) -> Prefs {
+        Prefs {
+            tab: self.view.tab,
+            grouping: self.view.grouping,
+            shown: self.view.shown,
+            map_axis: self.view.map_axis,
+            time_scale: self.view.time_scale,
+            filter: self.filter.query.clone(),
+        }
+    }
+
+    fn save_prefs(&mut self) {
+        let prefs = self.prefs();
+        if let Some(store) = &mut self.prefs_store {
+            store.save(&prefs);
+        }
+    }
+
+    /// Switches to an initial tab before the first frame. The app's
+    /// `--tab` goes through `Prefs::overridden`.
+    #[cfg(test)]
     pub fn with_tab(mut self, tab: Tab) -> Self {
         if self.view.tab == tab {
             return self;
@@ -533,8 +620,8 @@ impl Dashboard {
         self
     }
 
-    /// Applies an initial filter query (e.g. from `--filter=...`) before the
-    /// first frame.
+    /// Applies an initial filter query (the saved one, or `--filter`) before
+    /// the first frame.
     pub fn with_filter(mut self, query: String) -> Self {
         let query = fleet::one_line(&query);
         if query.is_empty() {
@@ -551,7 +638,9 @@ impl Dashboard {
         self
     }
 
-    /// One live snapshot, with no feed behind it.
+    /// One live snapshot, with no feed behind it. As `new`, for the tests
+    /// (`of_snapshot_with_prefs`).
+    #[cfg(test)]
     pub fn of_snapshot(grouping: Grouping, snapshot: Snapshot) -> Self {
         Self::from_snapshot(View::of(grouping), snapshot)
     }
@@ -1079,6 +1168,7 @@ impl Dashboard {
         self.close_ended = old.close_ended;
         self.filter_had_focus = old.filter_had_focus;
         self.pressed_in_filter = old.pressed_in_filter;
+        self.prefs_store = old.prefs_store;
         self.watch();
         self.lay_out_again(text);
     }
@@ -1159,6 +1249,7 @@ impl Dashboard {
             close_ended: None,
             filter_had_focus: false,
             pressed_in_filter: false,
+            prefs_store: None,
             #[cfg(test)]
             panels: [None; 5],
             #[cfg(test)]
@@ -2283,6 +2374,15 @@ impl Screen for Dashboard {
 
     fn before_frame(&mut self, text: &mut TextStore) {
         self.frame(Instant::now(), text);
+    }
+
+    /// Every view change comes from input: the view is saved after each.
+    fn after_input(&mut self) {
+        self.save_prefs();
+    }
+
+    fn close_requested(&mut self) {
+        self.save_prefs();
     }
 
     fn handle(&mut self, message: Message, text: &mut TextStore) {

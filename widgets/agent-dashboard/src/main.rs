@@ -11,15 +11,18 @@ use noa_gpui_platform::{App, AppOptions, Headless, Screen};
 use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 
-use crate::dashboard::{Dashboard, Tab};
+use crate::dashboard::{Dashboard, PrefsStore, Tab};
 use crate::fleet::Grouping;
 use crate::live::{Link, Snapshot};
 
 const USAGE: &str = "usage: agent-dashboard [--demo] [--group=parent|agent|model|none] \
-                     [--tab=ops|analytics|map|timeline] [--filter=QUERY] \
+                     [--tab=ops|analytics|map|timeline] [--filter=QUERY] [--prefs=FILE] \
                      [--snapshot=FILE.png [--size=WxH] [--keys=SEQ]]\n  \
-                     --tab: initial view tab (default ops); \
-                     --filter: initial filter query (e.g. 'parent:release -state:done'); \
+                     --group, --tab, --filter: the initial grouping, tab and filter query \
+                     (e.g. 'parent:release -state:done'), over the saved view; \
+                     --prefs: where the view is saved and restored (default \
+                     <data-dir>/noa/agent-dashboard/view.json; a snapshot keeps none \
+                     unless given); \
                      --size: snapshot size in logical pixels (default 1440x900; at most \
                      4096 a side and about 8.3 million pixels, e.g. 3840x2160); \
                      --keys: keys sent before the snapshot, e.g. 'jj/codex<Enter>' \
@@ -261,9 +264,10 @@ fn first_live_snapshot() -> Result<Snapshot, String> {
 
 fn main() -> Result<(), String> {
     let mut snapshot_path = None;
-    let mut grouping = Grouping::Orchestrator;
-    let mut tab = Tab::Operations;
-    let mut initial_filter = String::new();
+    let mut grouping = None;
+    let mut tab = None;
+    let mut initial_filter = None;
+    let mut prefs_path = None;
     let mut demo = false;
     let mut size = DEFAULT_SIZE;
     let mut keys = Vec::new();
@@ -271,12 +275,15 @@ fn main() -> Result<(), String> {
         if let Some(path) = arg.strip_prefix("--snapshot=") {
             snapshot_path = Some(PathBuf::from(path));
         } else if let Some(name) = arg.strip_prefix("--group=") {
-            grouping =
-                Grouping::parse(name).ok_or_else(|| format!("unknown group {name:?}\n{USAGE}"))?;
+            grouping = Some(
+                Grouping::parse(name).ok_or_else(|| format!("unknown group {name:?}\n{USAGE}"))?,
+            );
         } else if let Some(name) = arg.strip_prefix("--tab=") {
-            tab = Tab::parse(name).ok_or_else(|| format!("unknown tab {name:?}\n{USAGE}"))?;
+            tab = Some(Tab::parse(name).ok_or_else(|| format!("unknown tab {name:?}\n{USAGE}"))?);
         } else if let Some(query) = arg.strip_prefix("--filter=") {
-            initial_filter = query.to_owned();
+            initial_filter = Some(query.to_owned());
+        } else if let Some(path) = arg.strip_prefix("--prefs=") {
+            prefs_path = Some(PathBuf::from(path));
         } else if let Some(arg) = arg.strip_prefix("--size=") {
             size = parse_size(arg)?;
         } else if let Some(seq) = arg.strip_prefix("--keys=") {
@@ -287,33 +294,43 @@ fn main() -> Result<(), String> {
             return Err(format!("unknown option {arg:?}\n{USAGE}"));
         }
     }
+    // A snapshot leaves the person's saved view alone unless given a file.
+    let prefs_path = match prefs_path {
+        Some(path) => Some(path),
+        None if snapshot_path.is_some() => None,
+        None => dashboard::default_prefs_path(),
+    };
+    let mut store = prefs_path.map(PrefsStore::at);
+    let prefs = store
+        .as_mut()
+        .map(PrefsStore::load)
+        .unwrap_or_default()
+        .overridden(tab, grouping, initial_filter);
+    let persisting = |screen: Dashboard, store: Option<PrefsStore>| match store {
+        Some(store) => screen.persisting(store),
+        None => screen,
+    };
     if let Some(path) = snapshot_path {
-        let mut screen = if demo {
-            Dashboard::new(grouping)
+        let screen = if demo {
+            Dashboard::with_prefs(&prefs)
         } else {
-            Dashboard::of_snapshot(grouping, first_live_snapshot()?)
-        }
-        .with_tab(tab)
-        .with_filter(initial_filter);
+            Dashboard::of_snapshot_with_prefs(&prefs, first_live_snapshot()?)
+        };
+        let mut screen = persisting(screen, store);
         snapshot(&path, &mut screen, size, keys)?;
         println!("wrote {}", path.display());
         return Ok(());
     }
     App::new(options(), move |setup| {
         if demo {
-            return Box::new(
-                Dashboard::new(grouping)
-                    .with_tab(tab)
-                    .with_filter(initial_filter),
-            );
+            return Box::new(persisting(Dashboard::with_prefs(&prefs), store));
         }
         let waker = setup.waker.clone();
         let channel = live::start(move || waker.wake());
-        Box::new(
-            Dashboard::live(grouping, channel)
-                .with_tab(tab)
-                .with_filter(initial_filter),
-        )
+        Box::new(persisting(
+            Dashboard::live_with_prefs(&prefs, channel),
+            store,
+        ))
     })
     .run()
     .map_err(|e| e.to_string())

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The discussion and competition start views list past sessions: a finished
+  one opens read-only without starting agents, an interrupted one resumes
+  (taking its labelled panes back), and a new session or a rematch with the
+  same settings starts from the same window. `--session=DIR` renders a stored
+  one. A session's log is locked while a runner holds it, so two windows never
+  resume the same one.
+- Discussions and competitions can hold after each round until 次のラウンドへ,
+  and +1 / +3 adds rounds to a running session or continues one that ran out
+  of rounds.
+- A competition panel takes 2–6 entries, so one CLI can compete against itself
+  on different models or efforts.
+- The discussion, competition and repo browser jump to an agent's pane
+  (`noa.focusPane`).
+- The repo browser starts claude, codex or agy in a worktree, pane-less ones
+  included, with the review prompt as its first prompt (passed through a
+  private file, never on a listed command line); shows a predicted merge
+  conflict's file with its markers and quotes it; names the file and line
+  range in quotes from a commit; and opens on a worktree with
+  `--worktree=PATH`.
+- The agent dashboard closes every ended worker of the filter at once (⇧X,
+  confirmed after Shift is let go), shows closed workers and their results
+  from the ctl journals, keeps its view across runs, and opens a worker's
+  worktree in the repo browser (D).
+- docs/FEATURES.md describes the competition window.
+
+### Fixed
+
+- The agent dashboard never types a message into a pane whose agent went
+  back to its shell (`refuseShell`, and nothing is sent to a Noa older than
+  0.9.12).
+
 ## [0.9.14] - 2026-11-23
 
 An animated split zoom, fixes for the seven High findings from the

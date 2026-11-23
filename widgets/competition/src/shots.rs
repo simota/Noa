@@ -78,10 +78,12 @@ pub fn find_chrome() -> Option<PathBuf> {
     shells.pop()
 }
 
-/// A `file://` URL for an absolute path.
+/// A `file://` URL for `path`, made absolute first: a relative path would
+/// put its first segment in the URL's host and load nothing.
 fn file_url(path: &Path) -> String {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     let mut url = String::from("file://");
-    for byte in path.to_string_lossy().bytes() {
+    for byte in absolute.to_string_lossy().bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
             url.push(byte as char);
         } else {
@@ -191,6 +193,17 @@ mod tests {
             file_url(Path::new("/a b/ノア.html")),
             "file:///a%20b/%E3%83%8E%E3%82%A2.html"
         );
+    }
+
+    #[test]
+    fn relative_pages_become_absolute_file_urls() {
+        let url = file_url(Path::new("checks/snapshot/.preview/index.html"));
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            url,
+            file_url(&cwd.join("checks/snapshot/.preview/index.html"))
+        );
+        assert!(url.starts_with("file:///"), "{url}");
     }
 
     #[test]

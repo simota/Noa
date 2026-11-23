@@ -236,45 +236,69 @@ fn inline_css(css: &str, ctx: &Ctx, base: &Path) -> String {
     out
 }
 
+/// One attribute of a start tag.
+struct Attr {
+    key: String,
+    /// The decoded value; `None` for a bare attribute like `defer`.
+    value: Option<String>,
+    /// The attribute exactly as written, rendered back while it is unchanged
+    /// so character references and quoting survive untouched.
+    raw: Option<String>,
+}
+
 /// One parsed start tag: its name and attributes in source order.
 struct Tag {
     name: String,
-    attrs: Vec<(String, Option<String>)>,
+    attrs: Vec<Attr>,
+    /// What stood between the last attribute and `>`, such as the ` /` of a
+    /// self-closing SVG element, kept so foreign content still nests right.
+    tail: String,
 }
 
 impl Tag {
     fn get(&self, name: &str) -> Option<&str> {
         self.attrs
             .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .and_then(|(_, v)| v.as_deref())
+            .find(|a| a.key.eq_ignore_ascii_case(name))
+            .and_then(|a| a.value.as_deref())
     }
 
     fn has(&self, name: &str) -> bool {
-        self.attrs.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
+        self.attrs.iter().any(|a| a.key.eq_ignore_ascii_case(name))
+    }
+
+    fn remove(&mut self, names: &[&str]) {
+        self.attrs
+            .retain(|a| !names.iter().any(|n| a.key.eq_ignore_ascii_case(n)));
     }
 
     fn set(&mut self, name: &str, value: String) {
         if let Some(slot) = self
             .attrs
             .iter_mut()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .find(|a| a.key.eq_ignore_ascii_case(name))
         {
-            slot.1 = Some(value);
+            slot.value = Some(value);
+            slot.raw = None;
         }
     }
 
     fn render(&self) -> String {
         let mut out = format!("<{}", self.name);
-        for (key, value) in &self.attrs {
+        for attr in &self.attrs {
             out.push(' ');
-            out.push_str(key);
-            if let Some(value) = value {
-                out.push_str("=\"");
-                out.push_str(&value.replace('&', "&amp;").replace('"', "&quot;"));
-                out.push('"');
+            match (&attr.raw, &attr.value) {
+                (Some(raw), _) => out.push_str(raw),
+                (None, Some(value)) => {
+                    out.push_str(&attr.key);
+                    out.push_str("=\"");
+                    out.push_str(&value.replace('&', "&amp;").replace('"', "&quot;"));
+                    out.push('"');
+                }
+                (None, None) => out.push_str(&attr.key),
             }
         }
+        out.push_str(&self.tail);
         out.push('>');
         out
     }
@@ -296,6 +320,7 @@ fn parse_tag(text: &str) -> Option<(Tag, usize)> {
     let name = text[start..i].to_owned();
     let mut attrs = Vec::new();
     loop {
+        let gap_start = i;
         while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
             i += 1;
         }
@@ -303,7 +328,8 @@ fn parse_tag(text: &str) -> Option<(Tag, usize)> {
             return None;
         }
         if bytes[i] == b'>' {
-            return Some((Tag { name, attrs }, i + 1));
+            let tail = text[gap_start..i].to_owned();
+            return Some((Tag { name, attrs, tail }, i + 1));
         }
         let key_start = i;
         while i < bytes.len()
@@ -334,9 +360,17 @@ fn parse_tag(text: &str) -> Option<(Tag, usize)> {
                 }
                 &text[value_start..i]
             };
-            attrs.push((key, Some(decode_entities(value))));
+            attrs.push(Attr {
+                value: Some(decode_entities(value)),
+                raw: Some(text[key_start..i].to_owned()),
+                key,
+            });
         } else if !key.is_empty() {
-            attrs.push((key, None));
+            attrs.push(Attr {
+                raw: Some(key.clone()),
+                key,
+                value: None,
+            });
         }
     }
 }
@@ -410,16 +444,20 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
             let close = find_ascii_ci(rest, &format!("</{name}")).unwrap_or(rest.len());
             let body = &rest[..close];
             rest = &rest[close..];
-            if name == "script"
-                && let Some(file) = tag.get("src").and_then(|src| resolve(ctx, base, src))
-                && let Ok(code) = fs::read_to_string(&file)
-            {
-                let late = tag.has("defer") || tag.get("type") == Some("module");
-                tag.attrs.retain(|(k, _)| {
-                    !["src", "defer", "async", "integrity", "crossorigin"]
-                        .iter()
-                        .any(|drop| k.eq_ignore_ascii_case(drop))
-                });
+            // A deferred or module script with `src` runs after parsing, in
+            // document order. Inlined copies run where they stand, so every
+            // such script, local or remote, moves before `</body>` without
+            // `defer`, keeping the order among them.
+            let late = name == "script"
+                && tag.has("src")
+                && !tag.has("async")
+                && (tag.has("defer") || tag.get("type") == Some("module"));
+            let local = (name == "script")
+                .then(|| tag.get("src").and_then(|src| resolve(ctx, base, src)))
+                .flatten()
+                .and_then(|file| fs::read_to_string(file).ok());
+            if let Some(code) = local {
+                tag.remove(&["src", "defer", "async", "integrity", "crossorigin"]);
                 let inlined = format!("{}{}", tag.render(), escape_raw_text(&code, "script"));
                 if late {
                     deferred.push(format!("{inlined}</script>"));
@@ -429,6 +467,14 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
                     }
                 } else {
                     out.push_str(&inlined);
+                }
+                continue;
+            }
+            if late {
+                tag.remove(&["defer"]);
+                deferred.push(format!("{}{body}</script>", tag.render()));
+                if let Some(end) = rest.find('>') {
+                    rest = &rest[end + 1..];
                 }
                 continue;
             }
@@ -599,6 +645,55 @@ mod tests {
         let dir = scratch("none");
         fs::write(dir.join("page.html"), "<p>x</p>").unwrap();
         assert_eq!(write(&dir).unwrap(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn inline(html: &str) -> String {
+        let dir = scratch("unit");
+        let ctx = Ctx {
+            root: &dir,
+            issues: Default::default(),
+        };
+        let out = inline_html(html, &ctx, Path::new(""));
+        let _ = fs::remove_dir_all(&dir);
+        out
+    }
+
+    #[test]
+    fn self_closing_svg_children_stay_self_closing() {
+        let html = r#"<svg viewBox="0 0 4 2"><rect x="0" width="1" height="1"/><rect x="2" width="1" height="1" /></svg>"#;
+        let out = inline(html);
+        assert!(
+            out.contains(r#"<rect x="0" width="1" height="1"/>"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"<rect x="2" width="1" height="1" />"#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn character_references_in_attributes_are_kept_as_written() {
+        let html = r#"<img alt="Noa&rsquo;s" title='A &mdash; "B"'><input value=&#x2014;>"#;
+        assert_eq!(inline(html), html);
+    }
+
+    #[test]
+    fn remote_deferred_scripts_keep_their_place_before_local_ones() {
+        let dir = scratch("order");
+        fs::write(dir.join("app.js"), "useLib();").unwrap();
+        fs::write(
+            dir.join("index.html"),
+            r#"<head><script defer src="https://cdn.example/lib.js"></script><script defer src="app.js"></script></head><body><p>x</p></body>"#,
+        )
+        .unwrap();
+        let html = fs::read_to_string(write(&dir).unwrap().unwrap().page).unwrap();
+        let lib = html.find("https://cdn.example/lib.js").unwrap();
+        let app = html.find("useLib();").unwrap();
+        let body = html.find("<p>x</p>").unwrap();
+        // Both run after the document, the library first.
+        assert!(body < lib && lib < app, "{html}");
         let _ = fs::remove_dir_all(&dir);
     }
 

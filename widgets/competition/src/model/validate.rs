@@ -110,6 +110,9 @@ struct RawEvaluation {
     breakdown: Vec<RawAxis>,
 }
 
+/// Most criteria one evaluation's breakdown may list.
+const MAX_AXES: usize = 32;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAxis {
@@ -194,8 +197,14 @@ pub fn parse_judge(
                 )),
             }
         }
+        if ev.breakdown.len() > MAX_AXES {
+            problems.push(format!(
+                "evaluations.{id}.breakdown has {} entries; at most {MAX_AXES}",
+                ev.breakdown.len()
+            ));
+        }
         let mut breakdown = Vec::new();
-        for (i, axis) in ev.breakdown.iter().enumerate() {
+        for (i, axis) in ev.breakdown.iter().take(MAX_AXES).enumerate() {
             let at = format!("evaluations.{id}.breakdown[{i}]");
             if axis.axis.trim().is_empty() {
                 problems.push(format!("{at}.axis is empty"));
@@ -216,8 +225,8 @@ pub fn parse_judge(
             });
         }
         if !breakdown.is_empty() {
-            let sum: u16 = ev.breakdown.iter().map(|a| a.score).sum();
-            if sum != ev.score {
+            let sum: u32 = ev.breakdown.iter().map(|a| u32::from(a.score)).sum();
+            if sum != u32::from(ev.score) {
                 problems.push(format!(
                     "evaluations.{id}.breakdown scores add up to {sum}, not the score {}",
                     ev.score
@@ -574,6 +583,72 @@ mod tests {
             vec!["320x568: no horizontal scroll".to_owned()]
         );
         assert_eq!(out.evaluations[&PartId::new("codex")].breakdown.len(), 2);
+    }
+
+    #[test]
+    fn an_amendment_drops_the_breakdown_it_no_longer_matches() {
+        let mut s = session(Some(10));
+        let first = r#"{
+  "overview": "R1",
+  "evaluations": {
+    "claude": { "score": 70, "feedback": "a", "breakdown": [
+      { "axis": "impact", "score": 50, "max": 60 }, { "axis": "craft", "score": 20, "max": 40 } ] },
+    "codex": { "score": 80, "feedback": "b" }
+  },
+  "ranking": ["codex", "claude"]
+}"#;
+        s.rounds[0].outcome = Some(parse_judge(first, &s, 1).unwrap());
+        let mut second = s.rounds[0].clone();
+        second.no = 2;
+        second.outcome = None;
+        s.rounds.push(second);
+        let raw = r#"{
+  "overview": "R2",
+  "evaluations": {
+    "claude": { "score": 75, "feedback": "a" },
+    "codex": { "score": 82, "feedback": "b" }
+  },
+  "ranking": ["codex", "claude"],
+  "amendments": [ { "round": 1, "contestant": "claude", "score": 90, "reason": "misread" } ]
+}"#;
+        let out = parse_judge(raw, &s, 2).unwrap();
+        crate::model::reduce::apply(
+            &mut s,
+            &[crate::model::reduce::Event::JudgeAccepted {
+                round: 2,
+                output: out,
+            }],
+        )
+        .unwrap();
+        let fixed =
+            &s.round(1).unwrap().outcome.as_ref().unwrap().evaluations[&PartId::new("claude")];
+        assert_eq!(fixed.score, 90);
+        let sum: u32 = fixed.breakdown.iter().map(|a| u32::from(a.score)).sum();
+        assert!(
+            fixed.breakdown.is_empty() || sum == 90,
+            "{:?}",
+            fixed.breakdown
+        );
+    }
+
+    #[test]
+    fn an_oversized_breakdown_is_a_validation_error_not_a_panic() {
+        let s = session(Some(10));
+        let raw = r#"{
+  "overview": "R1",
+  "evaluations": {
+    "claude": { "score": 64, "feedback": "a", "breakdown": [
+      { "axis": "a", "score": 65535, "max": 100 }, { "axis": "b", "score": 1, "max": 100 } ] },
+    "codex": { "score": 80, "feedback": "b" }
+  },
+  "ranking": ["codex", "claude"]
+}"#;
+        let result = std::panic::catch_unwind(|| parse_judge(raw, &s, 1));
+        let err = result
+            .expect("validation panicked")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("breakdown"), "{err}");
     }
 
     #[test]

@@ -173,14 +173,86 @@ pub fn inspect(snapshot_dir: &Path, out_dir: &Path) -> io::Result<Inspection> {
 /// submission is snapshotted, into `out/snapshot`, then [`inspect`]s it into
 /// `out`.
 pub fn check_entry(entry: &Path, out: &Path) -> io::Result<Inspection> {
+    if !entry.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} is not a directory", entry.display()),
+        ));
+    }
     let snapshot = out.join("snapshot");
+    // The snapshot step deletes its destination first: it must not be, hold,
+    // or sit inside the entry, or the entry is lost or copied into itself.
+    let entry_abs = lexical(&std::path::absolute(entry)?);
+    let entry_real = entry.canonicalize()?;
+    let out_abs = lexical(&std::path::absolute(out)?);
+    let snapshot_abs = out_abs.join("snapshot");
+    for e in [&entry_abs, &entry_real] {
+        if e.starts_with(&snapshot_abs) || out_abs.starts_with(e) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "--out {} overlaps the entry {}; pick a directory outside it",
+                    out.display(),
+                    entry.display()
+                ),
+            ));
+        }
+    }
     crate::store::snapshot_artifacts(entry, &snapshot)?;
     inspect(&snapshot, out)
+}
+
+/// `path` with `.` and `..` resolved lexically (no symlinks followed).
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("competition-check-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_output_that_overlaps_the_entry_is_refused_and_the_entry_survives() {
+        let work = scratch("overlap");
+        let entry = work.join("snapshot");
+        fs::create_dir_all(&entry).unwrap();
+        fs::write(entry.join("index.html"), "<p>keep me</p>").unwrap();
+        // `out/snapshot` is the entry itself, and `out` is its parent.
+        assert!(check_entry(&entry, &work).is_err());
+        assert!(entry.join("index.html").is_file(), "the entry was deleted");
+        // An output inside the entry would copy the entry into itself.
+        assert!(check_entry(&entry, &entry.join("out")).is_err());
+        assert!(entry.join("index.html").is_file());
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn a_missing_entry_is_an_error_not_a_stale_snapshot() {
+        let work = scratch("missing");
+        let out = work.join("out");
+        fs::create_dir_all(out.join("snapshot")).unwrap();
+        fs::write(out.join("snapshot/index.html"), "<p>old</p>").unwrap();
+        assert!(check_entry(&work.join("no-such-entry"), &out).is_err());
+        let _ = fs::remove_dir_all(&work);
+    }
 
     #[test]
     fn fnv1a64_matches_reference_values() {

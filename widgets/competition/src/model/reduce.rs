@@ -308,6 +308,8 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
                 };
                 let from = ev.amended.as_ref().map_or(ev.score, |note| note.from);
                 ev.score = amendment.score;
+                // The split no longer adds up to the corrected score.
+                ev.breakdown.clear();
                 ev.amended = Some(AmendNote {
                     from,
                     by_round: *round,

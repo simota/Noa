@@ -379,6 +379,8 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
     color: var(--muted);
   }}
   .preview-box iframe {{
+    /* Keep a fixed viewport's size: a flex item would shrink to the card. */
+    flex: none;
     border: 0;
     background: #fff;
     height: 460px;
@@ -669,6 +671,36 @@ mod tests {
         Submission,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn a_fixed_viewport_frame_does_not_shrink_to_the_card() {
+        let html = render_html(
+            &Session {
+                id: SessionId::new("comp-1"),
+                request: String::new(),
+                workdir: None,
+                max_rounds: None,
+                reveal_interval: 5,
+                rev: 1,
+                created_at: 1,
+                judge: Participant {
+                    id: PartId::new(JUDGE_ID),
+                    kind: AgentKind::Claude,
+                    role: Role::Judge,
+                    pane_id: None,
+                },
+                contestants: vec![],
+                messages: vec![],
+                rounds: vec![],
+                winner: None,
+                closed: false,
+            },
+            Path::new("/nonexistent"),
+        );
+        let start = html.find(".preview-box iframe {").unwrap();
+        let rule = &html[start..start + html[start..].find('}').unwrap()];
+        assert!(rule.contains("flex: none"), "{rule}");
+    }
 
     #[test]
     fn viewer_html_embeds_rounds_and_escapes_script_closing_tags() {

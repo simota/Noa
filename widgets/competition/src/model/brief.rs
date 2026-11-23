@@ -242,33 +242,26 @@ pub fn contestant_brief(
         for axis in &ev.breakdown {
             let _ = writeln!(body, "  - {}: {}/{}", axis.axis, axis.score, axis.max);
         }
-        // Corrections the latest judgment made to any of `to`'s scores.
-        for r in session.rounds.iter().filter(|r| r.no <= ev_round) {
-            if let Some(note) = r
-                .outcome
-                .as_ref()
-                .and_then(|o| o.evaluations.get(to))
-                .and_then(|e| e.amended.as_ref())
-                .filter(|n| n.by_round == ev_round)
-            {
-                let now = r
-                    .outcome
-                    .as_ref()
-                    .and_then(|o| o.evaluations.get(to))
-                    .map_or(0, |e| e.score);
-                let _ = writeln!(
-                    body,
-                    "- Score correction: your R{} score went from {}/100 to {now}/100 ({}).",
-                    r.no, note.from, note.reason
-                );
-            }
-        }
         if !ev.strengths.is_empty() {
             let _ = writeln!(body, "- Strengths: {}", ev.strengths);
         }
         let _ = writeln!(body, "- Feedback to address: {}", ev.feedback);
         if let Some(standing) = standing_line(session, to, ev_round) {
             let _ = writeln!(body, "- {standing}");
+        }
+    }
+    // Corrections the last judgment made to any of `to`'s scores, whether or
+    // not `to` took part in that round.
+    let last_judged = round.saturating_sub(1);
+    for r in session.rounds.iter().filter(|r| r.no < round) {
+        if let Some(ev) = r.outcome.as_ref().and_then(|o| o.evaluations.get(to))
+            && let Some(note) = ev.amended.as_ref().filter(|n| n.by_round == last_judged)
+        {
+            let _ = writeln!(
+                body,
+                "- Score correction: your R{} score went from {}/100 to {}/100 ({}).",
+                r.no, note.from, ev.score, note.reason
+            );
         }
     }
     body.push('\n');
@@ -898,6 +891,44 @@ mod tests {
                 .contains("FINAL ROUND: finish rather than experiment")
         );
         assert!(!last.body.contains("Prefer one bold, verified change"));
+    }
+
+    #[test]
+    fn a_correction_reaches_a_contestant_that_skipped_the_amending_round() {
+        let mut s = sample_session();
+        let claude = PartId::new("claude");
+        s.round_mut(1)
+            .unwrap()
+            .outcome
+            .as_mut()
+            .unwrap()
+            .evaluations
+            .get_mut(&claude)
+            .unwrap()
+            .amended = Some(AmendNote {
+            from: 60,
+            by_round: 3,
+            reason: "judged without its stylesheet".into(),
+        });
+        // claude did not take part in R3.
+        let third = s.round_mut(3).unwrap();
+        third.submissions.remove(&claude);
+        third.outcome.as_mut().unwrap().evaluations.remove(&claude);
+        let brief = contestant_brief(
+            &s,
+            &claude,
+            4,
+            &PathBuf::from("/tmp/entries/claude"),
+            &PathBuf::from("/tmp/comp"),
+            &PathBuf::from("/tmp/comp/r4/report-claude.md"),
+        );
+        assert!(
+            brief
+                .body
+                .contains("your R1 score went from 60/100 to 71/100"),
+            "{}",
+            brief.body
+        );
     }
 
     #[test]

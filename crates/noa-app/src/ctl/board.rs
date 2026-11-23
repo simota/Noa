@@ -3714,7 +3714,13 @@ impl Board {
             BORDER
         };
         if self.result_shown {
-            lines.extend(self.result_box(pane, cols, screen_rows, now));
+            // `.max(3)` can give the box rows past the frame, which `render`
+            // cuts off: scroll only as far as the rows that will show
+            // (under the title and the top border, above the footer).
+            let visible = rows
+                .saturating_sub(1 + lines.len() + 2)
+                .clamp(1, screen_rows);
+            lines.extend(self.result_box(pane, cols, screen_rows, visible, now));
         } else {
             let mut title = Line::default();
             title.plain(" ").bold(self.lang.pick("画面", "Screen")).fg(
@@ -3939,8 +3945,16 @@ impl Board {
     }
 
     /// The result file's text in place of the screen box (`r`, D18),
-    /// scrolled by `result_scroll`: a title, then a box of `height` rows.
-    fn result_box(&self, pane: u64, cols: usize, height: usize, now: Instant) -> Vec<String> {
+    /// scrolled by `result_scroll`: a title, then a box of `height` rows, of
+    /// which the first `visible` fit in the frame.
+    fn result_box(
+        &self,
+        pane: u64,
+        cols: usize,
+        height: usize,
+        visible: usize,
+        now: Instant,
+    ) -> Vec<String> {
         let l = |ja, en| self.lang.pick(ja, en);
         let dim = |text: String| (Some(DIM), text);
         let mut body: Vec<(Option<Rgb>, String)> = Vec::new();
@@ -3989,13 +4003,13 @@ impl Board {
                 }
             }
         }
-        let reach = body.len().saturating_sub(height);
+        let reach = body.len().saturating_sub(visible);
         self.result_reach.set(reach);
         let offset = self.result_scroll.min(reach);
         let mut title = Line::default();
         title.plain(" ").bold(l("結果ファイル", "Result file"));
-        if body.len() > height {
-            let (from, to, all) = (offset + 1, (offset + height).min(body.len()), body.len());
+        if body.len() > visible {
+            let (from, to, all) = (offset + 1, (offset + visible).min(body.len()), body.len());
             title.fg(
                 DIM,
                 &self.lang.pick(
@@ -8187,6 +8201,36 @@ mod tests {
         fresh.key(Key::Enter);
         fresh.key(Key::Char('r'));
         assert!(!fresh.result_shown);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_short_frame_still_scrolls_the_result_to_its_last_line() {
+        let dir = insight_dir("short");
+        spawn_and_send(&dir, "write the report");
+        let text: String = (1..=60).map(|n| format!("result line {n:02}\n")).collect();
+        std::fs::write(result_at(&dir), text).unwrap();
+        let mut board = insight_board(&dir);
+        let t0 = Instant::now();
+        board.refresh_files(t0);
+        board.key(Key::Enter);
+        board.key(Key::Char('r'));
+        board.refresh_files(t0 + Duration::from_millis(100));
+        let mut checked = 0;
+        for rows in MIN_ROWS..=30 {
+            board.result_scroll = 0;
+            let first = rendered(&board, 80, rows, t0);
+            if !first.contains("result line 01") {
+                continue; // The box does not reach the frame at all.
+            }
+            for _ in 0..100 {
+                board.key(Key::Char('j'));
+            }
+            let all = rendered(&board, 80, rows, t0);
+            assert!(all.contains("result line 60"), "rows {rows}:\n{all}");
+            checked += 1;
+        }
+        assert!(checked > 10, "{checked}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

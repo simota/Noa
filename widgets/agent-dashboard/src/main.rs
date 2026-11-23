@@ -15,7 +15,7 @@ use crate::dashboard::{Dashboard, PrefsStore, Tab};
 use crate::fleet::Grouping;
 use crate::live::{Link, Snapshot};
 
-const USAGE: &str = "usage: agent-dashboard [--demo] [--group=parent|agent|model|none] \
+const USAGE: &str = "usage: agent-dashboard [--demo | --demo-closed] [--group=parent|agent|model|none] \
                      [--tab=ops|analytics|map|timeline] [--filter=QUERY] [--prefs=FILE] \
                      [--snapshot=FILE.png [--size=WxH] [--keys=SEQ]]\n  \
                      --group, --tab, --filter: the initial grouping, tab and filter query \
@@ -28,7 +28,7 @@ const USAGE: &str = "usage: agent-dashboard [--demo] [--group=parent|agent|model
                      --keys: keys sent before the snapshot, e.g. 'jj/codex<Enter>' \
                      (<Enter> <Esc> <Space> <Down> <Up> are named keys; any other < is typed)\n  \
                      live data from the running Noa's control server by default; \
-                     --demo shows canned data";
+                     --demo shows canned data, --demo-closed with two closed workers";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
 const SNAPSHOT_SCALE: f32 = 2.0;
 /// How long `--snapshot` waits for the live feed's first snapshot.
@@ -269,6 +269,7 @@ fn main() -> Result<(), String> {
     let mut initial_filter = None;
     let mut prefs_path = None;
     let mut demo = false;
+    let mut demo_closed = false;
     let mut size = DEFAULT_SIZE;
     let mut keys = Vec::new();
     for arg in std::env::args().skip(1) {
@@ -290,6 +291,9 @@ fn main() -> Result<(), String> {
             keys = parse_keys(seq)?;
         } else if arg == "--demo" {
             demo = true;
+        } else if arg == "--demo-closed" {
+            demo = true;
+            demo_closed = true;
         } else {
             return Err(format!("unknown option {arg:?}\n{USAGE}"));
         }
@@ -306,13 +310,20 @@ fn main() -> Result<(), String> {
         .map(PrefsStore::load)
         .unwrap_or_default()
         .overridden(tab, grouping, initial_filter);
+    let canned = move || {
+        if demo_closed {
+            fleet::canned_with_closed()
+        } else {
+            fleet::canned()
+        }
+    };
     let persisting = |screen: Dashboard, store: Option<PrefsStore>| match store {
         Some(store) => screen.persisting(store),
         None => screen,
     };
     if let Some(path) = snapshot_path {
         let screen = if demo {
-            Dashboard::with_prefs(&prefs)
+            Dashboard::with_prefs(&prefs, canned())
         } else {
             Dashboard::of_snapshot_with_prefs(&prefs, first_live_snapshot()?)
         };
@@ -323,7 +334,7 @@ fn main() -> Result<(), String> {
     }
     App::new(options(), move |setup| {
         if demo {
-            return Box::new(persisting(Dashboard::with_prefs(&prefs), store));
+            return Box::new(persisting(Dashboard::with_prefs(&prefs, canned()), store));
         }
         let waker = setup.waker.clone();
         let channel = live::start(move || waker.wake());

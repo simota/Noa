@@ -15,6 +15,9 @@ use noa_ipc::{
 
 use crate::fleet::{Fleet, Orchestrator, Phase, State, Worker, minutes_text, one_line};
 
+mod journal;
+use journal::{Archive, Gone, Journal};
+
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(4);
 const NOTIFY_WAIT: Duration = Duration::from_secs(1);
@@ -178,15 +181,19 @@ impl Channel {
 /// Starts the feed thread. `wake` is called after each snapshot it sends,
 /// and every `HEARTBEAT` until the channel is dropped.
 pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
-    start_with(wake, HEARTBEAT, connect)
+    start_with(wake, HEARTBEAT, connect, journal::default_dir())
 }
 
 /// `start` with the heartbeat's period and the way the feed reaches Noa
 /// given (the tests give a Noa of their own).
+/// `journals`: the directory of the spawners' journals, where the workers
+/// of orchestrators no longer open are found; `None` looks only at the
+/// journals of open orchestrators.
 fn start_with<C: Noa + 'static>(
     wake: impl Fn() + Send + Sync + 'static,
     every: Duration,
     connect: impl FnMut() -> Result<C, String> + Send + 'static,
+    journals: Option<PathBuf>,
 ) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
@@ -194,7 +201,7 @@ fn start_with<C: Noa + 'static>(
     let (unsent_tx, unsent) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let (heartbeat, _thread) = heartbeat(every, Arc::clone(&wake));
-    let feed = Feed::new(
+    let mut feed = Feed::new(
         snapshot_tx,
         notice_tx,
         unsent_tx,
@@ -202,6 +209,7 @@ fn start_with<C: Noa + 'static>(
         wake,
         Box::new(Instant::now),
     );
+    feed.tracker.archive = Archive::at(journals);
     std::thread::Builder::new()
         .name("live-feed".into())
         .spawn(move || feed.run(connect))
@@ -504,6 +512,7 @@ impl Feed {
         self.tracker.replace(panels, unix_now());
         self.tracker.read_journals();
         self.tracker.read_results();
+        self.tracker.find_gone(unix_now());
         Ok(())
     }
 
@@ -917,11 +926,15 @@ struct Tracker {
     journals: HashMap<String, Journal>,
     /// The ended panes known to have left a result file, and that file.
     results: HashMap<u64, PathBuf>,
-}
-
-struct Journal {
-    modified: Option<SystemTime>,
-    spawns: HashMap<u64, Spawned>,
+    /// The journals of orchestrators not open: they outlive a change of
+    /// server instance, being files.
+    archive: Archive,
+    /// The worker panes the feed saw leave this instance: when, and when
+    /// the pane had started (a closed worker's end when its journal has
+    /// no `close`: the dashboard's own close is not journaled).
+    vanished: HashMap<u64, (f64, Option<u64>)>,
+    /// The workers the journals record whose panes are gone.
+    gone: Vec<Gone>,
 }
 
 /// What a spawner's journal says of the latest worker it spawned in a pane.
@@ -941,6 +954,7 @@ impl Tracker {
         if other {
             *self = Tracker {
                 instance: instance.to_owned(),
+                archive: std::mem::take(&mut self.archive),
                 ..Tracker::default()
             };
         }
@@ -953,6 +967,14 @@ impl Tracker {
 
     fn replace(&mut self, panels: Vec<Panel>, now: f64) {
         let live: Vec<u64> = panels.iter().map(|p| p.pane_id.0).collect();
+        for (pane, panel) in &self.panels {
+            if !live.contains(pane) && is_worker(panel) {
+                let started = panel.spawn.as_ref().map(|spawn| spawn.started_at);
+                self.vanished.insert(*pane, (now, started));
+            }
+        }
+        self.vanished
+            .retain(|_, (at, _)| now - *at <= journal::CLOSED_MAX_AGE_SECS);
         self.panels.retain(|pane, _| live.contains(pane));
         self.seen.retain(|pane, _| live.contains(pane));
         self.merge(panels, now);
@@ -977,10 +999,11 @@ impl Tracker {
         }
     }
 
-    /// Reads again each spawner's journal that changed on disk. A missing
+    /// Reads again each spawner's journal that changed on disk: the open
+    /// spawners of workers, and those of closed ones still open. A missing
     /// or unreadable journal gives no tasks.
     fn read_journals(&mut self) {
-        let surfaces: Vec<String> = self
+        let mut surfaces: Vec<String> = self
             .panels
             .values()
             .filter(|panel| is_worker(panel))
@@ -991,25 +1014,46 @@ impl Tracker {
                     .clone()
             })
             .collect();
+        // A spawner whose last worker closed keeps its journal while it is
+        // open: its closed workers are there.
+        let open: Vec<&str> = self
+            .panels
+            .values()
+            .filter_map(|panel| panel.surface_id.as_deref())
+            .collect();
         self.journals
-            .retain(|surface, _| surfaces.contains(surface));
+            .retain(|surface, _| surfaces.contains(surface) || open.contains(&surface.as_str()));
+        for surface in self.journals.keys() {
+            if !surfaces.contains(surface) {
+                surfaces.push(surface.clone());
+            }
+        }
         for surface in surfaces {
             let Some(path) = noa_config::ctl_journal_path(&surface) else {
                 continue;
             };
-            let modified = modified(&path);
+            let stamp = stamp(&path);
             if self
                 .journals
                 .get(&surface)
-                .is_some_and(|journal| journal.modified == modified)
+                .is_some_and(|journal| journal.stamp == stamp)
             {
                 continue;
             }
-            let spawns = std::fs::read_to_string(&path)
-                .map(|text| journal_spawns(&text))
-                .unwrap_or_default();
-            self.journals.insert(surface, Journal { modified, spawns });
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let journal = Journal::parsed(journal::file_name(&surface), stamp, &text);
+            self.journals.insert(surface, journal);
         }
+    }
+
+    /// Finds the workers the journals record whose panes are gone: those
+    /// of the open orchestrators' journals, and of the journal directory's
+    /// others (looked through at most every `journal::ARCHIVE_SCAN_SECS`).
+    fn find_gone(&mut self, now: f64) {
+        let open = self.journals.values().map(|j| j.name.clone()).collect();
+        self.archive.scan(now, &open);
+        let journals = self.journals.values().chain(self.archive.journals.values());
+        self.gone = journal::gone(journals, &self.panels, &self.vanished, now);
     }
 
     /// Looks again at each ended worker's own result file (one that failed
@@ -1072,6 +1116,12 @@ impl Tracker {
                 ))
             })
             .collect();
+        let mut workers = workers;
+        workers.extend(
+            self.gone
+                .iter()
+                .map(|gone| journal::closed_worker(gone, now)),
+        );
         let mut orchestrators: Vec<Orchestrator> = Vec::new();
         for worker in &workers {
             let known = orchestrators
@@ -1091,8 +1141,11 @@ impl Tracker {
     }
 }
 
-fn modified(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok()?.modified().ok()
+/// When the file at `path` last changed, and its length: a journal is
+/// read again when either differs.
+fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 /// A worker is an agent pane or a pane an orchestrator spawned, but not a
@@ -1255,43 +1308,9 @@ fn placement(pane: u64, panels: &HashMap<u64, Panel>) -> Placement {
 /// Each pane's latest `spawn` in a journal (pane ids are given out again
 /// after Noa restarts): its result path, and the first non-empty line of the
 /// latest `send` after it as the task. Answers to prompts are not tasks.
+#[cfg(test)]
 fn journal_spawns(text: &str) -> HashMap<u64, Spawned> {
-    let mut spawns: HashMap<u64, Spawned> = HashMap::new();
-    for line in text.lines() {
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(pane) = event["pane"].as_u64() else {
-            continue;
-        };
-        match event["ev"].as_str() {
-            Some("spawn") => {
-                let result = event["result"].as_str().map(PathBuf::from);
-                spawns.insert(
-                    pane,
-                    Spawned {
-                        result,
-                        ..Spawned::default()
-                    },
-                );
-            }
-            Some("send") if event["answer"].as_bool() != Some(true) => {
-                if let (Some(spawned), Some(text)) = (spawns.get_mut(&pane), event["text"].as_str())
-                {
-                    spawned.task = first_line(text).to_owned();
-                }
-            }
-            _ => {}
-        }
-    }
-    spawns
-}
-
-fn first_line(text: &str) -> &str {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
+    Journal::parsed(String::new(), None, text).spawns
 }
 
 /// The last lines of a screen with text on them.
@@ -1444,6 +1463,7 @@ fn worker_of(
         took_minutes,
         has_result: result.is_some(),
         result,
+        closed_pane: None,
         screen_tail: screen_tail.to_vec(),
         lines_per_tick: if running {
             buckets(&seen.changes, now)
@@ -1463,6 +1483,7 @@ fn worker_of(
 #[cfg(test)]
 pub(crate) mod tests {
     mod actions;
+    mod closed;
     mod performance;
 
     use std::cell::RefCell;
@@ -1758,10 +1779,7 @@ pub(crate) mod tests {
     }
 
     fn with_journal(tracker: &mut Tracker, surface: &str, text: &str) {
-        let journal = Journal {
-            modified: None,
-            spawns: journal_spawns(text),
-        };
+        let journal = Journal::parsed(journal::file_name(surface), None, text);
         tracker.journals.insert(surface.to_owned(), journal);
     }
 
@@ -2866,7 +2884,7 @@ pub(crate) mod tests {
             let _ = hang.recv();
             Err::<ScriptedNoa, String>("released".into())
         };
-        let channel = start_with(wake, Duration::from_millis(5), connect);
+        let channel = start_with(wake, Duration::from_millis(5), connect, None);
         for n in 0..3 {
             assert!(wakes.recv_timeout(PATIENCE).is_ok(), "wake {n}");
         }

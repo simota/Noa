@@ -221,6 +221,7 @@ fn dropped_text(label: &str) -> String {
 }
 
 impl Feed {
+    #[cfg(test)]
     fn demo() -> Self {
         Feed {
             fleet: fleet::canned(),
@@ -527,6 +528,7 @@ impl Dashboard {
         Self::showing(View::of(grouping))
     }
 
+    #[cfg(test)]
     fn showing(view: View) -> Self {
         Self::start(view, Feed::demo())
     }
@@ -559,9 +561,13 @@ impl Dashboard {
         Self::start(View::of(grouping), feed)
     }
 
-    /// The demo, starting from `prefs`.
-    pub fn with_prefs(prefs: &Prefs) -> Self {
-        Self::showing(View::from_prefs(prefs)).with_filter(prefs.filter.clone())
+    /// The demo of `fleet` (`fleet::canned`), starting from `prefs`.
+    pub fn with_prefs(prefs: &Prefs, fleet: Fleet) -> Self {
+        let feed = Feed {
+            fleet,
+            ..Feed::default()
+        };
+        Self::start(View::from_prefs(prefs), feed).with_filter(prefs.filter.clone())
     }
 
     /// `live`, starting from `prefs`.
@@ -1459,6 +1465,10 @@ impl Dashboard {
         let Some(worker) = self.feed.fleet.worker(pane) else {
             return;
         };
+        if worker.is_closed() {
+            self.show_notice(drawer::CLOSED_PANE.to_owned());
+            return;
+        }
         let status = match &self.feed.channel {
             Some(_) if self.feed.link != Some(Link::Live) => {
                 "ペインへ移動できません: Noa に接続していません".to_owned()
@@ -1555,8 +1565,10 @@ impl Dashboard {
             },
             &mut self.registry,
         );
-        self.registry.open_buttons.push((buttons.open, pane));
-        self.registry.close_pane_button = Some((buttons.close_pane, pane));
+        self.registry
+            .open_buttons
+            .extend(buttons.open.map(|id| (id, pane)));
+        self.registry.close_pane_button = buttons.close_pane.map(|id| (id, pane));
         self.registry.close_ended_button = buttons.close_ended.map(|id| (id, ended));
         self.registry.drawer = Some((root, buttons.close));
         self.registry.result_toggle = buttons.result;
@@ -1677,7 +1689,9 @@ impl Dashboard {
             .into_iter()
             .flatten()
         {
-            if !panes.contains(&pane) {
+            // A closed worker has no pane to fetch a screen from.
+            let closed = self.feed.fleet.worker(pane).is_some_and(Worker::is_closed);
+            if !closed && !panes.contains(&pane) {
                 panes.push(pane);
             }
         }
@@ -1774,6 +1788,10 @@ impl Dashboard {
             return;
         };
         let label = worker.label.clone();
+        if worker.is_closed() {
+            self.show_notice(drawer::CLOSED_SEND_GUARD.to_owned());
+            return;
+        }
         if worker.state == State::Permission {
             self.show_notice(drawer::PERMISSION_SEND_GUARD.to_owned());
             return;
@@ -1826,6 +1844,10 @@ impl Dashboard {
         let Some(worker) = self.feed.fleet.worker(pane) else {
             return;
         };
+        if worker.is_closed() {
+            self.show_notice(drawer::CLOSED_PANE.to_owned());
+            return;
+        }
         let label = worker.label.clone();
         if self.close_ended.take().is_some()
             && self.view.detail.is_some_and(|detail| detail != pane)
@@ -2105,12 +2127,12 @@ impl Dashboard {
             },
             Action::StartSend => match self.view.selected {
                 Some(pane) => {
-                    if self
-                        .feed
-                        .fleet
-                        .worker(pane)
-                        .is_some_and(|w| w.state == State::Permission)
-                    {
+                    let worker = self.feed.fleet.worker(pane);
+                    if worker.is_some_and(Worker::is_closed) {
+                        self.show_notice(drawer::CLOSED_SEND_GUARD.to_owned());
+                        return;
+                    }
+                    if worker.is_some_and(|w| w.state == State::Permission) {
                         self.show_notice(drawer::PERMISSION_SEND_GUARD.to_owned());
                         return;
                     }

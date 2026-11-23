@@ -38,6 +38,9 @@ pub(super) const RESULT_MAX_LINES: usize = 200;
 
 pub(super) const NEEDS_CONTROL: &str = "ペインへ移動するには Noa の server-scopes に control が必要です（例: server-scopes = read,control）。control はペインの作成と終了にも使われます";
 pub(super) const NEEDS_INPUT: &str = "送信するには Noa の server-scopes に input が必要です（例: server-scopes = read,control,input）";
+/// What the drawer and the notice line say of a worker whose pane is gone.
+pub(super) const CLOSED_PANE: &str = "ペインは閉じています（ctl の記録から表示）";
+pub(super) const CLOSED_SEND_GUARD: &str = "ペインは閉じているため送信できません";
 pub(super) const PERMISSION_SEND_GUARD: &str =
     "承認待ちのペインには安全のため送信できません（開く で直接操作してください）";
 
@@ -94,8 +97,9 @@ const NOT_REGULAR: &str = "通常のファイルではありません";
 
 /// The drawer's interactive controls.
 pub(super) struct DrawerButtons {
-    pub(super) open: WidgetId,
-    pub(super) close_pane: WidgetId,
+    /// 開く and ペインを閉じる; neither for a closed worker.
+    pub(super) open: Option<WidgetId>,
+    pub(super) close_pane: Option<WidgetId>,
     /// まとめて閉じる, when the filter shows ended workers.
     pub(super) close_ended: Option<WidgetId>,
     pub(super) close: WidgetId,
@@ -623,6 +627,12 @@ pub(super) fn build(
             FitTag::new(worker.branch.as_str()).style(TagStyle::Outlined),
         );
     }
+    if worker.is_closed() {
+        tree.insert(
+            Some(tags),
+            Tag::new(super::cards::CLOSED_TAG).style(TagStyle::Outlined),
+        );
+    }
     if worker.has_result {
         tree.insert(Some(tags), Tag::new("結果あり").tone(Tone::Success));
     } else {
@@ -647,8 +657,12 @@ pub(super) fn build(
         None if worker.orchestrator.is_empty() => "不明".to_owned(),
         None => one_line(&worker.orchestrator),
     };
-    text_line(tree, pane_section, &format!("ID {pane} · 親 {parent}"), 2);
-    if feed.link.as_ref() == Some(&Link::Live) && !feed.can_focus {
+    let id = worker.closed_pane.unwrap_or(pane);
+    text_line(tree, pane_section, &format!("ID {id} · 親 {parent}"), 2);
+    if worker.is_closed() {
+        let note = text_line(tree, pane_section, CLOSED_PANE, 2);
+        tree.update::<Label, _>(note, |l, cx| l.set_color(cx, Role::Muted));
+    } else if feed.link.as_ref() == Some(&Link::Live) && !feed.can_focus {
         let hint = text_line(tree, pane_section, NEEDS_CONTROL, 4);
         tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
     }
@@ -691,7 +705,9 @@ pub(super) fn build(
         )
     });
     if worker.screen_tail.is_empty() {
-        let empty = if feed.link.is_some() {
+        let empty = if worker.is_closed() {
+            TAIL_NONE
+        } else if feed.link.is_some() {
             TAIL_PENDING
         } else {
             TAIL_NONE
@@ -765,7 +781,11 @@ pub(super) fn build(
     }
 
     let send_section = section(tree, scroll, "指示・返信");
-    let (send_field, send_button) = if worker.state == State::Permission {
+    let (send_field, send_button) = if worker.is_closed() {
+        let hint = text_line(tree, send_section, CLOSED_SEND_GUARD, 2);
+        tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
+        (None, None)
+    } else if worker.state == State::Permission {
         let hint = text_line(tree, send_section, PERMISSION_SEND_GUARD, 3);
         tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
         (None, None)
@@ -833,23 +853,29 @@ pub(super) fn build(
             ..Default::default()
         }),
     );
-    let open = tree.insert(
-        Some(buttons),
-        Button::new("開く")
-            .control_size(ControlSize::Small)
-            .selected(true),
-    );
+    // A closed worker has no pane to go to or to close.
+    let open_pane = !worker.is_closed();
+    let open = open_pane.then(|| {
+        tree.insert(
+            Some(buttons),
+            Button::new("開く")
+                .control_size(ControlSize::Small)
+                .selected(true),
+        )
+    });
     let close_pane_label = if confirm_close {
         "本当に閉じる"
     } else {
         "ペインを閉じる"
     };
-    let close_pane = tree.insert(
-        Some(buttons),
-        Button::new(close_pane_label)
-            .control_size(ControlSize::Small)
-            .selected(confirm_close),
-    );
+    let close_pane = open_pane.then(|| {
+        tree.insert(
+            Some(buttons),
+            Button::new(close_pane_label)
+                .control_size(ControlSize::Small)
+                .selected(confirm_close),
+        )
+    });
     spacer(tree, buttons);
     let close = tree.insert(
         Some(buttons),

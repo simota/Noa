@@ -31,7 +31,8 @@ impl Filter {
 /// separate), lowercased, must match the worker. A term may be prefixed with
 /// `-` to negate it, and may use a `field:value` qualifier (`state:`/`s:`,
 /// `need:`/`n:`, `agent:`/`a:`, `model:`/`m:`, `branch:`/`b:`,
-/// `parent:`/`p:`, `label:`/`l:`, `task:`/`t:`, `result:`/`r:`). Plain terms
+/// `parent:`/`p:`, `label:`/`l:`, `task:`/`t:`, `result:`/`r:`; `state:closed`
+/// is a worker whose pane is gone, rebuilt from its journal). Plain terms
 /// match label, agent, model, branch or task. An empty query matches every
 /// worker.
 pub(super) fn matches(worker: &Worker, query: &str) -> bool {
@@ -78,6 +79,7 @@ fn match_qualified(worker: &Worker, term: &str) -> Option<bool> {
             "finished" | "done" | "完了" => worker.state == State::Finished,
             "error" | "fail" | "failure" | "失敗" => worker.state == State::Error,
             "quiet" | "静止" => worker.quiet,
+            "closed" | "閉じた" => worker.is_closed(),
             "waiting" | "要対応" => worker.need().is_some(),
             _ => false,
         },

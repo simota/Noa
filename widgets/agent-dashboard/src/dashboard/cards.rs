@@ -20,6 +20,9 @@ use super::{Pulse, Registry};
 
 pub(super) const RUNNING_CARD_WIDTH: f32 = 336.0;
 
+/// The tag of a worker whose pane is gone, rebuilt from its journal.
+pub(super) const CLOSED_TAG: &str = "閉じた";
+
 pub(super) fn quiet_text(worker: &Worker) -> String {
     format!("静止 {:.0} 分", worker.wait_minutes)
 }
@@ -356,6 +359,9 @@ pub(super) fn done_card(
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
     identity_tags(tree, tags, worker);
+    if worker.is_closed() {
+        tree.insert(Some(tags), Tag::new(CLOSED_TAG).style(TagStyle::Outlined));
+    }
     if worker.has_result {
         tree.insert(Some(tags), Tag::new("結果あり").tone(Tone::Success));
     }

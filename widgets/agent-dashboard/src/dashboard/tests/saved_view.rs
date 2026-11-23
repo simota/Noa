@@ -16,7 +16,7 @@ fn temp(name: &str) -> PathBuf {
 fn started(path: &Path, tab: Option<Tab>) -> (Dashboard, TextStore) {
     let mut store = PrefsStore::at(path.to_owned());
     let prefs = store.load().overridden(tab, None, None);
-    let mut dashboard = Dashboard::with_prefs(&prefs).persisting(store);
+    let mut dashboard = Dashboard::with_prefs(&prefs, fleet::canned()).persisting(store);
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
     (dashboard, text)

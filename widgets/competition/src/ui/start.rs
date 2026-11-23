@@ -1,28 +1,35 @@
 //! The start view: competition request, optional workdir, judge agent, round
-//! limit, peer-reveal interval (default every 5 rounds), and contestant panel.
+//! limit, peer-reveal interval (default every 5 rounds), and the contestant
+//! panel (rows of agent, model, and effort; a kind may enter more than once),
+//! above the list of past competitions to open, resume, or rematch.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use noa_gpui_core::style::{
-    AlignItems, FlexDirection, JustifyContent, Rect as LayoutRect, Size as LayoutSize, auto,
-    length, percent,
+    AlignItems, FlexDirection, Overflow, Point as LayoutPoint, Rect as LayoutRect,
+    Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, CheckState, Checkbox, ComboBox, Container, Label, NumberInput, PopUpButton, TextArea,
-    TextField,
+    Button, ComboBox, Container, ControlSize, Label, NumberInput, PopUpButton, ScrollView,
+    TextArea, TextField, Tone,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
 use competition::model::types::{
-    AgentChoice, AgentKind, AgentSetup, DEFAULT_MAX_ROUNDS, DEFAULT_REVEAL_INTERVAL, RoundNo,
+    AgentChoice, AgentKind, AgentSetup, DEFAULT_MAX_ROUNDS, DEFAULT_REVEAL_INTERVAL, MAX_PANEL,
+    Millis, Participant, RoundNo, Session,
 };
+use competition::store::Listed;
 
-use super::{caption, clear_children, gap};
+use super::{Action, caption, clear_children, gap, spacer, tag};
 use crate::live::Link;
 
 const MAX_MAX_ROUNDS: RoundNo = 50;
 const MAX_REVEAL_INTERVAL: RoundNo = 25;
+
+/// How many past competitions the start view lists.
+pub(super) const PAST_LIMIT: usize = 12;
 
 pub(super) struct Parts {
     pub(super) root: WidgetId,
@@ -33,13 +40,27 @@ pub(super) struct Parts {
     pub(super) judge: WidgetId,
     /// The model and effort of the judge; rebuilt when its kind changes.
     pub(super) judge_setup: SetupParts,
-    pub(super) panel: Vec<WidgetId>,
-    /// The model and effort of each panel checkbox, in the same order.
-    pub(super) panel_setup: Vec<SetupParts>,
+    /// Holds the panel's rows.
+    panel_list: WidgetId,
+    /// One row per entry, in panel order.
+    pub(super) panel: Vec<PanelRow>,
+    pub(super) add_row: WidgetId,
     pub(super) start_button: WidgetId,
     note: WidgetId,
+    /// Holds the list of past competitions.
+    past: WidgetId,
 }
 
+/// One panel entry: its agent kind, model and effort, and its remove button.
+pub(super) struct PanelRow {
+    host: WidgetId,
+    pub(super) kind: WidgetId,
+    pub(super) setup: SetupParts,
+    pub(super) remove: WidgetId,
+}
+
+/// What the start form holds; also what a rematch fills it with.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Form {
     pub request: String,
     pub workdir: String,
@@ -49,36 +70,99 @@ pub(crate) struct Form {
     pub panel: Vec<AgentChoice>,
 }
 
+impl Default for Form {
+    fn default() -> Self {
+        Self {
+            request: String::new(),
+            workdir: String::new(),
+            max_rounds: DEFAULT_MAX_ROUNDS,
+            reveal_interval: DEFAULT_REVEAL_INTERVAL,
+            judge: AgentKind::ALL[0].into(),
+            panel: AgentKind::ALL.iter().map(|&k| k.into()).collect(),
+        }
+    }
+}
+
+impl Form {
+    /// `session`'s settings, for a rematch. A session without a round
+    /// limit gets the default one (the form always sets a limit).
+    pub(crate) fn of_session(session: &Session) -> Self {
+        let choice = |p: &Participant| AgentChoice {
+            kind: p.kind,
+            setup: p.setup.clone(),
+        };
+        Self {
+            request: session.request.clone(),
+            workdir: session
+                .workdir
+                .as_ref()
+                .map(|w| w.display().to_string())
+                .unwrap_or_default(),
+            max_rounds: session
+                .max_rounds
+                .unwrap_or(DEFAULT_MAX_ROUNDS)
+                .clamp(1, MAX_MAX_ROUNDS),
+            reveal_interval: session.reveal_interval.min(MAX_REVEAL_INTERVAL),
+            judge: choice(&session.judge),
+            panel: session
+                .contestants
+                .iter()
+                .take(MAX_PANEL)
+                .map(choice)
+                .collect(),
+        }
+    }
+}
+
+fn card_container() -> Container {
+    Container::new(Style {
+        flex_direction: FlexDirection::Column,
+        flex_shrink: 0.0,
+        gap: gap(12.0),
+        padding: LayoutRect::length(24.0),
+        size: LayoutSize {
+            width: length(620.0),
+            height: auto(),
+        },
+        max_size: LayoutSize {
+            width: percent(1.0),
+            height: auto(),
+        },
+        ..Default::default()
+    })
+    .background(Role::Surface)
+    .border(1.0, Role::Separator)
+    .radius(10.0)
+}
+
 pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
+    // Scrolls as a whole: six panel rows and the past list outgrow a
+    // short window.
     let root = tree.insert(
         Some(parent),
-        Container::new(Style {
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::CENTER,
-            justify_content: JustifyContent::CENTER,
+        ScrollView::new(Style {
+            overflow: LayoutPoint {
+                x: Overflow::Hidden,
+                y: Overflow::Scroll,
+            },
             ..super::fill()
         }),
     );
-    let card = tree.insert(
+    let column = tree.insert(
         Some(root),
         Container::new(Style {
             flex_direction: FlexDirection::Column,
-            gap: gap(12.0),
+            align_items: AlignItems::CENTER,
+            gap: gap(16.0),
             padding: LayoutRect::length(24.0),
             size: LayoutSize {
-                width: length(620.0),
-                height: auto(),
-            },
-            max_size: LayoutSize {
                 width: percent(1.0),
                 height: auto(),
             },
             ..Default::default()
-        })
-        .background(Role::Surface)
-        .border(1.0, Role::Separator)
-        .radius(10.0),
+        }),
     );
+    let card = tree.insert(Some(column), card_container());
     tree.insert(
         Some(card),
         Label::new("新しいコンペティション")
@@ -169,8 +253,32 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     );
     let judge_setup = insert_setup(tree, judge_row, AgentKind::ALL[0]);
 
-    let (panel, panel_setup) =
-        insert_panel(tree, card, "参加パネル（2体以上）・モデル・エフォート");
+    let panel_col = tree.insert(Some(card), Container::column().gap(6.0));
+    caption(
+        tree,
+        panel_col,
+        format!("参加パネル（2〜{MAX_PANEL}体）・エージェント・モデル・エフォート"),
+    );
+    let panel_list = tree.insert(Some(panel_col), Container::column().gap(6.0));
+    let panel = Form::default()
+        .panel
+        .iter()
+        .map(|choice| insert_row(tree, panel_list, choice))
+        .collect();
+    let panel_foot = tree.insert(
+        Some(panel_col),
+        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+    );
+    let add_row = tree.insert(
+        Some(panel_foot),
+        Button::new("＋ 参加者を追加").control_size(ControlSize::Small),
+    );
+    tree.insert(
+        Some(panel_foot),
+        Label::new("同じエージェントの2体目以降は claude-2, claude-3 … として参加します")
+            .font_size(11.0)
+            .color(Role::Muted),
+    );
 
     let foot = tree.insert(
         Some(card),
@@ -181,7 +289,8 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(foot),
         Button::new("コンペティションを開始").default_button(true),
     );
-    Parts {
+    let past = tree.insert(Some(column), card_container());
+    let mut parts = Parts {
         root,
         request,
         workdir,
@@ -189,11 +298,15 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         reveal_interval,
         judge,
         judge_setup,
+        panel_list,
         panel,
-        panel_setup,
+        add_row,
         start_button,
         note,
-    }
+        past,
+    };
+    sync_row_buttons(tree, &mut parts);
+    parts
 }
 
 /// The model box and effort menu of one agent.
@@ -238,35 +351,138 @@ fn insert_setup_controls(
     (model, effort)
 }
 
-/// One row per agent kind: whether it takes part, and its model and effort.
-fn insert_panel(
-    tree: &mut UiTree,
-    card: WidgetId,
-    title: &str,
-) -> (Vec<WidgetId>, Vec<SetupParts>) {
-    let column = tree.insert(Some(card), Container::column().gap(6.0));
-    caption(tree, column, title);
-    AgentKind::ALL
+/// Shows `setup` in the model box and effort menu of `kind`.
+fn set_setup(tree: &mut UiTree, parts: &SetupParts, kind: AgentKind, setup: &AgentSetup) {
+    let model = setup.model.clone().unwrap_or_default();
+    tree.update::<ComboBox, _>(parts.model, |c, cx| c.set_text(cx, model));
+    let effort = setup
+        .effort
+        .as_deref()
+        .and_then(|e| kind.efforts().iter().position(|k| *k == e))
+        .map_or(0, |i| i + 1);
+    tree.update::<PopUpButton, _>(parts.effort, |p, cx| p.set_selected(cx, effort));
+}
+
+/// One panel row showing `choice`: kind menu, model, effort, remove.
+fn insert_row(tree: &mut UiTree, list: WidgetId, choice: &AgentChoice) -> PanelRow {
+    let host = tree.insert(
+        Some(list),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
+    let index = AgentKind::ALL
         .iter()
-        .map(|&kind| {
-            let row = tree.insert(
-                Some(column),
-                Container::row().align_items(AlignItems::CENTER).gap(10.0),
-            );
-            let check = tree.insert(
-                Some(row),
-                Container::new(Style {
-                    size: LayoutSize {
-                        width: length(84.0),
-                        height: auto(),
-                    },
-                    ..Default::default()
-                }),
-            );
-            let check = tree.insert(Some(check), Checkbox::new(kind.command()).checked(true));
-            (check, insert_setup(tree, row, kind))
-        })
-        .unzip()
+        .position(|&k| k == choice.kind)
+        .unwrap_or(0);
+    let kind = tree.insert(
+        Some(host),
+        PopUpButton::new(AgentKind::ALL.iter().map(|k| k.command())).selected_index(index),
+    );
+    let setup = insert_setup(tree, host, choice.kind);
+    set_setup(tree, &setup, choice.kind, &choice.setup);
+    spacer(tree, host);
+    let remove = tree.insert(
+        Some(host),
+        Button::new("削除").control_size(ControlSize::Small),
+    );
+    PanelRow {
+        host,
+        kind,
+        setup,
+        remove,
+    }
+}
+
+/// Adding stops at [`MAX_PANEL`] rows, removing at two.
+fn sync_row_buttons(tree: &mut UiTree, parts: &mut Parts) {
+    let removable = parts.panel.len() > 2;
+    for row in &parts.panel {
+        tree.set_enabled(row.remove, removable);
+    }
+    tree.set_enabled(parts.add_row, parts.panel.len() < MAX_PANEL);
+}
+
+/// Adds a row of the last row's kind (on its default model and effort),
+/// so a second claude is one click away.
+pub(super) fn add_row(tree: &mut UiTree, parts: &mut Parts) {
+    if parts.panel.len() >= MAX_PANEL {
+        return;
+    }
+    let kind = parts
+        .panel
+        .last()
+        .map_or(AgentKind::ALL[0], |row| selected_kind(tree, row.kind));
+    let row = insert_row(tree, parts.panel_list, &kind.into());
+    parts.panel.push(row);
+    sync_row_buttons(tree, parts);
+}
+
+pub(super) fn remove_row(tree: &mut UiTree, parts: &mut Parts, index: usize, text: &mut TextStore) {
+    if parts.panel.len() <= 2 || index >= parts.panel.len() {
+        return;
+    }
+    let row = parts.panel.remove(index);
+    tree.remove(row.host, text);
+    sync_row_buttons(tree, parts);
+}
+
+/// Rebuilds the model and effort controls of the row whose kind menu is
+/// `source`; `false` when no row's is.
+pub(super) fn row_kind_changed(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    source: WidgetId,
+    text: &mut TextStore,
+) -> bool {
+    let Some(row) = parts.panel.iter_mut().find(|row| row.kind == source) else {
+        return false;
+    };
+    let kind = selected_kind(tree, row.kind);
+    clear_children(tree, row.setup.host, text);
+    let (model, effort) = insert_setup_controls(tree, row.setup.host, kind);
+    row.setup.model = model;
+    row.setup.effort = effort;
+    true
+}
+
+/// Puts `form` into the start view: a rematch, or a clean form.
+pub(super) fn fill(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut TextStore) {
+    let request = form.request.clone();
+    tree.update::<TextArea, _>(parts.request, |a, cx| a.set_text(cx, request));
+    let workdir = form.workdir.clone();
+    tree.update::<TextField, _>(parts.workdir, |f, cx| f.set_text(cx, workdir));
+    let (rounds, reveal) = (f64::from(form.max_rounds), f64::from(form.reveal_interval));
+    tree.update::<NumberInput, _>(parts.max_rounds, |n, cx| n.set_value(cx, rounds));
+    tree.update::<NumberInput, _>(parts.reveal_interval, |n, cx| n.set_value(cx, reveal));
+    let judge = AgentKind::ALL
+        .iter()
+        .position(|&k| k == form.judge.kind)
+        .unwrap_or(0);
+    tree.update::<PopUpButton, _>(parts.judge, |p, cx| p.set_selected(cx, judge));
+    judge_kind_changed(tree, parts, text);
+    set_setup(tree, &parts.judge_setup, form.judge.kind, &form.judge.setup);
+    for row in std::mem::take(&mut parts.panel) {
+        tree.remove(row.host, text);
+    }
+    parts.panel = form
+        .panel
+        .iter()
+        .take(MAX_PANEL)
+        .map(|choice| insert_row(tree, parts.panel_list, choice))
+        .collect();
+    while parts.panel.len() < 2 {
+        let row = insert_row(tree, parts.panel_list, &AgentKind::ALL[0].into());
+        parts.panel.push(row);
+    }
+    sync_row_buttons(tree, parts);
+}
+
+/// The start view's buttons, for the screen's action table.
+pub(super) fn actions(parts: &Parts, actions: &mut Vec<(WidgetId, Action)>) {
+    actions.push((parts.start_button, Action::Start));
+    actions.push((parts.add_row, Action::AddPanelRow));
+    for (index, row) in parts.panel.iter().enumerate() {
+        actions.push((row.remove, Action::RemovePanelRow(index)));
+    }
 }
 
 /// Rebuilds the judge's model and effort controls for the kind now
@@ -331,17 +547,15 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         kind,
         setup: read_setup(tree, &parts.judge_setup, kind),
     };
-    let panel = AgentKind::ALL
+    let panel = parts
+        .panel
         .iter()
-        .zip(&parts.panel)
-        .zip(&parts.panel_setup)
-        .filter(|((_, id), _)| {
-            tree.get::<Checkbox>(**id)
-                .is_some_and(|c| c.state() == CheckState::On)
-        })
-        .map(|((&kind, _), setup)| AgentChoice {
-            kind,
-            setup: read_setup(tree, setup, kind),
+        .map(|row| {
+            let kind = selected_kind(tree, row.kind);
+            AgentChoice {
+                kind,
+                setup: read_setup(tree, &row.setup, kind),
+            }
         })
         .collect();
     Form {
@@ -351,6 +565,135 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         reveal_interval,
         judge,
         panel,
+    }
+}
+
+/// Rebuilds the list of past competitions, newest first, each with what
+/// can be done with it: open read-only (finished, or running in another
+/// window), resume (unfinished), rematch.
+pub(super) fn rebuild_past(
+    tree: &mut UiTree,
+    parts: &Parts,
+    past: &[Listed],
+    now: Millis,
+    actions: &mut Vec<(WidgetId, Action)>,
+    text: &mut TextStore,
+) {
+    clear_children(tree, parts.past, text);
+    tree.insert(
+        Some(parts.past),
+        Label::new("過去のコンペ").font_size(15.0).weight(600),
+    );
+    if past.is_empty() {
+        super::note(tree, parts.past, "まだコンペはありません");
+        return;
+    }
+    let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+    for listed in past {
+        let row = tree.insert(
+            Some(parts.past),
+            Container::row().align_items(AlignItems::CENTER).gap(10.0),
+        );
+        let info = tree.insert(
+            Some(row),
+            Container::new(Style {
+                flex_direction: FlexDirection::Column,
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                min_size: LayoutSize {
+                    width: length(0.0),
+                    height: auto(),
+                },
+                gap: gap(3.0),
+                ..Default::default()
+            }),
+        );
+        let summary = match &listed.summary {
+            Ok(summary) => summary,
+            Err(why) => {
+                tree.insert(
+                    Some(info),
+                    Label::new(dir_name(&listed.dir))
+                        .font_size(12.5)
+                        .weight(600),
+                );
+                super::note(tree, info, format!("読めません: {why}"));
+                continue;
+            }
+        };
+        let tags = tree.insert(
+            Some(info),
+            Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+        );
+        let (status, tone) = match (summary.closed, summary.busy, summary.maybe_running) {
+            (true, _, _) => ("終了", Tone::Neutral),
+            (false, true, _) => ("実行中", Tone::Success),
+            (false, false, true) => ("旧版で実行中の可能性", Tone::Warning),
+            (false, false, false) => ("中断", Tone::Warning),
+        };
+        tag(tree, tags, status, tone);
+        caption(tree, tags, age(now, summary.created_at));
+        caption(tree, tags, format!("{}ラウンド", summary.rounds));
+        if let Some(winner) = &summary.winner {
+            tag(tree, tags, format!("🏆 {winner}"), Tone::Success);
+        }
+        tree.insert(
+            Some(info),
+            Label::new(excerpt(&summary.request))
+                .font_size(12.5)
+                .weight(600)
+                .wrap(true),
+        );
+        super::note(tree, info, summary.contestants.join(" · "));
+
+        let buttons = tree.insert(Some(row), Container::row().gap(6.0));
+        let dir: PathBuf = listed.dir.clone();
+        let open = if !summary.closed && !summary.busy && !summary.maybe_running {
+            let resume = tree.insert(Some(buttons), small("再開").default_button(true));
+            (resume, Action::ResumePast(dir.clone()))
+        } else {
+            let label = if summary.closed { "開く" } else { "閲覧" };
+            (
+                tree.insert(Some(buttons), small(label)),
+                Action::OpenPast(dir.clone()),
+            )
+        };
+        actions.push(open);
+        let rematch = tree.insert(Some(buttons), small("リマッチ"));
+        actions.push((rematch, Action::RematchPast(dir)));
+    }
+}
+
+fn dir_name(dir: &Path) -> String {
+    dir.file_name().map_or_else(
+        || dir.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+const EXCERPT_CHARS: usize = 60;
+
+/// The request's first line, cut to [`EXCERPT_CHARS`].
+fn excerpt(request: &str) -> String {
+    let line = request
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default();
+    match line.char_indices().nth(EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line.to_owned(),
+    }
+}
+
+/// How long ago `at` was: `たった今`, `5分前`, `3時間前`, `2日前`.
+fn age(now: Millis, at: Millis) -> String {
+    let minutes = now.saturating_sub(at) / 60_000;
+    match minutes {
+        0 => "たった今".to_owned(),
+        1..60 => format!("{minutes}分前"),
+        60..1440 => format!("{}時間前", minutes / 60),
+        _ => format!("{}日前", minutes / 1440),
     }
 }
 
@@ -374,4 +717,23 @@ pub(super) fn workdir(typed: &str) -> Result<Option<PathBuf>, String> {
         return Err(format!("{} はディレクトリではありません", path.display()));
     }
     Ok(Some(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_past_competition_shows_its_age_and_the_start_of_its_request() {
+        let now = 10 * 86_400_000;
+        assert_eq!(age(now, now - 30_000), "たった今");
+        assert_eq!(age(now, now - 5 * 60_000), "5分前");
+        assert_eq!(age(now, now - 3 * 3_600_000), "3時間前");
+        assert_eq!(age(now, now - 2 * 86_400_000), "2日前");
+        assert_eq!(age(now, now + 1), "たった今");
+        assert_eq!(excerpt("\n  LP を作る\n詳細"), "LP を作る");
+        let long = "あ".repeat(EXCERPT_CHARS + 5);
+        assert_eq!(excerpt(&long).chars().count(), EXCERPT_CHARS + 1);
+        assert!(excerpt(&long).ends_with('…'));
+    }
 }

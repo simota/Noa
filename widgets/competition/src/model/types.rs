@@ -21,6 +21,10 @@ pub const DEFAULT_REVEAL_INTERVAL: RoundNo = 5;
 /// Default maximum rounds for a competition (allows two 5-round sprints).
 pub const DEFAULT_MAX_ROUNDS: RoundNo = 10;
 
+/// The most contestants one competition takes: each runs in a split of
+/// one Noa tab.
+pub const MAX_PANEL: usize = 6;
+
 /// The id of the judge agent ("Judge").
 pub const JUDGE_ID: &str = "judge";
 
@@ -531,6 +535,9 @@ pub struct Receipt {
     pub failed: Option<String>,
     /// Why the last reply file was turned down; the agent is asked to fix it.
     pub rejected: Option<String>,
+    /// [`crate::store::digest`] of the reply that was turned down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_digest: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

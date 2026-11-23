@@ -2,7 +2,8 @@
 //! deliverables, scores, private feedback, and submission report for a round.
 
 use noa_gpui_core::style::{
-    AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
+    AlignItems, FlexDirection, FlexWrap, Rect as LayoutRect, Size as LayoutSize, auto, length,
+    percent,
 };
 use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
@@ -17,6 +18,7 @@ pub(super) fn insert(
     session: &Session,
     selected_round: Option<RoundNo>,
     filter_part: Option<&PartId>,
+    can_act: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let list = scroll_column(tree, host, 12.0);
@@ -104,8 +106,11 @@ pub(super) fn insert(
 
     let columns = tree.insert(
         Some(list),
+        // Wraps: six entries do not fit side by side in the center pane,
+        // which does not scroll sideways.
         Container::new(Style {
             flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::STRETCH,
             gap: gap(10.0),
             size: LayoutSize {
@@ -163,7 +168,7 @@ pub(super) fn insert(
         }
         // In the header, not after the report: a long report or artifact
         // list must not push the choice out of reach.
-        if round.submissions.contains_key(part) && !is_winner {
+        if can_act && round.submissions.contains_key(part) && !is_winner {
             let win_btn = tree.insert(
                 Some(col),
                 Button::new("この案を優勝に選ぶ").control_size(ControlSize::Small),

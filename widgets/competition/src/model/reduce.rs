@@ -72,6 +72,11 @@ pub enum Event {
         round: RoundNo,
         to: PartId,
         error: String,
+        /// [`crate::store::digest`] of the turned-down reply, so a copy
+        /// left on disk by a crash is known for what it is. Absent in logs
+        /// written before it was recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<u64>,
     },
     ReplyAccepted {
         round: RoundNo,
@@ -251,6 +256,7 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             // A retry sends the whole brief: the agent may be a new one that
             // never saw the output a correction would refer to.
             receipt.rejected = None;
+            receipt.rejected_digest = None;
         }
         Event::BriefFailed { round, to, reason } => {
             let receipt = receipt_mut(session, *round, to)?;
@@ -263,13 +269,20 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             receipt.retries = 0;
             receipt.failed = None;
             receipt.rejected = None;
+            receipt.rejected_digest = None;
         }
-        Event::ReplyRejected { round, to, error } => {
+        Event::ReplyRejected {
+            round,
+            to,
+            error,
+            digest,
+        } => {
             let receipt = receipt_mut(session, *round, to)?;
             receipt.retries = receipt.retries.saturating_add(1);
             receipt.sent = None;
             receipt.started = None;
             receipt.rejected = Some(error.clone());
+            receipt.rejected_digest = *digest;
         }
         Event::ReplyAccepted { round, to, at } => {
             let receipt = receipt_mut(session, *round, to)?;
@@ -278,6 +291,7 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             // with the link.
             receipt.sent.get_or_insert(*at);
             receipt.rejected = None;
+            receipt.rejected_digest = None;
             receipt.failed = None;
         }
         Event::SubmissionRecorded { round, submission } => {

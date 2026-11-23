@@ -741,12 +741,32 @@ fn launch_script(agent: AgentKind) -> String {
 
 /// The argv of the tab: `launch_script` through the user's login shell.
 /// `"$@"`-style positional parameters are POSIX syntax that fish and csh do
-/// not take, so `$SHELL` is used only when it is a POSIX shell, else
-/// `/bin/zsh`.
+/// not take, so `$SHELL` is used only when it is a POSIX shell, else the
+/// first installed of `POSIX_FALLBACKS`: noa-pty runs the argv as it is, so a
+/// shell that is not there fails the launch.
 fn agent_argv(shell: Option<&str>, agent: AgentKind, cwd: &str, prompt_file: &Path) -> Vec<String> {
+    agent_argv_with(shell, agent, cwd, prompt_file, |p| Path::new(p).is_file())
+}
+
+/// zsh first (the macOS default), then bash (most Linux systems), then `sh`,
+/// which every POSIX system has.
+const POSIX_FALLBACKS: [&str; 3] = ["/bin/zsh", "/bin/bash", "/bin/sh"];
+
+fn agent_argv_with(
+    shell: Option<&str>,
+    agent: AgentKind,
+    cwd: &str,
+    prompt_file: &Path,
+    installed: impl Fn(&str) -> bool,
+) -> Vec<String> {
     let shell = shell
         .filter(|s| s.starts_with('/') && is_posix_shell(s))
-        .unwrap_or("/bin/zsh");
+        .unwrap_or_else(|| {
+            POSIX_FALLBACKS
+                .into_iter()
+                .find(|s| installed(s))
+                .unwrap_or("/bin/sh")
+        });
     vec![
         shell.to_owned(),
         "-l".to_owned(),
@@ -2023,8 +2043,9 @@ mod tests {
 
     #[test]
     fn agents_start_from_a_posix_login_shell() {
-        let shell =
-            |s: Option<&str>| agent_argv(s, AgentKind::Claude, "/wt", Path::new("/f"))[0].clone();
+        let shell = |s: Option<&str>| {
+            agent_argv_with(s, AgentKind::Claude, "/wt", Path::new("/f"), |_| true)[0].clone()
+        };
         assert_eq!(shell(Some("/bin/bash")), "/bin/bash");
         assert_eq!(
             shell(Some("/opt/homebrew/bin/zsh")),
@@ -2041,6 +2062,20 @@ mod tests {
         ] {
             assert_eq!(shell(other), "/bin/zsh", "{other:?}");
         }
+        // Without zsh (a Linux system whose login shell is fish), the
+        // fallback is a shell that is installed.
+        let without_zsh = |s: Option<&str>| {
+            agent_argv_with(s, AgentKind::Claude, "/wt", Path::new("/f"), |p| {
+                p != "/bin/zsh"
+            })[0]
+                .clone()
+        };
+        assert_eq!(without_zsh(Some("/usr/bin/fish")), "/bin/bash");
+        assert_eq!(without_zsh(None), "/bin/bash");
+        let only_sh = agent_argv_with(None, AgentKind::Claude, "/wt", Path::new("/f"), |p| {
+            p == "/bin/sh"
+        });
+        assert_eq!(only_sh[0], "/bin/sh");
         let argv = agent_argv(None, AgentKind::Codex, "/wt", Path::new("/f"));
         assert_eq!(argv[5..], ["noa-review", "/wt", "/f"]);
     }

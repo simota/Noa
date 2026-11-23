@@ -68,6 +68,27 @@ struct ViewerFile<'a> {
 /// Cached per-snapshot file previews and serialized closed-round JSON across
 /// `RefreshViewer` calls so immutable prior rounds are neither re-read from
 /// disk nor re-serialized on every new submission or judgment.
+///
+/// [`render_html_cached`] returns exactly what [`render_html`] would only
+/// while these invariants hold:
+///
+/// - A snapshot directory `r<N>/artifacts/<part>/` changes on disk only by
+///   being rewritten whole (`store::snapshot_artifacts`), and every rewrite
+///   is followed by [`ViewerCache::invalidate`] for that `(round, part)`.
+///   Any other writer to a snapshot makes the cache serve stale previews.
+/// - `.preview/index.html` inside a snapshot is only ever added (by
+///   `preview::write`), never removed. The cache re-checks it for files
+///   that lacked it, but never notices one disappearing.
+/// - A closed round's JSON depends only on what `RoundStamp` records plus
+///   the disk state above. After a round closes its outcome changes only
+///   through an amendment, which always changes a score and the amending
+///   round, both in the stamp.
+///
+/// Memory: `entries` holds previews only for rounds whose closed JSON is not
+/// stored; storing a round's closed JSON drops that round's entries (a later
+/// stamp mismatch rebuilds them from disk, as [`render_html`] always does).
+/// So the cache holds at most the previews one uncached render builds, plus
+/// one JSON string per closed round.
 #[derive(Debug, Default)]
 pub struct ViewerCache {
     entries: HashMap<(RoundNo, PartId), CachedEntry>,
@@ -485,6 +506,11 @@ pub fn render_html_cached(
         let vr = build_viewer_round(session, r, artifact_root, Some(cache));
         let json = escape_lt_owned(serde_json::to_string(&vr).unwrap_or_else(|_| "{}".to_owned()));
         if let Some(stamp) = stamp {
+            // The round's previews now live in `json`; a stamp mismatch later
+            // rebuilds them from disk.
+            cache.entries.retain(|(no, _), _| *no != r.no);
+            let mut json = json;
+            json.shrink_to_fit();
             cache.rounds.insert(
                 r.no,
                 CachedRound {

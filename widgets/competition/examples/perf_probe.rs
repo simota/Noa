@@ -17,7 +17,7 @@ use competition::model::viewer;
 use competition::preview;
 use competition::store::{self, Store};
 
-const ROUNDS: RoundNo = 10;
+pub const ROUNDS: RoundNo = 10;
 const REPORT_BYTES: usize = 20 * 1024;
 
 fn make_body(tag: &str, size: usize) -> String {
@@ -147,7 +147,7 @@ fn make_artifacts_list() -> Vec<ArtifactFile> {
     ]
 }
 
-fn populate_snapshot(dir: &Path) {
+pub fn populate_snapshot(dir: &Path) {
     fs::create_dir_all(dir.join("styles")).unwrap();
     fs::create_dir_all(dir.join("assets")).unwrap();
 
@@ -223,7 +223,7 @@ fn populate_snapshot(dir: &Path) {
     fs::write(dir.join("other.html"), "<p>Other page</p>").unwrap();
 }
 
-fn simulate_competition(rounds: RoundNo) -> (Session, Vec<Vec<Event>>, String, String) {
+pub fn simulate_competition(rounds: RoundNo) -> (Session, Vec<Vec<Event>>, String, String) {
     let setup = Setup {
         request: "Design a responsive, accessible audio workstation web UI",
         workdir: None,

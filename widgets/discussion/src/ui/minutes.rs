@@ -32,6 +32,7 @@ pub(super) fn insert(
     tree: &mut UiTree,
     host: WidgetId,
     session: &Session,
+    live: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     heading(tree, host, "議事録");
@@ -41,8 +42,10 @@ pub(super) fn insert(
     actions.push((copy, Action::CopyResult));
     let export = tree.insert(Some(tools), small("議事録を書き出す…"));
     actions.push((export, Action::ExportMinutes));
-    // An implementation needs a repository to work in.
-    if session.workdir.is_some() {
+    // An implementation needs a repository to work in, and a running
+    // discussion to start it from (a stored one shown read-only offers
+    // neither the buttons nor the note).
+    if live && session.workdir.is_some() {
         let implement = tree.insert(
             Some(host),
             Container::wrapping_row(6.0, 6.0).align_items(noa_gpui_core::style::AlignItems::CENTER),
@@ -52,7 +55,7 @@ pub(super) fn insert(
             let button = tree.insert(Some(implement), small(kind.command()));
             actions.push((button, Action::Implement(kind)));
         }
-    } else {
+    } else if live {
         note(
             tree,
             host,

@@ -18,6 +18,7 @@ mod tree;
 mod tests;
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use noa_gpui_core::style::{
@@ -37,6 +38,8 @@ use discussion::model::types::{
     AgentKind, Author, DebateId, DebateStatus, IssueId, IssueState, MODERATOR_ID, Message, MsgKind,
     PartId, Phase, Position, Receipt, Session,
 };
+
+use discussion::store::Summary;
 
 use crate::live::{Channel, Command, Link, Snapshot};
 
@@ -85,6 +88,29 @@ pub enum Action {
     ShowMap,
     /// Save the whole map as a PNG.
     ExportMap,
+    /// Show the stored discussion at this directory, read-only.
+    Open(PathBuf),
+    /// Pick up the stored discussion at this directory: its agents run again.
+    Resume(PathBuf),
+    /// Leave the discussion shown and go back to the start view.
+    NewDiscussion,
+}
+
+impl Action {
+    /// Whether the action changes the discussion or its agents, which a
+    /// stored discussion shown read-only does not offer.
+    fn acts_on_session(&self) -> bool {
+        matches!(
+            self,
+            Action::DraftDebate(_)
+                | Action::SwapSides
+                | Action::ConfirmDebate
+                | Action::Retry
+                | Action::Send
+                | Action::Close
+                | Action::Implement(_)
+        )
+    }
 }
 
 /// What the save panel that is up was opened for.
@@ -130,6 +156,11 @@ pub struct Discussion {
     export: Option<Export>,
     /// The session (id, rev) and link the panes were last built from.
     built: Option<(Option<(String, u64)>, Link)>,
+    /// The stored discussions the start view lists, newest first.
+    history: Arc<Vec<Summary>>,
+    /// Where the stored discussion shown read-only lives (it can be
+    /// resumed from there).
+    viewing: Option<PathBuf>,
 
     start: start::Parts,
     meeting: WidgetId,
@@ -162,6 +193,34 @@ impl Discussion {
 
     pub fn of_snapshot(snapshot: Snapshot) -> Self {
         Self::build(Source::Snapshot, snapshot.link, snapshot.session)
+    }
+
+    /// A one-off render of the stored discussion at `dir`, read-only
+    /// (`--session` with `--snapshot`).
+    pub fn of_stored(dir: PathBuf, session: Session) -> Self {
+        let mut screen = Self::build(Source::Snapshot, Link::Stored, Some(Arc::new(session)));
+        screen.viewing = Some(dir);
+        screen.rebuild(&mut TextStore::new(Default::default()));
+        screen
+    }
+
+    /// The start view of a one-off render lists these stored discussions.
+    pub fn with_history(mut self, history: Arc<Vec<Summary>>) -> Self {
+        self.history = history;
+        self.rebuild(&mut TextStore::new(Default::default()));
+        self
+    }
+
+    /// The demo's start view, with canned stored discussions
+    /// (`--demo-start`).
+    pub fn demo_start() -> Self {
+        Self::build(Source::Demo, Link::Live, None).with_history(Arc::new(crate::demo::history()))
+    }
+
+    /// Whether the session shown is a stored one, read-only: nothing runs
+    /// it, so nothing is offered that would change it.
+    fn read_only(&self) -> bool {
+        self.link == Link::Stored
     }
 
     fn build(source: Source, link: Link, session: Option<Arc<Session>>) -> Self {
@@ -222,6 +281,8 @@ impl Discussion {
             file_dialogs: Vec::new(),
             export: None,
             built: None,
+            history: Arc::new(Vec::new()),
+            viewing: None,
             start,
             meeting,
             tree_host,
@@ -285,6 +346,8 @@ impl Discussion {
         let started = self.session.is_some();
         self.tree.set_hidden(self.start.root, started);
         self.tree.set_hidden(self.meeting, !started);
+        self.tree
+            .set_hidden(self.composer.root, !started || self.read_only());
         if started {
             self.rebuild_tree(text);
             self.rebuild_center(text);
@@ -293,8 +356,31 @@ impl Discussion {
         } else {
             start::rebuild_note(&mut self.tree, &self.start, &self.link, text);
             self.actions.push((self.start.start_button, Action::Start));
+            start::rebuild_history(
+                &mut self.tree,
+                &self.start,
+                &self.history,
+                &mut self.actions,
+                text,
+            );
         }
         self.rebuild_status(text);
+        if self.read_only() {
+            self.strip_controls();
+        }
+    }
+
+    /// Takes away every control that would change a stored discussion
+    /// shown read-only: hidden, and no longer clickable.
+    fn strip_controls(&mut self) {
+        let tree = &mut self.tree;
+        self.actions.retain(|(id, action)| {
+            let keep = !action.acts_on_session();
+            if !keep {
+                tree.set_hidden(*id, true);
+            }
+            keep
+        });
     }
 
     fn rebuild_tree(&mut self, text: &mut TextStore) {
@@ -385,10 +471,12 @@ impl Discussion {
         let Some(session) = &self.session else {
             return;
         };
+        let read_only = self.read_only();
         minutes::insert(
             &mut self.tree,
             self.minutes_host,
             session,
+            !read_only,
             &mut self.actions,
         );
     }
@@ -409,6 +497,7 @@ impl Discussion {
             (_, Link::Live) => ("LIVE", Tone::Success),
             (_, Link::Connecting) => ("接続中", Tone::Warning),
             (_, Link::Down(_)) => ("オフライン", Tone::Critical),
+            (_, Link::Stored) => ("記録", Tone::Neutral),
         };
         self.tree
             .insert(Some(self.status_leading), Badge::text(badge).tone(tone));
@@ -437,13 +526,34 @@ impl Discussion {
                 Some(self.status_leading),
                 Badge::text("終了").tone(Tone::Neutral),
             );
-        } else {
+        } else if !self.read_only() {
             let end = self.tree.insert(
                 Some(self.status_trailing),
                 Button::new("議論を終える").control_size(ControlSize::Small),
             );
             self.actions.push((end, Action::Close));
         }
+        if self.read_only() {
+            caption(
+                &mut self.tree,
+                self.status_leading,
+                "読み取りのみ（エージェントは動いていません）",
+            );
+            if let (false, Some(dir)) = (session.closed, &self.viewing) {
+                let resume = self.tree.insert(
+                    Some(self.status_trailing),
+                    Button::new("再開").control_size(ControlSize::Small),
+                );
+                self.actions.push((resume, Action::Resume(dir.clone())));
+            }
+        }
+        let new = self.tree.insert(
+            Some(self.status_trailing),
+            Button::new("新しい議論").control_size(ControlSize::Small),
+        );
+        self.tree
+            .set_accessible_label(new, "この議論を離れて開始画面に戻る");
+        self.actions.push((new, Action::NewDiscussion));
         caption(
             &mut self.tree,
             self.status_trailing,
@@ -478,6 +588,7 @@ impl Discussion {
     fn poll_live(&mut self, text: &mut TextStore) {
         let mut latest = None;
         let mut notices = Vec::new();
+        let mut history = None;
         if let Source::Live(ch) = &self.source {
             while let Ok(snapshot) = ch.snapshots.try_recv() {
                 latest = Some(snapshot);
@@ -485,8 +596,27 @@ impl Discussion {
             while let Ok(notice) = ch.notices.try_recv() {
                 notices.push(notice);
             }
+            while let Ok(listed) = ch.history.try_recv() {
+                history = Some(listed);
+            }
+        }
+        if let Some(listed) = history {
+            self.history = listed;
+            // The start view lists them: build it again unless a session
+            // (or a snapshot below) hides it.
+            if self.session.is_none() && latest.is_none() {
+                self.rebuild(text);
+            }
         }
         if let Some(snapshot) = latest {
+            if snapshot.session.is_none() {
+                // Back at the start view: what was shown is gone.
+                self.viewing = None;
+                self.filter = None;
+                self.center = Center::Chat;
+                self.pending_intervention = None;
+                self.built = None;
+            }
             self.link = snapshot.link;
             self.session = snapshot.session;
             self.note_debates();
@@ -590,6 +720,18 @@ impl Discussion {
                 Command::Implement { agent },
                 format!("{} に実装を依頼します（新しいタブ）", agent.command()),
             ),
+            Action::Open(dir) => {
+                self.viewing = Some(dir.clone());
+                self.send(
+                    Command::Open { dir: dir.clone() },
+                    format!("{} を表示します", dir.display()),
+                );
+            }
+            Action::Resume(dir) => self.send(
+                Command::Resume { dir: dir.clone() },
+                format!("{} を再開します", dir.display()),
+            ),
+            Action::NewDiscussion => self.send(Command::NewDiscussion, "開始画面に戻ります"),
         }
     }
 

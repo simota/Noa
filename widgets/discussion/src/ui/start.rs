@@ -1,27 +1,29 @@
 //! The start view, shown until a session exists: the topic, the moderator's
-//! agent kind and the panel.
+//! agent kind and the panel, beside the stored discussions to open or
+//! resume.
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, JustifyContent, Rect as LayoutRect, Size as LayoutSize, auto,
     length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, CheckState, Checkbox, ComboBox, Container, Label, NumberInput, PopUpButton, TextArea,
-    TextField,
+    Button, CheckState, Checkbox, ComboBox, Container, ControlSize, Label, NumberInput,
+    PopUpButton, TextArea, TextField, Tone, Truncation,
 };
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use std::path::PathBuf;
 
 use noa_gpui_text::TextStore;
 
-use discussion::model::types::{AgentChoice, AgentKind, AgentSetup, RoundNo};
+use discussion::model::types::{AgentChoice, AgentKind, AgentSetup, Millis, RoundNo};
+use discussion::store::Summary;
 
 /// The round limit the start view offers first.
 pub(crate) const DEFAULT_MAX_ROUNDS: RoundNo = 5;
 /// The highest round limit the start view takes.
 const MAX_MAX_ROUNDS: RoundNo = 50;
 
-use super::{caption, clear_children, gap};
+use super::{Action, caption, clear_children, gap};
 use crate::live::Link;
 
 pub(super) struct Parts {
@@ -38,6 +40,8 @@ pub(super) struct Parts {
     pub(super) panel_setup: Vec<SetupParts>,
     pub(super) start_button: WidgetId,
     note: WidgetId,
+    /// The list of stored discussions; rebuilt when the list changes.
+    pub(super) history: WidgetId,
 }
 
 pub(crate) struct Form {
@@ -60,18 +64,28 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
             ..super::fill()
         }),
     );
-    let card = tree.insert(
+    let cards = tree.insert(
         Some(root),
         Container::new(Style {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::START,
+            gap: gap(16.0),
+            max_size: LayoutSize {
+                width: percent(1.0),
+                height: percent(1.0),
+            },
+            ..Default::default()
+        }),
+    );
+    let card = tree.insert(
+        Some(cards),
+        Container::new(Style {
             flex_direction: FlexDirection::Column,
+            flex_shrink: 0.0,
             gap: gap(12.0),
             padding: LayoutRect::length(24.0),
             size: LayoutSize {
                 width: length(560.0),
-                height: auto(),
-            },
-            max_size: LayoutSize {
-                width: percent(1.0),
                 height: auto(),
             },
             ..Default::default()
@@ -152,6 +166,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(foot),
         Button::new("ディスカッションを開始").default_button(true),
     );
+    let history = insert_history_card(tree, cards);
     Parts {
         root,
         topic,
@@ -163,7 +178,179 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         panel_setup,
         start_button,
         note,
+        history,
     }
+}
+
+const HISTORY_WIDTH: f32 = 380.0;
+const HISTORY_HEIGHT: f32 = 600.0;
+
+/// The card beside the form that lists the stored discussions; returns the
+/// list's column.
+fn insert_history_card(tree: &mut UiTree, parent: WidgetId) -> WidgetId {
+    let card = tree.insert(
+        Some(parent),
+        Container::new(Style {
+            flex_direction: FlexDirection::Column,
+            flex_shrink: 1.0,
+            size: LayoutSize {
+                width: length(HISTORY_WIDTH),
+                height: length(HISTORY_HEIGHT),
+            },
+            min_size: LayoutSize {
+                width: length(0.0),
+                height: length(0.0),
+            },
+            max_size: LayoutSize {
+                width: percent(1.0),
+                height: percent(1.0),
+            },
+            ..Default::default()
+        })
+        .background(Role::Surface)
+        .border(1.0, Role::Separator)
+        .radius(10.0),
+    );
+    super::heading(tree, card, "過去の議論");
+    super::scroll_column(tree, card, 8.0)
+}
+
+/// Lists the stored discussions, newest first: each one opens read-only,
+/// and one that has not ended can be resumed.
+pub(super) fn rebuild_history(
+    tree: &mut UiTree,
+    parts: &Parts,
+    history: &[Summary],
+    actions: &mut Vec<(WidgetId, Action)>,
+    text: &mut TextStore,
+) {
+    clear_children(tree, parts.history, text);
+    if history.is_empty() {
+        super::note(
+            tree,
+            parts.history,
+            "保存された議論はまだありません。始めた議論はここに残り、あとから開いたり再開したりできます",
+        );
+        return;
+    }
+    for summary in history {
+        history_row(tree, parts.history, summary, actions);
+    }
+}
+
+fn history_row(
+    tree: &mut UiTree,
+    list: WidgetId,
+    summary: &Summary,
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
+    let row = tree.insert(
+        Some(list),
+        Container::new(Style {
+            flex_direction: FlexDirection::Column,
+            flex_shrink: 0.0,
+            gap: gap(4.0),
+            padding: LayoutRect::length(8.0),
+            size: LayoutSize {
+                width: percent(1.0),
+                height: auto(),
+            },
+            ..Default::default()
+        })
+        .background(Role::SurfaceAlt)
+        .radius(6.0),
+    );
+    let outline = match &summary.state {
+        Ok(outline) => outline,
+        Err(why) => {
+            tree.insert(
+                Some(row),
+                Label::new(summary.id.to_string())
+                    .font_size(12.5)
+                    .weight(600)
+                    .truncation(Truncation::Tail),
+            );
+            super::note(tree, row, format!("読めません: {why}"));
+            return;
+        }
+    };
+    tree.insert(
+        Some(row),
+        Label::new(outline.topic.lines().next().unwrap_or_default().to_owned())
+            .font_size(12.5)
+            .weight(600)
+            .truncation(Truncation::Tail),
+    );
+    let line = tree.insert(
+        Some(row),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
+    let (state, tone) = if outline.closed {
+        ("終了", Tone::Neutral)
+    } else {
+        ("進行中", Tone::Accent)
+    };
+    super::tag(tree, line, state, tone);
+    caption(tree, line, rounds_label(outline.rounds, outline.max_rounds));
+    caption(tree, line, local_date(outline.created_at));
+    super::spacer(tree, line);
+    let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+    let open = tree.insert(Some(line), small("表示"));
+    tree.set_accessible_label(open, format!("{} を表示（読み取りのみ）", outline.topic));
+    actions.push((open, Action::Open(summary.dir.clone())));
+    if !outline.closed {
+        let resume = tree.insert(Some(line), small("再開"));
+        tree.set_accessible_label(resume, format!("{} を再開", outline.topic));
+        actions.push((resume, Action::Resume(summary.dir.clone())));
+    }
+}
+
+/// `3 / 5 ラウンド`, or `3 ラウンド` without a limit.
+pub(crate) fn rounds_label(rounds: usize, max: Option<RoundNo>) -> String {
+    match max {
+        Some(max) => format!("{rounds} / {max} ラウンド"),
+        None => format!("{rounds} ラウンド"),
+    }
+}
+
+/// `2026-11-23 14:05` in the local time zone.
+fn local_date(at: Millis) -> String {
+    let secs = (at / 1000) as i64;
+    date_label(secs + utc_offset(secs))
+}
+
+/// The local time zone's offset from UTC at `secs`, in seconds.
+fn utc_offset(secs: i64) -> i64 {
+    let time = secs as libc::time_t;
+    // SAFETY: `localtime_r` writes only into `tm`, which outlives the call.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&time, &mut tm).is_null() {
+            return 0;
+        }
+        tm.tm_gmtoff as i64
+    }
+}
+
+/// `YYYY-MM-DD HH:MM` of `secs` since the epoch (already shifted to the
+/// zone shown).
+pub(crate) fn date_label(secs: i64) -> String {
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant's civil-from-days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        rest / 3600,
+        rest % 3600 / 60
+    )
 }
 
 /// The model box and effort menu of one agent.
@@ -271,7 +458,7 @@ fn read_setup(tree: &UiTree, parts: &SetupParts, kind: AgentKind) -> AgentSetup 
 pub(super) fn rebuild_note(tree: &mut UiTree, parts: &Parts, link: &Link, text: &mut TextStore) {
     clear_children(tree, parts.note, text);
     let note = match link {
-        Link::Live => return,
+        Link::Live | Link::Stored => return,
         Link::Connecting => "Noa に接続しています…".to_owned(),
         Link::Down(why) => format!("Noa に接続できません: {why}"),
     };

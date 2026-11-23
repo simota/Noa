@@ -90,13 +90,6 @@ pub enum Start {
         root: PathBuf,
     },
     /// The discussion stored at `dir`, picked up where it stopped.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the UI has no way to pick a stored discussion yet"
-        )
-    )]
     Resume { dir: PathBuf },
 }
 
@@ -166,6 +159,12 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// A handle over channels the caller drives: a stand-in runner.
+    #[cfg(test)]
+    pub(crate) fn new(updates: Receiver<Update>, actions: Sender<Action>) -> Self {
+        SessionHandle { updates, actions }
+    }
+
     /// Another sender of actions, for a thread other than the one reading
     /// [`Self::updates`]. The runner ends once the handle and every such
     /// sender are dropped.

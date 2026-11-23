@@ -159,7 +159,10 @@ fn main() -> Result<(), String> {
         } else if let Some(raw) = arg.strip_prefix("--size=") {
             size = parse_size(raw)?;
         } else if let Some(dir) = arg.strip_prefix("--session=") {
-            session_dir = Some(PathBuf::from(dir));
+            // The log's reply paths are absolute; so is what is checked
+            // against them and written next.
+            session_dir =
+                Some(std::path::absolute(dir).map_err(|e| format!("--session={dir}: {e}"))?);
         } else if arg == "--demo" {
             demo = true;
         } else if arg == "--start" {

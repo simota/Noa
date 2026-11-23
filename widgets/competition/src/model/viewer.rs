@@ -180,14 +180,37 @@ fn read_text_preview(path: &Path) -> Option<String> {
 /// The URL of a round snapshot file, relative to `compare.html`.
 fn file_href(round: RoundNo, part: &PartId, rel_path: &str) -> String {
     let mut href = format!("r{round}/artifacts/{part}/");
-    for byte in rel_path.bytes() {
+    push_url_path(&mut href, rel_path);
+    href
+}
+
+/// Appends `path` to `url`, percent-encoding every byte but unreserved ones
+/// and `/`.
+fn push_url_path(url: &mut String, path: &str) {
+    for byte in path.bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
-            href.push(byte as char);
+            url.push(byte as char);
         } else {
-            let _ = write!(href, "%{byte:02X}");
+            let _ = write!(url, "%{byte:02X}");
         }
     }
-    href
+}
+
+/// [`render_html`] for a page written outside `artifact_root`: a
+/// `<base href>` makes its links, frames and images, all relative to
+/// `compare.html`, resolve under `artifact_root`.
+pub fn render_html_elsewhere(session: &Session, artifact_root: &Path) -> String {
+    let html = render_html(session, artifact_root);
+    let mut base = String::from("<base href=\"file://");
+    push_url_path(&mut base, &artifact_root.to_string_lossy());
+    if !base.ends_with('/') {
+        base.push('/');
+    }
+    base.push_str("\">\n");
+    match html.split_once("<head>\n") {
+        Some((head, rest)) => format!("{head}<head>\n{base}{rest}"),
+        None => html,
+    }
 }
 
 fn frame_href_for(

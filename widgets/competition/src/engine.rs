@@ -198,6 +198,25 @@ pub fn participants(judge: &AgentChoice, panel: &[AgentChoice]) -> (Participant,
     (judge, contestants)
 }
 
+/// Whether `logged` and `want` name the same file: the same path, or the
+/// same name in one directory reached another way (`dir` given through a
+/// symlink). The file need not exist yet.
+fn same_file(logged: &Path, want: &Path) -> bool {
+    if logged == want {
+        return true;
+    }
+    resolved(logged).is_some_and(|logged| Some(logged) == resolved(want))
+}
+
+/// `path` with its deepest existing ancestor made canonical (the rest, not
+/// written yet, joined as it is).
+fn resolved(path: &Path) -> Option<std::path::PathBuf> {
+    path.ancestors().find_map(|dir| {
+        let rest = path.strip_prefix(dir).ok()?;
+        Some(std::fs::canonicalize(dir).ok()?.join(rest))
+    })
+}
+
 /// Why the competition logged in `dir` cannot be resumed from its log.
 /// What the log names is used as paths and in shell scripts, so a log
 /// edited by hand (or moved) gets the checks a new session does: each
@@ -233,7 +252,10 @@ pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
     for round in &session.rounds {
         for brief in &round.briefs {
             if !session.is_contestant(&brief.to)
-                || brief.reply_path != store::reply_path(&reply_dir, round.no, &brief.to)
+                || !same_file(
+                    &brief.reply_path,
+                    &store::reply_path(&reply_dir, round.no, &brief.to),
+                )
             {
                 return Err(format!(
                     "R{} の {} の返答パスがこのコンペの保存先と一致しません",
@@ -243,7 +265,10 @@ pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
         }
         if let Some(brief) = &round.judge_brief
             && (brief.to != session.judge.id
-                || brief.reply_path != store::judge_reply_path(&reply_dir, round.no))
+                || !same_file(
+                    &brief.reply_path,
+                    &store::judge_reply_path(&reply_dir, round.no),
+                ))
         {
             return Err(format!(
                 "R{} の審判の返答パスがこのコンペの保存先と一致しません",

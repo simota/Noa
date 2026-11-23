@@ -143,6 +143,55 @@ pub(crate) fn apply_tier(command: &[String], tier: Tier) -> Result<Vec<String>, 
     Ok(out)
 }
 
+/// `command` without the flags [`apply_tier`] put right after its program
+/// for `tier` (`retry`): the command as it was given before `--tier`. `Err`
+/// when the program is not one of the three agents, or the flags are not
+/// there.
+pub(crate) fn remove_tier(command: &[String], tier: Tier) -> Result<Vec<String>, String> {
+    let Some((program, rest)) = command.split_first() else {
+        return Err("no command to remove the tier's flags from".to_string());
+    };
+    let Some(agent) = agent_of(program) else {
+        return Err(format!(
+            "--tier only applies to {TIER_AGENTS}, not {program:?}"
+        ));
+    };
+    let flags = tier_flags(agent, tier);
+    let carries =
+        rest.len() >= flags.len() && rest.iter().zip(flags).all(|(arg, flag)| arg == flag);
+    if !carries {
+        return Err(format!(
+            "the command {command:?} does not start with tier {}'s flags {flags:?}, as \
+             spawn --tier put them",
+            tier.name()
+        ));
+    }
+    let mut out = Vec::with_capacity(command.len() - flags.len());
+    out.push(program.clone());
+    out.extend(rest[flags.len()..].iter().cloned());
+    Ok(out)
+}
+
+/// The model a claude, codex or agy `command` names (`--model X`,
+/// `--model=X`, codex's `-m X` or `-mX`), for saying which worker it was.
+pub(crate) fn model_of(command: &[String]) -> Option<String> {
+    let (program, rest) = command.split_first()?;
+    let codex = agent_of(program)? == Agent::Codex;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--model" || (codex && arg == "-m") {
+            return iter.next().cloned();
+        }
+        if let Some(model) = arg
+            .strip_prefix("--model=")
+            .or_else(|| codex.then(|| arg.strip_prefix("-m")).flatten())
+        {
+            return Some(model.to_string());
+        }
+    }
+    None
+}
+
 /// A `--worktree` label becomes a directory and a branch name.
 pub(crate) fn check_label(label: &str) -> Result<(), String> {
     let ok = !label.is_empty()
@@ -579,6 +628,74 @@ mod tests {
             want.extend(flags.iter().map(|f| f.to_string()));
             want.extend(strings(&["--flag", "task"]));
             assert_eq!(got, want, "{program} {tier:?}");
+        }
+    }
+
+    const TIERS: [Tier; 3] = [Tier::Light, Tier::Standard, Tier::Deep];
+
+    // `retry`: a tier's flags come off exactly as `apply_tier` put them,
+    // and any tier goes on again, for every agent and tier.
+    #[test]
+    fn a_tiers_flags_come_off_and_any_tier_goes_on_again() {
+        for program in ["claude", "/opt/bin/codex", "agy"] {
+            let given = strings(&[program, "--flag", "x", "task"]);
+            for old in TIERS {
+                let spawned = apply_tier(&given, old).unwrap();
+                assert_eq!(
+                    remove_tier(&spawned, old).unwrap(),
+                    given,
+                    "{program} {old:?}"
+                );
+                for new in TIERS {
+                    let retried = apply_tier(&remove_tier(&spawned, old).unwrap(), new).unwrap();
+                    assert_eq!(
+                        retried,
+                        apply_tier(&given, new).unwrap(),
+                        "{old:?} -> {new:?}"
+                    );
+                }
+            }
+        }
+        // Only the flags right after the program: the same words later on
+        // stay.
+        let twice = strings(&["agy", "--model", "gemini-4-hydrogen-low", "--model", "x"]);
+        assert_eq!(
+            remove_tier(&twice, Tier::Light).unwrap(),
+            strings(&["agy", "--model", "x"])
+        );
+    }
+
+    #[test]
+    fn a_tier_whose_flags_are_not_there_is_not_removed() {
+        // Another tier's flags, flags moved later, the bare program.
+        let light = apply_tier(&strings(&["claude"]), Tier::Light).unwrap();
+        assert!(remove_tier(&light, Tier::Deep).is_err());
+        let later = strings(&["claude", "-p", "--model", "sonnet", "--effort", "low"]);
+        assert!(remove_tier(&later, Tier::Light).is_err());
+        assert!(remove_tier(&strings(&["codex"]), Tier::Light).is_err());
+        let other = remove_tier(&strings(&["vim", "--model", "x"]), Tier::Light).unwrap_err();
+        assert!(other.contains("claude, codex or agy"), "{other}");
+        assert!(remove_tier(&[], Tier::Light).is_err());
+    }
+
+    #[test]
+    fn the_model_is_read_from_each_agents_flag() {
+        for (command, want) in [
+            (&["claude", "--model", "opus", "-p"][..], Some("opus")),
+            (&["claude", "--model=haiku"], Some("haiku")),
+            (&["codex", "-m", "gpt-6-luna"], Some("gpt-6-luna")),
+            (&["codex", "-mgpt-6.2-sol"], Some("gpt-6.2-sol")),
+            (&["codex", "--model", "o9"], Some("o9")),
+            (
+                &["agy", "--model", "gemini-4-neon-high"],
+                Some("gemini-4-neon-high"),
+            ),
+            // `-m` is codex's only.
+            (&["claude", "-m", "x"], None),
+            (&["claude"], None),
+            (&["vim", "--model", "x"], None),
+        ] {
+            assert_eq!(model_of(&strings(command)).as_deref(), want, "{command:?}");
         }
     }
 

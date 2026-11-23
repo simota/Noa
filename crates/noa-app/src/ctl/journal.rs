@@ -5,7 +5,10 @@
 //! server keeps no such record.
 //!
 //! Every line is one event with `"ev"` and `"ts"` (unix seconds): `spawn`,
-//! `send`, `outcome` and `close`. A journal that cannot be written never
+//! `send`, `outcome` and `close`. A `send` keeps its text's first
+//! [`TEXT_CHARS`] characters as `text`, and the whole text as `full` when
+//! that cut it and it is at most [`FULL_TEXT_BYTES`] (`retry` sends it
+//! again). A journal that cannot be written never
 //! fails a command: the first failure is a warning on stderr, the rest are
 //! silent.
 //!
@@ -24,8 +27,12 @@ use std::path::{Path, PathBuf};
 /// A journal over this size when it is opened loses its oldest half.
 pub(crate) const MAX_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
 
-/// The most characters of a sent text the journal keeps.
+/// The most characters of a sent text the journal keeps as `text`.
 pub(crate) const TEXT_CHARS: usize = 200;
+
+/// The most bytes of a sent text the journal keeps whole, as `full`, for
+/// `retry` to send again.
+pub(crate) const FULL_TEXT_BYTES: usize = 64 * 1024;
 
 pub(crate) struct Journal {
     /// `None`: this process has no pane of its own, so nothing is kept.
@@ -196,6 +203,27 @@ pub(crate) fn clip(text: &str) -> String {
     text.chars().take(TEXT_CHARS).collect()
 }
 
+/// What a `send` event keeps as `full`: the whole text, when [`clip`] cut
+/// it and it is at most [`FULL_TEXT_BYTES`]. A text `clip` keeps whole
+/// needs no second copy; one over the bound is not kept whole at all.
+pub(crate) fn full(text: &str) -> Option<&str> {
+    (text.chars().nth(TEXT_CHARS).is_some() && text.len() <= FULL_TEXT_BYTES).then_some(text)
+}
+
+/// The whole text a `send` event kept: `full`, else `text` when `bytes`
+/// says it was not cut. `None` when only its start was kept (over
+/// [`FULL_TEXT_BYTES`]), or the event is from an older `+ctl`, which did
+/// not journal `raw` (or `full`).
+fn whole_text(event: &serde_json::Value) -> Option<String> {
+    // An older `+ctl` journaled no `raw`: its `--raw` keys look like a task.
+    event.get("raw")?;
+    if let Some(full) = event["full"].as_str() {
+        return Some(full.to_string());
+    }
+    let text = event["text"].as_str()?;
+    (event["bytes"].as_u64() == Some(text.len() as u64)).then(|| text.to_string())
+}
+
 /// What the journal knows of one worker.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Worker {
@@ -209,6 +237,12 @@ pub(crate) struct Worker {
     pub(crate) result: Option<String>,
     /// The last text sent that was not an answer.
     pub(crate) last_task: Option<String>,
+    /// The last task sent, whole: the last send that was not an answer, not
+    /// `--raw` keys and not empty. `None` when there was none, or the
+    /// journal kept only its start ([`whole_text`]).
+    pub(crate) task: Option<String>,
+    /// The worker `retry` replaced with this one.
+    pub(crate) retry_of: Option<u64>,
     /// The report count before the last send.
     pub(crate) last_sent_seq: Option<u64>,
     /// `{reason, seq, ts}` of the last wait outcome.
@@ -265,6 +299,7 @@ pub(crate) fn workers(events: &[serde_json::Value]) -> Vec<Worker> {
                     worktree: text_field(event, "worktree"),
                     branch: text_field(event, "branch"),
                     result: text_field(event, "result"),
+                    retry_of: pane_field(&event["retryOf"]),
                     ..Worker::default()
                 };
             }
@@ -273,6 +308,12 @@ pub(crate) fn workers(events: &[serde_json::Value]) -> Vec<Worker> {
                     worker.answers += 1;
                 } else {
                     worker.last_task = text_field(event, "text");
+                    let keys = event["raw"].as_bool() == Some(true);
+                    let empty = event["bytes"].as_u64() == Some(0)
+                        || event["text"].as_str().is_some_and(str::is_empty);
+                    if !keys && !empty {
+                        worker.task = whole_text(event);
+                    }
                 }
                 worker.last_sent_seq = event["seqBefore"].as_u64();
             }
@@ -382,6 +423,11 @@ impl Worker {
         put("answers", Some(self.answers.into()));
         put("result", self.result.clone().map(Into::into));
         put("worktree", self.worktree.clone().map(Into::into));
+        put(
+            "retryOf",
+            self.retry_of
+                .map(|pane| serde_json::json!(noa_ipc::WireId(pane))),
+        );
     }
 }
 
@@ -629,6 +675,111 @@ mod tests {
         assert_eq!(lines[0]["text"], "1");
         assert_eq!(lines[0]["ts"], 4);
         assert_eq!(lines[0]["screen"], "Allow edit?\n1. Yes");
+    }
+
+    /// A `send` event as `Session::deliver` writes it.
+    fn send_event(pane: u64, text: &str, answer: bool, raw: bool) -> serde_json::Value {
+        let mut event = serde_json::json!({
+            "pane": pane,
+            "seqBefore": 0,
+            "text": clip(text),
+            "bytes": text.len(),
+            "enter": true,
+            "answer": answer,
+            "raw": raw,
+            "queue": false,
+        });
+        if let Some(full) = full(text) {
+            event["full"] = full.into();
+        }
+        event
+    }
+
+    // `retry` sends a worker's last task again, so the journal keeps it
+    // whole (to 64 KiB), and only a task: not an answer, keys or nothing.
+    #[test]
+    fn the_last_task_is_kept_whole_up_to_its_bound() {
+        let path = temp_path("full");
+        let mut journal = Journal::at(path.clone());
+        let long = "あ".repeat(TEXT_CHARS * 3);
+        let short = "fix the test";
+        journal.append("spawn", serde_json::json!({ "pane": 4, "retryOf": "2" }));
+        for (text, want) in [
+            (short, Some(short.to_string())),
+            (long.as_str(), Some(long.clone())),
+        ] {
+            journal.append("send", send_event(4, text, false, false));
+            let worker = &workers(&journal.events())[0];
+            assert_eq!(worker.task, want);
+            assert_eq!(worker.last_task, Some(clip(text)));
+            assert_eq!(worker.retry_of, Some(2));
+        }
+        let events = journal.events();
+        assert!(events[1].get("full").is_none(), "a short text is kept once");
+        assert_eq!(events[2]["full"].as_str(), Some(long.as_str()));
+
+        // Answers, `--raw` keys and a bare Enter are not the task.
+        journal.append("send", send_event(4, "1", true, false));
+        journal.append("send", send_event(4, "\x1b", false, true));
+        journal.append("send", send_event(4, "", false, false));
+        assert_eq!(workers(&journal.events())[0].task, Some(long.clone()));
+
+        // Just within the bound is kept; one byte over is not, and then the
+        // task is not known whole.
+        let at_bound = "x".repeat(FULL_TEXT_BYTES);
+        journal.append("send", send_event(4, &at_bound, false, false));
+        assert_eq!(workers(&journal.events())[0].task, Some(at_bound));
+        let over = "x".repeat(FULL_TEXT_BYTES + 1);
+        assert_eq!(full(&over), None);
+        journal.append("send", send_event(4, &over, false, false));
+        let worker = &workers(&journal.events())[0];
+        assert_eq!(worker.task, None);
+        assert_eq!(worker.last_task, Some(clip(&over)));
+        assert_eq!(mode(&path), 0o600);
+
+        let mut line = serde_json::json!({});
+        worker.add_to(&mut line);
+        assert_eq!(line["retryOf"], "2");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    // A journal from before `full` kept only the first 200 characters: a
+    // task there is not known whole.
+    #[test]
+    fn an_older_journals_cut_task_is_not_taken_for_whole() {
+        let long = "y".repeat(TEXT_CHARS + 1);
+        let events = parse_events(&format!(
+            "{}\n{}\n",
+            r#"{"ev":"spawn","ts":1,"pane":4}"#,
+            serde_json::json!({
+                "ev": "send", "ts": 2, "pane": 4, "seqBefore": 0,
+                "text": clip(&long), "bytes": long.len(), "answer": false,
+            })
+        ));
+        assert_eq!(workers(&events)[0].task, None);
+        // Nor `sample`'s short "do it": without `raw`, keys look the same.
+        assert_eq!(workers(&sample())[0].task, None);
+    }
+
+    // Review finding: an older `+ctl` journaled no `raw`, so its `--raw`
+    // keys (an Esc) were taken for the whole task.
+    #[test]
+    fn an_older_journals_send_is_not_taken_for_the_whole_task() {
+        let events = parse_events(&format!(
+            "{}\n{}\n{}\n",
+            r#"{"ev":"spawn","ts":1,"pane":4}"#,
+            serde_json::json!({
+                "ev": "send", "ts": 2, "pane": 4, "seqBefore": 0,
+                "text": "fix the test", "bytes": 12, "answer": false,
+            }),
+            serde_json::json!({
+                "ev": "send", "ts": 3, "pane": 4, "seqBefore": 2,
+                "text": "\u{1b}", "bytes": 1, "answer": false,
+            })
+        ));
+        let worker = &workers(&events)[0];
+        assert_eq!(worker.task, None);
+        assert_eq!(worker.last_task.as_deref(), Some("\u{1b}"));
     }
 
     #[test]

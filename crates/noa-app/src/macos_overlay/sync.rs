@@ -5,10 +5,15 @@ use winit::window::Window;
 
 use super::imp;
 use super::model::{
-    ChildExitedBar, NativeOverlayCache, OverlayColors, PaneRectPt, ProcessMonitorViewModel,
-    ThemeSettingsViewModel, child_exited_bars_hash, process_monitor_view_model,
-    theme_settings_view_model,
+    ChildExitedBar, ModalAxActions, NativeOverlayCache, OverlayColors, PaneRectPt,
+    ProcessMonitorViewModel, TITLE_PROMPT_HINT, ThemeSettingsViewModel, child_exited_bars_hash,
+    format_dialog_announcement, palette_selected_ax_label, process_monitor_row_ax_label,
+    process_monitor_view_model, theme_settings_selected_ax_label, theme_settings_view_model,
 };
+
+const PALETTE_OPEN_HINT: &str = "Arrow keys to navigate, Enter to select, Esc to close";
+const PROCESS_MONITOR_OPEN_HINT: &str =
+    "\u{2191}\u{2193} select \u{b7} Enter jump \u{b7} s sort \u{b7} Esc close";
 
 fn hash_u64(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -16,14 +21,11 @@ fn hash_u64(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u
     hasher.finish()
 }
 
-/// Sync the native command-palette card: `None` removes it, `Some` builds or
-/// rebuilds it when the snapshot/geometry/colors changed.
-pub(crate) fn sync_command_palette(
-    window: &Window,
+pub(super) fn palette_sync_decision(
     cache: &mut NativeOverlayCache,
     model: Option<(&CommandPaletteSnapshot, PaneRectPt)>,
     colors: &OverlayColors,
-) {
+) -> Option<ModalAxActions> {
     let hash = model.map(|(snap, rect)| {
         hash_u64(|h| {
             snap.query.hash(h);
@@ -54,10 +56,61 @@ pub(crate) fn sync_command_palette(
         })
     });
     if cache.palette == hash {
-        return;
+        return None;
     }
     cache.palette = hash;
-    imp::rebuild_palette(window, model, colors);
+    let actions = match model {
+        Some((snap, _)) => {
+            let selected = palette_selected_ax_label(snap);
+            match cache.palette_ax.replace(selected.clone()) {
+                None => {
+                    let body = match &selected {
+                        Some(item) => format!("Command Palette. {item}"),
+                        None => "Command Palette. No matching commands".to_string(),
+                    };
+                    ModalAxActions {
+                        focus_modal: true,
+                        layout_changed: true,
+                        announcement: Some((
+                            format_dialog_announcement(&body, PALETTE_OPEN_HINT),
+                            true,
+                        )),
+                    }
+                }
+                Some(prev) if prev != selected => ModalAxActions {
+                    focus_modal: false,
+                    layout_changed: false,
+                    announcement: Some((
+                        selected.unwrap_or_else(|| "No matching commands".to_string()),
+                        false,
+                    )),
+                },
+                Some(_) => ModalAxActions::default(),
+            }
+        }
+        None => {
+            let was_open = cache.palette_ax.take().is_some();
+            ModalAxActions {
+                layout_changed: was_open,
+                ..ModalAxActions::default()
+            }
+        }
+    };
+    Some(actions)
+}
+
+/// Sync the native command-palette card: `None` removes it, `Some` builds or
+/// rebuilds it when the snapshot/geometry/colors changed.
+pub(crate) fn sync_command_palette(
+    window: &Window,
+    cache: &mut NativeOverlayCache,
+    model: Option<(&CommandPaletteSnapshot, PaneRectPt)>,
+    colors: &OverlayColors,
+) {
+    let Some(ax) = palette_sync_decision(cache, model, colors) else {
+        return;
+    };
+    imp::rebuild_palette(window, model, colors, &ax);
 }
 
 /// The window-free half of [`sync_theme_settings`] (ADR-2/R-20/NFR-7):
@@ -75,7 +128,7 @@ pub(super) fn theme_settings_sync_decision(
     cache: &mut NativeOverlayCache,
     model: Option<(&crate::theme_settings::ThemeSettings, PaneRectPt)>,
     colors: &OverlayColors,
-) -> Option<Option<(ThemeSettingsViewModel, PaneRectPt)>> {
+) -> Option<(Option<(ThemeSettingsViewModel, PaneRectPt)>, ModalAxActions)> {
     let key = model.map(|(state, rect)| {
         hash_u64(|h| {
             state.view_fingerprint(h);
@@ -89,7 +142,57 @@ pub(super) fn theme_settings_sync_decision(
     cache.theme_settings = key;
     #[cfg(debug_assertions)]
     cache.record_theme_settings_rebuild();
-    Some(model.map(|(state, rect)| (theme_settings_view_model(state), rect)))
+    let built = model.map(|(state, rect)| (theme_settings_view_model(state), rect));
+    let actions = match &built {
+        Some((vm, _)) => {
+            let selected = theme_settings_selected_ax_label(vm);
+            let mode_title = match vm.mode {
+                crate::theme_settings::ThemeSettingsMode::Theme => "Theme",
+                crate::theme_settings::ThemeSettingsMode::Settings => "Settings",
+            };
+            match cache.theme_settings_ax.replace((vm.mode, selected.clone())) {
+                None => {
+                    let body = match &selected {
+                        Some(item) => format!("{mode_title}. {item}"),
+                        None => mode_title.to_string(),
+                    };
+                    ModalAxActions {
+                        focus_modal: true,
+                        layout_changed: true,
+                        announcement: Some((format_dialog_announcement(&body, &vm.footer.0), true)),
+                    }
+                }
+                Some((prev_mode, _)) if prev_mode != vm.mode => {
+                    let body = match &selected {
+                        Some(item) => format!("{mode_title}. {item}"),
+                        None => mode_title.to_string(),
+                    };
+                    ModalAxActions {
+                        focus_modal: true,
+                        layout_changed: true,
+                        announcement: Some((format_dialog_announcement(&body, &vm.footer.0), true)),
+                    }
+                }
+                Some((_, prev_selected)) if prev_selected != selected => ModalAxActions {
+                    focus_modal: false,
+                    layout_changed: false,
+                    announcement: Some((
+                        selected.unwrap_or_else(|| "No matches".to_string()),
+                        false,
+                    )),
+                },
+                Some(_) => ModalAxActions::default(),
+            }
+        }
+        None => {
+            let was_open = cache.theme_settings_ax.take().is_some();
+            ModalAxActions {
+                layout_changed: was_open,
+                ..ModalAxActions::default()
+            }
+        }
+    };
+    Some((built, actions))
 }
 
 /// Sync the native theme-settings card (same contract as
@@ -100,10 +203,70 @@ pub(crate) fn sync_theme_settings(
     model: Option<(&crate::theme_settings::ThemeSettings, PaneRectPt)>,
     colors: &OverlayColors,
 ) {
-    let Some(vm) = theme_settings_sync_decision(cache, model, colors) else {
+    let Some((vm, ax)) = theme_settings_sync_decision(cache, model, colors) else {
         return;
     };
-    imp::rebuild_theme_settings(window, vm, colors);
+    imp::rebuild_theme_settings(window, vm, colors, &ax);
+}
+
+pub(super) fn process_monitor_sync_decision(
+    cache: &mut NativeOverlayCache,
+    built: Option<(ProcessMonitorViewModel, PaneRectPt)>,
+    colors: &OverlayColors,
+) -> Option<(
+    Option<(ProcessMonitorViewModel, PaneRectPt)>,
+    ModalAxActions,
+)> {
+    let hash = built.as_ref().map(|(vm, rect)| {
+        hash_u64(|h| {
+            vm.hash(h);
+            rect.hash_into(h);
+            colors.hash_into(h);
+        })
+    });
+    if cache.process_monitor == hash {
+        return None;
+    }
+    cache.process_monitor = hash;
+    let actions = match &built {
+        Some((vm, _)) => {
+            let selected_row = vm.rows.iter().enumerate().find(|(_, row)| row.selected);
+            let selected_key =
+                selected_row.map(|(i, row)| (i, row.process.clone(), row.location.clone()));
+            let selected_label = selected_row.map(|(_, row)| process_monitor_row_ax_label(row));
+            match cache.process_monitor_ax.replace(selected_key.clone()) {
+                None => {
+                    let header = format!("Process Monitor, sort: {}", vm.sort_label);
+                    let body = match &selected_label {
+                        Some(item) => format!("{header}. {item}"),
+                        None => header,
+                    };
+                    ModalAxActions {
+                        focus_modal: true,
+                        layout_changed: true,
+                        announcement: Some((
+                            format_dialog_announcement(&body, PROCESS_MONITOR_OPEN_HINT),
+                            true,
+                        )),
+                    }
+                }
+                Some(prev) if prev != selected_key => ModalAxActions {
+                    focus_modal: false,
+                    layout_changed: false,
+                    announcement: selected_label.map(|label| (label, false)),
+                },
+                Some(_) => ModalAxActions::default(),
+            }
+        }
+        None => {
+            let was_open = cache.process_monitor_ax.take().is_some();
+            ModalAxActions {
+                layout_changed: was_open,
+                ..ModalAxActions::default()
+            }
+        }
+    };
+    Some((built, actions))
 }
 
 /// Sync the native process-monitor card (panel-metrics-view; same contract as
@@ -120,18 +283,61 @@ pub(crate) fn sync_process_monitor(
 ) {
     let built: Option<(ProcessMonitorViewModel, PaneRectPt)> =
         model.map(|(state, rect)| (process_monitor_view_model(state), rect));
-    let hash = built.as_ref().map(|(vm, rect)| {
+    let Some((built, ax)) = process_monitor_sync_decision(cache, built, colors) else {
+        return;
+    };
+    imp::rebuild_process_monitor(window, built, colors, &ax);
+}
+
+pub(super) fn confirm_sync_decision(
+    cache: &mut NativeOverlayCache,
+    model: Option<(&ConfirmDialogSnapshot, PaneRectPt)>,
+    colors: &OverlayColors,
+) -> Option<ModalAxActions> {
+    let hash = model.map(|(snap, rect)| {
         hash_u64(|h| {
-            vm.hash(h);
+            snap.message.hash(h);
+            snap.hint.hash(h);
             rect.hash_into(h);
             colors.hash_into(h);
         })
     });
-    if cache.process_monitor == hash {
-        return;
+    if cache.confirm == hash {
+        return None;
     }
-    cache.process_monitor = hash;
-    imp::rebuild_process_monitor(window, built, colors);
+    cache.confirm = hash;
+    let actions = match model {
+        Some((snap, _)) => {
+            let next = (snap.message.clone(), snap.hint.clone());
+            match cache.confirm_ax.replace(next.clone()) {
+                None => ModalAxActions {
+                    focus_modal: true,
+                    layout_changed: true,
+                    announcement: Some((
+                        format_dialog_announcement(&snap.message, &snap.hint),
+                        true,
+                    )),
+                },
+                Some(prev) if prev != next => ModalAxActions {
+                    focus_modal: true,
+                    layout_changed: false,
+                    announcement: Some((
+                        format_dialog_announcement(&snap.message, &snap.hint),
+                        true,
+                    )),
+                },
+                Some(_) => ModalAxActions::default(),
+            }
+        }
+        None => {
+            let was_open = cache.confirm_ax.take().is_some();
+            ModalAxActions {
+                layout_changed: was_open,
+                ..ModalAxActions::default()
+            }
+        }
+    };
+    Some(actions)
 }
 
 /// Sync the native confirm-dialog card (same contract as
@@ -142,19 +348,58 @@ pub(crate) fn sync_confirm_dialog(
     model: Option<(&ConfirmDialogSnapshot, PaneRectPt)>,
     colors: &OverlayColors,
 ) {
-    let hash = model.map(|(snap, rect)| {
+    let Some(ax) = confirm_sync_decision(cache, model, colors) else {
+        return;
+    };
+    imp::rebuild_confirm(window, model, colors, &ax);
+}
+
+pub(super) fn title_prompt_sync_decision(
+    cache: &mut NativeOverlayCache,
+    model: Option<(&str, PaneRectPt)>,
+    colors: &OverlayColors,
+) -> Option<ModalAxActions> {
+    let hash = model.map(|(input, rect)| {
         hash_u64(|h| {
-            snap.message.hash(h);
-            snap.hint.hash(h);
+            input.hash(h);
             rect.hash_into(h);
             colors.hash_into(h);
         })
     });
-    if cache.confirm == hash {
-        return;
+    if cache.title_prompt == hash {
+        return None;
     }
-    cache.confirm = hash;
-    imp::rebuild_confirm(window, model, colors);
+    cache.title_prompt = hash;
+    let actions = match model {
+        Some((input, _)) => {
+            let was_open = std::mem::replace(&mut cache.title_prompt_open, true);
+            if !was_open {
+                let heading = if input.is_empty() {
+                    "Set Tab Title".to_string()
+                } else {
+                    format!("Set Tab Title: {input}")
+                };
+                ModalAxActions {
+                    focus_modal: true,
+                    layout_changed: true,
+                    announcement: Some((
+                        format_dialog_announcement(&heading, TITLE_PROMPT_HINT),
+                        true,
+                    )),
+                }
+            } else {
+                ModalAxActions::default()
+            }
+        }
+        None => {
+            let was_open = std::mem::replace(&mut cache.title_prompt_open, false);
+            ModalAxActions {
+                layout_changed: was_open,
+                ..ModalAxActions::default()
+            }
+        }
+    };
+    Some(actions)
 }
 
 /// Sync the native "Set Tab Title" prompt card (same contract as
@@ -166,18 +411,10 @@ pub(crate) fn sync_title_prompt(
     model: Option<(&str, PaneRectPt)>,
     colors: &OverlayColors,
 ) {
-    let hash = model.map(|(input, rect)| {
-        hash_u64(|h| {
-            input.hash(h);
-            rect.hash_into(h);
-            colors.hash_into(h);
-        })
-    });
-    if cache.title_prompt == hash {
+    let Some(ax) = title_prompt_sync_decision(cache, model, colors) else {
         return;
-    }
-    cache.title_prompt = hash;
-    imp::rebuild_title_prompt(window, model, colors);
+    };
+    imp::rebuild_title_prompt(window, model, colors, &ax);
 }
 
 /// Sync the native resize toast (window-centered; not pane-bound).

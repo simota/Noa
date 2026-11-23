@@ -1,11 +1,15 @@
 use super::model::{
-    CARD_PAD_H, NativeOverlayCache, OverlayColors, PALETTE_WIDTH, PaneRectPt, THEME_SETTINGS_WIDTH,
-    overlay_scroll_window, palette_query_caret, theme_settings_caret, theme_settings_view_model,
-    title_prompt_caret,
+    CARD_PAD_H, ModalAxActions, NativeOverlayCache, OverlayColors, PALETTE_WIDTH, PaneRectPt,
+    ProcessMonitorRowView, ProcessMonitorViewModel, THEME_SETTINGS_WIDTH, TITLE_PROMPT_HINT,
+    format_ax_item, format_dialog_announcement, overlay_scroll_window, palette_query_caret,
+    theme_settings_caret, theme_settings_view_model, title_prompt_caret,
 };
-use super::sync::theme_settings_sync_decision;
+use super::sync::{
+    confirm_sync_decision, palette_sync_decision, process_monitor_sync_decision,
+    theme_settings_sync_decision, title_prompt_sync_decision,
+};
 use crate::theme_settings::{Liveness, ThemeSettings, ThemeSettingsInit, ThemeSettingsMode};
-use noa_render::{CommandPaletteSnapshot, PaletteRow};
+use noa_render::{CommandPaletteSnapshot, ConfirmDialogSnapshot, PaletteRow};
 
 fn palette_snapshot(entries: usize) -> CommandPaletteSnapshot {
     CommandPaletteSnapshot {
@@ -491,4 +495,275 @@ fn palette_caret_tracks_visible_headers_selection_and_pane_height() {
     let tiny = PaneRectPt { h: 100.0, ..pane };
     // The card height is capped at pane.h - 24 even at the three-row floor.
     assert!((palette_query_caret(tiny, &snapshot, 0).y - 27.0).abs() < 1e-9);
+}
+
+#[test]
+fn confirm_dialog_ax_focuses_announces_transitions_and_closes() {
+    let colors = test_colors();
+    let rect = test_rect();
+    let mut cache = NativeOverlayCache::default();
+    assert!(!cache.has_modal());
+
+    let quit = ConfirmDialogSnapshot {
+        message: "Quit Noa?".to_string(),
+        hint: "Enter / Y to quit · Esc / N to cancel".to_string(),
+    };
+    let open = confirm_sync_decision(&mut cache, Some((&quit, rect)), &colors)
+        .expect("opening confirm dialog emits AX actions");
+    assert!(cache.has_modal());
+    assert!(open.focus_modal);
+    assert!(open.layout_changed);
+    assert_eq!(
+        open.announcement,
+        Some((
+            "Quit Noa? Enter / Y to quit · Esc / N to cancel".to_string(),
+            true,
+        ))
+    );
+
+    // Resizing the pane while the same dialog stays open rebuilds geometry
+    // without re-announcing or re-stealing focus.
+    let resized = PaneRectPt { w: 900.0, ..rect };
+    let on_resize = confirm_sync_decision(&mut cache, Some((&quit, resized)), &colors)
+        .expect("resize changes hash");
+    assert_eq!(on_resize, ModalAxActions::default());
+
+    // Transitioning directly to a different confirmation prompt re-focuses
+    // and announces the new prompt.
+    let paste = ConfirmDialogSnapshot {
+        message: "Paste 3 line(s) of text?".to_string(),
+        hint: "Enter / Y to paste · Esc / N to cancel".to_string(),
+    };
+    let switched = confirm_sync_decision(&mut cache, Some((&paste, resized)), &colors)
+        .expect("switching dialog emits AX actions");
+    assert!(switched.focus_modal);
+    assert_eq!(
+        switched.announcement,
+        Some((
+            "Paste 3 line(s) of text? Enter / Y to paste · Esc / N to cancel".to_string(),
+            true,
+        ))
+    );
+
+    let closed = confirm_sync_decision(&mut cache, None, &colors)
+        .expect("closing confirm dialog emits layout change");
+    assert!(!cache.has_modal());
+    assert!(!closed.focus_modal);
+    assert!(closed.layout_changed);
+    assert_eq!(closed.announcement, None);
+}
+
+#[test]
+fn palette_ax_focuses_on_open_and_announces_title_and_hint_on_selection_change() {
+    let colors = test_colors();
+    let rect = test_rect();
+    let mut cache = NativeOverlayCache::default();
+
+    let mut snap = CommandPaletteSnapshot {
+        query: String::new(),
+        rows: vec![
+            PaletteRow::Header {
+                label: "Splits".to_string(),
+            },
+            PaletteRow::Entry {
+                title: "Split Right".to_string(),
+                hint: Some("⌘D".to_string()),
+                match_positions: Vec::new(),
+                enabled: true,
+            },
+            PaletteRow::Entry {
+                title: "Close Pane".to_string(),
+                hint: None,
+                match_positions: Vec::new(),
+                enabled: true,
+            },
+        ],
+        selected: 1,
+        total_entries: 2,
+    };
+
+    let open = palette_sync_decision(&mut cache, Some((&snap, rect)), &colors)
+        .expect("opening palette emits AX actions");
+    assert!(cache.has_modal());
+    assert!(open.focus_modal);
+    assert!(open.layout_changed);
+    let (open_text, high) = open.announcement.expect("open announcement");
+    assert!(high);
+    assert!(open_text.contains("Command Palette"));
+    assert!(open_text.contains("Split Right, ⌘D"));
+
+    // Moving selection announces "{title}, {hint}" (or "{title}" without hint).
+    snap.selected = 2;
+    let moved = palette_sync_decision(&mut cache, Some((&snap, rect)), &colors)
+        .expect("selection move emits AX actions");
+    assert!(!moved.focus_modal);
+    assert!(!moved.layout_changed);
+    assert_eq!(moved.announcement, Some(("Close Pane".to_string(), false)));
+
+    snap.selected = 1;
+    let moved_back = palette_sync_decision(&mut cache, Some((&snap, rect)), &colors)
+        .expect("selection move back emits AX actions");
+    assert_eq!(
+        moved_back.announcement,
+        Some(("Split Right, ⌘D".to_string(), false))
+    );
+
+    // Query change keeping the same selected entry does not re-announce.
+    snap.query = "sp".to_string();
+    let typed = palette_sync_decision(&mut cache, Some((&snap, rect)), &colors)
+        .expect("query change rebuilds");
+    assert_eq!(typed, ModalAxActions::default());
+
+    // Filtering down to zero matches announces the empty state.
+    snap.rows.clear();
+    snap.selected = 0;
+    let empty = palette_sync_decision(&mut cache, Some((&snap, rect)), &colors)
+        .expect("empty filter emits announcement");
+    assert_eq!(
+        empty.announcement,
+        Some(("No matching commands".to_string(), false))
+    );
+
+    let closed = palette_sync_decision(&mut cache, None, &colors).expect("closing palette");
+    assert!(!cache.has_modal());
+    assert!(closed.layout_changed);
+}
+
+#[test]
+fn theme_settings_ax_announces_open_selection_mode_switch_and_value_adjustment() {
+    let colors = test_colors();
+    let rect = test_rect();
+    let mut cache = NativeOverlayCache::default();
+    let mut state = ThemeSettings::open(test_theme_settings_init());
+
+    let (_, open) = theme_settings_sync_decision(&mut cache, Some((&state, rect)), &colors)
+        .expect("opening theme picker emits AX actions");
+    assert!(cache.has_modal());
+    assert!(open.focus_modal);
+    assert!(open.layout_changed);
+    let (open_text, high) = open.announcement.expect("open announcement");
+    assert!(high);
+    assert!(open_text.starts_with("Theme."));
+
+    // Moving down in the theme list announces the newly highlighted theme.
+    state.move_down();
+    let expected_theme = state.highlighted_theme_name().unwrap().to_string();
+    let (_, moved) = theme_settings_sync_decision(&mut cache, Some((&state, rect)), &colors)
+        .expect("moving theme selection emits AX actions");
+    assert!(!moved.focus_modal);
+    assert_eq!(moved.announcement, Some((expected_theme, false)));
+
+    // Switching to Settings mode re-focuses and announces Settings.
+    let mut settings = ThemeSettings::open(settings_init());
+    let (_, switched) = theme_settings_sync_decision(&mut cache, Some((&settings, rect)), &colors)
+        .expect("mode switch emits AX actions");
+    assert!(switched.focus_modal);
+    assert!(switched.layout_changed);
+    let (switch_text, switch_high) = switched.announcement.expect("mode switch announcement");
+    assert!(switch_high);
+    assert!(switch_text.starts_with("Settings."));
+
+    // Adjusting the selected setting's value announces "{label}, {value}".
+    settings.adjust(1, std::time::Instant::now());
+    let (_, adjusted) = theme_settings_sync_decision(&mut cache, Some((&settings, rect)), &colors)
+        .expect("value adjustment emits AX actions");
+    assert!(!adjusted.focus_modal);
+    let (adj_text, adj_high) = adjusted.announcement.expect("value announcement");
+    assert!(!adj_high);
+    assert!(adj_text.starts_with("Font Size, "));
+
+    // Closing clears modal state and signals layout change.
+    let (_, closed) = theme_settings_sync_decision(&mut cache, None, &colors).expect("closing");
+    assert!(!cache.has_modal());
+    assert!(closed.layout_changed);
+}
+
+#[test]
+fn title_prompt_and_process_monitor_ax_actions_and_non_modal_cache_isolation() {
+    let colors = test_colors();
+    let rect = test_rect();
+    let mut cache = NativeOverlayCache::default();
+
+    // Non-modal overlays (toast, scratch badge, child-exited bars) never mark
+    // the window as having a modal open.
+    cache.toast = Some(1);
+    cache.scratch_badge = Some(2);
+    cache.child_exited = Some(3);
+    assert!(!cache.has_modal());
+
+    // Set Tab Title opens with focus + hint announcement, and typing stays quiet.
+    let open_title = title_prompt_sync_decision(&mut cache, Some(("", rect)), &colors)
+        .expect("opening title prompt");
+    assert!(cache.has_modal());
+    assert!(open_title.focus_modal);
+    assert!(open_title.layout_changed);
+    assert_eq!(
+        open_title.announcement,
+        Some((
+            format_dialog_announcement("Set Tab Title", TITLE_PROMPT_HINT),
+            true,
+        ))
+    );
+    let typed = title_prompt_sync_decision(&mut cache, Some(("Build", rect)), &colors)
+        .expect("typing updates title prompt");
+    assert_eq!(typed, ModalAxActions::default());
+    let closed_title = title_prompt_sync_decision(&mut cache, None, &colors).expect("closing");
+    assert!(!cache.has_modal());
+    assert!(closed_title.layout_changed);
+
+    // Process Monitor announces on open and selection move, but stays quiet
+    // across periodic CPU/MEM ticks on the same selected row.
+    let mut pm = ProcessMonitorViewModel {
+        sort_label: "CPU",
+        rows: vec![
+            ProcessMonitorRowView {
+                process: "cargo".to_string(),
+                cpu: "12.0%".to_string(),
+                mem: "200M".to_string(),
+                proc_count: "3".to_string(),
+                elapsed: "01:00".to_string(),
+                location: "Tab 1".to_string(),
+                selected: true,
+            },
+            ProcessMonitorRowView {
+                process: "zsh".to_string(),
+                cpu: "0.1%".to_string(),
+                mem: "10M".to_string(),
+                proc_count: "1".to_string(),
+                elapsed: "05:00".to_string(),
+                location: "Tab 2".to_string(),
+                selected: false,
+            },
+        ],
+    };
+    let (_, open_pm) = process_monitor_sync_decision(&mut cache, Some((pm.clone(), rect)), &colors)
+        .expect("opening process monitor");
+    assert!(cache.has_modal());
+    assert!(open_pm.focus_modal);
+    assert!(open_pm.layout_changed);
+    assert!(
+        open_pm
+            .announcement
+            .as_ref()
+            .is_some_and(|(t, h)| *h && t.contains("Process Monitor"))
+    );
+
+    pm.rows[0].cpu = "18.5%".to_string();
+    let (_, tick_pm) = process_monitor_sync_decision(&mut cache, Some((pm.clone(), rect)), &colors)
+        .expect("metric tick rebuilds view");
+    assert_eq!(tick_pm, ModalAxActions::default());
+
+    pm.rows[0].selected = false;
+    pm.rows[1].selected = true;
+    let (_, moved_pm) = process_monitor_sync_decision(&mut cache, Some((pm, rect)), &colors)
+        .expect("selection change announces new row");
+    assert_eq!(
+        moved_pm.announcement,
+        Some((format_ax_item("zsh", Some("Tab 2")), false))
+    );
+
+    let (_, closed_pm) =
+        process_monitor_sync_decision(&mut cache, None, &colors).expect("closing process monitor");
+    assert!(!cache.has_modal());
+    assert!(closed_pm.layout_changed);
 }

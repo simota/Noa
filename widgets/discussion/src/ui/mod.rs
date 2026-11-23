@@ -94,6 +94,8 @@ pub enum Action {
     Resume(PathBuf),
     /// Leave the discussion shown and go back to the start view.
     NewDiscussion,
+    /// Bring a participant's pane to the front in Noa.
+    Focus(PartId),
 }
 
 impl Action {
@@ -375,11 +377,12 @@ impl Discussion {
     fn strip_controls(&mut self) {
         let tree = &mut self.tree;
         self.actions.retain(|(id, action)| {
-            let keep = !action.acts_on_session();
-            if !keep {
+            if action.acts_on_session() {
                 tree.set_hidden(*id, true);
+                return false;
             }
-            keep
+            // A name stays shown; no pane runs to jump to.
+            !matches!(action, Action::Focus(_))
         });
     }
 
@@ -732,6 +735,10 @@ impl Discussion {
                 format!("{} を再開します", dir.display()),
             ),
             Action::NewDiscussion => self.send(Command::NewDiscussion, "開始画面に戻ります"),
+            Action::Focus(part) => self.send(
+                Command::Focus { part: part.clone() },
+                format!("{} のペインを表示します", part_name(&part)),
+            ),
         }
     }
 

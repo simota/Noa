@@ -85,6 +85,8 @@ pub enum Command {
     /// Start an agent of this kind in a new tab, in the working directory,
     /// on the discussion's result.
     Implement { agent: AgentKind },
+    /// Bring a participant's pane to the front in Noa (`noa.focusPane`).
+    Focus { part: PartId },
 }
 
 pub struct Channel {
@@ -324,6 +326,7 @@ fn action_of(cmd: Command) -> Option<Action> {
         Command::Retry => Action::Retry,
         Command::Close => Action::Close,
         Command::Implement { agent } => Action::Implement { agent },
+        Command::Focus { part } => Action::Focus { part },
         Command::Start { .. }
         | Command::Open { .. }
         | Command::Resume { .. }
@@ -681,5 +684,18 @@ mod tests {
                 .is_some()
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_focus_reaches_the_runner_as_its_action() {
+        assert_eq!(
+            action_of(Command::Focus {
+                part: PartId::new("codex")
+            }),
+            Some(Action::Focus {
+                part: PartId::new("codex")
+            })
+        );
+        assert_eq!(action_of(Command::NewDiscussion), None);
     }
 }

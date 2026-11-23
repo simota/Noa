@@ -126,6 +126,10 @@ pub enum Action {
     Implement {
         agent: AgentKind,
     },
+    /// Bring a participant's pane to the front in Noa.
+    Focus {
+        part: PartId,
+    },
     /// End the runner. The agents' panes stay open.
     Stop,
 }
@@ -669,12 +673,44 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 self.implement(agent);
                 return Ok(());
             }
+            Action::Focus { part } => {
+                self.focus(&part);
+                return Ok(());
+            }
             Action::Stop => return Ok(()),
         };
         if let Some(why) = self.feed(input)? {
             self.notice(why);
         }
         Ok(())
+    }
+
+    /// Brings `part`'s pane to the front. Refused, with a notice, for a
+    /// participant without a pane yet (nothing is asked of Noa then) or
+    /// without a link to Noa.
+    fn focus(&mut self, part: &PartId) {
+        let name = if *part == self.engine.session().moderator.id {
+            "司会 (Noa)".to_owned()
+        } else {
+            part.to_string()
+        };
+        if self.engine.session().participant(part).is_none() {
+            self.notice(format!("{part} はこの議論の参加者ではありません"));
+            return;
+        }
+        let Some(pane) = self.panes.get(part).map(|p| p.id) else {
+            self.notice(format!("{name} のペインはまだありません"));
+            return;
+        };
+        let Some(conn) = self.conn.as_mut() else {
+            self.notice(
+                "Noa に接続していません。接続が戻ってから、もう一度押してください".to_owned(),
+            );
+            return;
+        };
+        if let Err(err) = conn.focus(pane) {
+            self.notice(format!("{name} のペインを表示できません: {err}"));
+        }
     }
 
     /// Writes the result as a task file under the working directory and
@@ -1364,6 +1400,7 @@ mod tests {
         rpc_changes: usize,
         rpc_paste_ready: usize,
         rpc_screen: usize,
+        focused: Vec<u64>,
     }
 
     /// A fake Noa, its connector and the clock, sharing one world.
@@ -1567,6 +1604,16 @@ mod tests {
                 return Err(NoaError::NotReady);
             }
             w.typed.push((pane, text.to_owned(), paste));
+            Ok(())
+        }
+
+        fn focus(&mut self, pane: u64) -> Result<(), NoaError> {
+            self.up()?;
+            let mut w = self.w();
+            if !w.panes.contains_key(&pane) {
+                return Err(NoaError::PaneGone);
+            }
+            w.focused.push(pane);
             Ok(())
         }
     }
@@ -2399,6 +2446,66 @@ mod tests {
         rig.step();
         assert_eq!(fake.0.borrow().spawned.len(), before);
         assert!(rig.notices().iter().any(|n| n.contains("作業ディレクトリ")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn focusing_a_participant_brings_its_pane_forward_once_it_has_one() {
+        let root = temp_root("focus");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        // Before the first connection no pane exists: Noa is not asked.
+        rig.actions
+            .send(Action::Focus { part: p("codex") })
+            .unwrap();
+        rig.runner.step().unwrap();
+        assert!(fake.0.borrow().focused.is_empty());
+        assert!(
+            rig.notices()
+                .iter()
+                .any(|n| n.contains("codex のペインはまだありません")),
+        );
+
+        rig.step();
+        let codex = fake.pane_of("codex");
+        let moderator = fake.pane_of("noa");
+        rig.actions
+            .send(Action::Focus { part: p("codex") })
+            .unwrap();
+        rig.actions
+            .send(Action::Focus {
+                part: p(discussion::model::types::MODERATOR_ID),
+            })
+            .unwrap();
+        rig.step();
+        assert_eq!(fake.0.borrow().focused, [codex, moderator]);
+
+        // Someone not in the discussion: refused, nothing asked.
+        rig.actions
+            .send(Action::Focus { part: p("gemini") })
+            .unwrap();
+        rig.step();
+        assert_eq!(fake.0.borrow().focused.len(), 2);
+        assert!(
+            rig.notices()
+                .iter()
+                .any(|n| n.contains("参加者ではありません"))
+        );
+
+        // With the link down: refused with why.
+        fake.w().up = false;
+        rig.step();
+        rig.updates();
+        rig.actions
+            .send(Action::Focus { part: p("codex") })
+            .unwrap();
+        rig.step();
+        assert_eq!(fake.0.borrow().focused.len(), 2);
+        assert!(
+            rig.notices()
+                .iter()
+                .any(|n| n.contains("Noa に接続していません"))
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

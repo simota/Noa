@@ -804,6 +804,63 @@ fn stored_dates_and_round_counts_read_plainly() {
     assert_eq!(rounds_label(2, None), "2 ラウンド");
 }
 
+// ── Jumping to a pane ───────────────────────────────────────────────────────
+
+#[test]
+fn a_receipt_tag_or_an_agents_name_focuses_its_pane() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let session = crate::demo::session();
+    h.deliver(Some(session.clone()));
+    let round = session.current_round().unwrap();
+    // One link per receipt in the brief bar, the moderator's included.
+    for brief in round.briefs.iter().chain(&round.moderator_brief) {
+        assert!(has_widget_for(&h.screen, &Action::Focus(brief.to.clone())));
+    }
+    let codex = h
+        .screen
+        .actions
+        .iter()
+        .find(|(_, a)| *a == Action::Focus(p("codex")))
+        .map(|(id, _)| *id)
+        .unwrap();
+    click(&mut h.screen, &mut h.text, codex);
+    assert_eq!(h.drain(), vec![Command::Focus { part: p("codex") }]);
+    // Every agent's message names a link too; the user's own does not.
+    let links = h
+        .screen
+        .actions
+        .iter()
+        .filter(|(_, a)| matches!(a, Action::Focus(_)))
+        .count();
+    let briefs = round.briefs.len() + usize::from(round.moderator_brief.is_some());
+    let agent_messages = chat::visible(&session, None)
+        .iter()
+        .filter(|m| matches!(m.author, Author::Part(_)))
+        .count();
+    assert_eq!(links, briefs + agent_messages);
+}
+
+#[test]
+fn a_stored_discussion_has_no_panes_to_jump_to() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    h.deliver_with(Link::Stored, Some(crate::demo::session()));
+    assert!(
+        !h.screen
+            .actions
+            .iter()
+            .any(|(_, a)| matches!(a, Action::Focus(_)))
+    );
+}
+
+#[test]
+fn the_demo_only_says_which_pane_it_would_show() {
+    let (mut screen, mut text) = laid_out();
+    screen.run(Action::Focus(p(MODERATOR_ID)), &mut text);
+    assert_eq!(screen.toasts, ["[DEMO] Noa のペインを表示します"]);
+}
+
 // ── Link state ──────────────────────────────────────────────────────────────
 
 fn status_badges(screen: &Discussion) -> Vec<String> {

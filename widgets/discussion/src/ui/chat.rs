@@ -9,7 +9,7 @@ use noa_gpui_core::widgets::Container;
 use noa_gpui_core::widgets::{Button, ControlSize, Label, Pressable, Tag, Tone, Truncation};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
-use discussion::model::types::{IssueId, Message, MsgKind, RoundKind, Session};
+use discussion::model::types::{Author, IssueId, Message, MsgKind, PartId, RoundKind, Session};
 
 use super::{
     Action, Delivery, author_color, author_name, caption, debate_in_play, gap, is_about,
@@ -117,15 +117,16 @@ fn brief_bar(
     for brief in round.briefs.iter().chain(&round.moderator_brief) {
         let delivery = Delivery::of(&brief.receipt);
         let (state, tone) = delivery.tag();
-        let id = tag(
-            tree,
-            row,
-            &format!("{} {state}", part_name(&brief.to)),
-            tone,
-        );
-        if let Some(why) = &brief.receipt.failed {
-            tree.set_accessible_label(id, format!("{}: {why}", part_name(&brief.to)));
-        }
+        let name = part_name(&brief.to);
+        // A click shows the agent's pane: what it is doing, or the prompt
+        // it waits on.
+        let link = pane_link(tree, row, &brief.to, actions);
+        tag(tree, link, &format!("{name} {state}"), tone);
+        let label = match &brief.receipt.failed {
+            Some(why) => format!("{name}: {why}（クリックでペインを表示）"),
+            None => format!("{name} のペインを表示"),
+        };
+        tree.set_accessible_label(link, label);
     }
     // Offered only when the engine would take it (the same rule).
     if !session.closed && !round.retryable().is_empty() {
@@ -253,13 +254,20 @@ pub(super) fn message_card(
         Some(card),
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
-    tree.insert(
-        Some(head),
-        Label::new(author_name(&message.author))
-            .font_size(12.0)
-            .weight(600)
-            .color(author_color(session, &message.author)),
-    );
+    let author = Label::new(author_name(&message.author))
+        .font_size(12.0)
+        .weight(600)
+        .color(author_color(session, &message.author));
+    match &message.author {
+        Author::Part(part) => {
+            let link = pane_link(tree, head, part, actions);
+            tree.set_accessible_label(link, format!("{} のペインを表示", part_name(part)));
+            tree.insert(Some(link), author);
+        }
+        Author::User => {
+            tree.insert(Some(head), author);
+        }
+    }
     if !message.to.is_empty() {
         caption(
             tree,
@@ -296,6 +304,19 @@ pub(super) fn message_card(
             .selectable(true),
     );
     card
+}
+
+/// A participant's name or tag (the caller puts it inside): a click brings
+/// the participant's pane to the front in Noa.
+pub(super) fn pane_link(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    part: &PartId,
+    actions: &mut Vec<(WidgetId, Action)>,
+) -> WidgetId {
+    let link = tree.insert(Some(parent), Pressable::new(Style::default()).radius(9.0));
+    actions.push((link, Action::Focus(part.clone())));
+    link
 }
 
 /// `[B]`: a tag that filters the chat to the issue.

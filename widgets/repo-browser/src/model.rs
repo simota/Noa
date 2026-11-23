@@ -24,6 +24,40 @@ impl DiffMode {
     }
 }
 
+/// A coding agent CLI the browser can start in a worktree with the review
+/// prompt as its first prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    Agy,
+}
+
+impl AgentKind {
+    pub const ALL: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Codex, AgentKind::Agy];
+
+    /// The command that starts it, also its name in the UI.
+    pub fn command(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "claude",
+            AgentKind::Codex => "codex",
+            AgentKind::Agy => "agy",
+        }
+    }
+
+    /// The arguments that start it interactively with `prompt` as the first
+    /// prompt: Claude Code and Codex take it as their positional argument,
+    /// Antigravity after `-i` (as the competition widget starts them).
+    pub fn prompt_args(self, prompt: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        if self == AgentKind::Agy {
+            args.push("-i".to_owned());
+        }
+        args.push(prompt.to_owned());
+        args
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentActivity {
     #[default]
@@ -792,6 +826,44 @@ pub fn demo_data(mode: DiffMode) -> RepoData {
     };
     data.compute_conflicts();
     data
+}
+
+/// The predicted merge result of each demo merge conflict, as
+/// (worktree cwd, path, text with conflict markers).
+pub fn demo_merge_previews() -> Vec<(String, String, String)> {
+    vec![(
+        "/Users/simota/repos/github.com/Noa-wt-subs".into(),
+        "crates/noa-ipc/src/push.rs".into(),
+        "use crate::protocol::{ChangedPanel, Panel};\n\
+         \n\
+         impl Broadcaster {\n\
+         \x20   pub fn broadcast_state_delta(\n\
+         \x20       &self,\n\
+         <<<<<<< main\n\
+         \x20       changed: Vec<Panel>,\n\
+         \x20       seq: u64,\n\
+         =======\n\
+         \x20       changed: Vec<ChangedPanel>,\n\
+         \x20       removed: Vec<u64>,\n\
+         >>>>>>> feat/pane-subscriptions\n\
+         \x20   ) {\n\
+         \x20       let guard = self.inner.lock();\n\
+         <<<<<<< main\n\
+         \x20       for sub in guard.subscribers.values() {\n\
+         \x20           sub.enqueue_panels(&changed, seq);\n\
+         =======\n\
+         \x20       for conn in guard.connections.values() {\n\
+         \x20           let panels = conn.filter_panels(&changed);\n\
+         \x20           let removed_ids = conn.filter_removed(&removed);\n\
+         \x20           if !panels.is_empty() || !removed_ids.is_empty() {\n\
+         \x20               conn.enqueue_delta(panels, removed_ids);\n\
+         \x20           }\n\
+         >>>>>>> feat/pane-subscriptions\n\
+         \x20       }\n\
+         \x20   }\n\
+         }\n"
+        .into(),
+    )]
 }
 
 #[cfg(test)]

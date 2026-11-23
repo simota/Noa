@@ -13,7 +13,9 @@ use noa_ipc::{
 };
 
 use crate::git;
-use crate::model::{AgentActivity, DiffMode, PaneSummary, RepoData, Worktree, group_repos};
+use crate::model::{
+    AgentActivity, AgentKind, DiffMode, PaneSummary, RepoData, Worktree, group_repos,
+};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(4);
@@ -41,6 +43,9 @@ pub struct Snapshot {
     pub selected_diff: Option<(String, String, String)>,
     /// (worktree cwd, commit sha, `git show` text) of the commit being viewed.
     pub selected_commit: Option<(String, String, String)>,
+    /// (worktree cwd, path, predicted merge result) of the merge conflict
+    /// being viewed.
+    pub selected_merge: Option<(String, String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +77,20 @@ pub enum Command {
         pane_id: u64,
         text: String,
         submit: bool,
+    },
+    /// A new focused Noa tab in `cwd` (a worktree root) running `agent` with
+    /// `prompt` as its first prompt. Reported on `delivered` once Noa
+    /// accepted the spawn.
+    LaunchAgent {
+        cwd: String,
+        agent: AgentKind,
+        prompt: String,
+    },
+    /// The predicted merge result of `path` (conflict markers included) in
+    /// the worktree at `cwd`, shown instead of a file's diff.
+    LoadMergePreview {
+        cwd: String,
+        path: String,
     },
 }
 
@@ -122,6 +141,8 @@ fn run(
     let mut selected_commit: Option<(String, String)> = None;
     let mut commit_diff: Option<((String, String), String)> = None;
     let mut commit_cache = git::CommitCache::default();
+    let mut selected_merge: Option<(String, String)> = None;
+    let mut merge_memo: Option<MergeMemo> = None;
 
     let _ = snapshot_tx.send(Snapshot {
         data: RepoData::default(),
@@ -131,6 +152,7 @@ fn run(
         diff_mode: mode,
         selected_diff: None,
         selected_commit: None,
+        selected_merge: None,
     });
     wake();
 
@@ -165,11 +187,12 @@ fn run(
                             // worktrees are rescanned on the usual schedule.
                             Command::LoadDiff { cwd, path } => {
                                 selected_commit = None;
+                                selected_merge = None;
                                 match last.as_mut().filter(|l| l.mode == mode) {
                                     Some(l) => {
                                         let diff = git::file_diff(&cwd, &path, mode);
                                         l.selected_diff = Some((cwd.clone(), path.clone(), diff));
-                                        if !deliver(l.snapshot(can_focus, can_send, None)) {
+                                        if !deliver(l.snapshot(can_focus, can_send, None, None)) {
                                             return;
                                         }
                                     }
@@ -179,13 +202,32 @@ fn run(
                             }
                             Command::LoadCommit { cwd, sha } => {
                                 selected_commit = Some((cwd, sha));
+                                selected_merge = None;
                                 match &last {
                                     Some(l) => {
                                         let commit = commit_entry(
                                             &mut commit_diff,
                                             selected_commit.as_ref(),
                                         );
-                                        if !deliver(l.snapshot(can_focus, can_send, commit)) {
+                                        if !deliver(l.snapshot(can_focus, can_send, commit, None)) {
+                                            return;
+                                        }
+                                    }
+                                    None => dirty = true,
+                                }
+                            }
+                            Command::LoadMergePreview { cwd, path } => {
+                                selected_merge = Some((cwd, path));
+                                selected_commit = None;
+                                match &last {
+                                    Some(l) => {
+                                        let merge = merge_entry(
+                                            &mut merge_memo,
+                                            selected_merge.as_ref(),
+                                            &mut merges,
+                                            &l.data,
+                                        );
+                                        if !deliver(l.snapshot(can_focus, can_send, None, merge)) {
                                             return;
                                         }
                                     }
@@ -228,6 +270,28 @@ fn run(
                                         "新しいタブで {path}:{line} を開きました (ペイン #{pane_id})"
                                     ),
                                     Err(err) => format!("エディタを開けませんでした: {err}"),
+                                };
+                                let _ = notice_tx.send(notice);
+                                wake();
+                            }
+                            Command::LaunchAgent { cwd, agent, prompt } => {
+                                let params = agent_spawn(
+                                    &cwd,
+                                    agent,
+                                    &prompt,
+                                    std::env::var("SHELL").ok().as_deref(),
+                                );
+                                let notice = match client.spawn_tab(None, &params) {
+                                    Ok(pane_id) => {
+                                        let _ = delivered_tx.send(prompt);
+                                        format!(
+                                            "新しいタブで {} を起動し、指示を渡しました (ペイン #{pane_id})",
+                                            agent.command()
+                                        )
+                                    }
+                                    Err(err) => {
+                                        format!("{} を起動できませんでした: {err}", agent.command())
+                                    }
                                 };
                                 let _ = notice_tx.send(notice);
                                 wake();
@@ -288,12 +352,24 @@ fn run(
                             Ok((data, selected_diff)) => {
                                 let selected_commit =
                                     commit_entry(&mut commit_diff, selected_commit.as_ref());
+                                let selected_merge = merge_entry(
+                                    &mut merge_memo,
+                                    selected_merge.as_ref(),
+                                    &mut merges,
+                                    &data,
+                                );
                                 let build = LastBuild {
                                     data,
                                     mode,
                                     selected_diff,
                                 };
-                                if !deliver(build.snapshot(can_focus, can_send, selected_commit)) {
+                                let snapshot = build.snapshot(
+                                    can_focus,
+                                    can_send,
+                                    selected_commit,
+                                    selected_merge,
+                                );
+                                if !deliver(snapshot) {
                                     return;
                                 }
                                 last = Some(build);
@@ -310,6 +386,7 @@ fn run(
                                     diff_mode: mode,
                                     selected_diff: None,
                                     selected_commit: None,
+                                    selected_merge: None,
                                 });
                                 wake();
                                 break;
@@ -329,6 +406,7 @@ fn run(
                                 diff_mode: mode,
                                 selected_diff: None,
                                 selected_commit: None,
+                                selected_merge: None,
                             });
                             wake();
                             break;
@@ -346,6 +424,7 @@ fn run(
                         diff_mode: mode,
                         selected_diff: None,
                         selected_commit: None,
+                        selected_merge: None,
                     })
                     .is_err()
                 {
@@ -359,8 +438,16 @@ fn run(
                         Ok(Command::LoadDiff { cwd, path }) => {
                             selected_file = Some((cwd, path));
                             selected_commit = None;
+                            selected_merge = None;
                         }
-                        Ok(Command::LoadCommit { cwd, sha }) => selected_commit = Some((cwd, sha)),
+                        Ok(Command::LoadCommit { cwd, sha }) => {
+                            selected_commit = Some((cwd, sha));
+                            selected_merge = None;
+                        }
+                        Ok(Command::LoadMergePreview { cwd, path }) => {
+                            selected_merge = Some((cwd, path));
+                            selected_commit = None;
+                        }
                         Ok(Command::Refresh) => break,
                         Ok(_) => {}
                         Err(TryRecvError::Disconnected) => return,
@@ -395,6 +482,7 @@ impl LastBuild {
         can_focus: bool,
         can_send: bool,
         selected_commit: Option<DiffEntry>,
+        selected_merge: Option<DiffEntry>,
     ) -> Snapshot {
         Snapshot {
             data: self.data.clone(),
@@ -404,6 +492,7 @@ impl LastBuild {
             diff_mode: self.mode,
             selected_diff: self.selected_diff.clone(),
             selected_commit,
+            selected_merge,
         }
     }
 }
@@ -478,6 +567,65 @@ fn editor_argv(shell: Option<&str>, path: &str, line: u32, editor: Option<&str>)
     vec![shell.to_owned(), "-lc".to_owned(), script]
 }
 
+/// The most bytes of a prompt handed to an agent as its argument: one argv
+/// string must stay under Linux's 128 KiB `MAX_ARG_STRLEN` (macOS takes
+/// more).
+pub const AGENT_PROMPT_MAX: usize = 128 * 1024 - 1;
+/// The most bytes the prompt may take JSON-escaped: Noa's control server
+/// reads frames of at most 256 KiB, which also hold the rest of the request.
+const AGENT_PROMPT_MAX_ESCAPED: usize = 200 * 1024;
+
+/// Whether `prompt` is too large to start an agent with.
+pub fn agent_prompt_too_large(prompt: &str) -> bool {
+    prompt.len() > AGENT_PROMPT_MAX
+        || serde_json::to_string(prompt).map_or(true, |s| s.len() > AGENT_PROMPT_MAX_ESCAPED)
+}
+
+/// A new tab (focused) in `cwd` running `agent` with `prompt` as its first
+/// prompt.
+fn agent_spawn(cwd: &str, agent: AgentKind, prompt: &str, shell: Option<&str>) -> SpawnParams {
+    SpawnParams {
+        config: Some(SpawnConfig {
+            command: Some(agent_argv(shell, agent, prompt)),
+            cwd: Some(cwd.to_owned()),
+            ..SpawnConfig::default()
+        }),
+        focus: Some(true),
+        ..SpawnParams::default()
+    }
+}
+
+/// `exec AGENT "$@"` through the user's login shell, so the agent is found on
+/// the `PATH` their rc files set, with the agent's arguments (the prompt among
+/// them) as the script's positional parameters (`$0` is `noa-review`): the
+/// prompt is one argv element and never part of the script.
+///
+/// `"$@"` is POSIX syntax that fish and csh do not take, so `$SHELL` is used
+/// only when it is a POSIX shell, else `/bin/zsh`.
+fn agent_argv(shell: Option<&str>, agent: AgentKind, prompt: &str) -> Vec<String> {
+    let shell = shell
+        .filter(|s| s.starts_with('/') && is_posix_shell(s))
+        .unwrap_or("/bin/zsh");
+    let mut argv = vec![
+        shell.to_owned(),
+        "-l".to_owned(),
+        "-i".to_owned(),
+        "-c".to_owned(),
+        format!("exec {} \"$@\"", agent.command()),
+        "noa-review".to_owned(),
+    ];
+    argv.extend(agent.prompt_args(prompt));
+    argv
+}
+
+fn is_posix_shell(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(
+        name,
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "yash"
+    )
+}
+
 /// `path` (relative to the worktree root) as `./<path>`; an absolute path,
 /// which cannot be read as an option either, is kept as it is.
 fn dot_relative(path: &str) -> String {
@@ -541,6 +689,68 @@ fn commit_entry(
     }
     let (_, diff) = memo.as_ref()?;
     Some((wanted.0.clone(), wanted.1.clone(), diff.clone()))
+}
+
+/// The viewed merge conflict (worktree cwd, path, merged tree) and its text.
+type MergeMemo = ((String, String, String), String);
+
+/// The entry for the viewed merge conflict: `path` as `git merge-tree` left
+/// it in the merged tree it last wrote for the worktree, read again only when
+/// that tree changed. A tree whose object is gone (pruned since) is
+/// predicted afresh once, as is a worktree with no prediction yet.
+fn merge_entry(
+    memo: &mut Option<MergeMemo>,
+    wanted: Option<&(String, String)>,
+    merges: &mut git::MergePredictions,
+    data: &RepoData,
+) -> Option<DiffEntry> {
+    let (cwd, path) = wanted?;
+    let entry = |text: String| Some((cwd.clone(), path.clone(), text));
+    let mut predicted_again = false;
+    loop {
+        let Some(tree) = merges.tree(cwd).map(str::to_owned) else {
+            if !predicted_again && predict_again(merges, data, cwd) {
+                predicted_again = true;
+                continue;
+            }
+            return entry(format!(
+                "(このワークツリーのマージ予測がありません: {path})"
+            ));
+        };
+        let key = (cwd.clone(), path.clone(), tree);
+        if let Some((cached, text)) = memo.as_ref()
+            && *cached == key
+        {
+            return entry(text.clone());
+        }
+        match git::merge_preview(Path::new(cwd), &key.2, path) {
+            Some(text) => {
+                *memo = Some((key, text.clone()));
+                return entry(text);
+            }
+            None if !predicted_again => {
+                predicted_again = true;
+                merges.forget(cwd);
+                predict_again(merges, data, cwd);
+            }
+            None => return entry(format!("(予測したマージ結果を読めません: {path})")),
+        }
+    }
+}
+
+/// Runs the merge prediction for the worktree at `cwd` (as listed in `data`)
+/// now; whether it left a merged tree.
+fn predict_again(merges: &mut git::MergePredictions, data: &RepoData, cwd: &str) -> bool {
+    let Some((repo, wt)) = data
+        .repos
+        .iter()
+        .find_map(|r| r.worktrees.iter().find(|w| w.cwd == cwd).map(|w| (r, w)))
+    else {
+        return false;
+    };
+    let base = git::BaseRefs::default().get(&repo.root, Path::new(cwd));
+    merges.predict(cwd, &wt.branch, base.as_ref());
+    merges.tree(cwd).is_some()
 }
 
 fn build_snapshot(
@@ -1242,13 +1452,15 @@ mod tests {
             selected_diff: Some(("/repo".into(), "a.rs".into(), "+new".into())),
         };
         let commit = Some(("/repo".into(), "abc".into(), "commit abc".into()));
-        let snap = last.snapshot(true, false, commit.clone());
+        let merge = Some(("/repo".into(), "a.rs".into(), "<<<<<<< main".into()));
+        let snap = last.snapshot(true, false, commit.clone(), merge.clone());
         assert_eq!(snap.data, last.data);
         assert_eq!(snap.diff_mode, DiffMode::Staged);
         assert_eq!(snap.link, Link::Live);
         assert!(snap.can_focus && !snap.can_send);
         assert_eq!(snap.selected_diff, last.selected_diff);
         assert_eq!(snap.selected_commit, commit);
+        assert_eq!(snap.selected_merge, merge);
     }
 
     #[test]
@@ -1388,6 +1600,169 @@ mod tests {
             5,
         );
         assert_eq!(args, vec!["+5", "./a.rs"]);
+    }
+
+    /// Runs the script half of `agent_argv` (`-c SCRIPT $0 ARGS…`) with
+    /// `/bin/sh` and a stub `agent` first on `PATH` that records its
+    /// arguments one per NUL-terminated record; returns them.
+    fn run_agent(tag: &str, agent: AgentKind, prompt: &str) -> Vec<String> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rb-agent-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("args");
+        let stub = dir.join(agent.command());
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\"; done > '{}'\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let argv = agent_argv(Some("/bin/zsh"), agent, prompt);
+        assert_eq!(argv[..4], ["/bin/zsh", "-l", "-i", "-c"]);
+        assert!(
+            !argv[4].contains(prompt),
+            "the prompt is never in the script"
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .args(&argv[4..])
+            .current_dir(&dir)
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            .status()
+            .unwrap();
+        assert!(status.success(), "{argv:?}");
+        let args = std::fs::read(&out).unwrap();
+        let pwned = dir.join("pwned").exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!pwned, "the prompt ran as a command");
+        String::from_utf8(args)
+            .unwrap()
+            .split_terminator('\0')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn the_prompt_reaches_the_agent_as_one_argument() {
+        let prompt = "[main / a.rs L3]\n```diff\n+x\n```\n\
+                      $(touch pwned) `touch pwned` \"$@\" '; touch pwned; '\n-v --help\n直して";
+        for agent in [AgentKind::Claude, AgentKind::Codex] {
+            assert_eq!(run_agent(agent.command(), agent, prompt), vec![prompt]);
+        }
+        // Antigravity takes its first prompt after `-i`.
+        assert_eq!(
+            run_agent("agy", AgentKind::Agy, prompt),
+            vec!["-i".to_owned(), prompt.to_owned()]
+        );
+        // A prompt that looks like an option is still one argument.
+        assert_eq!(
+            run_agent("dash", AgentKind::Claude, "--resume"),
+            vec!["--resume"]
+        );
+    }
+
+    #[test]
+    fn agents_start_from_a_posix_login_shell() {
+        let shell = |s: Option<&str>| agent_argv(s, AgentKind::Claude, "p")[0].clone();
+        assert_eq!(shell(Some("/bin/bash")), "/bin/bash");
+        assert_eq!(
+            shell(Some("/opt/homebrew/bin/zsh")),
+            "/opt/homebrew/bin/zsh"
+        );
+        // `"$@"` means nothing to fish or csh; a relative or empty one is no path.
+        for other in [
+            Some("/opt/homebrew/bin/fish"),
+            Some("/bin/tcsh"),
+            Some("zsh"),
+            Some(""),
+            None,
+        ] {
+            assert_eq!(shell(other), "/bin/zsh", "{other:?}");
+        }
+        let argv = agent_argv(None, AgentKind::Codex, "p");
+        assert_eq!(argv[4..], ["exec codex \"$@\"", "noa-review", "p"]);
+    }
+
+    #[test]
+    fn agent_spawn_runs_in_the_worktree_focused_and_needs_input() {
+        let params = agent_spawn("/repo wt", AgentKind::Claude, "直して", Some("/bin/bash"));
+        let config = params.config.as_ref().unwrap();
+        assert_eq!(config.cwd.as_deref(), Some("/repo wt"));
+        assert_eq!(params.focus, Some(true));
+        assert!(config.needs_input_scope());
+        assert_eq!(config.command.as_ref().unwrap().last().unwrap(), "直して");
+    }
+
+    #[test]
+    fn prompts_beyond_one_argument_or_one_frame_are_too_large() {
+        assert!(!agent_prompt_too_large(&"x".repeat(AGENT_PROMPT_MAX)));
+        assert!(agent_prompt_too_large(&"x".repeat(AGENT_PROMPT_MAX + 1)));
+        // Within the argv limit, but twice that once JSON-escaped.
+        assert!(agent_prompt_too_large(&"\"".repeat(110 * 1024)));
+        assert!(!agent_prompt_too_large(&"日本語\n".repeat(10_000)));
+    }
+
+    #[test]
+    fn the_viewed_merge_conflict_is_read_from_the_predicted_tree() {
+        let repo = temp_repo("live-merge", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&foo, "old.rs", "fn theirs() {}\n");
+        commit_file(&repo.0, "old.rs", "fn ours() {}\n");
+        let mut merges = git::MergePredictions::default();
+        let mut commits = git::CommitCache::default();
+        let (data, _) = offline_refresh(
+            repo.0.to_str().unwrap(),
+            DiffMode::Unstaged,
+            &mut merges,
+            &mut commits,
+        );
+        let foo_root = data.repos[0].worktrees[1].cwd.clone();
+        assert_eq!(data.repos[0].worktrees[1].merge_conflicts, vec!["old.rs"]);
+        let wanted = (foo_root.clone(), "old.rs".to_owned());
+        let mut memo = None;
+        let (cwd, path, text) = merge_entry(&mut memo, Some(&wanted), &mut merges, &data).unwrap();
+        assert_eq!((cwd.as_str(), path.as_str()), (foo_root.as_str(), "old.rs"));
+        assert!(
+            text.contains("<<<<<<< ") && text.contains("fn theirs() {}"),
+            "{text}"
+        );
+        assert_eq!(merges.runs(), 1);
+        assert!(merge_entry(&mut None, None, &mut merges, &data).is_none());
+
+        // The tree object pruned since: predicted again once, same result.
+        let tree = merges.tree(&foo_root).unwrap().to_owned();
+        let object = repo
+            .0
+            .join(".git/objects")
+            .join(&tree[..2])
+            .join(&tree[2..]);
+        std::fs::remove_file(&object).unwrap();
+        let (_, _, again) = merge_entry(&mut None, Some(&wanted), &mut merges, &data).unwrap();
+        assert_eq!(again, text);
+        assert_eq!(merges.runs(), 2);
+        // Answered from the memo while the tree stays the same.
+        let (_, _, cached) = merge_entry(&mut memo, Some(&wanted), &mut merges, &data).unwrap();
+        assert_eq!(cached, text);
+
+        // No prediction yet (a fresh feed): one is made.
+        let mut fresh = git::MergePredictions::default();
+        let (_, _, text) = merge_entry(&mut None, Some(&wanted), &mut fresh, &data).unwrap();
+        assert!(text.contains("<<<<<<< "), "{text}");
+        // A worktree no longer listed says so instead.
+        let gone = ("/nowhere".to_owned(), "old.rs".to_owned());
+        let (_, _, note) = merge_entry(
+            &mut None,
+            Some(&gone),
+            &mut git::MergePredictions::default(),
+            &data,
+        )
+        .unwrap();
+        assert!(note.contains("マージ予測がありません"), "{note}");
     }
 
     #[test]

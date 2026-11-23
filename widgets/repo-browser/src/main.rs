@@ -80,9 +80,13 @@ use noa_gpui_text::TextStore;
 use crate::live::{Link, Snapshot};
 use crate::ui::RepoBrowser;
 
-const USAGE: &str = "usage: repo-browser [--demo] [--snapshot=FILE.png [--size=WxH] [--composer]]\n  \
+const USAGE: &str = "usage: repo-browser [--demo] [--worktree=PATH] \
+                     [--snapshot=FILE.png [--size=WxH] [--merge | --commit] [--composer]]\n  \
                      live data from the running Noa control server by default; \
-                     --demo shows canned multi-worktree data";
+                     --demo shows canned multi-worktree data;\n  \
+                     --worktree selects the worktree holding PATH;\n  \
+                     --merge shows a predicted merge conflict, --commit the newest commit, \
+                     --composer quotes the selection into the review prompt";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
 const SNAPSHOT_SCALE: f32 = 2.0;
 const FIRST_SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
@@ -143,6 +147,8 @@ fn main() -> Result<(), String> {
     let mut snapshot_path = None;
     let mut demo = false;
     let mut composer = false;
+    let mut view = None;
+    let mut worktree = None;
     let mut size = DEFAULT_SIZE;
 
     for arg in std::env::args().skip(1) {
@@ -150,8 +156,18 @@ fn main() -> Result<(), String> {
             snapshot_path = Some(PathBuf::from(path));
         } else if let Some(raw) = arg.strip_prefix("--size=") {
             size = parse_size(raw)?;
+        } else if let Some(path) = arg.strip_prefix("--worktree=") {
+            if path.trim().is_empty() {
+                return Err(format!("--worktree needs a path\n{USAGE}"));
+            }
+            worktree = Some(path.to_owned());
         } else if arg == "--composer" {
             composer = true;
+        } else if arg == "--merge" || arg == "--commit" {
+            if view.is_some() {
+                return Err(format!("--merge and --commit exclude each other\n{USAGE}"));
+            }
+            view = Some(arg);
         } else if arg == "--demo" {
             demo = true;
         } else if arg == "--help" || arg == "-h" {
@@ -168,6 +184,14 @@ fn main() -> Result<(), String> {
         } else {
             RepoBrowser::of_snapshot(first_live_snapshot()?)
         };
+        if let Some(path) = worktree {
+            screen.preselect_worktree(path);
+        }
+        match view.as_deref() {
+            Some("--merge") => screen.show_first_merge(),
+            Some("--commit") => screen.show_first_commit(),
+            _ => {}
+        }
         if composer {
             screen.show_composer();
         }
@@ -177,12 +201,17 @@ fn main() -> Result<(), String> {
     }
 
     App::new(options(), move |setup| {
-        if demo {
-            return Box::new(RepoBrowser::demo());
+        let mut screen = if demo {
+            RepoBrowser::demo()
+        } else {
+            let waker = setup.waker.clone();
+            let channel = live::start(move || waker.wake());
+            RepoBrowser::live(channel)
+        };
+        if let Some(path) = worktree.take() {
+            screen.preselect_worktree(path);
         }
-        let waker = setup.waker.clone();
-        let channel = live::start(move || waker.wake());
-        Box::new(RepoBrowser::live(channel))
+        Box::new(screen)
     })
     .run()
     .map_err(|e| e.to_string())

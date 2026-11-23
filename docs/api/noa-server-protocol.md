@@ -143,6 +143,7 @@ Optional fields for an orchestrator that starts worker panes (see [Agent workflo
 | `parentPaneId` | string | the orchestrator's pane; shown as `Panel.parentPaneId` and used by `direction:"auto"` |
 | `focus` | boolean | `false` puts keyboard focus back where it was after the spawn. Omitted means `true`. A spawn that fails (no room to split) always puts focus back |
 | `maxChildren` | number | with `parentPaneId`: refuse the spawn with **`-32011`** when that pane already has this many children (`pane P already has N children (L live, E exited); maxChildren is M`). It counts every pane in every window whose parent is `parentPaneId`, exited panes held open included, on the UI thread before the pane is created, so concurrent spawns cannot pass it. Ignored without `parentPaneId`, and by servers older than the field |
+| `autoApprove` | boolean | `noa.newTab` only: turn the new tab's agent-CLI auto approval (the per-tab **Toggle Auto Approve**) on or off instead of the `auto-approve` config default. Panes split into the tab later share it. `true` needs the `input` scope; on `noa.split` the field is `-32602`. Servers older than the field ignore it |
 
 A `config` with `command`, `initialInput`, or `env` also needs the `input` scope (`-32003` otherwise). An empty `command`, an `env` key that is empty or contains `=`, or an over-long `label` is `-32602`, and so is a `label` starting with `board:` together with `parentPaneId` (that label names an orchestrator's board, which has no parent). An unknown `parentPaneId` is `-32002`.
 

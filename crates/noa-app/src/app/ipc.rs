@@ -659,7 +659,11 @@ impl App {
                     Some(id) => Some(self.resolve_ipc_window_or_group(id)?),
                     None => None,
                 };
-                self.ipc_spawn_tab(event_loop, window, spawn)?
+                let (window_id, pane_id) = self.ipc_spawn_tab(event_loop, window, spawn)?;
+                if let Some(enabled) = params.auto_approve {
+                    self.set_tab_auto_approve(window_id, enabled);
+                }
+                (window_id, pane_id)
             }
             noa_ipc::SpawnTarget::Float { pane } => {
                 let (window_id, target) = self.resolve_ipc_pane(pane)?;

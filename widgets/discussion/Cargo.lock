@@ -844,6 +844,7 @@ dependencies = [
 name = "discussion"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "noa-config",
  "noa-gpui-core",
  "noa-gpui-platform",

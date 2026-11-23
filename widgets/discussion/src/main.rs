@@ -14,6 +14,7 @@ mod session {
 mod ui;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
@@ -21,12 +22,18 @@ use noa_gpui_platform::{App, AppOptions, Headless, Screen};
 use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 
+use discussion::store::Summary;
+
 use crate::live::{Link, Snapshot};
 use crate::ui::Discussion;
 
-const USAGE: &str = "usage: discussion [--demo] [--snapshot=FILE.png [--size=WxH]]\n  \
+const USAGE: &str = "usage: discussion [--demo | --demo-start | --demo-held | --session=DIR] \
+                     [--snapshot=FILE.png [--size=WxH]]\n  \
                      the live discussion by default; \
-                     --demo shows a canned multi-round discussion";
+                     --demo shows a canned multi-round discussion, \
+                     --demo-start the start view with canned stored discussions, \
+                     --demo-held the demo paused after a round, \
+                     --session the discussion stored at DIR, read-only";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
 const SNAPSHOT_SCALE: f32 = 2.0;
 /// How long `--snapshot` waits for the live feed's first snapshot.
@@ -81,8 +88,10 @@ fn parse_size(arg: &str) -> Result<(u32, u32), String> {
     }
 }
 
-fn first_live_snapshot() -> Result<Snapshot, String> {
+/// The live feed's first snapshot, and the stored discussions it listed.
+fn first_live_snapshot() -> Result<(Snapshot, Arc<Vec<Summary>>), String> {
     let channel = live::start(|| {});
+    let history = || channel.history.try_recv().unwrap_or_default();
     let until = Instant::now() + FIRST_SNAPSHOT_WAIT;
     let mut reason = "Noa から 3 秒以内に応答がありません".to_owned();
     loop {
@@ -90,9 +99,9 @@ fn first_live_snapshot() -> Result<Snapshot, String> {
         match channel.snapshots.recv_timeout(left) {
             // Before a session starts there is no link to wait for: the
             // start view is what the window shows.
-            Ok(snapshot) if snapshot.session.is_none() => return Ok(snapshot),
+            Ok(snapshot) if snapshot.session.is_none() => return Ok((snapshot, history())),
             Ok(snapshot) => match &snapshot.link {
-                Link::Live => return Ok(snapshot),
+                Link::Live | Link::Stored(_) => return Ok((snapshot, history())),
                 Link::Down(why) => reason.clone_from(why),
                 Link::Connecting => {}
             },
@@ -122,6 +131,9 @@ fn render_snapshot(
 fn main() -> Result<(), String> {
     let mut snapshot_path = None;
     let mut demo = false;
+    let mut demo_start = false;
+    let mut demo_held = false;
+    let mut stored = None;
     let mut size = DEFAULT_SIZE;
 
     for arg in std::env::args().skip(1) {
@@ -129,8 +141,14 @@ fn main() -> Result<(), String> {
             snapshot_path = Some(PathBuf::from(path));
         } else if let Some(raw) = arg.strip_prefix("--size=") {
             size = parse_size(raw)?;
+        } else if let Some(dir) = arg.strip_prefix("--session=") {
+            stored = Some(PathBuf::from(dir));
         } else if arg == "--demo" {
             demo = true;
+        } else if arg == "--demo-start" {
+            demo_start = true;
+        } else if arg == "--demo-held" {
+            demo_held = true;
         } else if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
             return Ok(());
@@ -139,11 +157,38 @@ fn main() -> Result<(), String> {
         }
     }
 
+    if usize::from(demo)
+        + usize::from(demo_start)
+        + usize::from(demo_held)
+        + usize::from(stored.is_some())
+        > 1
+    {
+        return Err(format!(
+            "--demo, --demo-start, --demo-held and --session do not go together\n{USAGE}"
+        ));
+    }
+    // Folded read-only: no agent or runner starts.
+    let stored = match stored {
+        Some(dir) => {
+            let session = discussion::store::load(&dir)
+                .map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
+            Some((dir, session))
+        }
+        None => None,
+    };
+
     if let Some(path) = snapshot_path {
         let mut screen = if demo {
             Discussion::demo()
+        } else if demo_start {
+            Discussion::demo_start()
+        } else if demo_held {
+            Discussion::demo_held()
+        } else if let Some((dir, session)) = stored {
+            Discussion::of_stored(dir, session)
         } else {
-            Discussion::of_snapshot(first_live_snapshot()?)
+            let (snapshot, history) = first_live_snapshot()?;
+            Discussion::of_snapshot(snapshot).with_history(history)
         };
         render_snapshot(&path, &mut screen, size)?;
         println!("wrote {}", path.display());
@@ -153,6 +198,15 @@ fn main() -> Result<(), String> {
     App::new(options(), move |setup| {
         if demo {
             return Box::new(Discussion::demo());
+        }
+        if demo_start {
+            return Box::new(Discussion::demo_start());
+        }
+        if demo_held {
+            return Box::new(Discussion::demo_held());
+        }
+        if let Some((dir, session)) = stored {
+            return Box::new(Discussion::of_stored(dir, session));
         }
         let waker = setup.waker.clone();
         let channel = live::start(move || waker.wake());

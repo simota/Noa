@@ -89,15 +89,12 @@ pub enum Start {
         panel: Vec<AgentChoice>,
         root: PathBuf,
     },
-    /// The discussion stored at `dir`, picked up where it stopped.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the UI has no way to pick a stored discussion yet"
-        )
-    )]
+    /// The discussion stored at `dir`, picked up where it stopped. One
+    /// that has ended is refused: nothing of it would run.
     Resume { dir: PathBuf },
+    /// The discussion stored at `dir`, given `by` more rounds before any
+    /// pane is started (it may have ended by running all its rounds).
+    Extend { dir: PathBuf, by: RoundNo },
 }
 
 /// What the user does. Times are stamped by the runner.
@@ -133,6 +130,21 @@ pub enum Action {
     Implement {
         agent: AgentKind,
     },
+    /// Bring a participant's pane to the front in Noa.
+    Focus {
+        part: PartId,
+    },
+    /// Hold the discussion after each round, or stop holding it.
+    SetHold {
+        hold: bool,
+    },
+    /// Start the next round of a held discussion.
+    Continue,
+    /// Give the discussion this many more rounds (an ended one that ran all
+    /// its rounds goes on).
+    Extend {
+        by: RoundNo,
+    },
     /// End the runner. The agents' panes stay open.
     Stop,
 }
@@ -166,6 +178,12 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// A handle over channels the caller drives: a stand-in runner.
+    #[cfg(test)]
+    pub(crate) fn new(updates: Receiver<Update>, actions: Sender<Action>) -> Self {
+        SessionHandle { updates, actions }
+    }
+
     /// Another sender of actions, for a thread other than the one reading
     /// [`Self::updates`]. The runner ends once the handle and every such
     /// sender are dropped.
@@ -564,16 +582,28 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 (engine, store)
             }
             Start::Resume { dir } => {
-                let (store, session) = Store::open(&dir)
-                    .map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
-                // The setup is written into the login shell's script, so a
-                // log edited by hand gets the same check a new session does.
-                for part in std::iter::once(&session.moderator).chain(&session.panelists) {
-                    part.setup
-                        .check(part.kind)
-                        .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
+                let (engine, store) = resume(&dir, config)?;
+                if engine.session().closed {
+                    return Err(format!("{} は終了しています", dir.display()));
                 }
-                (Engine::resume(session, &dir, config), store)
+                (engine, store)
+            }
+            Start::Extend { dir, by } => {
+                let (mut engine, mut store) = resume(&dir, config)?;
+                // Extended and stored before anything starts: an extension
+                // that is refused leaves no pane behind.
+                match engine.handle(Input::UserExtend { by, at: now }) {
+                    Ok(out) => {
+                        store
+                            .append_all(&out.batches)
+                            .map_err(|e| format!("討論の記録を書けません: {e}"))?;
+                    }
+                    Err(EngineError::Rejected(why)) => {
+                        return Err(format!("ラウンドを追加できません: {why}"));
+                    }
+                    Err(err @ EngineError::Reduce(_)) => return Err(err.to_string()),
+                }
+                (engine, store)
             }
         };
         let mut runner = Runner {
@@ -666,8 +696,15 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             },
             Action::Retry => Input::UserRetry,
             Action::Close => Input::UserClose,
+            Action::SetHold { hold } => Input::UserSetHold { hold, at },
+            Action::Continue => Input::UserContinue { at },
+            Action::Extend { by } => Input::UserExtend { by, at },
             Action::Implement { agent } => {
                 self.implement(agent);
+                return Ok(());
+            }
+            Action::Focus { part } => {
+                self.focus(&part);
                 return Ok(());
             }
             Action::Stop => return Ok(()),
@@ -676,6 +713,34 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             self.notice(why);
         }
         Ok(())
+    }
+
+    /// Brings `part`'s pane to the front. Refused, with a notice, for a
+    /// participant without a pane yet (nothing is asked of Noa then) or
+    /// without a link to Noa.
+    fn focus(&mut self, part: &PartId) {
+        let name = if *part == self.engine.session().moderator.id {
+            "司会 (Noa)".to_owned()
+        } else {
+            part.to_string()
+        };
+        if self.engine.session().participant(part).is_none() {
+            self.notice(format!("{part} はこの議論の参加者ではありません"));
+            return;
+        }
+        let Some(pane) = self.panes.get(part).map(|p| p.id) else {
+            self.notice(format!("{name} のペインはまだありません"));
+            return;
+        };
+        let Some(conn) = self.conn.as_mut() else {
+            self.notice(
+                "Noa に接続していません。接続が戻ってから、もう一度押してください".to_owned(),
+            );
+            return;
+        };
+        if let Err(err) = conn.focus(pane) {
+            self.notice(format!("{name} のペインを表示できません: {err}"));
+        }
     }
 
     /// Writes the result as a task file under the working directory and
@@ -1317,6 +1382,61 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 }
 
+/// Opens the stored discussion at `dir` for a runner: its log is locked
+/// until the runner ends (another runner gets "busy"), and what a log
+/// edited by hand or a moved repository could turn into a pane started
+/// or a file touched outside the discussion is refused first.
+fn resume(dir: &Path, config: Config) -> Result<(Engine, Store), String> {
+    let (store, session) =
+        Store::open(dir).map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
+    let refuse = |why: String| format!("{} を再開できません: {why}", dir.display());
+    // The setup is written into the login shell's script, so a log edited
+    // by hand gets the same check a new session does.
+    for part in std::iter::once(&session.moderator).chain(&session.panelists) {
+        part.setup.check(part.kind).map_err(refuse)?;
+    }
+    // Reply files would otherwise be made again where the repository was.
+    if let Some(workdir) = &session.workdir
+        && !workdir.is_dir()
+    {
+        return Err(refuse(format!(
+            "作業ディレクトリ {} がありません（移動または削除されています）",
+            workdir.display()
+        )));
+    }
+    let engine = Engine::resume(session, dir, config);
+    if let Some(path) = engine.foreign_reply_path() {
+        return Err(refuse(format!(
+            "返信ファイル {} がこの議論の場所にありません",
+            path.display()
+        )));
+    }
+    let base = engine
+        .session()
+        .workdir
+        .clone()
+        .unwrap_or_else(|| dir.to_owned());
+    if let Some(path) = engine
+        .pending_reply_paths()
+        .into_iter()
+        .find(|path| through_symlink(path, &base))
+    {
+        return Err(refuse(format!(
+            "返信ファイル {} がシンボリックリンクを通ります",
+            path.display()
+        )));
+    }
+    Ok((engine, store))
+}
+
+/// Whether `path`, or a directory between it and `base`, is a symbolic
+/// link.
+fn through_symlink(path: &Path, base: &Path) -> bool {
+    path.ancestors()
+        .take_while(|p| *p != base)
+        .any(|p| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+}
+
 /// Where the agents run: the discussions directory, so the reply files are
 /// inside their working directory and an agent that asks to trust its
 /// folder asks once for all discussions.
@@ -1365,6 +1485,7 @@ mod tests {
         rpc_changes: usize,
         rpc_paste_ready: usize,
         rpc_screen: usize,
+        focused: Vec<u64>,
     }
 
     /// A fake Noa, its connector and the clock, sharing one world.
@@ -1570,6 +1691,16 @@ mod tests {
             w.typed.push((pane, text.to_owned(), paste));
             Ok(())
         }
+
+        fn focus(&mut self, pane: u64) -> Result<(), NoaError> {
+            self.up()?;
+            let mut w = self.w();
+            if !w.panes.contains_key(&pane) {
+                return Err(NoaError::PaneGone);
+            }
+            w.focused.push(pane);
+            Ok(())
+        }
     }
 
     const CONFIG: Config = Config {
@@ -1768,7 +1899,8 @@ mod tests {
         assert_eq!(fake.0.borrow().spawned.len(), 3);
 
         // Everything went to the log: it folds back to the same session.
-        let (_, stored) = Store::open(&dir).unwrap();
+        // Read-only: the runner still holds the log.
+        let stored = store::load(&dir).unwrap();
         assert_eq!(&stored, rig.session());
         let _ = fs::remove_dir_all(&root);
     }
@@ -2329,7 +2461,7 @@ mod tests {
             rig.step();
         }
         assert_eq!(rig.submitted(101), 1);
-        let (_, stored) = Store::open(&rig.dir()).unwrap();
+        let stored = store::load(&rig.dir()).unwrap();
         assert!(stored.closed, "the end is in the log");
         let _ = fs::remove_dir_all(&root);
     }
@@ -2400,6 +2532,102 @@ mod tests {
         rig.step();
         assert_eq!(fake.0.borrow().spawned.len(), before);
         assert!(rig.notices().iter().any(|n| n.contains("作業ディレクトリ")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn focusing_a_participant_brings_its_pane_forward_once_it_has_one() {
+        let root = temp_root("focus");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        // Before the first connection no pane exists: Noa is not asked.
+        rig.actions
+            .send(Action::Focus { part: p("codex") })
+            .unwrap();
+        rig.runner.step().unwrap();
+        assert!(fake.0.borrow().focused.is_empty());
+        assert!(
+            rig.notices()
+                .iter()
+                .any(|n| n.contains("codex のペインはまだありません")),
+        );
+
+        rig.step();
+        let codex = fake.pane_of("codex");
+        let moderator = fake.pane_of("noa");
+        rig.actions
+            .send(Action::Focus { part: p("codex") })
+            .unwrap();
+        rig.actions
+            .send(Action::Focus {
+                part: p(discussion::model::types::MODERATOR_ID),
+            })
+            .unwrap();
+        rig.step();
+        assert_eq!(fake.0.borrow().focused, [codex, moderator]);
+
+        // Someone not in the discussion: refused, nothing asked.
+        rig.actions
+            .send(Action::Focus { part: p("gemini") })
+            .unwrap();
+        rig.step();
+        assert_eq!(fake.0.borrow().focused.len(), 2);
+        assert!(
+            rig.notices()
+                .iter()
+                .any(|n| n.contains("参加者ではありません"))
+        );
+
+        // With the link down: refused with why.
+        fake.w().up = false;
+        rig.step();
+        rig.updates();
+        rig.actions
+            .send(Action::Focus { part: p("codex") })
+            .unwrap();
+        rig.step();
+        assert_eq!(fake.0.borrow().focused.len(), 2);
+        assert!(
+            rig.notices()
+                .iter()
+                .any(|n| n.contains("Noa に接続していません"))
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hold_continue_and_extend_reach_the_engine_and_refusals_come_back() {
+        let root = temp_root("hold");
+        let fake = Fake::new();
+        fake.w().now = 1_000;
+        let mut rig = Rig::open(
+            &fake,
+            Start::New {
+                topic: "Pick a database".into(),
+                workdir: None,
+                max_rounds: Some(1),
+                moderator: AgentKind::Claude.into(),
+                panel: vec![AgentKind::Codex.into()],
+                root: root.clone(),
+            },
+        );
+        rig.step();
+        rig.actions.send(Action::SetHold { hold: true }).unwrap();
+        rig.actions.send(Action::Continue).unwrap();
+        rig.actions.send(Action::Extend { by: 2 }).unwrap();
+        rig.step();
+        assert!(rig.session().hold);
+        assert_eq!(rig.session().max_rounds, Some(3));
+        assert_eq!(rig.session().user_max_rounds, Some(3));
+        assert!(rig.notices().iter().any(|n| n.contains("still running")),);
+        // Stored: a resume folds the same.
+        let dir = rig.dir();
+        rig.actions.send(Action::Stop).unwrap();
+        assert!(!rig.runner.step().unwrap());
+        drop(rig);
+        let (_, session) = Store::open(&dir).unwrap();
+        assert!(session.hold);
+        assert_eq!(session.max_rounds, Some(3));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2551,6 +2779,206 @@ mod tests {
         assert_eq!(receipt.retries, 0);
         let reply = rig.session().messages.last().unwrap();
         assert_eq!(reply.body.trim(), "Postgres, because of JSONB.");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Why `start` is refused before the runner opens.
+    fn refused(fake: &Fake, start: Start) -> String {
+        let (_actions, action_rx) = mpsc::channel();
+        let (update_tx, _updates) = mpsc::channel();
+        match Runner::open(
+            start,
+            fake.clone(),
+            fake.clone(),
+            CONFIG,
+            action_rx,
+            update_tx,
+            Rc::new(|| {}),
+        ) {
+            Ok(_) => panic!("opened"),
+            Err(why) => why,
+        }
+    }
+
+    /// A discussion stored under `root` that ran its one round: codex
+    /// replied, and the moderator concluded `conclusion` early (`round_limit`
+    /// 2) or in the last round (1).
+    fn ran(root: &Path, id: &str, max_rounds: RoundNo) -> PathBuf {
+        use discussion::engine::Setup;
+        let dir = store::session_dir(root, &SessionId::new(id));
+        let setup = Setup {
+            topic: "Pick a database",
+            workdir: None,
+            max_rounds: Some(max_rounds),
+            moderator: AgentKind::Claude.into(),
+            panel: &[AgentKind::Codex.into()],
+        };
+        let (mut engine, out) =
+            Engine::create_in(SessionId::new(id), setup, &dir, CONFIG, 1).unwrap();
+        let mut log = out.batches;
+        let mut feed = |engine: &mut Engine, input| {
+            log.extend(engine.handle(input).unwrap().batches);
+        };
+        feed(&mut engine, Input::Start { now: 2 });
+        for (part, content) in [
+            ("codex", "SQLite."),
+            ("noa", r#"{"summary":"one","conclusion":"SQLite."}"#),
+        ] {
+            let part = p(part);
+            feed(
+                &mut engine,
+                Input::Sent {
+                    round: 1,
+                    part: part.clone(),
+                    at: 3,
+                },
+            );
+            feed(
+                &mut engine,
+                Input::AgentStateChanged {
+                    part: part.clone(),
+                    state: AgentState::Running,
+                    at: 3,
+                },
+            );
+            feed(
+                &mut engine,
+                Input::ReplyFileWritten {
+                    round: 1,
+                    part,
+                    content: content.into(),
+                    at: 4,
+                },
+            );
+        }
+        assert!(engine.session().closed);
+        let mut store = Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_discussion_a_runner_holds_is_busy_for_a_second_resume() {
+        let root = temp_root("busy");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        let dir = rig.dir();
+        let why = refused(&fake, Start::Resume { dir: dir.clone() });
+        assert!(why.contains("別のウィンドウで実行中"), "{why}");
+        let spawned = fake.0.borrow().spawned.len();
+        // Once the first runner has ended, it resumes.
+        rig.actions.send(Action::Stop).unwrap();
+        assert!(!rig.runner.step().unwrap());
+        drop(rig);
+        let mut rig = Rig::open(&fake, Start::Resume { dir });
+        rig.step();
+        assert_eq!(fake.0.borrow().spawned.len(), spawned, "panes taken back");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_resume_refuses_reply_files_outside_the_session() {
+        let root = temp_root("foreign");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.step();
+        let dir = rig.dir();
+        let codex = store::reply_path(&dir, 1, &p("codex"));
+        rig.actions.send(Action::Stop).unwrap();
+        assert!(!rig.runner.step().unwrap());
+        drop(rig);
+
+        // The log names a file elsewhere for codex's reply.
+        let outside = root.join("precious.txt");
+        fs::write(&outside, "keep me").unwrap();
+        let events = dir.join(store::EVENTS_FILE);
+        let log = fs::read_to_string(&events).unwrap();
+        let quoted = |p: &Path| serde_json::to_string(&p.display().to_string()).unwrap();
+        fs::write(&events, log.replace(&quoted(&codex), &quoted(&outside))).unwrap();
+        let why = refused(&fake, Start::Resume { dir: dir.clone() });
+        assert!(why.contains("この議論の場所にありません"), "{why}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep me");
+        fs::write(&events, log).unwrap();
+
+        // The round directory is a link to somewhere else.
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let round = store::round_dir(&dir, 1);
+        fs::remove_dir_all(&round).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &round).unwrap();
+        let why = refused(&fake, Start::Resume { dir });
+        assert!(why.contains("シンボリックリンク"), "{why}");
+        assert!(fake.0.borrow().spawned.len() == 3, "no pane started");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_resume_whose_workdir_moved_is_refused_and_makes_nothing_there() {
+        let root = temp_root("moved");
+        let workdir = root.join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        let fake = Fake::new();
+        fake.w().now = 1_000;
+        let mut rig = Rig::open(
+            &fake,
+            Start::New {
+                topic: "Pick a database".into(),
+                workdir: Some(workdir.clone()),
+                max_rounds: None,
+                moderator: AgentKind::Claude.into(),
+                panel: vec![AgentKind::Codex.into()],
+                root: root.join("discussions"),
+            },
+        );
+        rig.step();
+        let dir = rig.dir();
+        rig.actions.send(Action::Stop).unwrap();
+        assert!(!rig.runner.step().unwrap());
+        drop(rig);
+        fs::rename(&workdir, root.join("repo-moved")).unwrap();
+        let why = refused(&fake, Start::Resume { dir });
+        assert!(why.contains("作業ディレクトリ"), "{why}");
+        assert!(!workdir.exists(), "nothing made where the repo was");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_ended_discussion_is_not_resumed_and_an_extension_comes_before_any_pane() {
+        let root = temp_root("ended");
+        let fake = Fake::new();
+        fake.w().now = 1_000;
+        let concluded_early = ran(&root, "disc-early", 3);
+        let ran_out = ran(&root, "disc-out", 1);
+        for dir in [&concluded_early, &ran_out] {
+            let why = refused(&fake, Start::Resume { dir: dir.clone() });
+            assert!(why.contains("終了しています"), "{why}");
+        }
+        let why = refused(
+            &fake,
+            Start::Extend {
+                dir: concluded_early,
+                by: 1,
+            },
+        );
+        assert!(why.contains("ラウンドを追加できません"), "{why}");
+        assert!(fake.0.borrow().spawned.is_empty(), "no pane for a refusal");
+
+        let mut rig = Rig::open(
+            &fake,
+            Start::Extend {
+                dir: ran_out.clone(),
+                by: 2,
+            },
+        );
+        // Extended and stored before the first connection.
+        assert!(fake.0.borrow().spawned.is_empty());
+        assert_eq!(rig.session().max_rounds, Some(3));
+        assert_eq!(store::load(&ran_out).unwrap().max_rounds, Some(3));
+        rig.until(40, |r| r.fake.0.borrow().spawned.len() == 2);
+        let codex = fake.pane_of("codex");
+        rig.until(40, |r| r.submitted(codex) == 1);
+        assert_eq!(rig.session().rounds.len(), 2);
         let _ = fs::remove_dir_all(&root);
     }
 

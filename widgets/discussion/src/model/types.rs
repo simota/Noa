@@ -805,9 +805,56 @@ pub struct Session {
     pub rounds: Vec<Round>,
     pub debates: Vec<Debate>,
     pub closed: bool,
+    /// The user holds the discussion after each round: the next one starts
+    /// only when the user continues. Absent in logs written before.
+    #[serde(default)]
+    pub hold: bool,
 }
 
 impl Session {
+    /// Whether the discussion waits for the user to start its next round:
+    /// held, with the last round over and no proposed debate (which waits
+    /// for approval first).
+    pub fn waits_to_continue(&self) -> bool {
+        !self.closed
+            && self.hold
+            && self
+                .current_round()
+                .is_some_and(|round| round.phase == Phase::Closed)
+            && self.pending_debate().is_none()
+    }
+
+    /// Whether the user may add rounds, or why not: the discussion must
+    /// have a round limit, and once it has ended it must have ended by
+    /// running all its rounds (not by an early conclusion or the user).
+    /// While the moderator summarizes the last round it was told to
+    /// conclude, so rounds are added once that conclusion is in.
+    pub fn extendable(&self) -> Result<(), &'static str> {
+        let Some(max) = self.max_rounds else {
+            return Err("this discussion has no round limit");
+        };
+        if !self.closed {
+            let concluding = self.rounds.len() as RoundNo >= max
+                && self
+                    .current_round()
+                    .is_some_and(|round| round.phase == Phase::Summarizing);
+            return if concluding {
+                Err("the moderator is concluding the last round; add rounds once it has")
+            } else {
+                Ok(())
+            };
+        }
+        let ran_out = self.rounds.len() as RoundNo >= max
+            && self
+                .current_round()
+                .is_some_and(|round| round.phase == Phase::Closed);
+        if ran_out {
+            Ok(())
+        } else {
+            Err("the discussion ended before its round limit")
+        }
+    }
+
     /// The highest round limit the moderator may set: twice the user's.
     pub fn round_limit_cap(&self) -> Option<RoundNo> {
         self.user_max_rounds.map(|max| max.saturating_mul(2))
@@ -1085,6 +1132,7 @@ mod tests {
             rounds: vec![round(1), round(2), round(5)],
             debates: vec![debate("d1"), debate("d9")],
             closed: false,
+            hold: false,
         };
         assert_eq!(session.message_index(&MessageId::new("m1")), Some(0));
         assert_eq!(session.message_index(&MessageId::new("m2")), Some(1));

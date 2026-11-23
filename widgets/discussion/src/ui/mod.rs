@@ -18,6 +18,7 @@ mod tree;
 mod tests;
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use noa_gpui_core::style::{
@@ -35,8 +36,10 @@ use noa_gpui_text::TextStore;
 
 use discussion::model::types::{
     AgentKind, Author, DebateId, DebateStatus, IssueId, IssueState, MODERATOR_ID, Message, MsgKind,
-    PartId, Phase, Position, Receipt, Session,
+    PartId, Phase, Position, Receipt, RoundNo, Session,
 };
+
+use discussion::store::Summary;
 
 use crate::live::{Channel, Command, Link, Snapshot};
 
@@ -85,6 +88,42 @@ pub enum Action {
     ShowMap,
     /// Save the whole map as a PNG.
     ExportMap,
+    /// Show the stored discussion at this directory, read-only.
+    Open(PathBuf),
+    /// Pick up the stored discussion at this directory: its agents run again.
+    Resume(PathBuf),
+    /// Leave the discussion shown and go back to the start view.
+    NewDiscussion,
+    /// Bring a participant's pane to the front in Noa.
+    Focus(PartId),
+    /// Hold the discussion after each round (`true`), or stop holding it.
+    SetHold(bool),
+    /// Start the next round of a held discussion.
+    Continue,
+    /// Give the discussion this many more rounds.
+    Extend(RoundNo),
+}
+
+/// The round counts the "+N ラウンド" buttons offer.
+pub(crate) const EXTEND_BY: [RoundNo; 2] = [1, 3];
+
+impl Action {
+    /// Whether the action changes the discussion or its agents, which a
+    /// stored discussion shown read-only does not offer.
+    fn acts_on_session(&self) -> bool {
+        matches!(
+            self,
+            Action::DraftDebate(_)
+                | Action::SwapSides
+                | Action::ConfirmDebate
+                | Action::Retry
+                | Action::Send
+                | Action::Close
+                | Action::Implement(_)
+                | Action::SetHold(_)
+                | Action::Continue
+        )
+    }
 }
 
 /// What the save panel that is up was opened for.
@@ -130,6 +169,8 @@ pub struct Discussion {
     export: Option<Export>,
     /// The session (id, rev) and link the panes were last built from.
     built: Option<(Option<(String, u64)>, Link)>,
+    /// The stored discussions the start view lists, newest first.
+    history: Arc<Vec<Summary>>,
 
     start: start::Parts,
     meeting: WidgetId,
@@ -162,6 +203,48 @@ impl Discussion {
 
     pub fn of_snapshot(snapshot: Snapshot) -> Self {
         Self::build(Source::Snapshot, snapshot.link, snapshot.session)
+    }
+
+    /// A one-off render of the stored discussion at `dir`, read-only
+    /// (`--session` with `--snapshot`).
+    pub fn of_stored(dir: PathBuf, session: Session) -> Self {
+        Self::build(Source::Snapshot, Link::Stored(dir), Some(Arc::new(session)))
+    }
+
+    /// The start view of a one-off render lists these stored discussions.
+    pub fn with_history(mut self, history: Arc<Vec<Summary>>) -> Self {
+        self.history = history;
+        self.rebuild(&mut TextStore::new(Default::default()));
+        self
+    }
+
+    /// The demo held after a round, waiting for the user (`--demo-held`).
+    pub fn demo_held() -> Self {
+        Self::build(
+            Source::Demo,
+            Link::Live,
+            Some(Arc::new(crate::demo::held())),
+        )
+    }
+
+    /// The demo's start view, with canned stored discussions
+    /// (`--demo-start`).
+    pub fn demo_start() -> Self {
+        Self::build(Source::Demo, Link::Live, None).with_history(Arc::new(crate::demo::history()))
+    }
+
+    /// Whether the window can leave what it shows or start a runner for it
+    /// (resume, add rounds, a new discussion): not in a one-off render of
+    /// a snapshot or a stored discussion (`--snapshot`, `--session`), which
+    /// has no live feed to do it with.
+    fn navigates(&self) -> bool {
+        !matches!(self.source, Source::Snapshot)
+    }
+
+    /// Whether the session shown is a stored one, read-only: nothing runs
+    /// it, so nothing is offered that would change it.
+    fn read_only(&self) -> bool {
+        matches!(self.link, Link::Stored(_))
     }
 
     fn build(source: Source, link: Link, session: Option<Arc<Session>>) -> Self {
@@ -222,6 +305,7 @@ impl Discussion {
             file_dialogs: Vec::new(),
             export: None,
             built: None,
+            history: Arc::new(Vec::new()),
             start,
             meeting,
             tree_host,
@@ -285,6 +369,8 @@ impl Discussion {
         let started = self.session.is_some();
         self.tree.set_hidden(self.start.root, started);
         self.tree.set_hidden(self.meeting, !started);
+        self.tree
+            .set_hidden(self.composer.root, !started || self.read_only());
         if started {
             self.rebuild_tree(text);
             self.rebuild_center(text);
@@ -293,8 +379,36 @@ impl Discussion {
         } else {
             start::rebuild_note(&mut self.tree, &self.start, &self.link, text);
             self.actions.push((self.start.start_button, Action::Start));
+            start::rebuild_history(
+                &mut self.tree,
+                &self.start,
+                &self.history,
+                &mut self.actions,
+                text,
+            );
         }
         self.rebuild_status(text);
+        if self.read_only() {
+            self.strip_controls();
+        }
+    }
+
+    /// Takes away every control that would change a stored discussion
+    /// shown read-only: hidden, and no longer clickable.
+    fn strip_controls(&mut self) {
+        let tree = &mut self.tree;
+        // The send button outlives every build: its composer is hidden
+        // instead, so a later live session gets it back as it was.
+        let send = self.composer.send;
+        self.actions.retain(|(id, action)| {
+            if !action.acts_on_session() {
+                return true;
+            }
+            if *id != send {
+                tree.set_hidden(*id, true);
+            }
+            false
+        });
     }
 
     fn rebuild_tree(&mut self, text: &mut TextStore) {
@@ -314,6 +428,7 @@ impl Discussion {
     fn rebuild_center(&mut self, text: &mut TextStore) {
         clear_children(&mut self.tree, self.center_host, text);
         self.map_nodes.clear();
+        let live = !self.read_only();
         let Some(session) = &self.session else {
             return;
         };
@@ -366,6 +481,7 @@ impl Discussion {
                         body,
                         session,
                         self.filter.as_ref(),
+                        live,
                         &mut self.actions,
                     );
                 }
@@ -375,6 +491,7 @@ impl Discussion {
                 self.center_host,
                 session,
                 view,
+                live,
                 &mut self.actions,
             ),
         }
@@ -385,10 +502,12 @@ impl Discussion {
         let Some(session) = &self.session else {
             return;
         };
+        let read_only = self.read_only();
         minutes::insert(
             &mut self.tree,
             self.minutes_host,
             session,
+            !read_only,
             &mut self.actions,
         );
     }
@@ -409,6 +528,7 @@ impl Discussion {
             (_, Link::Live) => ("LIVE", Tone::Success),
             (_, Link::Connecting) => ("接続中", Tone::Warning),
             (_, Link::Down(_)) => ("オフライン", Tone::Critical),
+            (_, Link::Stored(_)) => ("記録", Tone::Neutral),
         };
         self.tree
             .insert(Some(self.status_leading), Badge::text(badge).tone(tone));
@@ -432,17 +552,97 @@ impl Discussion {
                 format!("第 {} ラウンド · {}", round.no, phase_label(round.phase)),
             );
         }
+        let waits = session.waits_to_continue();
+        if waits {
+            self.tree.insert(
+                Some(self.status_leading),
+                Badge::text("一時停止中").tone(Tone::Warning),
+            );
+        }
+        if !session.closed && !self.read_only() {
+            let hold = self.tree.insert(
+                Some(self.status_trailing),
+                Button::new(if session.hold {
+                    "ラウンド後に停止: オン"
+                } else {
+                    "ラウンド後に停止: オフ"
+                })
+                .control_size(ControlSize::Small)
+                .tooltip("オンにすると、司会の要約のあと次のラウンドを始める前に止まります"),
+            );
+            self.actions.push((hold, Action::SetHold(!session.hold)));
+            if waits {
+                let go = self.tree.insert(
+                    Some(self.status_trailing),
+                    Button::new("次のラウンドへ")
+                        .default_button(true)
+                        .control_size(ControlSize::Small),
+                );
+                self.actions.push((go, Action::Continue));
+            }
+        }
+        // A stored discussion that ran all its rounds is resumed to go on.
+        if session.extendable().is_ok()
+            && (!self.read_only() || (session.closed && self.navigates()))
+        {
+            if let Some(max) = session.max_rounds {
+                caption(
+                    &mut self.tree,
+                    self.status_trailing,
+                    format!("上限 {max} ラウンド"),
+                );
+            }
+            for by in EXTEND_BY {
+                let more = self.tree.insert(
+                    Some(self.status_trailing),
+                    Button::new(format!("+{by}"))
+                        .control_size(ControlSize::Small)
+                        .tooltip(if self.read_only() {
+                            "再開してラウンドを追加します（エージェントが起動します）"
+                        } else {
+                            "ラウンド数の上限を増やします。終了していれば議論を続けます"
+                        }),
+                );
+                self.tree
+                    .set_accessible_label(more, format!("ラウンドを {by} 追加"));
+                self.actions.push((more, Action::Extend(by)));
+            }
+        }
         if session.closed {
             self.tree.insert(
                 Some(self.status_leading),
                 Badge::text("終了").tone(Tone::Neutral),
             );
-        } else {
+        } else if !self.read_only() {
             let end = self.tree.insert(
                 Some(self.status_trailing),
                 Button::new("議論を終える").control_size(ControlSize::Small),
             );
             self.actions.push((end, Action::Close));
+        }
+        if self.read_only() {
+            caption(
+                &mut self.tree,
+                self.status_leading,
+                "読み取りのみ（エージェントは動いていません）",
+            );
+            if let (false, Link::Stored(dir), true) = (session.closed, &self.link, self.navigates())
+            {
+                let resume = self.tree.insert(
+                    Some(self.status_trailing),
+                    Button::new("再開").control_size(ControlSize::Small),
+                );
+                self.actions.push((resume, Action::Resume(dir.clone())));
+            }
+        }
+        if self.navigates() {
+            let new = self.tree.insert(
+                Some(self.status_trailing),
+                Button::new("新しい議論").control_size(ControlSize::Small),
+            );
+            self.tree
+                .set_accessible_label(new, "この議論を離れて開始画面に戻る");
+            self.actions.push((new, Action::NewDiscussion));
         }
         caption(
             &mut self.tree,
@@ -478,6 +678,7 @@ impl Discussion {
     fn poll_live(&mut self, text: &mut TextStore) {
         let mut latest = None;
         let mut notices = Vec::new();
+        let mut history = None;
         if let Source::Live(ch) = &self.source {
             while let Ok(snapshot) = ch.snapshots.try_recv() {
                 latest = Some(snapshot);
@@ -485,8 +686,23 @@ impl Discussion {
             while let Ok(notice) = ch.notices.try_recv() {
                 notices.push(notice);
             }
+            while let Ok(listed) = ch.history.try_recv() {
+                history = Some(listed);
+            }
+        }
+        if let Some(listed) = history {
+            self.history = listed;
+            // The start view lists them: build it again unless a session
+            // (or a snapshot below) hides it.
+            if self.session.is_none() && latest.is_none() {
+                self.rebuild(text);
+            }
         }
         if let Some(snapshot) = latest {
+            let id = |s: &Option<Arc<Session>>| s.as_ref().map(|s| s.id.clone());
+            if id(&snapshot.session) != id(&self.session) {
+                self.switched(snapshot.session.is_none());
+            }
             self.link = snapshot.link;
             self.session = snapshot.session;
             self.note_debates();
@@ -497,6 +713,23 @@ impl Discussion {
         }
         for notice in notices {
             self.toast(notice);
+        }
+    }
+
+    /// Another discussion is shown, or none (`to_start`): the view state of
+    /// the last one goes with it. Its unsent intervention must not reach
+    /// the next one's panel, and its debate ids mean nothing there. Back at
+    /// the start view the topic is cleared for the next discussion; the
+    /// working directory, round limit and agents stay as they were set.
+    fn switched(&mut self, to_start: bool) {
+        self.filter = None;
+        self.center = Center::Chat;
+        self.shown_debates.clear();
+        self.pending_intervention = None;
+        self.built = None;
+        composer::clear(&mut self.tree, &self.composer);
+        if to_start {
+            start::clear_topic(&mut self.tree, &self.start);
         }
     }
 
@@ -589,6 +822,32 @@ impl Discussion {
             Action::Implement(agent) => self.send(
                 Command::Implement { agent },
                 format!("{} に実装を依頼します（新しいタブ）", agent.command()),
+            ),
+            Action::Open(dir) => self.send(
+                Command::Open { dir: dir.clone() },
+                format!("{} を表示します", dir.display()),
+            ),
+            Action::Resume(dir) => self.send(
+                Command::Resume { dir: dir.clone() },
+                format!("{} を再開します", dir.display()),
+            ),
+            Action::NewDiscussion => self.send(Command::NewDiscussion, "開始画面に戻ります"),
+            Action::SetHold(hold) => self.send(
+                Command::SetHold { hold },
+                if hold {
+                    "各ラウンドのあとで止めます"
+                } else {
+                    "ラウンドを続けて進めます"
+                },
+            ),
+            Action::Continue => self.send(Command::Continue, "次のラウンドを始めます"),
+            Action::Extend(by) => self.send(
+                Command::Extend { by },
+                format!("ラウンドを {by} 追加します"),
+            ),
+            Action::Focus(part) => self.send(
+                Command::Focus { part: part.clone() },
+                format!("{} のペインを表示します", part_name(&part)),
             ),
         }
     }

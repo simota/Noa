@@ -45,6 +45,16 @@ pub const DIFF_CAP: usize = 2 * 1024 * 1024;
 /// [`run_git`] reading at most `cap` bytes of the output: a longer one is cut
 /// at its last line break within `cap` and ends with a line saying so.
 fn run_git_capped(cwd: &Path, args: &[&str], cap: usize) -> Option<String> {
+    let bytes = run_git_bytes_capped(cwd, args, cap)?;
+    if bytes.len() > cap {
+        return Some(truncate_at_line(bytes, cap));
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The output of `git <args>`, read up to `cap + 1` bytes: longer than `cap`
+/// means it was cut. `None` when git failed (a cut output is not a failure).
+fn run_git_bytes_capped(cwd: &Path, args: &[&str], cap: usize) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut child = git_command(cwd)
         .args(args)
@@ -62,11 +72,9 @@ fn run_git_capped(cwd: &Path, args: &[&str], cap: usize) -> Option<String> {
     let status = child.wait().ok()?;
     read?.ok()?;
     if bytes.len() > cap {
-        return Some(truncate_at_line(bytes, cap));
+        return Some(bytes);
     }
-    status
-        .success()
-        .then(|| String::from_utf8_lossy(&bytes).into_owned())
+    status.success().then_some(bytes)
 }
 
 /// The first `cap` bytes of `bytes` up to the last line break among them,
@@ -404,7 +412,17 @@ pub struct MergePredictions {
 struct MergeEntry {
     base: String,
     head: String,
-    conflicts: Option<Vec<String>>,
+    /// What `git merge-tree` reported; `None` when it could not tell.
+    outcome: Option<MergeOutcome>,
+}
+
+/// The result of one `git merge-tree --write-tree`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MergeOutcome {
+    /// The merged tree it wrote, conflict markers in the conflicted files.
+    tree: String,
+    /// The conflicted paths; empty for a clean merge.
+    conflicts: Vec<String>,
 }
 
 impl MergePredictions {
@@ -431,19 +449,32 @@ impl MergePredictions {
             && entry.base == base_sha
             && entry.head == head_sha
         {
-            return entry.conflicts.clone();
+            return entry.outcome.as_ref().map(|o| o.conflicts.clone());
         }
         self.runs += 1;
-        let conflicts = merge_tree_conflicts(dir, &base_sha, &head_sha);
+        let outcome = merge_tree(dir, &base_sha, &head_sha);
+        let conflicts = outcome.as_ref().map(|o| o.conflicts.clone());
         self.entries.insert(
             worktree_root.to_owned(),
             MergeEntry {
                 base: base_sha,
                 head: head_sha,
-                conflicts: conflicts.clone(),
+                outcome,
             },
         );
         conflicts
+    }
+
+    /// The merged tree the last prediction for `worktree_root` wrote.
+    pub fn tree(&self, worktree_root: &str) -> Option<&str> {
+        let outcome = self.entries.get(worktree_root)?.outcome.as_ref()?;
+        Some(outcome.tree.as_str())
+    }
+
+    /// Drops the prediction for `worktree_root`, so the next one runs
+    /// `git merge-tree` again (its tree object was pruned).
+    pub fn forget(&mut self, worktree_root: &str) {
+        self.entries.remove(worktree_root);
     }
 
     /// How many times `git merge-tree` ran.
@@ -461,7 +492,7 @@ impl MergePredictions {
 /// Runs `git merge-tree --write-tree` (git >= 2.38) to merge `head` into
 /// `base` without touching any worktree or ref. Exit status 1 means
 /// conflicts, 0 a clean merge, anything else that git could not tell.
-fn merge_tree_conflicts(dir: &Path, base: &str, head: &str) -> Option<Vec<String>> {
+fn merge_tree(dir: &Path, base: &str, head: &str) -> Option<MergeOutcome> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -477,21 +508,83 @@ fn merge_tree_conflicts(dir: &Path, base: &str, head: &str) -> Option<Vec<String
         ])
         .output()
         .ok()?;
-    match out.status.code() {
-        Some(0) => Some(Vec::new()),
-        Some(1) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            // `<tree oid>\0` then one `<path>\0` per conflicted file.
-            Some(
-                text.split('\0')
-                    .skip(1)
-                    .take_while(|path| !path.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-            )
-        }
-        _ => None,
+    let clean = match out.status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        _ => return None,
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    // `<tree oid>\0` then, on a conflict, one `<path>\0` per conflicted file.
+    let mut fields = text.split('\0');
+    let tree = fields.next()?.trim().to_owned();
+    if !is_object_id(&tree) {
+        return None;
     }
+    let conflicts = if clean {
+        Vec::new()
+    } else {
+        fields
+            .take_while(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    Some(MergeOutcome { tree, conflicts })
+}
+
+/// Whether `s` is a full object id (SHA-1 or SHA-256), so it is never read
+/// as an option or a revision expression.
+fn is_object_id(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `path` as the merged tree `tree` (from `git merge-tree --write-tree`)
+/// holds it, conflict markers included, capped like a diff; a note instead
+/// for a path the tree lacks, a binary file or a submodule. `None` when the
+/// tree cannot be read (its object was pruned), so it is predicted again.
+pub fn merge_preview(dir: &Path, tree: &str, path: &str) -> Option<String> {
+    if !is_object_id(tree) {
+        return None;
+    }
+    // `ls-tree` takes the path as a literal pathspec (never `<tree>:<path>`
+    // revision syntax), and fails when the tree object is gone.
+    let listing = run_git(
+        dir,
+        &[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            tree,
+            "--",
+            path,
+        ],
+    )?;
+    // `<mode> SP <type> SP <oid> TAB <path>`
+    let entry = listing
+        .split('\0')
+        .filter_map(|record| record.split_once('\t'))
+        .find(|(_, name)| *name == path)
+        .map(|(meta, _)| meta.split(' ').collect::<Vec<_>>());
+    let Some([_mode, kind, oid]) = entry.as_deref() else {
+        return Some(format!(
+            "(マージ結果にこのパスはありません。削除と変更の衝突などで、どちらかの側が削除しています: {path})"
+        ));
+    };
+    if *kind != "blob" || !is_object_id(oid) {
+        return Some(format!(
+            "(サブモジュールなどファイル以外のため表示できません: {path})"
+        ));
+    }
+    let bytes = run_git_bytes_capped(dir, &["cat-file", "blob", oid], DIFF_CAP)?;
+    if bytes.iter().take(8000).any(|&b| b == 0) {
+        return Some(format!(
+            "(バイナリファイルのため衝突マーカーを表示できません: {path})"
+        ));
+    }
+    if bytes.len() > DIFF_CAP {
+        return Some(truncate_at_line(bytes, DIFF_CAP));
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// At most this many commits are listed per worktree.
@@ -1716,6 +1809,136 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
             predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
             Some(vec!["old.rs".to_owned()])
         );
+    }
+
+    /// A repository whose `orch/foo` worktree conflicts with main on
+    /// `old.rs` and adds `only-here.rs`, predicted once: (repo, worktree
+    /// root, predictions).
+    fn predicted_conflict(name: &str) -> (TempRepo, TempRepo, String, MergePredictions) {
+        let repo = temp_repo(name, "main");
+        let cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let wt = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&wt, "old.rs", "fn theirs() {}\n");
+        commit_file(&wt, "only-here.rs", "fn new() {}\n");
+        commit_file(&repo.0, "old.rs", "fn ours() {}\n");
+        let root = canonical_or_raw(&wt);
+        let mut predictions = MergePredictions::default();
+        assert_eq!(
+            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
+            Some(vec!["old.rs".to_owned()])
+        );
+        (repo, cleanup, root, predictions)
+    }
+
+    fn porcelain_status(dir: &Path) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    #[test]
+    fn the_merged_tree_shows_the_conflict_markers_without_touching_the_worktree() {
+        let (_repo, _wt, root, predictions) = predicted_conflict("merge-preview");
+        let tree = predictions.tree(&root).unwrap().to_owned();
+        assert!(is_object_id(&tree), "{tree}");
+        let dir = Path::new(&root);
+        let merged = merge_preview(dir, &tree, "old.rs").unwrap();
+        for part in [
+            "<<<<<<< ",
+            "fn ours() {}",
+            "=======",
+            "fn theirs() {}",
+            ">>>>>>> ",
+        ] {
+            assert!(merged.contains(part), "{part} missing from {merged:?}");
+        }
+        // A file only the branch changed merges cleanly into the tree.
+        assert_eq!(
+            merge_preview(dir, &tree, "only-here.rs").unwrap(),
+            "fn new() {}\n"
+        );
+        let absent = merge_preview(dir, &tree, "nowhere.rs").unwrap();
+        assert!(absent.contains("ありません"), "{absent}");
+        // Reading it is read-only.
+        assert_eq!(porcelain_status(dir), "");
+        // An id that is no object id is never handed to git.
+        assert_eq!(merge_preview(dir, "--output=x", "old.rs"), None);
+        assert_eq!(merge_preview(dir, "HEAD", "old.rs"), None);
+    }
+
+    #[test]
+    fn a_pruned_merged_tree_reads_as_none_and_is_forgotten_on_request() {
+        let (repo, _wt, root, mut predictions) = predicted_conflict("merge-pruned");
+        let tree = predictions.tree(&root).unwrap().to_owned();
+        let object = repo
+            .0
+            .join(".git/objects")
+            .join(&tree[..2])
+            .join(&tree[2..]);
+        std::fs::remove_file(&object).unwrap();
+        assert_eq!(merge_preview(Path::new(&root), &tree, "old.rs"), None);
+        predictions.forget(&root);
+        assert_eq!(predictions.tree(&root), None);
+        // Predicting again writes the same tree back.
+        predictions.predict(&root, "orch/foo", base_of(&root).as_ref());
+        assert_eq!(predictions.tree(&root), Some(tree.as_str()));
+        assert!(merge_preview(Path::new(&root), &tree, "old.rs").is_some());
+        assert_eq!(predictions.runs, 2);
+    }
+
+    #[test]
+    fn a_clean_merge_keeps_its_tree_too() {
+        let repo = temp_repo("merge-clean-tree", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let wt = add_worktree(&repo, "foo", "orch/foo");
+        commit_file(&wt, "new.rs", "fn new() {}\n");
+        let root = canonical_or_raw(&wt);
+        let mut predictions = MergePredictions::default();
+        assert_eq!(
+            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
+            Some(Vec::new())
+        );
+        let tree = predictions.tree(&root).unwrap();
+        assert_eq!(
+            merge_preview(Path::new(&root), tree, "new.rs").unwrap(),
+            "fn new() {}\n"
+        );
+    }
+
+    #[test]
+    fn a_binary_conflict_is_a_note_and_a_huge_file_is_capped() {
+        let repo = temp_repo("merge-binary", "main");
+        let _cleanup = TempRepo(PathBuf::from(format!("{}-wt", repo.0.display())));
+        let wt = add_worktree(&repo, "foo", "orch/foo");
+        let commit_bytes = |dir: &Path, name: &str, bytes: &[u8]| {
+            std::fs::write(dir.join(name), bytes).unwrap();
+            git(dir, &["add", "."]);
+            git(dir, &["commit", "-q", "-m", name]);
+        };
+        commit_bytes(&wt, "img.bin", b"\x00\x01theirs");
+        commit_bytes(&repo.0, "img.bin", b"\x00\x02ours");
+        // Larger than the cap on both sides, with a conflict at the top.
+        let big = |side: &str| format!("{side}\n{}", "line\n".repeat(DIFF_CAP / 5 + 10));
+        commit_bytes(&wt, "big.txt", big("theirs").as_bytes());
+        commit_bytes(&repo.0, "big.txt", big("ours").as_bytes());
+        let root = canonical_or_raw(&wt);
+        let mut predictions = MergePredictions::default();
+        let mut conflicts = predictions
+            .predict(&root, "orch/foo", base_of(&root).as_ref())
+            .unwrap();
+        conflicts.sort();
+        assert_eq!(conflicts, vec!["big.txt", "img.bin"]);
+        let tree = predictions.tree(&root).unwrap();
+        let binary = merge_preview(Path::new(&root), tree, "img.bin").unwrap();
+        assert!(binary.contains("バイナリ"), "{binary}");
+        let capped = merge_preview(Path::new(&root), tree, "big.txt").unwrap();
+        assert!(capped.len() <= DIFF_CAP + 200, "{}", capped.len());
+        assert!(capped.starts_with("<<<<<<< "), "{}", &capped[..40]);
+        assert!(capped.trim_end().ends_with("以降を省略しました)"));
     }
 
     #[test]

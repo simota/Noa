@@ -2664,14 +2664,11 @@ const PASTE_MODE_TRIES: usize = 75;
 /// (REL-01): an agent's pane, or one whose program is not even listed yet
 /// (just spawned). Until then every newline of a paste lands as Enter.
 ///
-/// A pane an IPC spawn started with a command (`panel.spawn`) is not
-/// "starting" for want of a process name: a shell-less spawn never gets one
-/// (see `panel_agent`), and a shell-less agent already has its `kind` from
-/// argv0. Gating it would refuse `send` to a script or REPL that never
-/// enables bracketed paste. A spawn whose argv names an agent is gated
-/// even when the panel has no `agent` (a pane listed before its first
-/// output by a server that did not derive the kind for it).
+/// A known spawn command may be a script or REPL that never enables
+/// bracketed paste. For older servers that omit the kind before first
+/// output, use the same executable classifier as the session store.
 pub(crate) fn needs_paste_mode(panel: &Panel) -> bool {
+    use crate::session_store::AgentKind;
     panel
         .agent
         .as_ref()
@@ -2680,7 +2677,7 @@ pub(crate) fn needs_paste_mode(panel: &Panel) -> bool {
             .spawn
             .as_ref()
             .and_then(|spawn| spawn.argv.first())
-            .is_some_and(|argv0| crate::ipc_bridge::spawn_agent_kind(argv0).is_some())
+            .is_some_and(|argv0| AgentKind::from_spawn(argv0) != AgentKind::Generic)
         || (panel.process.as_deref().is_none_or(str::is_empty) && panel.spawn.is_none())
 }
 

@@ -13,8 +13,82 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use noa_core::Color;
 
-use crate::sidebar::{AgentKind, classify_agent};
 use crate::split_tree::PaneId;
+
+/// The coding agent a pane is running, or `Generic` for any other program.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentKind {
+    ClaudeCode,
+    Codex,
+    Agy,
+    #[default]
+    Generic,
+}
+
+/// Classify a foreground process name into a known AI agent. Case-insensitive,
+/// matched on the executable basename's leading token (so a target-triple suffix
+/// on a distribution binary — `codex-aarch64-apple-darwin` — still classifies).
+///
+/// Note: `proc_name` reports a runtime wrapper (`node`, `bun`, …) for npm
+/// installs. `noa-pty` canonicalizes those to the hosted agent's name
+/// (`codex`, `claude`) from the wrapper's argv before the name reaches here —
+/// see `WRAPPED_AGENTS` in `noa-pty/src/pty.rs`, whose `name` column must stay
+/// in step with the stems matched below. A wrapper whose argv names no known
+/// agent still arrives as the wrapper name and classifies `Generic`.
+fn classify_agent(process: &str) -> AgentKind {
+    let base = process
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(process)
+        .trim()
+        .to_ascii_lowercase();
+    // Claude Code's native installer names the versioned executable after its
+    // bare version (`…/claude/versions/2.1.203`), so the tty's accounting name
+    // is `2.1.203` — no agent stem at all. A pure dotted-version name is
+    // claimed by Claude Code, the only known agent shipping that layout.
+    if is_bare_version(&base) {
+        return AgentKind::ClaudeCode;
+    }
+    // Distribution binaries carry suffixes (`codex-aarch64-apple-darwin`) and
+    // wrapper scripts can use alternate separators (`codex_cli`). Match the
+    // leading alphanumeric token so those suffixes do not defeat branding, and
+    // allow the known vendor-prefixed OpenAI form without matching arbitrary
+    // names that merely contain "codex" as a substring.
+    let mut tokens = base
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty());
+    let first = tokens.next().unwrap_or(&base);
+    if first == "openai" && tokens.next() == Some("codex") {
+        return AgentKind::Codex;
+    }
+    match first {
+        "claude" => AgentKind::ClaudeCode,
+        "codex" => AgentKind::Codex,
+        "agy" | "gemini" => AgentKind::Agy,
+        _ => AgentKind::Generic,
+    }
+}
+
+/// Whether `name` is a bare dotted version number (`2.1.203`): only ASCII
+/// digits and dots, at least one dot, with no empty component.
+fn is_bare_version(name: &str) -> bool {
+    name.contains('.')
+        && name
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+impl AgentKind {
+    pub(crate) fn from_spawn(argv0: &str) -> Self {
+        classify_agent(argv0)
+    }
+}
+
+#[derive(Debug, Default)]
+struct PendingAgent {
+    process: Option<String>,
+    spawn_kind: AgentKind,
+}
 
 /// One color run within a card's last-output preview (FR-2): a maximal span of
 /// preview text sharing one foreground color. The io thread coalesces adjacent
@@ -151,6 +225,9 @@ pub struct SessionCard {
     /// e.g. `zsh` / `cargo` / `claude`. `None` until the session-metadata worker
     /// resolves it, or where detection is unavailable (non-macOS, NFR-5).
     pub process: Option<String>,
+    /// Recognized foreground process, OSC 7501 app, or direct spawn, in that order.
+    pub agent: PaneAgent,
+    spawn_kind: AgentKind,
     /// This pane's foreground-process-tree metrics (panel-metrics-view
     /// FR-4/FR-7). `None` until the process-monitor overlay is open and the
     /// branch-poll metrics tick has posted at least one sample for it, and
@@ -179,7 +256,50 @@ fn agent_left(previous: Option<&str>, current: Option<&str>) -> bool {
     is_agent(previous) && !is_agent(current)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaneAgent {
+    pub kind: AgentKind,
+    executable_matches: bool,
+}
+
+impl PaneAgent {
+    fn resolve(process: Option<&str>, app: Option<&str>, spawn: AgentKind) -> Self {
+        let foreground = process.map(classify_agent);
+        let kind = foreground
+            .filter(|kind| *kind != AgentKind::Generic)
+            .or_else(|| {
+                app.map(|app| match app {
+                    // agy's OSC 7501 app name differs from its executable.
+                    "antigravity" => AgentKind::Agy,
+                    app => classify_agent(app),
+                })
+                .filter(|kind| *kind != AgentKind::Generic)
+            })
+            .unwrap_or(spawn);
+        Self {
+            kind,
+            executable_matches: kind != AgentKind::Generic && foreground.unwrap_or(spawn) == kind,
+        }
+    }
+
+    /// Terminal output can name an agent for display. Inject input only when
+    /// the sampled executable (or direct launch before sampling) agrees.
+    pub(crate) fn can_auto_approve(self, agent: AgentKind) -> bool {
+        self.executable_matches && self.kind == agent
+    }
+}
+
 impl SessionCard {
+    fn refresh_agent_kind(&mut self) {
+        self.agent = PaneAgent::resolve(
+            self.process.as_deref(),
+            self.agent_status
+                .as_ref()
+                .and_then(|status| status.app.as_deref()),
+            self.spawn_kind,
+        );
+    }
+
     pub fn is_running(&self) -> bool {
         self.agent_status.as_ref().map_or(self.busy, |report| {
             report.state == noa_grid::AgentState::Running
@@ -343,6 +463,8 @@ impl SessionDelta {
 #[derive(Debug, Default)]
 pub struct SessionStore {
     cards: HashMap<SessionCardId, SessionCard>,
+    /// The direct launch and latest probe sample can both precede first output.
+    pending_agents: HashMap<SessionCardId, PendingAgent>,
     /// Ids that have been removed, with the `seq` seen at removal. An `Upsert`
     /// whose `seq` does not exceed the tombstone is a stale/reordered message
     /// and is dropped (Omen T10). Bounded to [`TOMBSTONE_CAP`] entries by FIFO
@@ -388,6 +510,20 @@ impl SessionStore {
 
     pub fn get(&self, id: &SessionCardId) -> Option<&SessionCard> {
         self.cards.get(id)
+    }
+
+    pub(crate) fn register_spawn(&mut self, id: SessionCardId, kind: AgentKind) {
+        if kind != AgentKind::Generic {
+            self.pending_agents.entry(id).or_default().spawn_kind = kind;
+        }
+    }
+
+    pub(crate) fn pending_agent_kind(&self, id: SessionCardId) -> AgentKind {
+        self.pending_agents
+            .get(&id)
+            .map_or(AgentKind::Generic, |pending| {
+                PaneAgent::resolve(pending.process.as_deref(), None, pending.spawn_kind).kind
+            })
     }
 
     /// Every live card id in a stable, deterministic order: cards with a
@@ -656,6 +792,7 @@ impl SessionStore {
                     None => {
                         self.untombstone(id);
                         self.activity_counter += 1;
+                        let pending = self.pending_agents.remove(&id).unwrap_or_default();
                         self.cards.insert(
                             id,
                             SessionCard {
@@ -673,7 +810,13 @@ impl SessionStore {
                                 agent_seq: 0,
                                 auto_approve_enabled: false,
                                 auto_approve_audit: VecDeque::new(),
-                                process: None,
+                                agent: PaneAgent::resolve(
+                                    pending.process.as_deref(),
+                                    None,
+                                    pending.spawn_kind,
+                                ),
+                                process: pending.process,
+                                spawn_kind: pending.spawn_kind,
                                 metrics: None,
                                 updated_at,
                                 preview: preview.unwrap_or_default(),
@@ -733,6 +876,7 @@ impl SessionStore {
                         card.unread_bell = false;
                     }
                     card.agent_status = status;
+                    card.refresh_agent_kind();
                 }
             }
             SessionDelta::Progress { id, progress } => {
@@ -756,6 +900,9 @@ impl SessionStore {
                         card.agent_status_at = None;
                     }
                     card.process = process;
+                    card.refresh_agent_kind();
+                } else if !self.tombstones.contains_key(&id) {
+                    self.pending_agents.entry(id).or_default().process = process;
                 }
             }
             SessionDelta::Metrics { id, metrics } => {
@@ -784,13 +931,16 @@ impl SessionStore {
     /// would (correctly) recreate a stale duplicate rather than being
     /// silently swallowed; the io thread's shared `window_id` cell (io_thread
     /// spec L2(e)) is what actually stops that from happening in practice.
-    /// A no-op (returns `false`) when `old` has no live card, `old == new`,
-    /// or `new` already names a live card.
+    /// Before first output, move any pending agent metadata too. Returns
+    /// `true` only when a live card changed keys.
     pub fn rekey(&mut self, old: SessionCardId, new: SessionCardId) -> bool {
         if old == new || self.cards.contains_key(&new) {
             return false;
         }
         let Some(card) = self.cards.remove(&old) else {
+            if let Some(pending) = self.pending_agents.remove(&old) {
+                self.pending_agents.insert(new, pending);
+            }
             return false;
         };
         self.cards.insert(new, card);
@@ -813,6 +963,7 @@ impl SessionStore {
     /// of live ids that had a card.
     pub fn reconcile_sessions(&mut self, live_ids: &[SessionCardId]) {
         let live: std::collections::HashSet<SessionCardId> = live_ids.iter().copied().collect();
+        self.pending_agents.retain(|id, _| live.contains(id));
         let dead: Vec<SessionCardId> = self
             .cards
             .keys()
@@ -829,6 +980,7 @@ impl SessionStore {
     /// remove-then-tombstone invariant, shared by [`SessionDelta::Remove`] and
     /// [`reconcile_sessions`](Self::reconcile_sessions).
     fn retire(&mut self, id: SessionCardId) {
+        self.pending_agents.remove(&id);
         if let Some(card) = self.cards.remove(&id) {
             self.tombstone(id, card.seq);
             // Keep the manual order free of dead ids so it doesn't grow for the
@@ -1281,6 +1433,8 @@ mod tests {
             auto_approve_audit: VecDeque::new(),
             process: None,
             metrics: None,
+            agent: PaneAgent::default(),
+            spawn_kind: AgentKind::Generic,
             updated_at: wall(10, 0),
             preview: Vec::new(),
             seq: 1,
@@ -1959,6 +2113,129 @@ mod tests {
             reports: 0,
         });
         assert_eq!(store.get(&id).unwrap().agent_seq, 5);
+    }
+
+    #[test]
+    fn first_process_sample_survives_the_first_upsert() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+        store.apply(SessionDelta::Process {
+            id,
+            process: Some("claude".into()),
+        });
+        store.apply(upsert(id, 1, "worker"));
+        let card = store.get(&id).unwrap();
+        assert_eq!(card.process.as_deref(), Some("claude"));
+        assert_eq!(card.agent.kind, AgentKind::ClaudeCode);
+        assert!(card.agent.can_auto_approve(AgentKind::ClaudeCode));
+    }
+
+    #[test]
+    fn agent_kind_follows_the_foreground_then_report_then_launch() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+        store.register_spawn(id, AgentKind::from_spawn("/opt/bin/claude"));
+        store.apply(upsert(id, 1, "worker"));
+        let agent = |store: &SessionStore| store.get(&id).unwrap().agent;
+        assert!(agent(&store).can_auto_approve(AgentKind::ClaudeCode));
+        let report = |app: Option<&str>| SessionDelta::AgentStatus {
+            id,
+            status: app.map(|app| noa_grid::AgentStatus {
+                app: Some(app.into()),
+                state: noa_grid::AgentState::Running,
+                detail: String::new(),
+                blocked: None,
+            }),
+            at: wall(10, 0),
+            reports: 1,
+        };
+        store.apply(report(Some("antigravity")));
+        assert_eq!(agent(&store).kind, AgentKind::Agy);
+        assert!(!agent(&store).can_auto_approve(AgentKind::Agy));
+        assert!(!agent(&store).can_auto_approve(AgentKind::ClaudeCode));
+        store.apply(report(None));
+        assert_eq!(agent(&store).kind, AgentKind::ClaudeCode);
+        store.apply(report(Some("antigravity")));
+        store.apply(SessionDelta::Process {
+            id,
+            process: Some("codex".into()),
+        });
+        assert!(agent(&store).can_auto_approve(AgentKind::Codex));
+        store.apply(SessionDelta::Process {
+            id,
+            process: Some("zsh".into()),
+        });
+        assert_eq!(agent(&store).kind, AgentKind::ClaudeCode);
+        assert!(!agent(&store).can_auto_approve(AgentKind::ClaudeCode));
+    }
+
+    #[test]
+    fn pending_process_follows_a_pane_move_and_is_forgotten_on_close() {
+        let mut store = SessionStore::new();
+        let old = card_id(1, 1);
+        let new = card_id(2, 1);
+        for name in ["claude", "codex"] {
+            store.apply(SessionDelta::Process {
+                id: old,
+                process: Some(name.into()),
+            });
+        }
+        store.rekey(old, new);
+        assert_eq!(store.pending_agent_kind(old), AgentKind::Generic);
+        assert_eq!(store.pending_agent_kind(new), AgentKind::Codex);
+        store.reconcile_sessions(&[new]);
+        store.apply(upsert(new, 1, "moved"));
+        assert_eq!(store.get(&new).unwrap().process.as_deref(), Some("codex"));
+
+        store.register_spawn(old, AgentKind::ClaudeCode);
+        store.reconcile_sessions(&[new]);
+        assert_eq!(store.pending_agent_kind(old), AgentKind::Generic);
+        store.register_spawn(old, AgentKind::ClaudeCode);
+        store.apply(SessionDelta::Remove { id: old });
+        assert_eq!(store.pending_agent_kind(old), AgentKind::Generic);
+    }
+
+    // Agent branding: known AI agents classify (case-insensitively, on the
+    // basename); everything else is generic and keeps its raw name.
+    #[test]
+    fn classify_agent_maps_known_agents() {
+        use AgentKind::*;
+        for (input, expect) in [
+            ("claude", ClaudeCode),
+            // Claude Code's native installer names the versioned executable
+            // after its bare version, so the accounting name is the version.
+            ("2.1.203", ClaudeCode),
+            (
+                "/Users/dev/.local/share/claude/versions/2.1.203",
+                ClaudeCode,
+            ),
+            ("2", Generic),
+            ("1.2.3a", Generic),
+            ("Claude", ClaudeCode),
+            ("CLAUDE", ClaudeCode),
+            ("/usr/local/bin/claude", ClaudeCode),
+            ("codex", Codex),
+            ("Codex", Codex),
+            // Distribution binaries carry a target-triple suffix; the stem still
+            // classifies, independent of arch or version.
+            ("codex-aarch64-apple-darwin", Codex),
+            ("codex-x86_64-apple-darwin", Codex),
+            ("codex_cli", Codex),
+            ("openai-codex", Codex),
+            ("openai_codex", Codex),
+            ("mycodex", Generic),
+            ("my-openai-codex", Generic),
+            ("node-openai-codex", Generic),
+            ("agy", Agy),
+            ("gemini", Agy),
+            ("Gemini", Agy),
+            ("zsh", Generic),
+            ("cargo", Generic),
+            ("node", Generic),
+            ("bun", Generic),
+        ] {
+            assert_eq!(classify_agent(input), expect, "input {input:?}");
+        }
     }
 
     #[test]

@@ -11,7 +11,9 @@
 
 pub use crate::split_tree::{Point, Rect as SidebarRect};
 
-use crate::session_store::{IconKind, SessionCard, SessionCardId, WallClock, format_relative_time};
+use crate::session_store::{
+    AgentKind, IconKind, SessionCard, SessionCardId, WallClock, format_relative_time,
+};
 
 // All the `SIDEBAR_*`/`CARD_*` metrics below are the design values at scale
 // 1.0, tuned for the sidebar's dedicated small font (≈11.5pt), so cards read
@@ -733,77 +735,10 @@ pub(crate) fn cwd_tail(cwd: &str) -> Option<&str> {
     cwd.rsplit('/').find(|segment| !segment.is_empty())
 }
 
-/// A recognized AI coding agent, inferred from the tty's foreground process
-/// name so the sidebar can brand it distinctly (FR — agent branding).
-/// `Generic` is every other process (its raw name is shown as-is).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AgentKind {
-    ClaudeCode,
-    Codex,
-    Agy,
-    Generic,
-}
-
-/// Classify a foreground process name into a known AI agent. Case-insensitive,
-/// matched on the executable basename's leading token (so a target-triple suffix
-/// on a distribution binary — `codex-aarch64-apple-darwin` — still classifies).
-///
-/// Note: `proc_name` reports a runtime wrapper (`node`, `bun`, …) for npm
-/// installs. `noa-pty` canonicalizes those to the hosted agent's name
-/// (`codex`, `claude`) from the wrapper's argv before the name reaches here —
-/// see `WRAPPED_AGENTS` in `noa-pty/src/pty.rs`, whose `name` column must stay
-/// in step with the stems matched below. A wrapper whose argv names no known
-/// agent still arrives as the wrapper name and classifies `Generic`.
-pub fn classify_agent(process: &str) -> AgentKind {
-    let base = process
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(process)
-        .trim()
-        .to_ascii_lowercase();
-    // Claude Code's native installer names the versioned executable after its
-    // bare version (`…/claude/versions/2.1.203`), so the tty's accounting name
-    // is `2.1.203` — no agent stem at all. A pure dotted-version name is
-    // claimed by Claude Code, the only known agent shipping that layout.
-    if is_bare_version(&base) {
-        return AgentKind::ClaudeCode;
-    }
-    // Distribution binaries carry suffixes (`codex-aarch64-apple-darwin`) and
-    // wrapper scripts can use alternate separators (`codex_cli`). Match the
-    // leading alphanumeric token so those suffixes do not defeat branding, and
-    // allow the known vendor-prefixed OpenAI form without matching arbitrary
-    // names that merely contain "codex" as a substring.
-    let mut tokens = base
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty());
-    let first = tokens.next().unwrap_or(&base);
-    if first == "openai" && tokens.next() == Some("codex") {
-        return AgentKind::Codex;
-    }
-    match first {
-        "claude" => AgentKind::ClaudeCode,
-        "codex" => AgentKind::Codex,
-        "agy" | "gemini" => AgentKind::Agy,
-        _ => AgentKind::Generic,
-    }
-}
-
-/// Whether `name` is a bare dotted version number (`2.1.203`): only ASCII
-/// digits and dots, at least one dot, with no empty component.
-fn is_bare_version(name: &str) -> bool {
-    name.contains('.')
-        && name
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-}
-
 /// Whether a session's bell should escalate to an attention request (FR-A3):
-/// true only when the foreground process classifies as a known coding agent.
-/// A generic process — or an unresolved one (`None`, e.g. non-macOS or not yet
-/// polled) — stays a plain bell, so a generic beep is never mistaken for an
-/// interaction request (NFR-A4).
-pub fn bell_escalates_to_attention(process: Option<&str>) -> bool {
-    process.is_some_and(|p| classify_agent(p) != AgentKind::Generic)
+/// a generic pane's beep stays a plain bell (NFR-A4).
+pub fn bell_escalates_to_attention(kind: AgentKind) -> bool {
+    kind != AgentKind::Generic
 }
 
 /// The branded display name for a classified agent, or the raw process name for
@@ -1059,81 +994,26 @@ mod tests {
         );
     }
 
-    // Agent branding: known AI agents classify (case-insensitively, on the
-    // basename); everything else is generic and keeps its raw name.
     #[test]
-    fn classify_agent_maps_known_agents() {
-        use AgentKind::*;
-        for (input, expect) in [
-            ("claude", ClaudeCode),
-            // Claude Code's native installer names the versioned executable
-            // after its bare version, so the accounting name is the version.
-            ("2.1.203", ClaudeCode),
-            (
-                "/Users/dev/.local/share/claude/versions/2.1.203",
-                ClaudeCode,
-            ),
-            ("2", Generic),
-            ("1.2.3a", Generic),
-            ("Claude", ClaudeCode),
-            ("CLAUDE", ClaudeCode),
-            ("/usr/local/bin/claude", ClaudeCode),
-            ("codex", Codex),
-            ("Codex", Codex),
-            // Distribution binaries carry a target-triple suffix; the stem still
-            // classifies, independent of arch or version.
-            ("codex-aarch64-apple-darwin", Codex),
-            ("codex-x86_64-apple-darwin", Codex),
-            ("codex_cli", Codex),
-            ("openai-codex", Codex),
-            ("openai_codex", Codex),
-            ("mycodex", Generic),
-            ("my-openai-codex", Generic),
-            ("node-openai-codex", Generic),
-            ("agy", Agy),
-            ("gemini", Agy),
-            ("Gemini", Agy),
-            ("zsh", Generic),
-            ("cargo", Generic),
-            ("node", Generic),
-            ("bun", Generic),
-        ] {
-            assert_eq!(classify_agent(input), expect, "input {input:?}");
-        }
-
+    fn agent_display_names_use_the_brand_or_raw_process() {
         // The display name replaces the raw process for known agents.
         assert_eq!(
-            agent_display_name(classify_agent("claude"), "claude"),
+            agent_display_name(AgentKind::ClaudeCode, "claude"),
             "Claude Code"
         );
-        assert_eq!(
-            agent_display_name(classify_agent("codex"), "codex"),
-            "Codex"
-        );
-        assert_eq!(
-            agent_display_name(classify_agent("gemini"), "gemini"),
-            "agy"
-        );
-        assert_eq!(agent_display_name(classify_agent("zsh"), "zsh"), "zsh");
+        assert_eq!(agent_display_name(AgentKind::Codex, "codex"), "Codex");
+        assert_eq!(agent_display_name(AgentKind::Agy, "gemini"), "agy");
+        assert_eq!(agent_display_name(AgentKind::Generic, "zsh"), "zsh");
     }
 
     // AC-A2 (FR-A3/NFR-A4): a known agent's bell escalates to attention; a
     // generic process — or an unresolved one — stays a plain bell.
     #[test]
     fn bell_escalates_only_for_known_agents() {
-        assert!(bell_escalates_to_attention(Some("claude")));
-        assert!(bell_escalates_to_attention(Some("codex")));
-        assert!(bell_escalates_to_attention(Some("codex_cli")));
-        assert!(bell_escalates_to_attention(Some("openai-codex")));
-        assert!(bell_escalates_to_attention(Some("openai_codex")));
-        assert!(bell_escalates_to_attention(Some("agy")));
-        assert!(bell_escalates_to_attention(Some("/usr/local/bin/gemini")));
-        assert!(!bell_escalates_to_attention(Some("mycodex")));
-        assert!(!bell_escalates_to_attention(Some("zsh")));
-        assert!(!bell_escalates_to_attention(Some("cargo")));
-        assert!(!bell_escalates_to_attention(Some("node")));
-        assert!(!bell_escalates_to_attention(Some("bun")));
-        assert!(!bell_escalates_to_attention(None));
+        for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Agy] {
+            assert!(bell_escalates_to_attention(kind));
+        }
+        assert!(!bell_escalates_to_attention(AgentKind::Generic));
     }
 
     #[test]

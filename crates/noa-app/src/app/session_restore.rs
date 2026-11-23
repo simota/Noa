@@ -399,8 +399,8 @@ impl App {
         let mut leaves = Vec::new();
         let tree = build_split_tree(&tab.split, &mut minter, &mut leaves);
 
-        // Spawn surfaces for the non-root leaves before mutating window state
-        // (`spawn_pane_surface` borrows `&self`). A rough grid/rect is fine —
+        // Spawn surfaces for the non-root leaves before mutating window state.
+        // A rough grid/rect is fine —
         // `relayout_and_resize_window` fixes every pane's geometry below.
         let placeholder_grid = GridSize::new(self.config.cols, self.config.rows);
         let Some((auto_approve_enabled, redraw_floor)) =

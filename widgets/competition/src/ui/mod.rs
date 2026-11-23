@@ -1075,7 +1075,10 @@ fn viewer_page(
             let dir = std::env::temp_dir().join(format!("noa-comp-viewer-{}", session.id));
             std::fs::create_dir_all(&dir)?;
             let path = store::viewer_path(&dir);
-            let html = competition::model::viewer::render_html(session, root.unwrap_or(&dir));
+            let html = match root {
+                Some(root) => competition::model::viewer::render_html_elsewhere(session, root),
+                None => competition::model::viewer::render_html(session, &dir),
+            };
             std::fs::write(&path, html)?;
             Ok(path)
         }
@@ -1826,6 +1829,67 @@ mod tests {
         assert!(!page.exists());
         // A live competition's page is written afresh where it belongs.
         assert_eq!(viewer_page(&session, Some(&dir), false).unwrap(), page);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_competition_opened_through_a_link_to_its_folder_can_go_on() {
+        // `--session=DIR` names the folder another way than the log's reply
+        // paths do (a symlink here; a relative path is made absolute first).
+        let root = temp_root("resume-alias");
+        let dir = stored_competition(&root);
+        let session = store::read_session(&dir).unwrap();
+        let alias = root.join("alias");
+        std::fs::create_dir_all(&alias).unwrap();
+        let linked = alias.join(dir.file_name().unwrap());
+        std::os::unix::fs::symlink(&dir, &linked).unwrap();
+        assert_eq!(
+            competition::engine::check_resumable(&session, &linked),
+            Ok(())
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Where the page's relative `href`s point: under its `<base href>`,
+    /// else next to the page.
+    fn link_targets(page: &Path) -> Vec<PathBuf> {
+        let html = std::fs::read_to_string(page).unwrap();
+        let base = html
+            .split_once("<base href=\"file://")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(dir, _)| PathBuf::from(dir))
+            .unwrap_or_else(|| page.parent().unwrap().to_owned());
+        html.split("\"href\":\"")
+            .skip(1)
+            .filter_map(|rest| rest.split_once('"'))
+            .map(|(href, _)| base.join(href))
+            .collect()
+    }
+
+    #[test]
+    fn a_viewer_page_written_elsewhere_links_the_artifacts_where_they_are() {
+        let root = temp_root("viewer-links");
+        let dir = stored_competition(&root);
+        let mut session = store::read_session(&dir).unwrap();
+        let entry = store::artifact_snapshot_dir(&dir, 1, &PartId::new("claude"));
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("index.html"), "<p>claude</p>").unwrap();
+        let sub = session.rounds[0]
+            .submissions
+            .get_mut(&PartId::new("claude"))
+            .unwrap();
+        sub.artifacts.push(competition::model::types::ArtifactFile {
+            rel_path: "index.html".into(),
+            kind: competition::model::types::ArtifactKind::Html,
+            bytes: 13,
+        });
+        let page = viewer_page(&session, Some(&dir), true).unwrap();
+        assert!(!page.starts_with(&dir));
+        let targets = link_targets(&page);
+        assert!(!targets.is_empty(), "the fixture has artifacts");
+        for target in targets {
+            assert!(target.is_file(), "{}", target.display());
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 

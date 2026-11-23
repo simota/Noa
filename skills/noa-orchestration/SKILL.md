@@ -68,6 +68,8 @@ expensive models for work that needs them. Pick a tier per task:
 - When a `light` or `standard` worker's result fails your check, retry with
   a new worker one effort level higher on the same model first; if that also
   fails, go one tier up. Do not repeat the same model and effort.
+  `retry PANE --tier <tier>` does it in one command (see "Giving a worker its
+  own worktree").
 - Split a mixed task so the mechanical part goes to `light` and only the hard
   part to `deep`, when the parts are independent.
 - Your own check of each result does not get cheaper with the worker's tier.
@@ -125,12 +127,13 @@ directory may show a trust prompt, and the spawn line then has `"sent":false`
   says why under `worktree.kept` and the work stays. Do not remove it with
   `--force` or `-D` without reading what would be lost; keep it and tell the
   human instead.
-- To retry a worktree worker, `close` it without `--prune`, then
-  `spawn --cwd <its worktree> --label <same label> --tier <one up>`: the new
-  worker carries on in the same worktree and branch, and `--prune` still finds
-  it later. Say in the task that the previous attempt's changes are there.
-  The new worker gets a result file of its own (`result-<label>-<8 hex>.md`,
-  the spawn line's `result`), so the old report stays apart. Discarding the changes (`git reset --hard`) is the human's
+- To retry a worker, `retry PANE --tier <one up>` (reference.md, `retry`):
+  it closes PANE without pruning and starts it again in the same directory
+  (worktree and branch) under the same label, typing its last task after a
+  note that the previous attempt's changes are there to build on. After
+  follow-up sends, or when it asks for one, pass the whole task with
+  `--task-file`. The old report stays apart (the new worker gets its own
+  result file). Discarding the changes (`git reset --hard`) is the human's
   call. A new label with `--worktree` would split the work over two branches.
 - If `spawn --worktree` fails with a permission error, your own shell may be
   sandboxed away from `.git/worktrees`; say so rather than working around it.

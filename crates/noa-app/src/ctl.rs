@@ -12,6 +12,7 @@ mod journal;
 mod prompt;
 mod ready;
 mod result;
+mod retry;
 mod worktree;
 
 use std::collections::HashMap;
@@ -212,6 +213,24 @@ Commands:
                                 whose file it was), and result and status read
                                 each there. One that cannot move keeps the
                                 worktree, with \"kept\" saying why.
+  retry PANE [--tier light|standard|deep] [--task TEXT | --task-file F]
+       [--ready SECS] [--timeout SECS] [--stall SECS] [--tail N]
+       [--settle SECS] [--for LIST] [--all] [--no-board]
+                                Start this pane's claude, codex or agy worker
+                                PANE (listed or gone, by this pane's journal)
+                                again: its command with the old tier's flags
+                                swapped for --tier's (else the old tier's), in
+                                its directory (its worktree and branch, none
+                                made) under its label; PANE, if listed, is
+                                closed first (never pruned). Refused while
+                                PANE's agent is running. Types its last task
+                                (or --task/--task-file) after a preface: the
+                                previous worker's changes are here, check git
+                                status/log and build on them; its report path.
+                                Then as spawn --task: prints the spawn line
+                                with \"retryOf\" (and \"tier\"), then the
+                                wait lines. A task the journal kept only the
+                                start of needs --task-file.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
   board [--of PANE]             Show an orchestrator's workers in this pane
@@ -243,6 +262,8 @@ pub(crate) enum Command {
         children: bool,
     },
     Spawn(SpawnArgs),
+    /// `retry PANE`: close a worker and start it again with its task.
+    Retry(RetryArgs),
     Send(SendArgs),
     Wait(WaitArgs),
     Read {
@@ -312,6 +333,21 @@ pub(crate) struct SpawnArgs {
     /// `--task`/`--task-file`: type a task once the worker is ready.
     pub(crate) task: Option<Task>,
     pub(crate) command: Vec<String>,
+}
+
+/// `retry PANE [--tier T] [--task TEXT | --task-file F] [--ready SECS]
+/// [wait options] [--no-board]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RetryArgs {
+    pub(crate) pane: u64,
+    /// `--tier`: the new worker's tier (default: the old one's).
+    pub(crate) tier: Option<worktree::Tier>,
+    /// `--task`/`--task-file` (default: the old worker's last task).
+    pub(crate) task: Option<TaskText>,
+    pub(crate) ready: Option<Duration>,
+    /// The options of the wait after the task, as `spawn --task` takes.
+    pub(crate) wait: WaitOptions,
+    pub(crate) board: bool,
 }
 
 /// `spawn --task TEXT` or `--task-file F`, with the options of the wait
@@ -466,6 +502,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
             children: rest.flag("--children"),
         },
         "spawn" => Command::Spawn(parse_spawn(&mut rest)?),
+        "retry" => Command::Retry(parse_retry(&mut rest)?),
         "send" => Command::Send(parse_send(&mut rest)?),
         "wait" => {
             let mut afters = Vec::new();
@@ -663,24 +700,8 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
     if tier.is_some() {
         worktree::check_tier_command(&command)?;
     }
-    let ready = rest
-        .value("--ready")?
-        .map(|value| {
-            value
-                .parse::<f64>()
-                .ok()
-                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-                .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-                .ok_or_else(|| format!("--ready expects seconds, got {value:?}"))
-        })
-        .transpose()?;
-    let text = match (rest.value("--task")?, rest.value("--task-file")?) {
-        (Some(_), Some(_)) => return Err("--task and --task-file are exclusive".to_string()),
-        (Some(text), None) => Some(TaskText::Literal(text)),
-        (None, Some(file)) => Some(TaskText::File(file)),
-        (None, None) => None,
-    };
-    let task = match text {
+    let ready = parse_ready(rest)?;
+    let task = match parse_task_text(rest)? {
         Some(text) => {
             if !worktree::is_agent_command(&command) {
                 return Err(
@@ -710,6 +731,49 @@ fn parse_spawn(rest: &mut Args) -> Result<SpawnArgs, String> {
         ready,
         task,
         command,
+    })
+}
+
+/// `--ready SECS`.
+fn parse_ready(rest: &mut Args) -> Result<Option<Duration>, String> {
+    rest.value("--ready")?
+        .map(|value| {
+            value
+                .parse::<f64>()
+                .ok()
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+                .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+                .ok_or_else(|| format!("--ready expects seconds, got {value:?}"))
+        })
+        .transpose()
+}
+
+/// `--task TEXT` or `--task-file F`.
+fn parse_task_text(rest: &mut Args) -> Result<Option<TaskText>, String> {
+    Ok(match (rest.value("--task")?, rest.value("--task-file")?) {
+        (Some(_), Some(_)) => return Err("--task and --task-file are exclusive".to_string()),
+        (Some(text), None) => Some(TaskText::Literal(text)),
+        (None, Some(file)) => Some(TaskText::File(file)),
+        (None, None) => None,
+    })
+}
+
+fn parse_retry(rest: &mut Args) -> Result<RetryArgs, String> {
+    let board = !rest.flag("--no-board");
+    let tier = rest
+        .value("--tier")?
+        .map(|name| worktree::Tier::parse(&name))
+        .transpose()?;
+    let ready = parse_ready(rest)?;
+    let task = parse_task_text(rest)?;
+    let wait = parse_wait_options(rest)?;
+    Ok(RetryArgs {
+        pane: single_pane(rest)?,
+        tier,
+        task,
+        ready,
+        wait,
+        board,
     })
 }
 
@@ -1897,7 +1961,8 @@ impl Session {
                 };
                 panels.into_iter().for_each(print_panel);
             }
-            Command::Spawn(args) => return self.spawn(args),
+            Command::Spawn(args) => return self.spawn(args, serde_json::Map::new()),
+            Command::Retry(args) => return self.retry(args),
             Command::Send(args) => return self.send(args),
             Command::Wait(args) => {
                 let panes = self.resolve(&args.panes)?;
@@ -2050,7 +2115,13 @@ impl Session {
         Ok(pane)
     }
 
-    fn spawn(&mut self, args: SpawnArgs) -> Result<i32, Failure> {
+    /// `spawn`; `extra` goes on the spawn line and its journal event
+    /// (`retry`'s `retryOf`, and the worktree and branch it reuses).
+    fn spawn(
+        &mut self,
+        args: SpawnArgs,
+        extra: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<i32, Failure> {
         // Read and checked before anything starts.
         let task = match &args.task {
             Some(task) => {
@@ -2243,19 +2314,23 @@ impl Session {
             result_path.as_deref(),
             started_in.as_deref(),
         );
-        self.journal.append(
-            "spawn",
-            serde_json::json!({
-                "pane": spawned.pane,
-                "label": wanted_label,
-                "argv": argv,
-                "tier": args.tier.map(worktree::Tier::name),
-                "cwd": started_in,
-                "worktree": line.get("worktree"),
-                "branch": line.get("branch"),
-                "result": result_path,
-            }),
-        );
+        if let Some(fields) = line.as_object_mut() {
+            fields.extend(extra);
+        }
+        let mut event = serde_json::json!({
+            "pane": spawned.pane,
+            "label": wanted_label,
+            "argv": argv,
+            "tier": args.tier.map(worktree::Tier::name),
+            "cwd": started_in,
+            "worktree": line.get("worktree"),
+            "branch": line.get("branch"),
+            "result": result_path,
+        });
+        if let Some(of) = line.get("retryOf") {
+            event["retryOf"] = of.clone();
+        }
+        self.journal.append("spawn", event);
         let Some(limit) = args.ready.or(task.is_some().then_some(ready::TASK_READY)) else {
             print_json(&line);
             return Ok(EXIT_OK);
@@ -2307,6 +2382,72 @@ impl Session {
         delivered
     }
 
+    /// `retry PANE`: [`retry::plan`] from the journal and one listing, then
+    /// [`retry::steps`]: check the spawn as `run` checks one, close the old
+    /// pane (journaled, not printed, never pruned), and spawn with the task.
+    fn retry(&mut self, args: RetryArgs) -> Result<i32, Failure> {
+        let given = match &args.task {
+            Some(TaskText::Literal(text)) => Some(text.clone()),
+            Some(TaskText::File(file)) => Some(std::fs::read_to_string(file).map_err(|err| {
+                Failure::error(format!("cannot read --task-file {file:?}: {err}"))
+            })?),
+            None => None,
+        };
+        let own = self.require_own()?;
+        let panels = self.client.list_panels()?;
+        let workers = journal::workers(&self.journal.events());
+        let plan = retry::plan(&args, given, &workers, &panels, own, |path| {
+            std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+        })
+        .map_err(Failure::error)?;
+        retry::steps(
+            self,
+            plan,
+            |_, spawn| {
+                let env = worker_env(Vec::new(), true, std::env::vars());
+                check_spawn(
+                    spawn,
+                    std::env::current_dir().ok(),
+                    env.get("PATH").map(String::as_str),
+                )
+                .map_err(|message| {
+                    Failure::error(format!(
+                        "the new worker cannot start: {message} (its directory is the old \
+                         worker's). Nothing was done"
+                    ))
+                })
+            },
+            |session, old| {
+                let journal = &mut session.journal;
+                let code = close_panes(
+                    &mut session.client,
+                    &[old],
+                    Some(own),
+                    &[],
+                    &mut |_, _, _| None,
+                    &mut |line| {
+                        if let Some(pane) = line_pane(line) {
+                            journal.append(
+                                "close",
+                                serde_json::json!({ "pane": pane, "worktree": null }),
+                            );
+                        }
+                    },
+                )?;
+                if code == EXIT_OK {
+                    Ok(())
+                } else {
+                    Err(Failure {
+                        code,
+                        message: format!("pane {old} was not closed, so no worker was started"),
+                        transient: false,
+                    })
+                }
+            },
+            |session, spawn, extra| session.spawn(spawn, extra),
+        )
+    }
+
     fn send(&mut self, args: SendArgs) -> Result<i32, Failure> {
         self.guard(&[args.pane], args.any_pane)?;
         let text = match &args.text {
@@ -2349,9 +2490,13 @@ impl Session {
             "text": journal::clip(text),
             "bytes": text.len(),
             "enter": args.enter,
+            "raw": args.raw,
             "answer": args.answer,
             "queue": args.queue,
         });
+        if let Some(full) = journal::full(text) {
+            event["full"] = full.into();
+        }
         if let Some(screen) = screen {
             event["screen"] = screen.into();
         }

@@ -258,22 +258,31 @@ pub fn inspect_worktree(
 /// `git rev-parse --show-toplevel` and `--git-common-dir` (`None` if that
 /// one fails) of `dir`, trimmed; `None` outside a work tree.
 fn top_and_common_dir(dir: &Path) -> Option<(String, Option<String>)> {
-    // One git for both. It fails exactly when `--show-toplevel` does, as
-    // `--git-common-dir` cannot fail once a work tree was found.
-    let both = run_git(dir, &["rev-parse", "--show-toplevel", "--git-common-dir"])?;
-    let lines: Vec<&str> = both
-        .strip_suffix('\n')
-        .unwrap_or(&both)
-        .split('\n')
-        .collect();
-    if let [top, common] = lines[..] {
-        return Some((top.trim().to_owned(), Some(common.trim().to_owned())));
+    top_and_common_dir_with(|args| run_git(dir, args))
+}
+
+/// [`top_and_common_dir`] running git through `git`. One git asks for both;
+/// whenever its answer is not exactly an absolute top level and a common
+/// dir, one per line (it failed, or a path holds a line break), the two are
+/// asked one at a time, so the result is always what those two calls give.
+fn top_and_common_dir_with(
+    git: impl Fn(&[&str]) -> Option<String>,
+) -> Option<(String, Option<String>)> {
+    if let Some(both) = git(&["rev-parse", "--show-toplevel", "--git-common-dir"]) {
+        let lines: Vec<&str> = both
+            .strip_suffix('\n')
+            .unwrap_or(&both)
+            .split('\n')
+            .collect();
+        if let [top, common] = lines[..]
+            && Path::new(top.trim()).is_absolute()
+            && !common.trim().is_empty()
+        {
+            return Some((top.trim().to_owned(), Some(common.trim().to_owned())));
+        }
     }
-    // A path holding a line break: ask one at a time, each answer whole.
-    let top = run_git(dir, &["rev-parse", "--show-toplevel"])?
-        .trim()
-        .to_owned();
-    let common = run_git(dir, &["rev-parse", "--git-common-dir"]).map(|s| s.trim().to_owned());
+    let top = git(&["rev-parse", "--show-toplevel"])?.trim().to_owned();
+    let common = git(&["rev-parse", "--git-common-dir"]).map(|s| s.trim().to_owned());
     Some((top, common))
 }
 
@@ -1097,6 +1106,49 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         );
         assert_eq!(info.worktree_root, canonical_or_raw(&foo));
         assert_eq!(info.branch, "orch/foo");
+    }
+
+    #[test]
+    fn top_and_common_dir_falls_back_to_one_call_each() {
+        use std::cell::RefCell;
+        const BOTH: &str = "rev-parse --show-toplevel --git-common-dir";
+        const TOP: &str = "rev-parse --show-toplevel";
+        const COMMON: &str = "rev-parse --git-common-dir";
+        // A fake git answering each argument list from `answers` (a missing
+        // one fails), recording what was asked.
+        let run = |answers: &[(&str, &str)]| {
+            let asked = RefCell::new(Vec::new());
+            let result = top_and_common_dir_with(|args| {
+                let args = args.join(" ");
+                let answer = answers
+                    .iter()
+                    .find(|(a, _)| *a == args)
+                    .map(|(_, out)| (*out).to_owned());
+                asked.borrow_mut().push(args);
+                answer
+            });
+            (result, asked.into_inner())
+        };
+        let some =
+            |top: &str, common: Option<&str>| Some((top.to_owned(), common.map(str::to_owned)));
+
+        // The combined call answers: nothing else runs.
+        let (result, asked) = run(&[(BOTH, "/w\n/r/.git\n")]);
+        assert_eq!(result, some("/w", Some("/r/.git")));
+        assert_eq!(asked, [BOTH]);
+        // It fails: the two calls decide, each failure as main treats it.
+        let (result, asked) = run(&[(TOP, "/w\n"), (COMMON, ".git\n")]);
+        assert_eq!(result, some("/w", Some(".git")));
+        assert_eq!(asked, [BOTH, TOP, COMMON]);
+        assert_eq!(run(&[(TOP, "/w\n")]).0, some("/w", None));
+        assert_eq!(run(&[(COMMON, ".git\n")]).0, None);
+        // Unexpected answers (not two lines, no absolute top level, an empty
+        // common dir) are asked again one at a time.
+        for odd in ["/a\nb\n/r/.git\n", "x\n/r/.git\n", "/w\n\n", "/w\n"] {
+            let (result, asked) = run(&[(BOTH, odd), (TOP, "/w\n"), (COMMON, "/r/.git\n")]);
+            assert_eq!(result, some("/w", Some("/r/.git")), "{odd:?}");
+            assert_eq!(asked, [BOTH, TOP, COMMON], "{odd:?}");
+        }
     }
 
     #[test]

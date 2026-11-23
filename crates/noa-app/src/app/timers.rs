@@ -30,6 +30,15 @@ pub(super) fn split_zoom_tick(
     }
 }
 
+/// Whether finishing a tween must resolve the pointer again. The final
+/// relayout moves the animating pane's grid off the clip origin it was
+/// mapped through mid-tween, so a pointer at rest in the window would keep
+/// the cell it resolved then, and the next button event, with no tween
+/// live and no hover change, would not look again.
+pub(super) fn zoom_finish_reresolves_pointer(tick: SplitZoomTick, pointer_in_window: bool) -> bool {
+    tick == SplitZoomTick::Finish && pointer_in_window
+}
+
 /// Whether cached cursor state (see `Surface::cursor_blink_state`) is
 /// currently blink-eligible: visible, at the live viewport (not scrolled into
 /// scrollback), and rendered in one of the `Blinking*` DECSCUSR styles.
@@ -726,7 +735,13 @@ impl App {
             };
             state.split_zoom_anim = None;
             let window = state.window.clone();
+            let pointer = state.last_mouse_physical_position;
             self.relayout_and_resize_window(window_id);
+            if zoom_finish_reresolves_pointer(SplitZoomTick::Finish, pointer.is_some())
+                && let Some(position) = pointer
+            {
+                self.on_cursor_moved(window_id, position);
+            }
             window.request_redraw();
         }
         next
@@ -770,7 +785,7 @@ mod tests {
     use super::{
         LIVE_WALLPAPER_FADE_DURATION, SplitZoomTick, cursor_blink_focus_gate,
         cursor_blink_idle_elapsed, cursor_blink_state_wants_blink, live_wallpaper_fade_progress,
-        live_wallpaper_timer_step, split_zoom_tick,
+        live_wallpaper_timer_step, split_zoom_tick, zoom_finish_reresolves_pointer,
     };
     use crate::anim::DUR_SPLIT_ZOOM;
     use crate::app::state::CursorBlinkState;
@@ -1036,5 +1051,38 @@ mod tests {
         let t0 = Instant::now();
         let back = SplitZoomAnim::zoom_in(PaneId::new(1), t0).reversed(t0);
         assert_eq!(split_zoom_tick(Some(back), t0), SplitZoomTick::Finish);
+    }
+
+    /// PR review: a pointer that came to rest on the zooming pane mid-tween
+    /// mapped its cell through the clip origin of that moment; once the
+    /// tween ends the grid sits at the content rect's origin, so the cell
+    /// under the pointer differs and the finish must resolve it again.
+    #[test]
+    fn finishing_a_zoom_re_resolves_a_pointer_at_rest() {
+        use crate::split_tree::{Rect, pane_mapping_rect, zoom_frame};
+        let pane = PaneId::new(1);
+        let (tile, bounds) = (Rect::new(400, 0, 400, 600), Rect::new(0, 0, 800, 600));
+        let t0 = Instant::now();
+        let anim = SplitZoomAnim::zoom_in(pane, t0);
+        let mid = zoom_frame(&anim, tile, bounds, t0 + DUR_SPLIT_ZOOM / 4);
+        let col = |rect: Rect| (500 - rect.x) / 10;
+        assert_ne!(col(pane_mapping_rect(pane, bounds, &mid)), col(bounds));
+        let end = t0 + DUR_SPLIT_ZOOM;
+        assert!(zoom_finish_reresolves_pointer(
+            split_zoom_tick(Some(anim), end),
+            true
+        ));
+        assert!(!zoom_finish_reresolves_pointer(
+            split_zoom_tick(Some(anim), end),
+            false
+        ));
+        assert!(!zoom_finish_reresolves_pointer(
+            split_zoom_tick(Some(anim), t0),
+            true
+        ));
+        assert!(!zoom_finish_reresolves_pointer(
+            split_zoom_tick(None, end),
+            true
+        ));
     }
 }

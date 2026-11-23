@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-11-23
+
+Competitions judged from what the viewer shows, and a model and effort
+choice for every discussion and competition agent.
+
+### Added
+
+- The discussion and competition start views give the moderator or judge and
+  every panel agent a model box (suggestions per CLI, empty for the CLI
+  default) and an effort menu. A resumed session starts its agents with the
+  same choice, and one with a model or effort the CLI does not take is refused.
+- Each competition snapshot gets a self-contained viewer copy of its root
+  `index.html`, headless-Chrome screenshots at 1440x900, 768x1024 and
+  320x568, and a manifest under `r<N>/checks/<part>/`; the judge and the
+  viewer use them, so entries are no longer compared unstyled.
+  `competition --check=DIR` runs the same check before submitting.
+- The competition judge records per-claim evidence (measured, self-reported
+  or unverified), a per-criterion score breakdown, a checklist published in
+  round 1, and amendments that correct earlier rounds' scores. Contestants
+  see their rank and gap, the checklist, their breakdown and corrections.
+- The competition window shows a progress strip and a round map, and opens
+  its tab with auto approval so contestants and the judge run unattended.
+- `noa.newTab` takes `autoApprove` to turn the new tab's agent-CLI auto
+  approval on or off (`true` needs the `input` scope); `noa.split` refuses it.
+
+### Changed
+
+- The landing page is rebuilt around output floods, agents and the Ghostty
+  import step.
+- The README is reordered (install, usage, configuration, orchestration,
+  performance, compatibility) and keeps only figures a committed run supports.
+
 ## [0.9.12] - 2026-11-22
 
 A blind multi-agent competition window, a fuller agent dashboard, a repo

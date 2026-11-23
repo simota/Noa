@@ -187,7 +187,9 @@ pub fn check_entry(entry: &Path, out: &Path) -> io::Result<Inspection> {
     let entry_abs = lexical(&std::path::absolute(entry)?);
     let entry_real = entry.canonicalize()?;
     let out_abs = lexical(&std::path::absolute(out)?);
-    let out_real = real_path(&out_abs)?;
+    // Resolved from the path as written: `link/..` is the link target's
+    // parent on disk, not what `lexical` makes of it.
+    let out_real = real_path(&std::path::absolute(out)?)?;
     for e in [&entry_abs, &entry_real] {
         for o in [&out_abs, &out_real] {
             if e.starts_with(o.join("snapshot")) || o.starts_with(e) {
@@ -215,14 +217,20 @@ fn real_path(path: &Path) -> io::Result<PathBuf> {
         let Some(parent) = existing.parent() else {
             return Ok(path.to_owned());
         };
-        rest.push(existing.file_name().unwrap_or_default().to_owned());
+        // `file_name` is `None` for a trailing `..`; keep it to resolve later.
+        rest.push(
+            existing
+                .components()
+                .next_back()
+                .map_or_else(Default::default, |c| c.as_os_str().to_owned()),
+        );
         existing = parent;
     }
     let mut real = existing.canonicalize()?;
     for part in rest.iter().rev() {
         real.push(part);
     }
-    Ok(real)
+    Ok(lexical(&real))
 }
 
 /// `path` with `.` and `..` resolved lexically (no symlinks followed).
@@ -286,6 +294,25 @@ mod tests {
             !entry.join("out").exists(),
             "the entry was copied into itself"
         );
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_dot_after_a_symlink_is_resolved_on_the_real_side() {
+        let work = scratch("dotdot");
+        let data = work.join("data");
+        let entry = data.join("snapshot");
+        fs::create_dir_all(&entry).unwrap();
+        fs::create_dir_all(data.join("subdir")).unwrap();
+        fs::write(entry.join("index.html"), "<p>keep me</p>").unwrap();
+        fs::create_dir_all(work.join("w")).unwrap();
+        let link = work.join("w").join("link");
+        std::os::unix::fs::symlink(data.join("subdir"), &link).unwrap();
+        // `link/..` is `data` on disk, so `link/../snapshot` is the entry,
+        // though it reads as `w/snapshot`.
+        assert!(check_entry(&entry, &link.join("..")).is_err());
+        assert!(entry.join("index.html").is_file(), "the entry was deleted");
         let _ = fs::remove_dir_all(&work);
     }
 

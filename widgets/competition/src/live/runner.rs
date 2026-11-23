@@ -326,6 +326,8 @@ struct Runner<C: Connect, K: Clock> {
     stop: bool,
     started: bool,
     link_state: Link,
+    /// Problems reported by snapshot checks running on their own threads.
+    check_notes: (Sender<String>, Receiver<String>),
 }
 
 impl<C: Connect, K: Clock> Runner<C, K> {
@@ -391,6 +393,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             stop: false,
             started: false,
             link_state: Link::Connecting,
+            check_notes: mpsc::channel(),
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
@@ -943,6 +946,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     fn poll_replies(&mut self) -> Result<(), Fail> {
+        while let Ok(note) = self.check_notes.1.try_recv() {
+            self.notice(note);
+        }
         let now = self.clock.now();
         let mut ready = Vec::new();
         let mut idx = 0;
@@ -1005,19 +1011,32 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     /// Runs the snapshot check (viewer copy, screenshots, manifest) on a
-    /// submitted entry. Problems are reported but never block the submission.
+    /// submitted entry on its own thread: it starts a browser several times,
+    /// which must not hold up the runner. Problems come back as notices.
     fn check_snapshot(&self, part: &PartId, snapshot: &Path, out: &Path) {
-        match check::inspect(snapshot, out) {
-            Ok(inspection) => {
-                let problems = inspection.problems();
-                if !problems.is_empty() {
-                    self.notice(format!(
-                        "{part} のスナップショット確認で問題: {}",
-                        problems.join(" / ")
-                    ));
+        let notes = self.check_notes.0.clone();
+        let (part, snapshot, out) = (part.clone(), snapshot.to_owned(), out.to_owned());
+        let spawned = std::thread::Builder::new()
+            .name(format!("competition-check-{part}"))
+            .spawn(move || {
+                let note = match check::inspect(&snapshot, &out) {
+                    Ok(inspection) => {
+                        let problems = inspection.problems();
+                        (!problems.is_empty()).then(|| {
+                            format!(
+                                "{part} のスナップショット確認で問題: {}",
+                                problems.join(" / ")
+                            )
+                        })
+                    }
+                    Err(e) => Some(format!("{part} のスナップショット確認に失敗しました: {e}")),
+                };
+                if let Some(note) = note {
+                    let _ = notes.send(note);
                 }
-            }
-            Err(e) => self.notice(format!("{part} のスナップショット確認に失敗しました: {e}")),
+            });
+        if let Err(e) = spawned {
+            self.notice(format!("スナップショット確認を開始できませんでした: {e}"));
         }
     }
 

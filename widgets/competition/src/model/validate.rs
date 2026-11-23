@@ -225,8 +225,14 @@ pub fn parse_judge(
             });
         }
         if !breakdown.is_empty() {
-            let sum: u32 = ev.breakdown.iter().map(|a| u32::from(a.score)).sum();
-            if sum != u32::from(ev.score) {
+            // Over the kept entries only, and wide enough for any of them.
+            let sum: u64 = ev
+                .breakdown
+                .iter()
+                .take(MAX_AXES)
+                .map(|a| u64::from(a.score))
+                .sum();
+            if sum != u64::from(ev.score) {
                 problems.push(format!(
                     "evaluations.{id}.breakdown scores add up to {sum}, not the score {}",
                     ev.score
@@ -728,6 +734,21 @@ mod tests {
             ev.amended.as_ref().map(|n| (n.from, n.by_round)),
             Some((80, 3))
         );
+    }
+
+    #[test]
+    fn a_huge_breakdown_cannot_overflow_its_sum() {
+        let s = session(Some(10));
+        let axes = vec![r#"{"axis":"a","score":65535,"max":100}"#; 65_538].join(",");
+        let raw = format!(
+            r#"{{"overview":"R1","evaluations":{{"claude":{{"score":64,"feedback":"a","breakdown":[{axes}]}},"codex":{{"score":80,"feedback":"b"}}}},"ranking":["codex","claude"]}}"#
+        );
+        let result = std::panic::catch_unwind(|| parse_judge(&raw, &s, 1));
+        let err = result
+            .expect("validation panicked")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at most 32"), "{}", &err[..err.len().min(300)]);
     }
 
     #[test]

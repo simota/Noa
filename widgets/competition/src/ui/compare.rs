@@ -203,21 +203,18 @@ pub(super) fn insert(
             }
 
             if let Some(ev) = round.outcome.as_ref().and_then(|o| o.evaluations.get(part)) {
-                if !ev.strengths.is_empty() {
-                    caption(tree, col, "評価された点");
+                for (title, text, muted) in evaluation_sections(ev) {
+                    caption(tree, col, title);
+                    let label = Label::new(text).font_size(11.5).wrap(true);
                     tree.insert(
                         Some(col),
-                        Label::new(ev.strengths.clone()).font_size(11.5).wrap(true),
+                        if muted {
+                            label.color(Role::Muted)
+                        } else {
+                            label
+                        },
                     );
                 }
-                caption(tree, col, "審判フィードバック（個別）");
-                tree.insert(
-                    Some(col),
-                    Label::new(ev.feedback.clone())
-                        .font_size(11.5)
-                        .color(Role::Muted)
-                        .wrap(true),
-                );
             }
 
             caption(tree, col, "提出レポート");
@@ -246,9 +243,60 @@ fn ranked_visible(order: Vec<PartId>, filter_part: Option<&PartId>) -> Vec<(usiz
         .collect()
 }
 
+/// The judge's evaluation of one entry as (caption, text, muted) sections.
+fn evaluation_sections(
+    ev: &competition::model::types::EntryEvaluation,
+) -> Vec<(&'static str, String, bool)> {
+    let mut sections = Vec::new();
+    if !ev.strengths.is_empty() {
+        sections.push(("評価された点", ev.strengths.clone(), false));
+    }
+    sections.push(("審判フィードバック（個別）", ev.feedback.clone(), true));
+    if !ev.evidence.is_empty() {
+        let lines: Vec<String> = ev
+            .evidence
+            .iter()
+            .map(|e| format!("{}: {}", e.basis.as_str(), e.claim))
+            .collect();
+        sections.push(("採点の根拠", lines.join("\n"), true));
+    }
+    sections
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_evaluation_shows_the_evidence_with_its_basis() {
+        use competition::model::types::{EntryEvaluation, Evidence, EvidenceBasis};
+        let ev = EntryEvaluation {
+            score: 80,
+            strengths: "s".into(),
+            feedback: "f".into(),
+            evidence: vec![
+                Evidence {
+                    claim: "index.html is 19 KB".into(),
+                    basis: EvidenceBasis::Measured,
+                },
+                Evidence {
+                    claim: "0 axe violations".into(),
+                    basis: EvidenceBasis::SelfReported,
+                },
+            ],
+            amended: None,
+            breakdown: vec![],
+        };
+        let sections = evaluation_sections(&ev);
+        let evidence = sections
+            .iter()
+            .find(|(title, _, _)| *title == "採点の根拠")
+            .map(|(_, text, _)| text.as_str());
+        assert_eq!(
+            evidence,
+            Some("measured: index.html is 19 KB\nself_reported: 0 axe violations")
+        );
+    }
 
     #[test]
     fn a_filtered_contestant_keeps_its_rank() {

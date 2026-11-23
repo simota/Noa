@@ -38,7 +38,7 @@ pub struct Preview {
 }
 
 /// What the preview inlines, for briefs and manifests.
-pub const INLINE_RULES: &str = "Inlined from the root `index.html`: `<link rel=\"stylesheet\">`, `<script src>` (deferred and module scripts move to the end of `<body>`), `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined: `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.";
+pub const INLINE_RULES: &str = "Inlined from the root `index.html`: `<link rel=\"stylesheet\">`, `<script src>` (in place; a deferred, async or module script keeps those attributes with its code as a `data:` URI), leading `@import`s in stylesheets, `src`/`href`/`poster` resources such as images, icons and fonts, and `url(...)` in stylesheets and `style` attributes, each when it is a relative path to a file of at most 8 MiB inside the entry directory. Not inlined (relative ones are pointed back at the entry with `../`): `srcset`, URLs built by scripts, `fetch`/XHR, other pages (links stay links), and absolute or remote URLs.";
 
 /// Writes the inlined preview of `snapshot_dir/index.html`. Returns `None`
 /// when the snapshot has no root `index.html`.
@@ -235,31 +235,47 @@ fn rebase(reference: &str, base: &Path) -> Option<String> {
     Some(rebased)
 }
 
-/// Inlines a stylesheet: leading `@import`s become the imported sheets
-/// (inlined in turn, under `@media` when the import names one), and every
-/// local `url(...)` becomes a data URI. `base` is the stylesheet's
-/// directory relative to the entry root.
+/// Inlines a stylesheet: the leading `@import`s (after any comments and
+/// `@charset`) become the imported sheets, inlined in turn and wrapped in
+/// `@media` when the import names one, and every local `url(...)` becomes a
+/// data URI. Imports that cannot be inlined stay imports, moved ahead of all
+/// inlined rules: a browser ignores an `@import` that follows a rule. `base`
+/// is the stylesheet's directory relative to the entry root.
 fn inline_css(css: &str, ctx: &Ctx, base: &Path) -> String {
-    inline_css_at(css, ctx, base, 0)
+    let (imports, body) = inline_css_at(css, ctx, base, 0);
+    imports.concat() + &body
 }
 
-fn inline_css_at(css: &str, ctx: &Ctx, base: &Path, depth: usize) -> String {
+/// The kept `@import` statements and the inlined rest of a stylesheet.
+fn inline_css_at(css: &str, ctx: &Ctx, base: &Path, depth: usize) -> (Vec<String>, String) {
+    let mut kept = Vec::new();
     let mut out = String::with_capacity(css.len());
     let mut rest = css;
-    // `@import` is only valid before every other rule, after `@charset`.
     loop {
         let trimmed = rest.trim_start();
-        let lead = &rest[..rest.len() - trimmed.len()];
-        let is_import = trimmed
-            .get(..7)
-            .is_some_and(|head| head.eq_ignore_ascii_case("@import"));
-        let Some(end) = is_import.then(|| trimmed.find(';')).flatten() else {
+        if trimmed.starts_with("/*") {
+            let end = trimmed.find("*/").map_or(trimmed.len(), |e| e + 2);
+            rest = &trimmed[end..];
+            continue;
+        }
+        let at_rule = |name: &str| {
+            trimmed
+                .get(..name.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(name))
+        };
+        if at_rule("@charset") {
+            // Meaningless inside an HTML page; dropped.
+            rest = statement_end(trimmed).map_or("", |end| &trimmed[end + 1..]);
+            continue;
+        }
+        if !at_rule("@import") {
+            break;
+        }
+        let Some(end) = statement_end(trimmed) else {
             break;
         };
-        let statement = &trimmed[7..end];
+        let (target, media) = split_import(&trimmed[7..end]);
         rest = &trimmed[end + 1..];
-        out.push_str(lead);
-        let (target, media) = split_import(statement);
         let inlined = (depth < MAX_IMPORT_DEPTH)
             .then(|| resolve(ctx, base, &target))
             .flatten()
@@ -274,13 +290,24 @@ fn inline_css_at(css: &str, ctx: &Ctx, base: &Path, depth: usize) -> String {
                 Some(inline_css_at(&sheet, ctx, &sheet_base, depth + 1))
             });
         match inlined {
-            Some(sheet) if media.is_empty() => out.push_str(&sheet),
-            Some(sheet) => {
-                let _ = write!(out, "@media {media} {{{sheet}}}");
+            Some((nested, sheet)) => {
+                for import in nested {
+                    // A nested import keeps the outer import's media.
+                    kept.push(if media.is_empty() {
+                        import
+                    } else {
+                        import.replacen(") ", &format!(") {media} "), 1)
+                    });
+                }
+                if media.is_empty() {
+                    out.push_str(&sheet);
+                } else {
+                    let _ = write!(out, "@media {media} {{{sheet}}}");
+                }
             }
             None => {
                 let target = rebase(&target, base).unwrap_or(target);
-                let _ = write!(out, "@import url(\"{target}\") {media};");
+                kept.push(format!("@import url(\"{target}\") {media};\n"));
             }
         }
     }
@@ -297,6 +324,7 @@ fn inline_css_at(css: &str, ctx: &Ctx, base: &Path, depth: usize) -> String {
             Some(uri) => {
                 out.push('"');
                 out.push_str(&uri);
+                out.push_str(&fragment(target));
                 out.push('"');
             }
             None => match rebase(target, base) {
@@ -311,26 +339,98 @@ fn inline_css_at(css: &str, ctx: &Ctx, base: &Path, depth: usize) -> String {
         rest = &tail[close..];
     }
     out.push_str(rest);
-    out
+    (kept, out)
+}
+
+/// The byte index of the `;` ending the CSS statement `text` starts with,
+/// skipping `;` inside quotes and parentheses (`url(...;...)`).
+fn statement_end(text: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut depth = 0usize;
+    for (i, c) in text.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => depth = depth.saturating_sub(1),
+            (None, ';') if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The target and media list of an `@import` statement's body.
 fn split_import(statement: &str) -> (String, String) {
     let s = statement.trim();
-    let (target, after) = if let Some(inner) = s.strip_prefix("url(") {
-        let close = inner.find(')').unwrap_or(inner.len());
-        (&inner[..close], inner.get(close + 1..).unwrap_or_default())
-    } else if let Some(quote) = s.chars().next().filter(|c| *c == '"' || *c == '\'') {
-        let inner = &s[1..];
-        let close = inner.find(quote).unwrap_or(inner.len());
-        (&inner[..close], inner.get(close + 1..).unwrap_or_default())
-    } else {
-        (s, "")
+    let unquote = |t: &str| -> (String, usize) {
+        match t.chars().next().filter(|c| *c == '"' || *c == '\'') {
+            Some(q) => {
+                let close = t[1..].find(q).map_or(t.len(), |c| c + 1);
+                (t[1..close.min(t.len())].to_owned(), close + 1)
+            }
+            None => {
+                let close = t.find(')').unwrap_or(t.len());
+                (t[..close].trim().to_owned(), close)
+            }
+        }
     };
-    (
-        target.trim().trim_matches(['"', '\'']).to_owned(),
-        after.trim().to_owned(),
-    )
+    let (target, after) = if let Some(inner) = s.strip_prefix("url(") {
+        let inner = inner.trim_start();
+        let (target, used) = unquote(inner);
+        let after = inner.get(used..).unwrap_or_default();
+        let after = after.find(')').map_or(after, |c| &after[c + 1..]);
+        (target, after)
+    } else {
+        let (target, used) = unquote(s);
+        (target, s.get(used..).unwrap_or_default())
+    };
+    (target, after.trim().to_owned())
+}
+
+/// `srcset` with each candidate URL rebased. Candidates are split the way
+/// browsers do: a URL runs to whitespace (so a `data:` URI keeps its commas),
+/// then descriptors run to the next comma.
+fn rebase_srcset(srcset: &str, base: &Path) -> String {
+    let mut out = String::with_capacity(srcset.len());
+    let mut rest = srcset;
+    loop {
+        let start = rest.len()
+            - rest
+                .trim_start_matches(|c: char| c.is_whitespace() || c == ',')
+                .len();
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        if rest.is_empty() {
+            break;
+        }
+        let url_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let mut url = &rest[..url_end];
+        let mut after = &rest[url_end..];
+        // `a.png,b.png`: a URL that ends in commas ends the candidate there.
+        let trailing = url.len() - url.trim_end_matches(',').len();
+        if trailing > 0 && !url.starts_with("data:") {
+            after = &rest[url_end - trailing..];
+            url = &url[..url.len() - trailing];
+        }
+        match rebase(url, base) {
+            Some(rebased) => out.push_str(&rebased),
+            None => out.push_str(url),
+        }
+        let desc_end = after.find(',').unwrap_or(after.len());
+        out.push_str(&after[..desc_end]);
+        rest = &after[desc_end..];
+    }
+    out
+}
+
+/// The `#fragment` of a reference, kept on its data URI (an SVG view).
+fn fragment(reference: &str) -> String {
+    reference
+        .find('#')
+        .map(|at| reference[at..].trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// One attribute of a start tag.
@@ -510,9 +610,6 @@ const URL_ATTRS: [&str; 3] = ["src", "poster", "href"];
 /// document's directory relative to `root`.
 fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
     let mut out = String::with_capacity(html.len());
-    // Deferred and module scripts run after parsing; inline copies go just
-    // before `</body>` so they still run once the DOM exists.
-    let mut deferred = Vec::new();
     let mut rest = html;
     while let Some(at) = rest.find('<') {
         out.push_str(&rest[..at]);
@@ -521,12 +618,6 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
             let end = rest.find("-->").map_or(rest.len(), |e| e + 3);
             out.push_str(&rest[..end]);
             rest = &rest[end..];
-            continue;
-        }
-        if rest.len() >= 6 && rest.as_bytes()[..6].eq_ignore_ascii_case(b"</body") {
-            out.extend(deferred.drain(..));
-            out.push_str("</");
-            rest = &rest[2..];
             continue;
         }
         let Some((mut tag, len)) = parse_tag(rest) else {
@@ -541,37 +632,41 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
             let close = find_ascii_ci(rest, &format!("</{name}")).unwrap_or(rest.len());
             let body = &rest[..close];
             rest = &rest[close..];
-            // A deferred or module script with `src` runs after parsing, in
-            // document order. Inlined copies run where they stand, so every
-            // such script, local or remote, moves before `</body>` without
-            // `defer`, keeping the order among them.
-            let module = tag.get("type") == Some("module");
-            let late = name == "script"
-                && !tag.has("async")
-                && (module || (tag.has("src") && tag.has("defer")));
-            let local = (name == "script")
-                .then(|| tag.get("src").and_then(|src| resolve(ctx, base, src)))
-                .flatten()
-                .and_then(|file| fs::read_to_string(file).ok());
-            if let Some(code) = local {
-                tag.remove(&["src", "defer", "async", "integrity", "crossorigin"]);
-                let inlined = format!("{}{}", tag.render(), escape_raw_text(&code, "script"));
-                if late {
-                    deferred.push(format!("{inlined}</script>"));
-                    // Skip the original end tag: the copy carries its own.
-                    if let Some(end) = rest.find('>') {
-                        rest = &rest[end + 1..];
+            // A local script stays where it is, so its timing and its order
+            // against every other script hold. A deferred, async or module
+            // one keeps those attributes with its code as a `data:` URI
+            // (inline code would run at once); a plain one is inlined.
+            if name == "script"
+                && let Some(src) = tag.get("src").map(str::to_owned)
+            {
+                let local = resolve(ctx, base, &src)
+                    .and_then(|file| Some((fs::read_to_string(&file).ok()?, file)));
+                match local {
+                    Some((code, file)) => {
+                        let late = tag.has("defer")
+                            || tag.has("async")
+                            || tag.get("type") == Some("module");
+                        if late {
+                            let Some(uri) = data_uri(&file) else {
+                                continue;
+                            };
+                            tag.set("src", uri.replacen(mime_for(&file), "text/javascript", 1));
+                            tag.remove(&["integrity"]);
+                            out.push_str(&tag.render());
+                            out.push_str(body);
+                        } else {
+                            tag.remove(&["src", "integrity", "crossorigin"]);
+                            out.push_str(&tag.render());
+                            out.push_str(&escape_raw_text(&code, "script"));
+                        }
                     }
-                } else {
-                    out.push_str(&inlined);
-                }
-                continue;
-            }
-            if late {
-                tag.remove(&["defer"]);
-                deferred.push(format!("{}{body}</script>", tag.render()));
-                if let Some(end) = rest.find('>') {
-                    rest = &rest[end + 1..];
+                    None => {
+                        if let Some(rebased) = rebase(&src, base) {
+                            tag.set("src", rebased);
+                        }
+                        out.push_str(&tag.render());
+                        out.push_str(body);
+                    }
                 }
                 continue;
             }
@@ -618,28 +713,14 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
                 .then(|| resolve(ctx, base, &value))
                 .flatten()
                 .filter(|p| !is_page(p))
-                .and_then(|p| data_uri(&p));
+                .and_then(|p| data_uri(&p))
+                .map(|uri| uri + &fragment(&value));
             if let Some(uri) = inlined.or_else(|| rebase(&value, base)) {
                 tag.set(attr, uri);
             }
         }
         if let Some(srcset) = tag.get("srcset").map(str::to_owned) {
-            let rebased: Vec<String> = srcset
-                .split(',')
-                .map(|candidate| {
-                    let candidate = candidate.trim();
-                    let (url, descriptor) = candidate
-                        .split_once(char::is_whitespace)
-                        .unwrap_or((candidate, ""));
-                    let url = rebase(url, base).unwrap_or_else(|| url.to_owned());
-                    if descriptor.is_empty() {
-                        url
-                    } else {
-                        format!("{url} {}", descriptor.trim())
-                    }
-                })
-                .collect();
-            let rebased = rebased.join(", ");
+            let rebased = rebase_srcset(&srcset, base);
             if rebased != srcset {
                 tag.set("srcset", rebased);
             }
@@ -653,7 +734,6 @@ fn inline_html(html: &str, ctx: &Ctx, base: &Path) -> String {
         out.push_str(&tag.render());
     }
     out.push_str(rest);
-    out.extend(deferred.drain(..));
     out
 }
 
@@ -718,11 +798,14 @@ mod tests {
             "page links stay links, pointed back at the entry"
         );
         assert!(html.contains("https://example.com/remote.png"));
-        // The deferred script moves to the end of <body>, after the DOM it reads.
-        let script = html.find("document.body.dataset.ok").unwrap();
-        let img = html.find("<img src=\"data:").unwrap();
-        assert!(script > img, "{html}");
-        assert!(html.find("</body>").unwrap() > script);
+        // The deferred script stays deferred, its code a data URI.
+        let code = base64(b"document.body.dataset.ok='1';");
+        assert!(
+            html.contains(&format!(
+                r#"<script src="data:text/javascript;base64,{code}" defer>"#
+            )),
+            "{html}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -818,16 +901,22 @@ mod tests {
         )
         .unwrap();
         let html = fs::read_to_string(write(&dir).unwrap().unwrap().page).unwrap();
-        let lib = html.find("https://cdn.example/lib.js").unwrap();
-        let app = html.find("useLib();").unwrap();
-        let body = html.find("<p>x</p>").unwrap();
-        // Both run after the document, the library first.
-        assert!(body < lib && lib < app, "{html}");
+        let lib = html
+            .find(r#"<script defer src="https://cdn.example/lib.js">"#)
+            .unwrap();
+        let app = html
+            .find(&format!(
+                r#"<script defer src="data:text/javascript;base64,{}">"#,
+                base64(b"useLib();")
+            ))
+            .unwrap();
+        // Both stay deferred, in their order: the library first.
+        assert!(lib < app, "{html}");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn inline_modules_keep_their_order_after_moved_external_ones() {
+    fn inline_modules_keep_their_order_with_external_ones() {
         let dir = scratch("modules");
         fs::write(dir.join("ready.js"), "globalThis.ready = true;").unwrap();
         fs::write(
@@ -836,7 +925,12 @@ mod tests {
         )
         .unwrap();
         let html = fs::read_to_string(write(&dir).unwrap().unwrap().page).unwrap();
-        let ready = html.find("globalThis.ready = true").unwrap();
+        let ready = html
+            .find(&format!(
+                "data:text/javascript;base64,{}",
+                base64(b"globalThis.ready = true;")
+            ))
+            .unwrap();
         let used = html.find("use(globalThis.ready)").unwrap();
         assert!(ready < used, "{html}");
         let _ = fs::remove_dir_all(&dir);
@@ -893,6 +987,97 @@ mod tests {
     fn a_style_attribute_without_urls_is_kept_as_written() {
         let html = r#"<p style="--q:&#x201C;&nbsp;">x</p>"#;
         assert_eq!(inline(html), html);
+    }
+
+    fn css_preview(sheet: &str, files: &[(&str, &str)]) -> (String, Vec<String>) {
+        let dir = scratch("css");
+        fs::write(
+            dir.join("index.html"),
+            r#"<link rel="stylesheet" href="style.css">"#,
+        )
+        .unwrap();
+        fs::write(dir.join("style.css"), sheet).unwrap();
+        for (name, body) in files {
+            fs::write(dir.join(name), body).unwrap();
+        }
+        let preview = write(&dir).unwrap().unwrap();
+        let html = fs::read_to_string(&preview.page).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        (html, preview.issues)
+    }
+
+    #[test]
+    fn imports_after_a_comment_or_charset_are_inlined() {
+        let (html, _) = css_preview(
+            "/* theme */ @charset \"UTF-8\";\n@import \"layout.css\";\nbody{margin:0}",
+            &[("layout.css", ".l{color:red}")],
+        );
+        assert!(html.contains(".l{color:red}"), "{html}");
+        assert!(!html.contains("@import \"layout.css\""), "{html}");
+    }
+
+    #[test]
+    fn a_semicolon_inside_an_import_url_does_not_end_it() {
+        let font =
+            "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap";
+        let (html, _) = css_preview(&format!("@import url(\"{font}\");\nbody{{margin:0}}"), &[]);
+        assert!(html.contains(font), "{html}");
+        assert!(!html.contains("500;700&display=swap\");\nbody"), "{html}");
+    }
+
+    #[test]
+    fn kept_imports_stay_ahead_of_every_inlined_rule() {
+        let (html, _) = css_preview(
+            "@import \"reset.css\";\n@import url(https://fonts.example/f.css);\nbody{margin:0}",
+            &[("reset.css", "*{box-sizing:border-box}")],
+        );
+        let remote = html.find("https://fonts.example/f.css").unwrap();
+        let reset = html.find("*{box-sizing:border-box}").unwrap();
+        assert!(remote < reset, "{html}");
+    }
+
+    #[test]
+    fn a_module_and_a_later_deferred_script_keep_their_order() {
+        let dir = scratch("module-defer");
+        fs::write(dir.join("app.js"), "init(window.ready);").unwrap();
+        fs::write(
+            dir.join("index.html"),
+            r#"<head><script type="module">window.ready=true</script><script defer src="app.js"></script></head><body><p>x</p></body>"#,
+        )
+        .unwrap();
+        let html = fs::read_to_string(write(&dir).unwrap().unwrap().page).unwrap();
+        // The deferred script must not run before the module: it stays a
+        // deferred external script (with the code as a data URI), after it.
+        let module = html.find("window.ready=true").unwrap();
+        let app = html.find(r#"defer src="data:text/javascript;base64,"#);
+        assert!(app.is_some_and(|app| module < app), "{html}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_resource_fragment_survives_inlining() {
+        let dir = scratch("fragment");
+        fs::write(dir.join("sprite.svg"), "<svg/>").unwrap();
+        fs::write(dir.join("index.html"), r#"<img src="sprite.svg#detail">"#).unwrap();
+        let html = fs::read_to_string(write(&dir).unwrap().unwrap().page).unwrap();
+        assert!(html.contains(";base64,PHN2Zy8+#detail\""), "{html}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn data_uris_in_srcset_are_left_whole() {
+        let html = r#"<img srcset="data:image/png;base64,AAAA 1x, b.png 2x">"#;
+        let out = inline(html);
+        assert!(out.contains("data:image/png;base64,AAAA 1x"), "{out}");
+        assert!(out.contains("../b.png 2x"), "{out}");
+    }
+
+    #[test]
+    fn script_sources_left_as_links_point_back_at_the_entry() {
+        let out =
+            inline(r#"<script src="missing.js"></script><script defer src="gone.js"></script>"#);
+        assert!(out.contains(r#"src="../missing.js""#), "{out}");
+        assert!(out.contains(r#"src="../gone.js""#), "{out}");
     }
 
     #[test]

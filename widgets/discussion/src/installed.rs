@@ -60,26 +60,37 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Receiver<Installed> {
 }
 
 /// The probe: prints a marked line for each agent command the login
-/// shell finds.
+/// shell finds. It ends in `exit 0`, so a POSIX shell that ran the loop
+/// exits 0 whatever it found; a shell that cannot run it (csh, fish: not
+/// POSIX) exits otherwise, and the check then cannot tell.
 fn script() -> String {
     let names = AgentKind::ALL.map(AgentKind::command).join(" ");
     format!(
-        "for c in {names}; do command -v \"$c\" >/dev/null 2>&1 && printf \"{MARKER}%s\\n\" \"$c\"; done"
+        "for c in {names}; do command -v \"$c\" >/dev/null 2>&1 && printf \"{MARKER}%s\\n\" \"$c\"; done; exit 0"
     )
 }
 
 /// Asks the user's login shell which agent commands are on its PATH.
 pub fn detect() -> Installed {
-    let shell = login_shell();
-    let mut child = match Command::new(&shell)
-        .args(["-l", "-i", "-c", &script()])
+    let mut command = Command::new(login_shell());
+    command.args(["-l", "-i", "-c", &script()]);
+    run(command)
+}
+
+/// Runs the probe `command` (stdin and stderr to null) for at most
+/// [`TIMEOUT`]: what it found if it exits 0, else why it could not tell.
+fn run(mut command: Command) -> Installed {
+    let mut child = match command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
     {
         Ok(child) => child,
-        Err(err) => return Installed::Unknown(format!("{shell} を起動できません: {err}")),
+        Err(err) => {
+            let shell = command.get_program().to_string_lossy().into_owned();
+            return Installed::Unknown(format!("{shell} を起動できません: {err}"));
+        }
     };
     let deadline = Instant::now() + TIMEOUT;
     // Read on the side, so a chatty rc file cannot fill the pipe and stall
@@ -94,9 +105,9 @@ pub fn detect() -> Installed {
     });
     let timed_out =
         || Installed::Unknown(format!("{} 秒以内に終わりませんでした", TIMEOUT.as_secs()));
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -111,6 +122,15 @@ pub fn detect() -> Installed {
                 return Installed::Unknown(err.to_string());
             }
         }
+    };
+    if !status.success() {
+        use std::os::unix::process::ExitStatusExt;
+        let how = match (status.code(), status.signal()) {
+            (Some(code), _) => format!("終了コード {code}"),
+            (None, Some(signal)) => format!("シグナル {signal}"),
+            (None, None) => status.to_string(),
+        };
+        return Installed::Unknown(format!("ログインシェルで確認できませんでした（{how}）"));
     }
     match out_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(bytes) => Installed::Found(parse(&String::from_utf8_lossy(&bytes))),
@@ -154,7 +174,7 @@ mod tests {
         assert_eq!(
             script(),
             "for c in claude codex agy; do command -v \"$c\" >/dev/null 2>&1 \
-             && printf \"noa-agent:%s\\n\" \"$c\"; done"
+             && printf \"noa-agent:%s\\n\" \"$c\"; done; exit 0"
         );
     }
 
@@ -177,6 +197,42 @@ mod tests {
         assert_eq!(
             parse(&String::from_utf8_lossy(&out.stdout)),
             [AgentKind::Codex, AgentKind::Agy]
+        );
+    }
+
+    #[test]
+    fn a_shell_that_cannot_run_the_probe_cannot_tell() {
+        // A syntax error, as a non-POSIX login shell meets the probe.
+        let mut broken = Command::new("/bin/sh");
+        broken.args(["-c", "for c in; do"]);
+        assert!(matches!(
+            run(broken),
+            Installed::Unknown(why) if why.starts_with("ログインシェルで確認できませんでした（終了コード ")
+        ));
+        assert_eq!(
+            run(Command::new("/usr/bin/false")),
+            Installed::Unknown("ログインシェルで確認できませんでした（終了コード 1）".into())
+        );
+        let mut killed = Command::new("/bin/sh");
+        killed.args(["-c", "kill -9 $$"]);
+        assert_eq!(
+            run(killed),
+            Installed::Unknown("ログインシェルで確認できませんでした（シグナル 9）".into())
+        );
+        // Csh cannot parse the probe at all, `exit 0` or not.
+        if std::path::Path::new("/bin/csh").exists() {
+            let mut csh = Command::new("/bin/csh");
+            csh.args(["-f", "-c", &script()]);
+            assert!(matches!(run(csh), Installed::Unknown(_)));
+        }
+        // A POSIX shell that finds nothing still exits 0: none installed.
+        let mut sh = Command::new("/bin/sh");
+        sh.args(["-c", &script()]).env("PATH", "/nonexistent");
+        assert_eq!(run(sh), Installed::Found(Vec::new()));
+        let mut missing = Command::new("/nonexistent/shell");
+        missing.arg("-c");
+        assert!(
+            matches!(run(missing), Installed::Unknown(why) if why.contains("を起動できません"))
         );
     }
 

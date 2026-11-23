@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use noa_core::Point;
 use noa_grid::{Cell, Terminal};
 
-use crate::sidebar::AgentKind;
+use crate::session_store::AgentKind;
 
 mod denylist;
 

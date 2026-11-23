@@ -539,7 +539,7 @@ fn emit_card_text(
         let (badge, badge_fg) = if lines.remote_unsupported {
             ("PROCESS N/A".to_string(), chrome().dim_fg)
         } else {
-            process_badge(&lines.process, card.busy)
+            process_badge(card.agent.kind, &lines.process, card.busy)
         };
         let (badge, badge_fg) = if let Some(status) = &card.agent_status {
             let detail = if status.detail.is_empty() {

@@ -244,7 +244,7 @@ impl App {
     }
 
     /// Escalate an agent session's bell to an attention request (FR-A3): a bell
-    /// from a card whose foreground process classifies as a known coding agent
+    /// from a card that identifies a known coding agent
     /// (`claude`/`codex`/`agy`/…) means it wants the user, so it becomes an
     /// `Attention` delta; a generic bell is returned unchanged. On the first
     /// escalation of an unfocused window, bounce the Dock once (FR-A5) — no OS
@@ -253,21 +253,16 @@ impl App {
         let SessionDelta::Bell { id } = delta else {
             return delta;
         };
-        let process = self
-            .session_store
-            .get(&id)
-            .and_then(|card| card.process.clone());
-        if !crate::sidebar::bell_escalates_to_attention(process.as_deref()) {
+        let Some(card) = self.session_store.get(&id) else {
+            return delta;
+        };
+        if !crate::sidebar::bell_escalates_to_attention(card.agent.kind) {
             return delta;
         }
         // Bounce the Dock only on the transition into attention for an unfocused
         // window, so a burst of bells doesn't bounce repeatedly.
         let window_id = WindowId::from(id.window_id.0);
-        let already = self
-            .session_store
-            .get(&id)
-            .is_some_and(|card| card.attention);
-        if !already && self.os_focused != Some(window_id) {
+        if !card.attention && self.os_focused != Some(window_id) {
             self.request_window_attention(window_id);
         }
         SessionDelta::Attention { id }

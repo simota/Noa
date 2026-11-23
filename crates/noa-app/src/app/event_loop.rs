@@ -1384,8 +1384,7 @@ impl App {
         let window_id = WindowId::from(id.window_id.0);
         self.os_focused != Some(window_id)
             && self.session_store.get(&id).is_some_and(|card| {
-                !card.attention
-                    && crate::sidebar::bell_escalates_to_attention(card.process.as_deref())
+                !card.attention && crate::sidebar::bell_escalates_to_attention(card.agent.kind)
             })
     }
 }

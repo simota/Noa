@@ -14,6 +14,8 @@ pub struct WorktreeGitInfo {
     pub branch: String,
     pub ahead: usize,
     pub behind: usize,
+    /// HEAD's commit; `None` on an unborn branch or when it cannot be read.
+    pub head: Option<String>,
     pub files: Vec<ChangedFile>,
     pub note: Option<String>,
 }
@@ -159,6 +161,7 @@ pub fn inspect_worktree(
         mut branch,
         ahead,
         behind,
+        head,
         files: mut status_map,
     } = parse_porcelain_v2(&status_out);
     if branch.is_empty() {
@@ -166,6 +169,8 @@ pub fn inspect_worktree(
             .map(|s| s.trim().to_owned())
             .unwrap_or_else(|| "HEAD".into());
     }
+    // The status names HEAD's commit; git is asked again only without it.
+    let head = head.unwrap_or_else(|| head_commit(top));
 
     // Only "vs main" compares against the base.
     let range = (mode == DiffMode::VsMain)
@@ -251,9 +256,17 @@ pub fn inspect_worktree(
         branch,
         ahead,
         behind,
+        head,
         files,
         note,
     })
+}
+
+/// HEAD's commit, `None` when it does not resolve (an unborn branch).
+fn head_commit(dir: &Path) -> Option<String> {
+    run_git(dir, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
 }
 
 /// `<base>...HEAD` for the "vs main" mode.
@@ -390,6 +403,7 @@ impl MergePredictions {
         &mut self,
         worktree_root: &str,
         branch: &str,
+        head: Option<&str>,
         base: Option<&BaseRef>,
     ) -> Option<Vec<String>> {
         let dir = Path::new(worktree_root);
@@ -397,9 +411,7 @@ impl MergePredictions {
         if branch == base.name {
             return None;
         }
-        let head_sha = run_git(dir, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())?;
+        let head_sha = head?.to_owned();
         let base_sha = base.sha.clone();
         if let Some(entry) = self.entries.get(worktree_root)
             && entry.base == base_sha
@@ -533,12 +545,15 @@ pub struct CommitCache {
 }
 
 impl CommitCache {
-    /// The commits of `worktree_root` against `base` (none without one).
-    pub fn commits(&mut self, worktree_root: &str, base: Option<&BaseRef>) -> Vec<CommitInfo> {
+    /// The commits of `worktree_root`, whose HEAD is at `head`, against
+    /// `base` (none without one).
+    pub fn commits(
+        &mut self,
+        worktree_root: &str,
+        head: Option<&str>,
+        base: Option<&BaseRef>,
+    ) -> Vec<CommitInfo> {
         let dir = Path::new(worktree_root);
-        let head = run_git(dir, &["rev-parse", "--verify", "--quiet", "HEAD"])
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
         let Some((base, key)) = base
             .zip(head)
             .map(|(base, head)| (base, format!("{head} {}", base.sha)))
@@ -688,6 +703,9 @@ struct PorcelainStatus {
     branch: String,
     ahead: usize,
     behind: usize,
+    /// `# branch.oid`: `Some(None)` for `(initial)` (an unborn branch),
+    /// `None` when there was no such line (the status could not be read).
+    head: Option<Option<String>>,
     files: Vec<(String, (char, char))>,
 }
 
@@ -698,10 +716,13 @@ fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
     let mut branch = String::new();
     let mut ahead = 0;
     let mut behind = 0;
+    let mut head = None;
     let mut files = Vec::new();
     let mut entries = text.split('\0');
     while let Some(entry) = entries.next() {
-        if let Some(rest) = entry.strip_prefix("# branch.head ") {
+        if let Some(oid) = entry.strip_prefix("# branch.oid ") {
+            head = Some((oid != "(initial)").then(|| oid.to_owned()));
+        } else if let Some(rest) = entry.strip_prefix("# branch.head ") {
             branch = rest.trim().to_owned();
         } else if let Some(rest) = entry.strip_prefix("# branch.ab ") {
             for part in rest.split_whitespace() {
@@ -740,6 +761,7 @@ fn parse_porcelain_v2(text: &str) -> PorcelainStatus {
         branch,
         ahead,
         behind,
+        head,
         files,
     }
 }
@@ -805,6 +827,7 @@ pub(crate) mod tests {
 u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let parsed = parse_porcelain_v2(sample);
         assert_eq!(parsed.branch, "feat/test");
+        assert_eq!(parsed.head, Some(Some("123456".to_owned())));
         assert_eq!(parsed.ahead, 2);
         assert_eq!(parsed.behind, 1);
         assert_eq!(parsed.files.len(), 5);
@@ -813,6 +836,26 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         assert_eq!(parsed.files[0], ("src/main.rs".into(), ('.', 'M')));
         assert_eq!(parsed.files[1], ("src/new.rs".into(), ('A', '.')));
         assert_eq!(parsed.files[2], ("notes.txt".into(), ('?', '?')));
+    }
+
+    #[test]
+    fn porcelain_v2_head_is_unborn_or_unknown() {
+        let unborn = parse_porcelain_v2("# branch.oid (initial)\0# branch.head trunk\0");
+        assert_eq!((unborn.branch.as_str(), unborn.head), ("trunk", Some(None)));
+        assert_eq!(parse_porcelain_v2("").head, None);
+    }
+
+    #[test]
+    fn worktree_head_is_the_commit_rev_parse_names() {
+        let repo = temp_repo("head", "main");
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::Unstaged, &mut BaseRefs::default()).unwrap();
+        assert_eq!(info.head, head_of(&repo.0));
+        assert_eq!(info.head.as_ref().map(String::len), Some(40));
+        git(&repo.0, &["checkout", "-q", "--orphan", "fresh"]);
+        let info =
+            inspect_worktree(cwd(&repo), DiffMode::Unstaged, &mut BaseRefs::default()).unwrap();
+        assert_eq!((info.branch.as_str(), info.head), ("fresh", None));
     }
 
     // ── Regression tests against real temporary repositories ─────────────────
@@ -865,6 +908,31 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
     /// The base a refresh would resolve for `dir` right now.
     fn base_of(dir: impl AsRef<Path>) -> Option<BaseRef> {
         resolve_base(dir.as_ref())
+    }
+
+    /// HEAD's commit in `dir` right now.
+    fn head_of(dir: impl AsRef<Path>) -> Option<String> {
+        head_commit(dir.as_ref())
+    }
+
+    /// What `predictions` says for `root` on `branch` against HEAD and the
+    /// base as they are now.
+    fn predict_now(
+        predictions: &mut MergePredictions,
+        root: &str,
+        branch: &str,
+    ) -> Option<Vec<String>> {
+        predictions.predict(
+            root,
+            branch,
+            head_of(root).as_deref(),
+            base_of(root).as_ref(),
+        )
+    }
+
+    /// What `cache` lists for `root` against HEAD and the base as they are now.
+    fn commits_now(cache: &mut CommitCache, root: &str) -> Vec<CommitInfo> {
+        cache.commits(root, head_of(root).as_deref(), base_of(root).as_ref())
     }
 
     /// [`branch_commits`] against the current base; none without one.
@@ -1377,14 +1445,11 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         let mut predictions = MergePredictions::default();
         let root = canonical_or_raw(&wt);
         assert_eq!(
-            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
+            predict_now(&mut predictions, &root, "orch/foo"),
             Some(vec!["old.rs".to_owned()])
         );
         // The base worktree itself has nothing to predict.
-        assert_eq!(
-            predictions.predict(cwd(&repo), "main", base_of(cwd(&repo)).as_ref()),
-            None
-        );
+        assert_eq!(predict_now(&mut predictions, cwd(&repo), "main"), None);
     }
 
     #[test]
@@ -1396,11 +1461,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         commit_file(&repo.0, "old.rs", "fn moved_on() {}\n");
         let mut predictions = MergePredictions::default();
         assert_eq!(
-            predictions.predict(
-                &canonical_or_raw(&wt),
-                "orch/foo",
-                base_of(canonical_or_raw(&wt)).as_ref()
-            ),
+            predict_now(&mut predictions, &canonical_or_raw(&wt), "orch/foo"),
             Some(Vec::new())
         );
     }
@@ -1413,31 +1474,28 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         commit_file(&wt, "old.rs", "fn theirs() {}\n");
         let root = canonical_or_raw(&wt);
         let mut predictions = MergePredictions::default();
-        let clean = predictions.predict(&root, "orch/foo", base_of(&root).as_ref());
+        let clean = predict_now(&mut predictions, &root, "orch/foo");
         assert_eq!(clean, Some(Vec::new()));
         // Uncommitted edits move neither commit: still cached.
         std::fs::write(wt.join("old.rs"), "dirty\n").unwrap();
-        assert_eq!(
-            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
-            clean
-        );
+        assert_eq!(predict_now(&mut predictions, &root, "orch/foo"), clean);
         assert_eq!(predictions.runs, 1);
         // The base moving (main commits a clashing change) recomputes it.
         commit_file(&repo.0, "old.rs", "fn ours() {}\n");
         assert_eq!(
-            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
+            predict_now(&mut predictions, &root, "orch/foo"),
             Some(vec!["old.rs".to_owned()])
         );
         assert_eq!(predictions.runs, 2);
         assert_eq!(
-            predictions.predict(&root, "orch/foo", base_of(&root).as_ref()),
+            predict_now(&mut predictions, &root, "orch/foo"),
             Some(vec!["old.rs".to_owned()])
         );
         assert_eq!(predictions.runs, 2);
         // So does HEAD moving.
         git(&wt, &["checkout", "-q", "--", "old.rs"]);
         commit_file(&wt, "more.rs", "x\n");
-        predictions.predict(&root, "orch/foo", base_of(&root).as_ref());
+        predict_now(&mut predictions, &root, "orch/foo");
         assert_eq!(predictions.runs, 3);
     }
 
@@ -1534,21 +1592,21 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs\0";
         commit_msg_file(&repo, "a.rs", "a\n", "one");
         let root = cwd(&repo);
         let mut cache = CommitCache::default();
-        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 1);
-        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 1);
+        assert_eq!(commits_now(&mut cache, root).len(), 1);
+        assert_eq!(commits_now(&mut cache, root).len(), 1);
         assert_eq!(cache.reads, 1);
         // An unstaged edit moves neither HEAD nor the base.
         std::fs::write(repo.0.join("a.rs"), "changed\n").unwrap();
-        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 1);
+        assert_eq!(commits_now(&mut cache, root).len(), 1);
         assert_eq!(cache.reads, 1);
         git(&repo.0, &["commit", "-q", "-am", "two"]);
-        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 2);
+        assert_eq!(commits_now(&mut cache, root).len(), 2);
         assert_eq!(cache.reads, 2);
         // The base moving (here: main gains a commit) changes the list too.
         git(&repo.0, &["checkout", "-q", "main"]);
         commit_msg_file(&repo, "m.rs", "m\n", "main moves");
         git(&repo.0, &["checkout", "-q", "feature"]);
-        assert_eq!(cache.commits(root, base_of(root).as_ref()).len(), 2);
+        assert_eq!(commits_now(&mut cache, root).len(), 2);
         assert_eq!(cache.reads, 3);
     }
 

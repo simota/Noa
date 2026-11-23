@@ -648,9 +648,15 @@ fn repo_data(
         .map(|(info, panes)| {
             let base = bases.get(&info.repo_root, Path::new(&info.worktree_root));
             let merge_conflicts = merges
-                .predict(&info.worktree_root, &info.branch, base.as_ref())
+                .predict(
+                    &info.worktree_root,
+                    &info.branch,
+                    info.head.as_deref(),
+                    base.as_ref(),
+                )
                 .unwrap_or_default();
-            let commits = commit_cache.commits(&info.worktree_root, base.as_ref());
+            let commits =
+                commit_cache.commits(&info.worktree_root, info.head.as_deref(), base.as_ref());
             let wt = Worktree {
                 name: info.branch.clone(),
                 cwd: info.worktree_root,

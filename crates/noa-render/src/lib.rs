@@ -26,7 +26,8 @@ pub use blit::{
     OverviewThumbnailResources,
 };
 pub use draw_plan::{
-    DrawOp, OverlayGroup, PaneId, PaneRect, build_draw_plan, build_draw_plan_with_overlays,
+    DrawOp, OverlayGroup, PaneId, PaneRect, SplitZoomFx, build_draw_plan,
+    build_draw_plan_with_overlays, build_draw_plan_with_zoom_fx,
 };
 pub use image_layer::{ImageBand, Z_BG_THRESHOLD, classify_band, resolve_image_quad};
 pub use instance::{BlendMode, CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};

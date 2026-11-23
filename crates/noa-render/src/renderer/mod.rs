@@ -1,6 +1,7 @@
 //! [`Renderer`] — owns GPU draw state, references the shared font atlas, and the
 //! instance buffers; rebuilds them from a [`crate::FrameSnapshot`] and draws.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -12,7 +13,10 @@ use noa_grid::{Cell, CursorStyle, PLACEHOLDER, Row, SearchState, Selection, Term
 use unicode_width::UnicodeWidthChar;
 
 use crate::background_image::{BackgroundImage, BackgroundImageLayer};
-use crate::draw_plan::{DrawOp, OverlayGroup, PaneId, PaneRect, build_draw_plan_with_overlays};
+use crate::draw_plan::{
+    DrawOp, OverlayGroup, PaneId, PaneRect, SplitZoomFx, build_draw_plan_with_zoom_fx,
+    zoom_fx_pane_alpha, zoom_fx_uniform_layout,
+};
 use crate::image_layer::{ImageDraw, ImageLayer};
 use crate::instance::{
     BlendMode, CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform,
@@ -143,6 +147,10 @@ struct PaneInstances {
     /// boundary between image band 1 and band 2, and above which no image ever
     /// draws (UI overlays stay on top).
     text_end: u32,
+    /// This pane's default background as a clear color, before
+    /// `background-opacity`: what the frame would clear to were this pane
+    /// the first (or only) one, as in the steady zoomed frame.
+    clear_color: [f32; 4],
 }
 
 /// Fills the scissor rect with the pass's blend constant, replacing what is
@@ -400,8 +408,15 @@ pub struct Renderer {
     /// rest of the surface is cleared fully transparent. See
     /// [`Renderer::set_backdrop_rect`].
     backdrop_rect: Option<PaneRect>,
-    /// Built on the first frame that has a `backdrop_rect`.
+    /// Built on the first frame that has a `backdrop_rect` or draws a
+    /// [`DrawOp::ZoomUnderlay`].
     backdrop_pipeline: Option<wgpu::RenderPipeline>,
+    /// The live split-zoom transition frame ([`Renderer::set_split_zoom_fx`]).
+    split_zoom_fx: Option<SplitZoomFx>,
+    /// Index of the pane bind group the window-pixel overlays (dividers,
+    /// focus ring, overlay frames) draw with: one whose `pane_alpha` is 1,
+    /// so they never fade with a split-zoom sibling. Set by `upload_uniforms`.
+    pixel_overlay_gpu: usize,
     /// Split-divider fill, re-derived from the active theme each
     /// [`Renderer::rebuild_panes`] (the overlay border tone) so the hairline
     /// tracks light/dark themes instead of staying a fixed gray.
@@ -530,6 +545,8 @@ impl Renderer {
             clear_color: [0.0, 0.0, 0.0, 1.0],
             backdrop_rect: None,
             backdrop_pipeline: None,
+            split_zoom_fx: None,
+            pixel_overlay_gpu: 0,
             divider_color: DIVIDER_RGBA,
             focus_indicator_color: FOCUS_INDICATOR_RGBA,
             overlays: Vec::new(),
@@ -666,6 +683,16 @@ impl Renderer {
 
     pub fn set_backdrop_rect(&mut self, rect: Option<PaneRect>) {
         self.backdrop_rect = rect;
+    }
+
+    /// Set the split-zoom transition frame for the following draws: `Some`
+    /// while a transition is live, `None` otherwise. The transition pane is
+    /// drawn last, cut to `clip` over a restored base and with its grid
+    /// anchored at `content_origin`; every other split pane draws at
+    /// `sibling_alpha`, without its kitty images while below 1. Ignored for
+    /// a frame whose split layout does not hold the pane.
+    pub fn set_split_zoom_fx(&mut self, fx: Option<SplitZoomFx>) {
+        self.split_zoom_fx = fx;
     }
 
     /// Mask atlas generation this renderer has uploaded.
@@ -987,6 +1014,7 @@ impl Renderer {
                     range: start..end,
                     bg_end: start + bg_len,
                     text_end: start + text_len,
+                    clear_color,
                 };
                 if let Some(previous) = self.pane_instances.get_mut(pane_index) {
                     *previous = pane_instances;
@@ -1105,18 +1133,36 @@ impl Renderer {
         zoomed: Option<PaneId>,
         force_ring: bool,
     ) {
-        let plan =
-            build_draw_plan_with_overlays(layout, &self.overlays, focused, zoomed, force_ring);
+        // A transition applies only while its pane is a split pane of this
+        // layout; otherwise the frame is the plain plan, unfaded.
+        let fx = self.split_zoom_fx.filter(|fx| {
+            layout.iter().any(|(pane, _)| *pane == fx.pane)
+                && !self
+                    .overlays
+                    .iter()
+                    .any(|group| group.panes.contains(&fx.pane))
+        });
+        let plan = build_draw_plan_with_zoom_fx(
+            layout,
+            &self.overlays,
+            focused,
+            zoomed,
+            force_ring,
+            fx.map(|fx| (fx.pane, fx.clip)),
+        );
+        // Uniforms and kitty images see the transition pane at its content
+        // origin; the plan keeps the real rect, which bounds the scissor.
+        let uniform_layout: Cow<'_, [(PaneId, PaneRect)]> = match &fx {
+            Some(fx) => Cow::Owned(zoom_fx_uniform_layout(layout, fx)),
+            None => Cow::Borrowed(layout),
+        };
         self.ensure_pane_gpu_count(device, layout.len());
-        self.upload_uniforms(queue, layout);
+        self.upload_uniforms(queue, &uniform_layout, fx.as_ref());
         self.prepare_overlay_instances(&plan);
         self.upload_instances(device, queue);
-        let image_draws = self.build_frame_image_draws(device, queue, layout);
-        let backdrop = self.backdrop_rect.and_then(|rect| {
-            let w = rect.w.min(self.viewport.w.saturating_sub(rect.x));
-            let h = rect.h.min(self.viewport.h.saturating_sub(rect.y));
-            (w > 0 && h > 0).then_some(PaneRect::new(rect.x, rect.y, w, h))
-        });
+        let image_draws = self.build_frame_image_draws(device, queue, &uniform_layout);
+        let base = FrameBase::resolve(self.backdrop_rect, self.viewport);
+        let backdrop = base.backdrop();
         // Background image: one quad below everything, resolved against the
         // area the background covers — the backdrop when there is one, the
         // whole viewport otherwise (recomputes on resize — spec AC-13/14).
@@ -1133,13 +1179,30 @@ impl Renderer {
             label: Some("noa-frame-encoder"),
         });
 
-        let background = wgpu::Color {
-            r: f64::from(self.clear_color[0]),
-            g: f64::from(self.clear_color[1]),
-            b: f64::from(self.clear_color[2]),
-            a: f64::from(self.clear_color[3]),
+        let to_wgpu = |[r, g, b, a]: [f32; 4]| wgpu::Color {
+            r: f64::from(r),
+            g: f64::from(g),
+            b: f64::from(b),
+            a: f64::from(a),
         };
-        if self.backdrop_rect.is_some() && self.backdrop_pipeline.is_none() {
+        let background = to_wgpu(self.clear_color);
+        // The underlay sits behind the transition pane's default-background
+        // cells, so it takes that pane's own background, as the steady
+        // zoomed frame (where the pane is alone) clears to; the frame's base
+        // keeps the first pane's.
+        let underlay_background = fx
+            .and_then(|fx| self.pane_instances.iter().find(|e| e.pane == fx.pane))
+            .map_or(background, |entry| {
+                to_wgpu(apply_background_opacity(
+                    entry.clear_color,
+                    self.background_opacity,
+                ))
+            });
+        let needs_backdrop_pipeline = self.backdrop_rect.is_some()
+            || plan
+                .iter()
+                .any(|op| matches!(op, DrawOp::ZoomUnderlay { .. }));
+        if needs_backdrop_pipeline && self.backdrop_pipeline.is_none() {
             self.backdrop_pipeline = Some(backdrop_pipeline(device, self.target_format));
         }
 
@@ -1151,7 +1214,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(if self.backdrop_rect.is_some() {
+                        load: wgpu::LoadOp::Clear(if base.clears_transparent() {
                             wgpu::Color::TRANSPARENT
                         } else {
                             background
@@ -1205,6 +1268,19 @@ impl Renderer {
             for op in &plan {
                 match op {
                     DrawOp::Clear => {}
+                    DrawOp::ZoomUnderlay { rect } => {
+                        let Some(pipeline) = self.backdrop_pipeline.as_ref() else {
+                            continue;
+                        };
+                        self.draw_zoom_underlay(
+                            &mut pass,
+                            pipeline,
+                            *rect,
+                            base,
+                            underlay_background,
+                            bg_image_draw.as_ref(),
+                        );
+                    }
                     DrawOp::OverlayFrame { .. } => {
                         if let Some(range) = overlay_frames.next() {
                             self.draw_pixel_overlay_range(&mut pass, range.clone());
@@ -1232,10 +1308,12 @@ impl Renderer {
                         // Interleave the pane's image quads with its cell passes
                         // in three z bands (design Step R): band 0 under the
                         // background, band 1 between background and text, band 2
-                        // over text but under the UI overlays.
+                        // over text but under the UI overlays. A fading pane
+                        // skips them: the image pipeline has no pane alpha.
+                        let opaque = zoom_fx_pane_alpha(fx.as_ref(), &self.overlays, *pane) >= 1.0;
                         let bands = image_draws
                             .iter()
-                            .find(|(id, _)| id == pane)
+                            .find(|(id, _)| id == pane && opaque)
                             .map(|(_, b)| b);
                         if let Some(b) = bands {
                             self.image_layer.draw_band(&mut pass, &b[0]);
@@ -1264,6 +1342,67 @@ impl Renderer {
         }
 
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// [`DrawOp::ZoomUnderlay`]: put back over `rect` what the frame's base
+    /// drew there before any pane, replacing what siblings drew since. The
+    /// steps come from the same [`FrameBase`] the base was drawn from (see
+    /// [`FrameBase::underlay_steps`]), except that `background` is the
+    /// transition pane's own default background rather than the frame's;
+    /// the background image is redrawn with the viewport the base used.
+    /// Ends with the full viewport set.
+    fn draw_zoom_underlay(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        rect: PaneRect,
+        base: FrameBase,
+        background: wgpu::Color,
+        bg_image_draw: Option<&crate::background_image::BgImageDraws>,
+    ) {
+        if rect.w == 0 || rect.h == 0 {
+            return;
+        }
+        let steps = base.underlay_steps(rect);
+        pass.set_pipeline(pipeline);
+        pass.set_scissor_rect(rect.x, rect.y, rect.w, rect.h);
+        pass.set_blend_constant(if steps.clear_transparent {
+            wgpu::Color::TRANSPARENT
+        } else {
+            background
+        });
+        pass.draw(0..3, 0..1);
+        if let Some(fill) = steps.fill {
+            pass.set_scissor_rect(fill.x, fill.y, fill.w, fill.h);
+            pass.set_blend_constant(background);
+            pass.draw(0..3, 0..1);
+        }
+        let Some(image) = steps.image_scissor else {
+            return;
+        };
+        pass.set_scissor_rect(image.x, image.y, image.w, image.h);
+        let backdrop = base.backdrop();
+        if let Some(backdrop) = backdrop {
+            pass.set_viewport(
+                backdrop.x as f32,
+                backdrop.y as f32,
+                backdrop.w as f32,
+                backdrop.h as f32,
+                0.0,
+                1.0,
+            );
+        }
+        self.background_image_layer.draw(pass, bg_image_draw);
+        if backdrop.is_some() {
+            pass.set_viewport(
+                0.0,
+                0.0,
+                self.viewport.w as f32,
+                self.viewport.h as f32,
+                0.0,
+                1.0,
+            );
+        }
     }
 
     /// Draw one contiguous cell-instance subrange for a pane. A no-op for an
@@ -1431,11 +1570,23 @@ impl Renderer {
         }
     }
 
-    fn upload_uniforms(&mut self, queue: &wgpu::Queue, layout: &[(PaneId, PaneRect)]) {
+    fn upload_uniforms(
+        &mut self,
+        queue: &wgpu::Queue,
+        layout: &[(PaneId, PaneRect)],
+        fx: Option<&SplitZoomFx>,
+    ) {
         let (cell_w, cell_h) = self.cell_size;
-        for (index, (_, rect)) in layout.iter().enumerate() {
+        self.pixel_overlay_gpu = 0;
+        let mut pixel_overlay_found = false;
+        for (index, (pane, rect)) in layout.iter().enumerate() {
             if index >= self.pane_gpu.len() {
                 continue;
+            }
+            let pane_alpha = zoom_fx_pane_alpha(fx, &self.overlays, *pane);
+            if pane_alpha >= 1.0 && !pixel_overlay_found {
+                self.pixel_overlay_gpu = index;
+                pixel_overlay_found = true;
             }
             let uniforms = populate_pane_uniform(PaneUniformParams {
                 pane_rect: *rect,
@@ -1447,6 +1598,7 @@ impl Renderer {
                 },
                 bg_color: self.clear_color,
                 blend_mode: self.blend_mode,
+                pane_alpha,
             });
             let gpu = &mut self.pane_gpu[index];
             let unchanged = gpu.uploaded_uniforms.as_ref().is_some_and(|uploaded| {
@@ -1516,7 +1668,7 @@ impl Renderer {
                     let end = (self.cell_instance_len + instances.len()) as u32;
                     self.focus_indicator_range = start..end;
                 }
-                DrawOp::Clear | DrawOp::PaneCells { .. } => {}
+                DrawOp::Clear | DrawOp::PaneCells { .. } | DrawOp::ZoomUnderlay { .. } => {}
             }
         }
         self.instance_changes
@@ -1534,7 +1686,7 @@ impl Renderer {
         if range.is_empty() || self.viewport.w == 0 || self.viewport.h == 0 {
             return;
         }
-        let Some(gpu) = self.pane_gpu.first() else {
+        let Some(gpu) = self.pane_gpu.get(self.pixel_overlay_gpu) else {
             return;
         };
         pass.set_pipeline(&self.cell.pipeline);
@@ -1562,6 +1714,87 @@ impl Renderer {
     #[cfg(test)]
     fn cell_instance_len_for_test(&self) -> usize {
         self.cell_instance_len
+    }
+}
+
+/// What a frame draws before any pane, decided once per frame from the
+/// backdrop rect and the target size. The base clear, the backdrop fill, the
+/// background image and every [`DrawOp::ZoomUnderlay`] all follow this one
+/// decision, so an underlay restores exactly the base's pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameBase {
+    /// No backdrop rect: the whole target is cleared to the background and
+    /// the background image spans it.
+    Opaque,
+    /// A backdrop rect, clipped to the target: transparent clear, then the
+    /// background fill and image confined to this rect.
+    Backdrop(PaneRect),
+    /// A backdrop rect lying entirely outside the target: transparent clear,
+    /// no fill; the background image spans the whole target.
+    Transparent,
+}
+
+/// How [`DrawOp::ZoomUnderlay`] replays a [`FrameBase`] over one rect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UnderlaySteps {
+    /// The rect is first overwritten with transparent (`true`) or with the
+    /// background color (`false`), as the base clear did.
+    clear_transparent: bool,
+    /// Then the background fill over this part of it (the backdrop's share).
+    fill: Option<PaneRect>,
+    /// Then the background image, scissored to this part of it.
+    image_scissor: Option<PaneRect>,
+}
+
+impl FrameBase {
+    fn resolve(backdrop_rect: Option<PaneRect>, viewport: PixelSize) -> Self {
+        let Some(rect) = backdrop_rect else {
+            return Self::Opaque;
+        };
+        let w = rect.w.min(viewport.w.saturating_sub(rect.x));
+        let h = rect.h.min(viewport.h.saturating_sub(rect.y));
+        if w > 0 && h > 0 {
+            Self::Backdrop(PaneRect::new(rect.x, rect.y, w, h))
+        } else {
+            Self::Transparent
+        }
+    }
+
+    /// The visible backdrop the fill and the background image are confined to.
+    fn backdrop(self) -> Option<PaneRect> {
+        match self {
+            Self::Backdrop(rect) => Some(rect),
+            Self::Opaque | Self::Transparent => None,
+        }
+    }
+
+    /// Whether the frame clears to transparent rather than the background.
+    fn clears_transparent(self) -> bool {
+        !matches!(self, Self::Opaque)
+    }
+
+    fn underlay_steps(self, rect: PaneRect) -> UnderlaySteps {
+        let non_empty = |r: PaneRect| (r.w > 0 && r.h > 0).then_some(r);
+        match self {
+            Self::Opaque => UnderlaySteps {
+                clear_transparent: false,
+                fill: None,
+                image_scissor: non_empty(rect),
+            },
+            Self::Backdrop(backdrop) => {
+                let inside = non_empty(rect.intersect(backdrop));
+                UnderlaySteps {
+                    clear_transparent: true,
+                    fill: inside,
+                    image_scissor: inside,
+                }
+            }
+            Self::Transparent => UnderlaySteps {
+                clear_transparent: true,
+                fill: None,
+                image_scissor: non_empty(rect),
+            },
+        }
     }
 }
 

@@ -680,6 +680,7 @@ impl App {
                 renderer,
                 split_tree: SplitTree::leaf(initial_pane),
                 zoomed: None,
+                split_zoom_anim: None,
                 focused_pane: initial_pane,
                 return_pane: initial_pane,
                 floats: crate::floating::FloatSet::default(),
@@ -700,6 +701,7 @@ impl App {
                 occluded: false,
                 background_tab: false,
                 title: "Noa".to_string(),
+                title_zoom_mark: false,
                 proxy_icon_cwd: None,
                 last_touchpad_stage: 0,
                 auto_approve_enabled,
@@ -2149,7 +2151,7 @@ impl App {
             }
             let outcome =
                 split_tree::close_pane_with_zoom(&mut state.split_tree, pane_id, state.zoomed);
-            state.zoomed = outcome.zoomed;
+            state.set_zoom_instant(outcome.zoomed);
             if outcome.close_outcome.tab_should_close {
                 tab_should_close = true;
             } else {

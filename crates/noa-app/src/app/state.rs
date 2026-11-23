@@ -288,7 +288,15 @@ pub(super) struct WindowState {
     pub(super) surface_config: wgpu::SurfaceConfiguration,
     pub(super) renderer: Renderer,
     pub(super) split_tree: SplitTree,
+    /// The logical split zoom: changes at toggle time, before any
+    /// transition finishes. Written only by `toggle_split_zoom` and
+    /// [`WindowState::set_zoom_instant`].
     pub(super) zoomed: Option<PaneId>,
+    /// The in-flight split zoom transition, if any
+    /// (`docs/specs/split-zoom-animation.md`). Read through
+    /// [`WindowState::live_split_zoom_anim`], which drops a tween whose pane
+    /// left the tree; cleared by `tick_split_zoom_anims` once it ends.
+    pub(super) split_zoom_anim: Option<split_tree::SplitZoomAnim>,
     pub(super) focused_pane: PaneId,
     /// The split pane that last held focus: where focus returns when a float
     /// closes, collapses or hides (floating-panes "復帰先ペイン"). Equals
@@ -344,6 +352,10 @@ pub(super) struct WindowState {
     /// capable of transparency.
     pub(super) created_transparent: bool,
     pub(super) title: String,
+    /// Whether the label last pushed for this tab carried the zoom mark
+    /// (`zoom_tab_title`). `title` stays the raw resolved title; this mirror
+    /// is what `refresh_window_title` compares `zoomed.is_some()` against.
+    pub(super) title_zoom_mark: bool,
     /// A user-set tab title (tab-title REQ-TTL-2/5). While `Some`, it masks
     /// the shell-driven title on the native tab label and overview tile;
     /// `Terminal.title` keeps tracking OSC 0/2 underneath so clearing the
@@ -1381,6 +1393,34 @@ pub(super) struct CursorBlinkState {
 }
 
 impl WindowState {
+    /// Change the zoom with no transition: every implicit zoom change (close,
+    /// new split, cross-tab move, re-zoom on focus, drag swap/move, float
+    /// reveal). A tween in flight is dropped; the caller's relayout then
+    /// sizes grids by the logical zoom alone.
+    pub(super) fn set_zoom_instant(&mut self, zoomed: Option<PaneId>) {
+        self.zoomed = zoomed;
+        self.split_zoom_anim = None;
+    }
+
+    /// The split zoom tween, if one is in flight for a pane still in the tree.
+    pub(super) fn live_split_zoom_anim(&self) -> Option<split_tree::SplitZoomAnim> {
+        split_tree::live_split_zoom_anim(&self.split_tree, self.split_zoom_anim)
+    }
+
+    /// The pane whose grid fills the pane area: the logical zoom, or the
+    /// pane still shrinking back from it (its grid is resized once, when the
+    /// tween ends).
+    pub(super) fn grid_zoomed(&self) -> Option<PaneId> {
+        split_tree::grid_zoomed(self.zoomed, self.live_split_zoom_anim())
+    }
+
+    /// The zoom the plain draw path uses: `None` while a tween is in flight
+    /// (every split pane draws; the renderer clips and fades), else the
+    /// logical zoom.
+    pub(super) fn draw_zoomed(&self) -> Option<PaneId> {
+        split_tree::draw_zoomed(self.zoomed, self.live_split_zoom_anim())
+    }
+
     pub(super) fn shutdown(&mut self) {
         shutdown_pane_io_threads(self.surfaces.values_mut());
     }

@@ -134,7 +134,8 @@ impl App {
         window_id: WindowId,
     ) -> Option<SplitResizeDrag> {
         let state = self.windows.get(&window_id)?;
-        if state.zoomed.is_some() {
+        // No divider is drawn while zoomed or during a zoom transition.
+        if state.zoomed.is_some() || state.live_split_zoom_anim().is_some() {
             return None;
         }
         let point = state.last_mouse_point?;
@@ -189,7 +190,7 @@ impl App {
             let cell = self.pane_cell_in(window_id, hit.id, position, metrics)?;
             return Some((hit.id, cell));
         }
-        let layout = visible_pane_ids(&state.split_tree, state.zoomed)
+        let layout = visible_pane_ids(&state.split_tree, state.draw_zoomed())
             .into_iter()
             .filter_map(|pane_id| {
                 state
@@ -198,6 +199,12 @@ impl App {
                     .map(|surface| (pane_id, surface.rect))
             })
             .collect::<Vec<_>>();
+        // During a zoom transition the pane is hit where it is visible (its
+        // clip, ahead of the siblings drawn under it).
+        let layout = match self.split_zoom_frame(window_id, Instant::now()) {
+            Some(frame) => split_tree::transition_hit_layout(&layout, &frame),
+            None => layout,
+        };
         let pane_id = match hit_test(&layout, point) {
             Some(HitTarget::Pane(pane_id)) => pane_id,
             Some(HitTarget::Divider) | None => return None,
@@ -219,16 +226,34 @@ impl App {
         metrics: noa_font::Metrics,
     ) -> Option<Point> {
         let surface = self.windows.get(&window_id)?.surfaces.get(&pane_id)?;
-        let local_x = position.x - f64::from(surface.rect.x);
-        let local_y = position.y - f64::from(surface.rect.y);
+        let rect = self.pane_mapping_rect(window_id, pane_id, surface.rect);
+        let local_x = position.x - f64::from(rect.x);
+        let local_y = position.y - f64::from(rect.y);
         Some(mouse::physical_position_to_grid_point(
             local_x,
             local_y,
             metrics.cell_w,
             metrics.cell_h,
             surface.grid_size,
-            self.pane_grid_padding(surface.rect, metrics),
+            self.pane_grid_padding(rect, metrics),
         ))
+    }
+
+    /// The rect window pixels map to `pane_id`'s grid cells through: its
+    /// `surface_rect`, except for the pane of a zoom transition, whose
+    /// full-size grid is drawn from the clip's origin (split-zoom
+    /// "Pointer"), so clicks, selection and mouse reports land on the cell
+    /// drawn under the pointer.
+    fn pane_mapping_rect(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        surface_rect: PaneRectApp,
+    ) -> PaneRectApp {
+        match self.split_zoom_frame(window_id, Instant::now()) {
+            Some(frame) => split_tree::pane_mapping_rect(pane_id, surface_rect, &frame),
+            None => surface_rect,
+        }
     }
 
     /// The DEC 1016 position of a window-relative `position` in `pane_id`:
@@ -242,10 +267,11 @@ impl App {
         metrics: noa_font::Metrics,
     ) -> Option<mouse::MousePos> {
         let surface = self.windows.get(&window_id)?.surfaces.get(&pane_id)?;
+        let rect = self.pane_mapping_rect(window_id, pane_id, surface.rect);
         Some(mouse::physical_position_to_grid_pixel(
-            position.x - f64::from(surface.rect.x),
-            position.y - f64::from(surface.rect.y),
-            self.pane_grid_padding(surface.rect, metrics),
+            position.x - f64::from(rect.x),
+            position.y - f64::from(rect.y),
+            self.pane_grid_padding(rect, metrics),
         ))
     }
 

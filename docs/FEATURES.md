@@ -38,7 +38,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 
 - **Multiple windows / native tabs**: new / close / select-by-number / cycle forward-backward
 - **Manual tab title**: Set Tab Title prompt (from the palette / Window menu). Masks shell-originated title updates (OSC 0/2) while editing; committing an empty value clears the override. Also shown on sidebar cards (an individual card rename takes priority). Preserved across session restore (equivalent to Ghostty's `prompt_surface_title`)
-- **Split tree (Splits)**: add panes left / right / up / down, max 3 panes per row/column and 9 panes overall (3x3 equivalent), directional focus movement, resizing, equalize, zoom toggle
+- **Split tree (Splits)**: add panes left / right / up / down, max 3 panes per row/column and 9 panes overall (3x3 equivalent), directional focus movement, resizing, equalize, zoom toggle (animated: clip reveal, 400 ms; instant under Reduce Motion), zoom icon in the tab title
 - **Session overview**: a monitoring dashboard that live-tiles all tabs. Switch by key or click, incremental search, quick-look zoom
 
 ## UI overlays

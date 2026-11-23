@@ -48,6 +48,23 @@ impl App {
         )
     }
 
+    /// The split zoom transition's frame for `window_id` at `now`, or `None`
+    /// when no tween is in flight. The tile and the bounds are re-read here,
+    /// so a window resize mid-tween stays correct.
+    pub(in crate::app) fn split_zoom_frame(
+        &self,
+        window_id: WindowId,
+        now: Instant,
+    ) -> Option<split_tree::ZoomFrame> {
+        let state = self.windows.get(&window_id)?;
+        let anim = state.live_split_zoom_anim()?;
+        let bounds = self.window_pane_bounds(window_id);
+        let (_, tile) = split_tree::compute_layout(&state.split_tree, bounds)
+            .into_iter()
+            .find(|(pane, _)| *pane == anim.pane())?;
+        Some(split_tree::zoom_frame(&anim, tile, bounds, now))
+    }
+
     /// The padding a pane at `rect` draws its grid with: the explicit
     /// padding balanced under `window-padding-balance`, as the renderer
     /// places it. Sizing the grid keeps the explicit padding; the cell count
@@ -131,7 +148,10 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        let mut targets = zoom_resize_targets(&state.split_tree, state.zoomed, bounds)
+        // `grid_zoomed`, not the logical zoom: a pane shrinking back from
+        // zoom keeps its full-size grid until `tick_split_zoom_anims` ends
+        // the tween, so its pty sees exactly one resize (split-zoom AC3).
+        let mut targets = zoom_resize_targets(&state.split_tree, state.grid_zoomed(), bounds)
             .into_iter()
             .map(|(pane_id, rect)| {
                 (

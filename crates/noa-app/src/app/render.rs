@@ -100,7 +100,7 @@ impl App {
             return;
         }
         let mut snapshots = Vec::new();
-        let visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
+        let visible_panes = visible_pane_ids(&state.split_tree, state.draw_zoomed());
         let now = Instant::now();
         for pane_id in visible_panes {
             let Some(surface) = state.surfaces.get_mut(&pane_id) else {
@@ -333,22 +333,29 @@ impl App {
         let Some(state) = self.windows.get_mut(&window_id) else {
             return;
         };
-        if let Some(title) = tab_title_update(&state.title, &title) {
+        // The zoom mark is a label decoration: `state.title` keeps the raw
+        // resolved title, `title_zoom_mark` mirrors what was pushed.
+        let zoomed = state.zoomed.is_some();
+        if title_push_needed(&state.title, &title, state.title_zoom_mark, zoomed) {
             // A tab behind another in a shared OS window (`linux_tabs`) owns
-            // only its tab bar label, which the front tab paints.
+            // only its tab bar label, which the front tab paints (from the
+            // raw title and `zoomed`, so only the mirrors move here).
             if state.background_tab {
                 state.title = title;
+                state.title_zoom_mark = zoomed;
                 state.window.request_redraw();
                 return;
             }
-            state.window.set_title(&title);
+            let label = zoom_tab_title(&title, zoomed);
+            state.window.set_title(&label);
             // `set_title` alone updates the titlebar but not an already-laid-out
             // native tab button (AppKit caches its label at layout time), so
             // also push the resolved title onto the NSWindowTab. Runs on the
             // main (window-owning) thread — same as every other macos_window
             // call from this handler; a no-op off macOS.
-            crate::macos_window::set_native_tab_title(&state.window, &title);
+            crate::macos_window::set_native_tab_title(&state.window, &label);
             state.title = title;
+            state.title_zoom_mark = zoomed;
         }
     }
 
@@ -424,6 +431,9 @@ impl App {
         // `draw_rebuilt_panes` call site.
         let scratch_terminal_ring = self.is_scratch_terminal_window(window_id);
         let float_draws = self.float_draws(window_id);
+        // The split zoom transition's frame (`None` when no tween is in
+        // flight), resolved before the borrows below like the floats.
+        let split_zoom_frame = self.split_zoom_frame(window_id, Instant::now());
         #[cfg(target_os = "macos")]
         let (child_exited_bars, child_exited_hovered) = self.visible_child_exited_bars(window_id);
         // Resolve the open palette's render payload up front (like the sidebar
@@ -556,7 +566,7 @@ impl App {
         // check the guard would otherwise present a stale, closed-pane
         // layout.
         let mut expected_panes: Vec<(RenderPaneId, PaneRect)> =
-            visible_pane_ids(&state.split_tree, state.zoomed)
+            visible_pane_ids(&state.split_tree, state.draw_zoomed())
                 .into_iter()
                 .filter_map(|pane_id| {
                     state
@@ -618,7 +628,9 @@ impl App {
         // terminal lock the snapshot takes (no extra lock later).
         let mut scroll_thumbs: Vec<sidebar::ScrollThumb> = Vec::new();
         let mut scroll_thumb_panes: Vec<PaneId> = Vec::new();
-        let mut visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
+        // During a zoom transition every split pane is drawn (the siblings
+        // fade, the zoomed pane is clipped), so all of them are snapshotted.
+        let mut visible_panes = visible_pane_ids(&state.split_tree, state.draw_zoomed());
         visible_panes.extend(
             float_draws
                 .iter()
@@ -627,6 +639,10 @@ impl App {
         );
         let now = Instant::now();
         for pane_id in visible_panes {
+            // A split pane's thumb is drawn unclipped, so during a zoom
+            // transition it would sit outside the clip or over a fading
+            // sibling: skipped until the transition ends.
+            let thumb_suppressed = split_zoom_frame.is_some() && !state.is_float(pane_id);
             let Some(surface) = state.surfaces.get_mut(&pane_id) else {
                 log::error!(
                     "split tree references missing pane surface: pane={}",
@@ -671,7 +687,7 @@ impl App {
                 };
                 focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, cwd);
             }
-            if term.viewport_offset() > 0 {
+            if term.viewport_offset() > 0 && !thumb_suppressed {
                 scroll_thumb_panes.push(pane_id);
                 scroll_thumbs.push(sidebar::ScrollThumb {
                     rect: render_pane_rect(surface.rect),
@@ -938,12 +954,23 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        // The zoomed pane's layout rect is already the full rect (its grid
+        // has the zoomed size); the renderer cuts it to the clip and draws
+        // its grid from the clip's origin.
+        state
+            .renderer
+            .set_split_zoom_fx(split_zoom_frame.map(|frame| noa_render::SplitZoomFx {
+                pane: render_pane_id(frame.pane),
+                clip: render_pane_rect(frame.clip),
+                content_origin: (frame.content.x, frame.content.y),
+                sibling_alpha: frame.sibling_alpha,
+            }));
         state.renderer.draw_rebuilt_panes(
             &gpu.device,
             &gpu.queue,
             &view,
             Some(render_pane_id(state.focused_pane)),
-            state.zoomed.map(render_pane_id),
+            state.draw_zoomed().map(render_pane_id),
             scratch_terminal_ring,
         );
         // Thumbs are composited after every pane, so one whose track lies
@@ -1443,6 +1470,15 @@ impl App {
         // request one more (now normal, no stash left, so a real terminal
         // read) redraw to pick it up deterministically.
         if consumed_pending_reveal_snapshot {
+            state.window.request_redraw();
+        }
+        // A running split zoom transition draws frame after frame; once it
+        // has run its length `tick_split_zoom_anims` finishes it and draws
+        // the settled frame, and nothing asks again (an idle window stops).
+        if matches!(
+            super::timers::split_zoom_tick(state.live_split_zoom_anim(), Instant::now()),
+            super::timers::SplitZoomTick::Running { .. }
+        ) {
             state.window.request_redraw();
         }
 

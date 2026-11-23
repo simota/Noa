@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::*;
+use crate::theme_settings::{SettingsRowKind, ThemeSettings};
 
 /// How often the config file's signature is re-stat'd. This poll is the one
 /// wake-up an otherwise fully idle noa keeps forever, so it is deliberately
@@ -156,6 +157,13 @@ impl App {
     }
 
     pub(in crate::app) fn reload_config_from_disk(&mut self) {
+        self.reload_config_from_disk_with_previews(None);
+    }
+
+    pub(super) fn reload_config_from_disk_with_previews(
+        &mut self,
+        previews: Option<&ThemeSettings>,
+    ) -> bool {
         let cli_overrides = self.config.cli_overrides.clone();
         let loaded = if self.config.config_default_files {
             noa_config::load_startup_config(cli_overrides.clone())
@@ -168,7 +176,7 @@ impl App {
             Ok(loaded) => loaded,
             Err(error) => {
                 log::warn!("config reload failed: {error:#}");
-                return;
+                return false;
             }
         };
         for diagnostic in diagnostics {
@@ -182,9 +190,10 @@ impl App {
         next.launch_command = self.config.launch_command.clone();
         // CLI-only as well: a reload must not flip the file-skipping mode.
         next.config_default_files = self.config.config_default_files;
-        self.apply_reloaded_config(next);
+        self.apply_reloaded_config(next, previews);
         self.config_watcher.mark_current();
         log::info!("config reloaded");
+        true
     }
 
     /// Shared by config reload and Settings preview/save/undo.
@@ -196,7 +205,7 @@ impl App {
         }
     }
 
-    fn apply_reloaded_config(&mut self, next: AppConfig) {
+    fn apply_reloaded_config(&mut self, next: AppConfig, previews: Option<&ThemeSettings>) {
         // scratch-terminal R4-e: config reload never applies to a live
         // popup (Scope: out — no live-reload path for it), so a shown
         // popup is discarded outright rather than risking stale settings.
@@ -205,7 +214,12 @@ impl App {
         let previous = self.config.clone();
         let mut applied = next;
 
-        let font_changed = previous.font != applied.font || previous.font_size != applied.font_size;
+        // A live preview can differ from both configs when a CLI override wins.
+        let previewed = |kind| previews.is_some_and(|settings| settings.row_touched(kind));
+        let font_changed = previous.font != applied.font
+            || previous.font_size != applied.font_size
+            || (previewed(SettingsRowKind::FontSize)
+                && self.runtime_font_size != applied.font_size);
         let font_applied = if font_changed {
             self.rebuild_runtime_fonts(&applied.font, applied.font_size)
         } else {
@@ -220,22 +234,16 @@ impl App {
             || previous.window_padding_y != applied.window_padding_y
             || previous.window_padding_balance != applied.window_padding_balance;
         let theme_changed = theme_inputs_changed(&previous, &applied);
-        let cursor_changed = cursor_inputs_changed(&previous, &applied);
+        let cursor_changed =
+            cursor_inputs_changed(&previous, &applied) || previewed(SettingsRowKind::CursorStyle);
         let background_image_changed = background_image_inputs_changed(&previous, &applied);
         let background_image_interval_changed =
             previous.background_image_interval_secs != applied.background_image_interval_secs;
-        let opacity_changed = previous.background_opacity != applied.background_opacity;
-        let blur_changed = previous.background_blur_radius != applied.background_blur_radius;
-        // `glassmorphism` swaps the chrome palette between its opaque and
-        // frosted variants; `apply_reloaded_theme` is the one path that
-        // re-selects that palette *and* drops the cached chrome textures
-        // painted with the old one, so route the toggle through it. This
-        // only fires for an external edit of the config file, though: the
-        // Settings panel's own toggle mirrors the new value into
-        // `self.config` at commit time (`sync_config_from_committed_live_rows`)
-        // and drives the same palette/texture/native-backdrop refresh
-        // directly from `App::commit_theme_settings`, so `previous` and
-        // `applied` already agree by the time this reload sees them.
+        let opacity_changed = previous.background_opacity != applied.background_opacity
+            || previewed(SettingsRowKind::BackgroundOpacity)
+            || previewed(SettingsRowKind::Glassmorphism);
+        let blur_changed = previous.background_blur_radius != applied.background_blur_radius
+            || previewed(SettingsRowKind::BackgroundBlurRadius);
         let glassmorphism_changed = previous.glassmorphism != applied.glassmorphism;
         let terminal_policy_changed = terminal_policy_inputs_changed(&previous, &applied);
         let sidebar_preview_changed =
@@ -613,10 +621,7 @@ impl App {
 
     /// Apply `self.config.background_opacity` to every window *completely*:
     /// the swapchain's alpha mode, the renderer, and the macOS window
-    /// background. `pub(in crate::app)` because the Settings panel's Undo
-    /// needs the same full application — it writes the reverted opacity
-    /// straight into `self.config`, so the watcher's reload-diff sees no
-    /// change and never runs this itself.
+    /// background.
     pub(in crate::app) fn apply_reloaded_background_opacity(&mut self) {
         self.apply_background_opacity_to_windows(self.config.background_opacity);
     }
@@ -639,10 +644,8 @@ impl App {
     /// The alpha mode is the part that cannot be skipped: an `Opaque`
     /// swapchain discards the alpha the renderer writes, so a preview that
     /// only moved the uniform shows nothing. That case is reachable whenever
-    /// a see-through window is currently resolved to `1.0` — exactly what
-    /// turning `glassmorphism` off does — and nothing downstream would
-    /// correct it: the commit mirrors the same value into `self.config`, so
-    /// the watcher's reload-diff then sees no change at all.
+    /// a see-through window is currently resolved to `1.0`, for example
+    /// after switching glassmorphism off.
     pub(in crate::app) fn apply_background_opacity_to_windows(&mut self, opacity: f32) {
         let opacity = self.shown_opacity(opacity);
         let overlay_window = self
@@ -688,12 +691,10 @@ impl App {
     }
 
     fn apply_reloaded_cursor_style(&mut self) {
-        self.initial_cursor_style =
-            resolve_cursor_style(self.config.cursor_style, self.config.cursor_style_blink);
-        let style = self.initial_cursor_style.unwrap_or_default();
         for state in self.windows.values() {
             for surface in state.surfaces.values() {
-                surface.terminal.lock().set_default_cursor_style(style);
+                self.config
+                    .apply_default_cursor_style(&mut surface.terminal.lock());
             }
         }
         self.reset_cursor_blink_phase();
@@ -742,24 +743,9 @@ impl App {
         self.refresh_macos_window_backgrounds_at(self.config.background_opacity);
     }
 
-    /// As [`Self::refresh_macos_window_backgrounds`], for an opacity that is
-    /// not (yet) the one in `self.config`. Two callers rely on that: the
-    /// Settings panel's live preview, which must move the native window
-    /// background with the swapchain or the two disagree until the commit
-    /// lands, and (`pub(in crate::app)`, hence) `App::commit_theme_settings`'s
-    /// `glassmorphism` commit — that mirrors the toggle straight into
-    /// `self.config` for its own immediate `chrome::select_palette` call
-    /// (needed there so the palette sees the fresh value), which leaves
-    /// `self.config.background_opacity` stale (unmirrored) and
-    /// `config_reload.rs`'s `glassmorphism_changed` diff with nothing to
-    /// react to on the watcher's next poll. `commit_theme_settings` derives
-    /// the *effective* opacity locally (`noa_config::resolved_background_opacity`,
-    /// the same rule `apply_glassmorphism_defaults` uses) and passes it here
-    /// directly, rather than through the no-arg wrapper above, so the native
-    /// background/backdrop lands on the value the reload is about to
-    /// converge on instead of flashing through the stale one.
+    /// During a Settings preview the window background tracks the live opacity.
     #[cfg(target_os = "macos")]
-    pub(in crate::app) fn refresh_macos_window_backgrounds_at(&self, opacity: f32) {
+    fn refresh_macos_window_backgrounds_at(&self, opacity: f32) {
         let opacity = self.shown_opacity(opacity);
         let Some(gpu) = self.gpu.as_ref() else {
             return;
@@ -792,7 +778,7 @@ impl App {
     fn refresh_macos_window_backgrounds(&self) {}
 
     #[cfg(not(target_os = "macos"))]
-    pub(in crate::app) fn refresh_macos_window_backgrounds_at(&self, _opacity: f32) {}
+    fn refresh_macos_window_backgrounds_at(&self, _opacity: f32) {}
 }
 
 fn theme_inputs_changed(previous: &AppConfig, next: &AppConfig) -> bool {
@@ -1034,7 +1020,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// `expedite` (focus gain / settings-panel commit) must make the very
+    /// `expedite` (focus gain) must make the very
     /// next tick stat the file instead of waiting out the slow
     /// `CONFIG_WATCH_INTERVAL`, and must only re-time the pending check —
     /// a no-change expedited tick still reports `Waiting`, not `Changed`.
@@ -1079,59 +1065,98 @@ mod tests {
         assert!(!terminal_policy_inputs_changed(&base, &image));
     }
 
-    /// Regression lock for the stale-titlebar-backdrop bug (P2): pins the
-    /// exact mechanism that makes `apply_reloaded_config`'s
-    /// `glassmorphism_changed` diff useless right after a Settings-panel
-    /// commit, so a future change can't quietly bring the bug back by
-    /// routing the toggle through this diff again instead of
-    /// `App::commit_theme_settings`'s direct `refresh_macos_window_backgrounds_at`
-    /// call.
-    ///
-    /// `theme_settings.rs`'s `sync_config_from_committed_live_rows` mirrors
-    /// a committed `glassmorphism` row straight into `self.config` (needed
-    /// so the same commit's live `chrome::select_palette` call sees the new
-    /// value immediately). That mirror *is* the bug's precondition: by the
-    /// time `ConfigWatcher` reloads the just-written file, `previous`
-    /// (`self.config`, already mirrored) and `applied` (the re-parsed file)
-    /// agree, so `glassmorphism_changed` — computed exactly like the second
-    /// half of this test — comes back `false` and `apply_reloaded_theme`
-    /// (the only caller of the native titlebar-backdrop refresh) never
-    /// runs. The first half is the sanity check this isn't vacuous: without
-    /// the mirror, the same before/after pair *would* be diffed.
     #[test]
-    fn glassmorphism_reload_diff_goes_silent_once_a_panel_commit_has_mirrored_it() {
-        let base = AppConfig::from_startup(
-            noa_config::StartupConfig::default(),
-            false,
-            noa_config::ConfigOverrides::default(),
+    fn settings_save_and_undo_resolve_runtime_and_new_pane_defaults() {
+        let path = temp_config_path("settings");
+        let original =
+            "quick-terminal-size = 50%,800px\ncursor-style = underline\ncursor-style-blink = false";
+        fs::write(&path, original).unwrap();
+        let load = || {
+            let cli = noa_config::ConfigOverrides {
+                font_size: Some(20.0),
+                ..Default::default()
+            };
+            let (startup, diagnostics) = noa_config::load_startup_config_from(
+                &path,
+                &path.with_extension("toml"),
+                cli.clone(),
+            )
+            .unwrap();
+            assert!(
+                diagnostics
+                    .iter()
+                    .all(|d| d.message.contains("glassmorphism")),
+                "{diagnostics:?}"
+            );
+            AppConfig::from_startup(startup, false, cli)
+        };
+        let before = load();
+        let updates = [
+            ("font-size", "21"),
+            ("cursor-style", "bar"),
+            ("quick-terminal-size", "0.45"),
+            ("confirm-quit", "false"),
+            ("send-selection-send-enter", "true"),
+            ("background-opacity", "0.80"),
+            ("background-blur-radius", "12"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        let undo = noa_config::write_config_updates_with_undo(&path, &updates).unwrap();
+        let saved = load();
+        let new_cursor = |config: &AppConfig| {
+            let mut term = Terminal::new(GridSize::new(10, 5));
+            config.apply_default_cursor_style(&mut term);
+            term.primary.cursor.style
+        };
+        assert!(cursor_inputs_changed(&before, &saved));
+        assert_eq!(new_cursor(&saved), CursorStyle::SteadyBar);
+        assert_eq!(saved.font_size, 20.0);
+        assert_eq!(
+            saved.quick_terminal_size.primary,
+            Some(noa_config::QuickTerminalSizeDim::Percent(45.0))
+        );
+        assert!(!saved.confirm_quit && saved.send_selection_send_enter);
+        assert_eq!(
+            (
+                saved.background_opacity,
+                saved.configured_background_opacity
+            ),
+            (0.8, 0.8)
         );
         assert_eq!(
-            base.glassmorphism,
-            noa_config::GlassLevel::Off,
-            "test assumes the documented default-off start"
+            (
+                saved.background_blur_radius,
+                saved.configured_background_blur_radius
+            ),
+            (12, 12)
         );
 
-        // An external edit of the config file: `self.config` (previous)
-        // still holds the old value when the file (applied) changes under
-        // it, so the diff fires — this is the case
-        // `glassmorphism_changed`/`apply_reloaded_theme` still legitimately
-        // serve.
-        let mut applied = base.clone();
-        applied.glassmorphism = noa_config::GlassLevel::One;
-        assert_ne!(base.glassmorphism, applied.glassmorphism);
-
-        // The panel commit's mirror collapses `previous` onto the same
-        // value before the next reload ever runs — reproducing
-        // `self.config.glassmorphism = *v` in
-        // `sync_config_from_committed_live_rows` followed by `self.config
-        // = applied` at the top of the *next* `apply_reloaded_config` call.
-        let previous_after_panel_mirror = applied.clone();
+        let glass = noa_config::write_config_updates_with_undo(
+            &path,
+            &[("glassmorphism".into(), "1".into())],
+        )
+        .unwrap();
+        let frosted = load();
+        assert_ne!(saved.glassmorphism, frosted.glassmorphism);
         assert_eq!(
-            previous_after_panel_mirror.glassmorphism, applied.glassmorphism,
-            "the panel's mirror must erase the diff — this is exactly why \
-             App::commit_theme_settings cannot rely on ConfigWatcher's reload \
-             pass and must call refresh_macos_window_backgrounds_at itself"
+            frosted.background_opacity,
+            noa_config::glass_background_opacity(frosted.glassmorphism)
         );
+        glass.restore().unwrap();
+        assert_eq!(load().background_opacity, 0.8);
+
+        undo.restore().unwrap();
+        let restored = load();
+        assert!(cursor_inputs_changed(&saved, &restored));
+        assert_eq!(new_cursor(&restored), CursorStyle::SteadyUnderline);
+        assert_eq!(restored.quick_terminal_size, before.quick_terminal_size);
+        assert_eq!(restored.confirm_quit, before.confirm_quit);
+        assert_eq!(
+            restored.send_selection_send_enter,
+            before.send_selection_send_enter
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        fs::remove_file(path).unwrap();
     }
 
     // R-9/Addendum D-1's FM-01 test clause: `scrollback-limit`,

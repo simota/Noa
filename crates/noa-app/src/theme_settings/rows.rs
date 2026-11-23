@@ -831,34 +831,12 @@ pub(crate) struct RevertValues {
     pub(crate) cursor_style: CursorShape,
     pub(crate) background_opacity: f32,
     pub(crate) background_blur_radius: u16,
-    /// The pair as *configured*, before `glassmorphism` took it over
-    /// (`noa_config::StartupConfig::configured_background_*`). Equal to the
-    /// two above whenever the toggle is off. `revert_updates` writes these,
-    /// never the effective ones — undoing must restore what the user had,
-    /// not the values the toggle derives.
+    /// Configured values for the row drafts when glassmorphism is switched off.
     pub(crate) configured_background_opacity: f32,
     pub(crate) configured_background_blur_radius: u16,
-    pub(crate) background_image: String,
-    pub(crate) background_image_opacity: f32,
-    pub(crate) background_image_position: BackgroundImagePosition,
-    pub(crate) background_image_fit: BackgroundImageFit,
-    pub(crate) background_image_repeat: bool,
-    pub(crate) background_image_interval_secs: u64,
     pub(crate) sidebar_preview_lines: usize,
     pub(crate) sidebar_width: f32,
     pub(crate) sidebar_font_size: f32,
-    pub(crate) quick_terminal_size: f32,
-    /// TSV2-1: the commit-only rows (R-8) were previously left out of this
-    /// snapshot entirely, so [`super::revert_updates`] never wrote them
-    /// back on undo — commit and undo must cover the exact same key set,
-    /// not just the "live" subset.
-    pub(crate) window_padding_x: f32,
-    pub(crate) window_padding_y: f32,
-    pub(crate) macos_titlebar_style: MacosTitlebarStyle,
-    pub(crate) glassmorphism: GlassLevel,
-    pub(crate) confirm_quit: bool,
-    pub(crate) send_selection_send_enter: bool,
-    pub(crate) file_link_editor: noa_config::FileLinkEditor,
     pub(crate) font_family: String,
 }
 
@@ -946,8 +924,7 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) background_blur_radius: u16,
     /// The pair as *configured*, before `glassmorphism` took it over
     /// (`noa_config::StartupConfig::configured_background_*`). Equal to the
-    /// two above whenever the toggle is off. Carried into the session's
-    /// `RevertValues` snapshot so Undo can restore them.
+    /// two above whenever the toggle is off. Used when editing the glass toggle.
     pub(crate) configured_background_opacity: f32,
     pub(crate) configured_background_blur_radius: u16,
     /// Whether the window this session opens over was *created* with AppKit

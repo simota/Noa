@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::parser::{Directive, parse_directives};
 
@@ -214,6 +214,139 @@ fn dominant_terminator(lines: &[(&str, &str)]) -> &'static str {
 /// (with its parent directory created) instead of being clobbered (B08,
 /// 2026-09 audit). A symlink cycle is an error rather than a replacement.
 pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Result<()> {
+    write_config_updates_with_undo(path, updates).map(|_| ())
+}
+
+/// Raw directives replaced or appended by a single settings save.
+pub struct ConfigUndo {
+    target: PathBuf,
+    keys: Vec<KeyUndo>,
+    // The writer may have supplied a terminator before appending new directives.
+    joined_last_line: Option<String>,
+    created_file: bool,
+}
+
+struct KeyUndo {
+    key: String,
+    before: Vec<String>,
+    after: Vec<String>,
+}
+
+/// Include every occurrence, since writes can replace aliases and append
+/// overrides after includes or rebuild a font-family stack.
+fn key_lines<'a>(
+    key: &str,
+    directives: &'a [Directive],
+    lines: &'a [(&str, &str)],
+) -> impl Iterator<Item = (usize, &'a str)> {
+    directives
+        .iter()
+        .filter(move |d| sets_key(&d.key, key))
+        .map(|d| {
+            let index = d.line - 1;
+            (index, lines[index].0)
+        })
+}
+
+impl ConfigUndo {
+    fn capture(
+        target: PathBuf,
+        original: Option<&str>,
+        written: &str,
+        updates: &[(String, String)],
+    ) -> Self {
+        let created_file = original.is_none();
+        let original = original.unwrap_or_default();
+        let original_lines = split_lines_preserving_terminators(original);
+        let written_lines = split_lines_preserving_terminators(written);
+        let original_directives = parse_directives(original);
+        let written_directives = parse_directives(written);
+        let mut keys = Vec::new();
+        for (key, _) in updates {
+            if keys.iter().any(|edit: &KeyUndo| edit.key == *key) {
+                continue;
+            }
+            let before = key_lines(key, &original_directives, &original_lines)
+                .map(|(_, s)| s.to_owned())
+                .collect();
+            let after = key_lines(key, &written_directives, &written_lines)
+                .map(|(_, s)| s.to_owned())
+                .collect();
+            if before != after {
+                keys.push(KeyUndo {
+                    key: key.clone(),
+                    before,
+                    after,
+                });
+            }
+        }
+        Self {
+            target,
+            keys,
+            joined_last_line: (original_lines.last().is_some_and(|(_, end)| end.is_empty())
+                && written_lines.len() > original_lines.len())
+            .then(|| written_lines[original_lines.len() - 1].0.to_owned()),
+            created_file,
+        }
+    }
+
+    /// Restore the saved directives in the current file, preserving unrelated
+    /// edits. If another writer changed a saved key, leave the file intact.
+    pub fn restore(&self) -> io::Result<()> {
+        if self.keys.is_empty() && !self.created_file {
+            return Ok(());
+        }
+        let current = fs::read_to_string(&self.target)?;
+        let directives = parse_directives(&current);
+        let lines = split_lines_preserving_terminators(&current);
+        let mut restored: Vec<_> = lines.iter().copied().map(Some).collect();
+        let mut first_append = lines.len();
+        for edit in &self.keys {
+            let occurrences: Vec<_> = key_lines(&edit.key, &directives, &lines).collect();
+            if !occurrences
+                .iter()
+                .map(|(_, line)| *line)
+                .eq(edit.after.iter().map(String::as_str))
+            {
+                return Err(io::Error::other(format!("{} changed since save", edit.key)));
+            }
+            for (occurrence, (index, _)) in occurrences.into_iter().enumerate() {
+                restored[index] = edit
+                    .before
+                    .get(occurrence)
+                    .map(|old| (old.as_str(), lines[index].1));
+                if restored[index].is_none() {
+                    first_append = first_append.min(index);
+                }
+            }
+        }
+        if first_append > 0
+            && self.joined_last_line.as_deref() == Some(lines[first_append - 1].0)
+            && restored[first_append..].iter().all(Option::is_none)
+            && let Some((_, end)) = &mut restored[first_append - 1]
+        {
+            *end = "";
+        }
+        let mut output = String::new();
+        for (line, end) in restored.into_iter().flatten() {
+            output.push_str(line);
+            output.push_str(end);
+        }
+        if self.created_file && output.is_empty() {
+            fs::remove_file(&self.target)
+        } else if current == output {
+            Ok(())
+        } else {
+            write_atomic(&self.target, &output)
+        }
+    }
+}
+
+/// Atomically write the updates and capture their inverse from the same read.
+pub fn write_config_updates_with_undo(
+    path: &Path,
+    updates: &[(String, String)],
+) -> io::Result<ConfigUndo> {
     // Every update must stay one directive. A value carrying a newline (a
     // font family name from the OS list, say) would otherwise add lines of
     // its own — `server-enable`, `server-scopes` — to the user's config.
@@ -227,15 +360,25 @@ pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Re
         ));
     }
     let original = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Ok(contents) => Some(contents),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => return Err(err),
     };
 
-    let updated = apply_updates(&original, updates);
+    let updated = apply_updates(original.as_deref().unwrap_or_default(), updates);
     let updated = repair_font_family_primaries(path, updated, updates);
 
     let target = resolve_symlinks(path)?;
+    write_atomic(&target, &updated)?;
+    Ok(ConfigUndo::capture(
+        target,
+        original.as_deref(),
+        &updated,
+        updates,
+    ))
+}
+
+fn write_atomic(target: &Path, updated: &str) -> io::Result<()> {
     let parent = target.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -250,7 +393,7 @@ pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Re
     // default. The existing file's mode (if any) is carried over before the
     // rename so a user-tightened (0600) or user-loosened (0644) config keeps
     // its permissions across a save.
-    let existing_mode = fs::metadata(&target).ok().map(|m| m.permissions());
+    let existing_mode = fs::metadata(target).ok().map(|m| m.permissions());
     let tmp = parent.join(format!(
         ".{}.{}.tmp",
         target
@@ -263,7 +406,7 @@ pub fn write_config_updates(path: &Path, updates: &[(String, String)]) -> io::Re
         if let Some(perms) = existing_mode {
             fs::set_permissions(&tmp, perms)?;
         }
-        fs::rename(&tmp, &target)
+        fs::rename(&tmp, target)
     });
     if write_result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -401,6 +544,64 @@ mod tests {
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("noa-config-writer-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn undo_preserves_later_edits_and_restores_aliases_and_included_font_stacks() {
+        let dir = unique_temp_dir("undo-includes");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        let child = dir.join("fonts.conf");
+        fs::write(&child, "font-family = Included\n").unwrap();
+        let original = "scrollback-limit=8\r\nconfig-file = fonts.conf\r\nfont-family=Old\r\nfont-family=Fallback";
+        fs::write(&path, original).unwrap();
+        let undo = write_config_updates_with_undo(
+            &path,
+            &[
+                ("font-family".into(), "New".into()),
+                ("scrollback-limit-bytes".into(), "42".into()),
+            ],
+        )
+        .unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("font-family = New"));
+        fs::write(&path, format!("# later edit\n{written}")).unwrap();
+        undo.restore().unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("# later edit\n{original}")
+        );
+        assert_eq!(
+            fs::read_to_string(child).unwrap(),
+            "font-family = Included\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn undo_of_new_file_preserves_other_writes_and_detects_conflicts() {
+        let dir = unique_temp_dir("undo-new");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        let updates = [
+            ("server-enable".into(), "true".into()),
+            ("server-port".into(), "8765".into()),
+        ];
+        let undo = write_config_updates_with_undo(&path, &updates).unwrap();
+        undo.restore().unwrap();
+        assert!(!path.exists());
+
+        let undo = write_config_updates_with_undo(&path, &updates).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        let conflicted = written.replace("8765", "9000");
+        fs::write(&path, &conflicted).unwrap();
+        assert!(undo.restore().is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), conflicted);
+
+        fs::write(&path, format!("{written}# later edit\r\n")).unwrap();
+        undo.restore().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# later edit\r\n");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

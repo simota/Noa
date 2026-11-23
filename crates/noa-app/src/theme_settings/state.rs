@@ -24,7 +24,7 @@ use super::{
 /// (R-12/AC-8/AC-23): production passes a thin closure over
 /// [`noa_config::write_config_updates`]; tests pass a spy or a
 /// failure-injecting closure.
-pub(crate) type ConfigWriteFn<'a> = dyn FnMut(&Path, &[(String, String)]) -> io::Result<()> + 'a;
+pub(crate) type ConfigWriteFn<'a, T> = dyn FnMut(&Path, &[(String, String)]) -> io::Result<T> + 'a;
 
 /// ~150ms debounce window for font-size (R-9/AC-6): a burst of ←→ presses or
 /// digit keystrokes fires once, `apply_runtime_font_size` runs on the final
@@ -306,23 +306,9 @@ impl ThemeSettings {
                     background_blur_radius: init.background_blur_radius,
                     configured_background_opacity: init.configured_background_opacity,
                     configured_background_blur_radius: init.configured_background_blur_radius,
-                    background_image: init.background_image.clone(),
-                    background_image_opacity: init.background_image_opacity,
-                    background_image_position: init.background_image_position,
-                    background_image_fit: init.background_image_fit,
-                    background_image_repeat: init.background_image_repeat,
-                    background_image_interval_secs: init.background_image_interval_secs,
                     sidebar_preview_lines: init.sidebar_preview_lines,
                     sidebar_width: init.sidebar_width,
                     sidebar_font_size: init.sidebar_font_size,
-                    quick_terminal_size: init.quick_terminal_size,
-                    window_padding_x: init.window_padding_x,
-                    window_padding_y: init.window_padding_y,
-                    macos_titlebar_style: init.macos_titlebar_style,
-                    glassmorphism: init.glassmorphism,
-                    confirm_quit: init.confirm_quit,
-                    send_selection_send_enter: init.send_selection_send_enter,
-                    file_link_editor: init.file_link_editor,
                     font_family: init.font_family.clone(),
                 },
                 [
@@ -657,6 +643,10 @@ impl ThemeSettings {
         self.selected_row
     }
 
+    pub(crate) fn row_touched(&self, kind: SettingsRowKind) -> bool {
+        self.rows[row_index(kind)].touched
+    }
+
     pub(crate) fn rows(&self) -> &[SettingsRow; SettingsRowKind::COUNT] {
         &self.rows
     }
@@ -844,11 +834,7 @@ impl ThemeSettings {
     /// reports its *effective* liveness (`OnLaunch`) for this session, not
     /// the static [`SettingsRowKind::is_live`] classification. A
     /// reload-exempt row (fix F1) reports `OnSave`, not `OnLaunch` — it has
-    /// no live-preview-while-editing path, but `App::commit_theme_settings`
-    /// (`sync_config_from_committed_live_rows`) fully applies it the moment
-    /// it's saved, unlike a genuine restart-only row (`FontFamily`/
-    /// `WindowPadding`/`MacosTitlebarStyle`), which persists to config but
-    /// changes nothing this session.
+    /// no live preview, and the config reload applies it on save.
     pub(crate) fn liveness(&self, row: SettingsRowKind) -> Liveness {
         if self.restart_reason(row) == RestartReason::OpaqueStartup {
             Liveness::OnLaunch
@@ -2377,38 +2363,23 @@ impl ThemeSettings {
     /// nothing else on `self` changes (no drafts/preview/touched-flag
     /// mutation happens anywhere in this method on the error path), so the
     /// overlay is left exactly as the user last saw it (AC-23). On success,
-    /// clears any stale error and returns the updates that were just
-    /// persisted, so `App` can derive the theme/chrome swap and commit-only
-    /// row handling from them without recomputing anything.
-    pub(crate) fn commit(
+    /// clears any stale error and returns the writer's receipt for Undo.
+    pub(crate) fn commit<T>(
         &mut self,
         config_path: &Path,
-        write: &mut ConfigWriteFn<'_>,
-    ) -> Option<Vec<(String, String)>> {
+        write: &mut ConfigWriteFn<'_, T>,
+    ) -> Option<T> {
         let updates = self.commit_updates();
         match write(config_path, &updates) {
-            Ok(()) => {
+            Ok(result) => {
                 self.commit_error = None;
-                Some(updates)
+                Some(result)
             }
             Err(err) => {
                 self.commit_error = Some(format!("Failed to save settings: {err}"));
                 None
             }
         }
-    }
-
-    /// R-31: the snapshot a just-succeeded [`Self::commit`] should hand
-    /// `App` for its Undo toast — `self.snapshot` itself (the values active
-    /// before *this whole session* started, R-16's revert target), plus the
-    /// pair context a pair-aware undo write needs to restore
-    /// `light:X,dark:Y` syntax instead of clobbering it with a bare name
-    /// (the same reason [`Self::commit_updates`] needs it). Read-only, no
-    /// side effects — unlike [`Self::revert`], which also cancels the
-    /// font-size debounce (correct for an Esc that closes the session, not
-    /// for this, called right after a *successful* commit).
-    pub(crate) fn pre_commit_snapshot(&self) -> (RevertValues, Option<ThemePairContext>) {
-        (self.snapshot.clone(), self.theme_pair.clone())
     }
 
     /// Cheap, allocation-free identity for
@@ -2476,141 +2447,6 @@ impl ThemeSettings {
     }
 }
 
-/// R-31 (AC-44): the config `key = value` pairs that restore `revert` —
-/// mirrors [`ThemeSettings::commit_updates`]'s per-field formatting, but
-/// unconditional (every field the snapshot tracks is rewritten, not just
-/// touched ones) since Undo means "go back to exactly this snapshot", not
-/// "persist an edit". `App`'s Undo path hands this straight to the *same*
-/// `write_config_updates` closure `commit_theme_settings` itself uses (R-31:
-/// no new write path) — this function is only the pure "what to write"
-/// half. An empty `revert.theme_name` (no theme was ever resolvable —
-/// FM-01's guard) omits the `theme` key entirely rather than writing an
-/// empty value.
-pub(crate) fn revert_updates(
-    revert: &RevertValues,
-    theme_pair: Option<&ThemePairContext>,
-) -> Vec<(String, String)> {
-    let mut updates = Vec::new();
-    if !revert.theme_name.is_empty() {
-        match theme_pair {
-            Some(ctx) => {
-                let (light, dark) = if ctx.active_is_light {
-                    (revert.theme_name.as_str(), ctx.dark.as_str())
-                } else {
-                    (ctx.light.as_str(), revert.theme_name.as_str())
-                };
-                updates.push(("theme".to_string(), format!("light:{light},dark:{dark}")));
-            }
-            None => updates.push(("theme".to_string(), revert.theme_name.clone())),
-        }
-    }
-    updates.push((
-        "ember-idle-after".to_string(),
-        revert.ember_idle_after_secs.to_string(),
-    ));
-    updates.push(("font-size".to_string(), format!("{}", revert.font_size)));
-    // The *configured* pair, never the effective one: while `glassmorphism`
-    // is on the effective values are derived
-    // (`noa_config::apply_glassmorphism_defaults`), so writing them back
-    // would overwrite what the user actually had — an unset key would gain
-    // `0.50 / 64`, an explicit `0.9 / 5` would be destroyed — silently
-    // changing the appearance the moment glassmorphism is turned off. With
-    // the toggle off the two are equal, so this is the same write as before.
-    updates.push((
-        "background-opacity".to_string(),
-        format!("{:.2}", revert.configured_background_opacity),
-    ));
-    updates.push((
-        "background-blur-radius".to_string(),
-        revert.configured_background_blur_radius.to_string(),
-    ));
-    updates.push((
-        "background-image".to_string(),
-        revert.background_image.clone(),
-    ));
-    updates.push((
-        "background-image-opacity".to_string(),
-        format!("{:.2}", revert.background_image_opacity),
-    ));
-    updates.push((
-        "background-image-position".to_string(),
-        background_image_position_value(revert.background_image_position).to_string(),
-    ));
-    updates.push((
-        "background-image-fit".to_string(),
-        background_image_fit_value(revert.background_image_fit).to_string(),
-    ));
-    updates.push((
-        "background-image-repeat".to_string(),
-        revert.background_image_repeat.to_string(),
-    ));
-    updates.push((
-        "background-image-interval".to_string(),
-        revert.background_image_interval_secs.to_string(),
-    ));
-    updates.push((
-        "cursor-style".to_string(),
-        cursor_shape_config_value(revert.cursor_style).to_string(),
-    ));
-    updates.push((
-        "sidebar-preview-lines".to_string(),
-        revert.sidebar_preview_lines.to_string(),
-    ));
-    updates.push((
-        "sidebar-width".to_string(),
-        format!("{}", revert.sidebar_width),
-    ));
-    updates.push((
-        "sidebar-font-size".to_string(),
-        format!("{}", revert.sidebar_font_size),
-    ));
-    updates.push((
-        "quick-terminal-size".to_string(),
-        format!("{:.2}", revert.quick_terminal_size),
-    ));
-    // TSV2-1: the commit-only rows (R-8) must revert too — `commit_updates`
-    // writes them whenever `touched`, so an undo that skips them can leave
-    // the file at a value the user never asked to keep.
-    updates.push((
-        "window-padding-x".to_string(),
-        format!("{}", revert.window_padding_x),
-    ));
-    updates.push((
-        "window-padding-y".to_string(),
-        format!("{}", revert.window_padding_y),
-    ));
-    updates.push((
-        "macos-titlebar-style".to_string(),
-        macos_titlebar_style_config_value(revert.macos_titlebar_style).to_string(),
-    ));
-    updates.push((
-        "glassmorphism".to_string(),
-        revert.glassmorphism.to_string(),
-    ));
-    updates.push(("confirm-quit".to_string(), revert.confirm_quit.to_string()));
-    updates.push((
-        "file-link-editor".to_string(),
-        revert.file_link_editor.as_str().to_string(),
-    ));
-    updates.push((
-        "send-selection-send-enter".to_string(),
-        revert.send_selection_send_enter.to_string(),
-    ));
-    updates.push(("font-family".to_string(), revert.font_family.clone()));
-    updates
-}
-
-/// Fix F1: the non-live rows with no live-preview-while-editing path but a
-/// full runtime apply the moment they're saved (`Enter` →
-/// `App::commit_theme_settings`'s `sync_config_from_committed_live_rows`,
-/// which mirrors every one of these into `self.config`/re-applies it
-/// immediately) — distinct from a genuine restart-only row (`FontFamily`/
-/// `WindowPadding`/`MacosTitlebarStyle`, deliberately excluded from that
-/// same mirroring function, which persists to config but changes nothing
-/// this session). Shared by [`ThemeSettings::restart_reason`] (always
-/// `None` here — nothing to explain waiting on a restart) and
-/// [`ThemeSettings::liveness`] (badges these `OnSave`, not `OnLaunch`) so
-/// the two lists can never drift apart.
 /// Normalize a typed `scratch-terminal-key` value the same way
 /// `noa-config`'s parser does for the config-file key (and `sidebar-hotkey`/
 /// `quick-terminal-hotkey` before it): `none`/`off`/`false` (trimmed,

@@ -184,9 +184,6 @@ pub struct App {
     /// Grid padding derived once from `window-padding-x/y`, applied to every
     /// pane's geometry.
     padding: GridPadding,
-    /// Initial cursor style from `cursor-style` / `cursor-style-blink`, applied
-    /// to each terminal at creation. `None` keeps the terminal default.
-    initial_cursor_style: Option<CursorStyle>,
     /// Static or directory-backed `background-image` runtime. Static mode keeps
     /// the existing one decoded PNG; slideshow mode owns the directory snapshot
     /// and the current decoded image.
@@ -817,8 +814,6 @@ impl App {
         startup_tasks: StartupTasks,
     ) -> Self {
         let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
-        let initial_cursor_style =
-            resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
         let background_image = load_background_image_runtime(&config);
         let (mut keybinds, keybind_diagnostics) =
             KeybindEngine::from_config(&config.keybinds, config.sidebar_hotkey.as_deref());
@@ -874,7 +869,6 @@ impl App {
             // `theme_appearance` pair happens after that point.
             system_appearance: winit::window::Theme::Light,
             padding,
-            initial_cursor_style,
             background_image,
             live_wallpaper_deadline: None,
             live_wallpaper_transition: None,

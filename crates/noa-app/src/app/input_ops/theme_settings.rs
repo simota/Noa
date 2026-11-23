@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::PathBuf;
 
 use super::super::*;
 use super::ActiveOverlay;
 use crate::theme_settings::{
-    RowDraft, RowEffect, SettingsRow, SettingsRowKind, ThemePairContext, ThemeSettings,
-    ThemeSettingsCarryover, ThemeSettingsInit, ThemeSettingsMode, TokenCopyStatus,
+    RowDraft, RowEffect, SettingsRowKind, ThemePairContext, ThemeSettings, ThemeSettingsCarryover,
+    ThemeSettingsInit, ThemeSettingsMode, TokenCopyStatus,
 };
 
 /// Enter's routing decision (Addendum D-3/FM-02): while R-5 search owns the
@@ -64,19 +65,6 @@ fn theme_settings_backspace_action(cmd_held: bool) -> ThemeSettingsBackspaceActi
         ThemeSettingsBackspaceAction::Reset
     } else {
         ThemeSettingsBackspaceAction::TextDelete
-    }
-}
-
-fn cursor_shape_of(style: CursorStyle) -> noa_config::CursorShape {
-    match style {
-        CursorStyle::BlinkingBlock | CursorStyle::SteadyBlock => noa_config::CursorShape::Block,
-        CursorStyle::BlinkingBar | CursorStyle::SteadyBar => noa_config::CursorShape::Bar,
-        CursorStyle::BlinkingUnderline | CursorStyle::SteadyUnderline => {
-            noa_config::CursorShape::Underline
-        }
-        CursorStyle::BlinkingBlockHollow | CursorStyle::SteadyBlockHollow => {
-            noa_config::CursorShape::BlockHollow
-        }
     }
 }
 
@@ -141,8 +129,7 @@ impl App {
         opened_at: Instant,
     ) {
         // FM-08: a later reopen (fresh open *or* Tab) invalidates any
-        // pending Undo toast — see `UndoPayload`'s doc comment for why this
-        // single clear is enough to satisfy the whole guard.
+        // pending Undo toast from the previous session.
         if let Some(state) = self.windows.get_mut(&window_id)
             && matches!(
                 state.resize_overlay.as_ref().map(|toast| &toast.kind),
@@ -176,8 +163,8 @@ impl App {
                 dark: pair.dark.clone(),
             });
         let cursor_style = self
-            .initial_cursor_style
-            .map(cursor_shape_of)
+            .config
+            .cursor_style
             .unwrap_or(noa_config::CursorShape::Block);
         let font_family = self
             .config
@@ -764,25 +751,7 @@ impl App {
         self.request_window_redraw(session.window_id);
     }
 
-    /// Enter (R-12): the theme-settings-ui commit sequence. This is the one
-    /// function the whole increment is about — every step below runs
-    /// synchronously in this call, so no redraw can land between a
-    /// successful config write and the in-memory swap that follows it
-    /// (AC-10: no `await` point exists in this function or anything it
-    /// calls, and `session` stays a local owned value for the whole body —
-    /// never borrowed back out of `self` — precisely so nothing here can
-    /// yield to the event loop mid-sequence).
-    ///
-    /// Order (R-12): (1) build the touched-only update list and write it —
-    /// the only step that can fail; (2) on failure, put the overlay session
-    /// back untouched (drafts/preview survive) with its error flag set, and
-    /// stop (AC-23); (3) on success, promote whichever theme is currently
-    /// active (preview if one is set, else the untouched base) into
-    /// `gpu.theme`, swap the chrome palette + reset its baked textures
-    /// (R-13), finalize any pending font-size debounce through the same
-    /// runtime path a real debounce-fire uses (R-9), and close the overlay;
-    /// (4) redraw every window (R-18/AC-24) — a background tab must not sit
-    /// on stale chrome after another window's overlay commits.
+    /// Persist touched settings and apply the resolved file before closing the overlay.
     pub(in crate::app) fn commit_theme_settings(&mut self) {
         let Some(mut session) = self.theme_settings.take() else {
             return;
@@ -797,12 +766,10 @@ impl App {
             return;
         };
 
-        let mut writer = |path: &Path, updates: &[(String, String)]| {
-            noa_config::write_config_updates(path, updates)
-        };
-        let Some(updates) =
-            std::sync::Arc::make_mut(&mut session.state).commit(&config_path, &mut writer)
-        else {
+        let Some(undo) = std::sync::Arc::make_mut(&mut session.state).commit(
+            &config_path,
+            &mut noa_config::write_config_updates_with_undo,
+        ) else {
             // AC-23: the write failed. `commit` already recorded the
             // display error and touched nothing else on `session.state` —
             // put the overlay back exactly as it was (still open,
@@ -813,12 +780,7 @@ impl App {
             return;
         };
 
-        // R-31: snapshot the Undo toast's payload before anything else
-        // below can consume `session` — the pre-commit values/pair context
-        // (`ThemeSettings::pre_commit_snapshot` is read-only, no side
-        // effects) and the ux.md §9 microcopy, which differs by mode.
-        let (pre_commit_revert, pre_commit_theme_pair) = session.state.pre_commit_snapshot();
-        let undo_toast_text = match session.state.mode() {
+        let mut undo_toast_text = match session.state.mode() {
             ThemeSettingsMode::Theme => {
                 let name = session.state.highlighted_theme_name().unwrap_or("");
                 format!("Theme set to \"{name}\" \u{b7} \u{2318}Z to undo")
@@ -826,114 +788,16 @@ impl App {
             ThemeSettingsMode::Settings => "Settings saved \u{b7} \u{2318}Z to undo".to_string(),
         };
 
-        // The write already landed on disk; everything from here is an
-        // in-memory swap that cannot itself fail, so there is no reachable
-        // state where only one half of the commit applied.
-        //
-        // The OnSave rows (scrollback-limit etc.) are applied by the config
-        // watcher's reload-diff pass picking up the write above; its idle
-        // poll is slow, so expedite it — the next `about_to_wait` pass
-        // reloads immediately instead of the user waiting out the interval.
-        self.expedite_config_watch();
-        self.sync_config_from_committed_live_rows(session.state.rows());
-        let glassmorphism = self.config.glassmorphism;
         if let Some(gpu) = self.gpu.as_mut() {
-            let new_theme = active_theme(&gpu.theme, &gpu.preview_theme).clone();
-            gpu.theme = new_theme;
             gpu.preview_theme = None;
-            crate::chrome::select_palette(&gpu.theme, glassmorphism);
-            gpu.chrome_textures.reset();
         }
-        // `glassmorphism` has no continuous live preview (unlike
-        // `background-opacity`/`-blur-radius`, which are already applied to
-        // every window frame-by-frame as the user adjusts them) and its own
-        // `config_reload.rs` reload-diff (`glassmorphism_changed`) never
-        // fires for this commit — the mirror two lines up already moved
-        // `self.config.glassmorphism` to the new value, for
-        // `select_palette` above, so `previous == applied` by the time the
-        // watcher reloads the just-written file. Drive the one remaining
-        // piece `apply_reloaded_theme` would otherwise have done — the
-        // native macOS titlebar backdrop — directly, now that `gpu.theme`
-        // and the chrome palette/textures above already reflect the new
-        // value. Idempotent (recomputes install-vs-remove from current
-        // state) and cheap, so unconditional here is simpler than gating it
-        // on the `Glassmorphism` row specifically having been touched.
-        //
-        // Deliberately *not* the no-arg `refresh_macos_window_backgrounds()`
-        // wrapper: that reads `self.config.background_opacity` as-is, but
-        // this commit never mirrors that field for a glass-only toggle (only
-        // `BackgroundOpacity`-row edits do, and `snap_glass_managed_rows`
-        // keeps that row untouched while glass is on) — it stays at its
-        // pre-toggle value until the reload re-derives it from the file.
-        // `noa_config::resolved_background_opacity` reproduces that
-        // derivation (`apply_glassmorphism_defaults`'s exact rule) locally
-        // so the native backdrop/background color land on the value the
-        // reload is about to converge on anyway, instead of flashing
-        // through whatever the pre-toggle opacity happened to be — visible
-        // whenever the configured opacity isn't already
-        // `noa_config::GLASS_BACKGROUND_OPACITY` (0.50).
-        //
-        // `background-blur-radius` needs no equivalent call here: unlike
-        // `glassmorphism`, it is never mirrored into `self.config` by this
-        // commit (there is no live-reader forcing it, the way
-        // `select_palette` above forces the opacity mirror), so
-        // `config_reload.rs`'s `blur_changed`/`opacity_changed` diff stays
-        // intact and `apply_reloaded_background_blur` still fires on the
-        // very next (expedited) reload tick, exactly as it did before this
-        // fix — no gap was introduced.
-        let effective_background_opacity = noa_config::resolved_background_opacity(
-            self.config.glassmorphism,
-            self.config.configured_background_opacity,
-        );
-        self.refresh_macos_window_backgrounds_at(effective_background_opacity);
-        if updates.iter().any(|(key, _)| key == "theme") {
-            // R-34/ADR-4 in-memory counterpart: a pair config's committed
-            // `updates` value is the whole `"light:X,dark:Y"` string (not a
-            // bare theme name — `noa_theme::resolve` couldn't look it up),
-            // so mirroring it into `self.config.theme` verbatim would both
-            // corrupt that field (its contract is a bare name) and, worse,
-            // leave `self.config.theme_appearance` stale — the very field
-            // `resolve_current_theme`/`effective_theme_name` actually read
-            // for a pair config, silently reverting a later reopen back to
-            // the pre-commit active theme. Update the correct field instead,
-            // from the *resolved* new name plus the pair context captured
-            // at open (`pre_commit_theme_pair`), not by reparsing the
-            // written string.
-            match &pre_commit_theme_pair {
-                Some(ctx) => {
-                    let new_name = session
-                        .state
-                        .highlighted_theme_name()
-                        .unwrap_or_default()
-                        .to_string();
-                    let (light, dark) = if ctx.active_is_light {
-                        (new_name, ctx.dark.clone())
-                    } else {
-                        (ctx.light.clone(), new_name)
-                    };
-                    self.config.theme_appearance =
-                        Some(noa_config::ThemeAppearancePair { light, dark });
-                }
-                None => {
-                    if let Some(name) = updates.iter().find(|(key, _)| key == "theme") {
-                        self.config.theme = Some(name.1.clone());
-                    }
-                }
-            }
+        if !self.reload_config_from_disk_with_previews(Some(&session.state)) {
+            // The file was saved, but its settings could not be resolved.
+            // Discard the live preview while keeping the file edit undoable.
+            self.theme_settings = Some(session);
+            self.close_theme_settings(true);
+            undo_toast_text = "Settings saved; reload failed · ⌘Z to undo".to_string();
         }
-        // Font-size may still have an unfired debounce (Enter pressed within
-        // the ~150ms window after the last ←→/digit edit) — finalize the
-        // draft's value live now through the same path the debounce timer
-        // itself would have used. A no-op if the value already matches.
-        if let RowDraft::FontSize(size) = session.state.rows()[0].draft {
-            self.apply_runtime_font_size(window_id, size);
-        }
-        // font-family / window-padding / macos-titlebar-style have no
-        // existing runtime-apply path cheap enough to add in this increment
-        // — they are persist-only here (the write above already landed) and
-        // take effect on the next launch, the same deferred pattern R-11
-        // already uses for opaque-startup opacity/blur. Deliberate deviation,
-        // recorded for the acceptance check rather than silently dropped.
 
         // R-31: the Undo toast — always shown on a successful commit
         // (spec's literal "Enter確定成功直後に...表示する", regardless of
@@ -946,31 +810,16 @@ impl App {
             state.resize_overlay = Some(Toast {
                 text: undo_toast_text,
                 until: Instant::now() + UNDO_TOAST_DURATION,
-                kind: ToastKind::Undo(Box::new(UndoPayload {
-                    revert: pre_commit_revert,
-                    theme_pair: pre_commit_theme_pair,
-                })),
+                kind: ToastKind::Undo(undo),
             });
         }
 
         for id in commit_redraw_targets(&self.windows) {
             self.request_window_redraw(id);
         }
-        // `session` (never put back into `self.theme_settings`) is dropped
-        // here — the overlay is closed.
     }
 
-    /// ⌘Z (R-31) — effective only once the overlay itself has closed (while
-    /// open, every key including this one is consumed by
-    /// `handle_theme_settings_key` instead, so the two can never race).
-    /// Re-commits the pending Undo toast's pre-commit snapshot through the
-    /// *same* `write_config_updates` call `commit_theme_settings` itself
-    /// uses (R-31: no new write path — [`crate::theme_settings::revert_updates`]
-    /// is only the pure "what to write" half), mirrors the same in-memory
-    /// swap, then clears the toast so a repeat press can't fire twice.
-    /// `false` (a silent no-op) when no Undo toast is currently showing for
-    /// `window_id`, or it already expired — "the toast is gone" *is* the
-    /// whole UI for "the undo window has closed" (FM-08, no separate modal).
+    /// Restore the active toast's edits and synchronously apply the resolved config.
     pub(in crate::app) fn undo_theme_settings_commit(&mut self, window_id: WindowId) -> bool {
         let now = Instant::now();
         let Some(state) = self.windows.get_mut(&window_id) else {
@@ -991,271 +840,17 @@ impl App {
             unreachable!("is_live_undo_toast just confirmed this shape");
         };
 
-        let Some(config_path) = noa_config::default_config_path() else {
-            return false;
-        };
-        let updates =
-            crate::theme_settings::revert_updates(&payload.revert, payload.theme_pair.as_ref());
-        if let Err(err) = noa_config::write_config_updates(&config_path, &updates) {
+        if let Err(err) = payload.restore() {
             log::warn!("failed to undo theme-settings commit: {err}");
-            return false;
+            self.show_notice_toast(format!("Could not undo settings: {err}"));
+            return true;
         }
-        // Same as the commit path: let the watcher's reload-diff pick the
-        // reverted write up on the very next pass, not an interval later.
-        self.expedite_config_watch();
-
-        let overrides = self.theme_overrides();
-        let reverted_theme_name =
-            (!payload.revert.theme_name.is_empty()).then(|| payload.revert.theme_name.clone());
-        // The *reverted* value, not `self.config.glassmorphism`: the commit
-        // has already been applied to `self.config`, and the field is only
-        // restored further down (`sync_reverted_confirm_quit_and_...`).
-        // Selecting from the committed value would re-install the palette
-        // this undo exists to drop — and nothing downstream would correct
-        // it: by the time the watcher reloads, file and memory agree, so its
-        // reload-diff sees no `glassmorphism` change and never re-selects.
-        // The chrome and overlay alphas would stay post-commit for good.
-        let glassmorphism = payload.revert.glassmorphism;
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.theme = crate::theme::resolve_theme_with_overrides(
-                reverted_theme_name.as_deref(),
-                &overrides,
-            );
-            gpu.preview_theme = None;
-            crate::chrome::select_palette(&gpu.theme, glassmorphism);
-            gpu.chrome_textures.reset();
-        }
-        match &payload.theme_pair {
-            Some(ctx) => {
-                self.config.theme_appearance = Some(noa_config::ThemeAppearancePair {
-                    light: ctx.light.clone(),
-                    dark: ctx.dark.clone(),
-                });
-            }
-            None => {
-                if let Some(name) = &reverted_theme_name {
-                    self.config.theme = Some(name.clone());
-                }
-            }
-        }
-        self.config.font_size = payload.revert.font_size;
-        self.config.file_link_editor = payload.revert.file_link_editor;
-        self.config.background_opacity = payload.revert.background_opacity;
-        self.config.background_blur_radius = payload.revert.background_blur_radius;
-        // The `configured_*` twins too, symmetrically with the commit path's
-        // `mirror_committed_background_*`: those move the twin with the
-        // effective value, so an undo that restored only the effective one
-        // would leave the pair disagreeing until the next reload — and
-        // `commit_theme_settings` derives the effective opacity from the
-        // twin (`noa_config::resolved_background_opacity`), so a glass
-        // toggle in that window would resolve against the undone value.
-        self.config.configured_background_opacity = payload.revert.configured_background_opacity;
-        self.config.configured_background_blur_radius =
-            payload.revert.configured_background_blur_radius;
-        self.config.background_image = (!payload.revert.background_image.is_empty())
-            .then(|| PathBuf::from(&payload.revert.background_image));
-        self.config.background_image_opacity = payload.revert.background_image_opacity;
-        self.config.background_image_position = payload.revert.background_image_position;
-        self.config.background_image_fit = payload.revert.background_image_fit;
-        self.config.background_image_repeat = payload.revert.background_image_repeat;
-        self.config.background_image_interval_secs = payload.revert.background_image_interval_secs;
-        self.apply_ember_idle_after(payload.revert.ember_idle_after_secs);
-        self.config.cursor_style = Some(payload.revert.cursor_style);
-        sync_reverted_confirm_quit_and_quick_terminal_size(&mut self.config, &payload.revert);
-        self.apply_runtime_font_size(window_id, payload.revert.font_size);
-        self.apply_live_cursor_style(payload.revert.cursor_style);
-        // The *full* apply, not `apply_live_background_opacity`: that one
-        // only moves the renderer's uniform, and an undo can cross the
-        // opaque/translucent boundary (glassmorphism off resolves the
-        // opacity back to 1.0 and leaves the surface Opaque). The swapchain
-        // would then discard the restored alpha and the glass would not come
-        // back. `self.config` already holds the reverted value here, and the
-        // watcher cannot rescue this: its reload-diff compares against that
-        // same updated config and sees nothing to do.
-        self.apply_reloaded_background_opacity();
-        self.apply_live_background_blur(
-            payload.revert.background_blur_radius,
-            payload.revert.background_opacity,
-        );
-        self.apply_live_sidebar_preview_lines(payload.revert.sidebar_preview_lines);
-        self.apply_live_sidebar_width(payload.revert.sidebar_width);
-        self.apply_live_sidebar_font_size(payload.revert.sidebar_font_size);
-        self.apply_reloaded_background_image();
+        self.reload_config_from_disk();
 
         for id in commit_redraw_targets(&self.windows) {
             self.request_window_redraw(id);
         }
         true
-    }
-
-    /// Mirror the just-committed runtime rows (font-size, background-opacity,
-    /// background-blur-radius, background-image settings, cursor-style,
-    /// sidebar-preview-lines, quick-terminal-size, confirm-quit,
-    /// send-selection-send-enter) into `self.config` so a future reopen of
-    /// the overlay, or the next quick-terminal toggle, shows the new value.
-    /// The restart-only rows are deliberately excluded: nothing on screen
-    /// actually changes for them until a restart, so leaving `self.config` at
-    /// its pre-commit value keeps it truthful to what the user still sees, even
-    /// though the file on disk has already moved (the same config-vs-runtime
-    /// divergence an external edit would produce).
-    fn sync_config_from_committed_live_rows(
-        &mut self,
-        rows: &[SettingsRow; SettingsRowKind::COUNT],
-    ) {
-        sync_quick_terminal_size_from_committed_rows(&mut self.config, rows);
-        let mut reload_background_image = false;
-        let mut reset_background_image_deadline = false;
-        // `rows[i].draft`'s variant always matches `SettingsRowKind::ALL[i]`
-        // (the `RowDraft` doc contract), so matching on the draft alone is
-        // enough — and, unlike a `(kind, draft)` tuple match, it stays
-        // exhaustive without a catch-all, so adding a settings row forces a
-        // mirror-or-skip decision here at compile time instead of panicking
-        // at commit time (the v0.1.1 Minimum Contrast crash).
-        for row in rows.iter() {
-            if !row.touched {
-                continue;
-            }
-            match &row.draft {
-                RowDraft::FontSize(v) => self.config.font_size = *v,
-                // The `configured_*` twin moves with the effective value:
-                // it means "what the config file asked for", and the commit
-                // just wrote this row to the file. Keeping it in sync is
-                // what lets `commit_theme_settings` derive the effective
-                // opacity through `noa_config::resolved_background_opacity`
-                // — with a stale twin that derivation hands back the
-                // *previous* opacity and undoes the live preview at save
-                // time, which the reload can't repair (the mirror above
-                // has already flattened `opacity_changed`). Only reached
-                // for a row the user actually touched, and `glassmorphism`
-                // holds these two at `touched = false` while it owns them
-                // (`snap_glass_managed_rows`), so turning glass back off
-                // still restores the user's own value rather than the
-                // glass one.
-                RowDraft::BackgroundOpacity(v) => {
-                    mirror_committed_background_opacity(&mut self.config, *v);
-                }
-                RowDraft::BackgroundBlurRadius(v) => {
-                    mirror_committed_background_blur_radius(&mut self.config, *v);
-                }
-                RowDraft::BackgroundImage(v) => {
-                    self.config.background_image =
-                        (!v.is_empty()).then(|| PathBuf::from(v.as_str()));
-                    reload_background_image = true;
-                }
-                RowDraft::BackgroundImageOpacity(v) => {
-                    self.config.background_image_opacity = *v;
-                    reload_background_image = true;
-                }
-                RowDraft::BackgroundImagePosition(v) => {
-                    self.config.background_image_position = *v;
-                    reload_background_image = true;
-                }
-                RowDraft::BackgroundImageFit(v) => {
-                    self.config.background_image_fit = *v;
-                    reload_background_image = true;
-                }
-                RowDraft::BackgroundImageRepeat(v) => {
-                    self.config.background_image_repeat = *v;
-                    reload_background_image = true;
-                }
-                RowDraft::BackgroundImageInterval(v) => {
-                    self.config.background_image_interval_secs = *v;
-                    reset_background_image_deadline = true;
-                }
-                RowDraft::EmberIdleAfter(v) => self.apply_ember_idle_after(*v),
-                RowDraft::CursorStyle(v) => {
-                    self.config.cursor_style = Some(*v);
-                }
-                RowDraft::SidebarPreviewLines(v) => {
-                    self.apply_live_sidebar_preview_lines(*v);
-                }
-                RowDraft::SidebarWidth(v) => {
-                    self.apply_live_sidebar_width(*v);
-                }
-                RowDraft::SidebarFontSize(v) => {
-                    self.apply_live_sidebar_font_size(*v);
-                }
-                RowDraft::QuickTerminalHeight(_) => {}
-                // Mirrored (unlike the reload-applied group below) because
-                // `commit_theme_settings`'s own `chrome::select_palette`
-                // call, right after this loop returns, reads
-                // `self.config.glassmorphism` and needs the new value
-                // immediately — a P2-confirmed bug once left this as the
-                // *only* apply, though: mirroring here makes
-                // `config_reload.rs`'s `glassmorphism_changed` diff go false
-                // before the watcher's next poll ever sees it, so nothing
-                // downstream removed a stale native titlebar backdrop when
-                // the toggle went back off. `commit_theme_settings` now
-                // drives that refresh directly (see its
-                // `refresh_macos_window_backgrounds_at` call, given the
-                // opacity `noa_config::resolved_background_opacity` derives
-                // rather than the stale `self.config.background_opacity`)
-                // instead of depending on the reload path picking it up.
-                RowDraft::Glassmorphism(v) => {
-                    self.config.glassmorphism = *v;
-                }
-                RowDraft::ConfirmQuit(v) => {
-                    self.config.confirm_quit = *v;
-                }
-                RowDraft::SendSelectionSendEnter(v) => {
-                    self.config.send_selection_send_enter = *v;
-                }
-                RowDraft::FileLinkEditor(editor) => {
-                    self.config.file_link_editor = *editor;
-                }
-                // Commit-only rows: intentionally not mirrored (see the doc
-                // comment above).
-                RowDraft::FontFamily(_)
-                | RowDraft::WindowPadding(_, _)
-                | RowDraft::MacosTitlebarStyle(_) => {}
-                // Reload-applied rows: the ConfigWatcher picks the written
-                // values up and applies them via the reload path, which
-                // detects changes by diffing `self.config` (previous) against
-                // the re-parsed file (next) — mirroring here would erase that
-                // diff and make the reload skip the actual apply.
-                RowDraft::ScrollbackLimit(_)
-                | RowDraft::CursorStyleBlink(_)
-                | RowDraft::MinimumContrast(_)
-                | RowDraft::MacosOptionAsAlt(_)
-                | RowDraft::ServerEnable(_)
-                | RowDraft::ServerPort(_)
-                | RowDraft::ServerBind(_)
-                | RowDraft::ServerScopes(_)
-                | RowDraft::ScrollbackPersist(_) => {}
-                // `scratch-terminal-key` is the same shape as the group
-                // above: `App::apply_reloaded_config`'s
-                // `scratch_terminal_key_changed` diff is what actually
-                // rebuilds the keybind engine (`KeybindEngine::
-                // apply_scratch_terminal_key`), so mirroring it here would
-                // erase that diff and silently skip the rebind.
-                // `scratch-terminal-size` has no such diff-gated apply step
-                // (a popup toggle just reads `self.config.
-                // scratch_terminal_size` fresh, exactly like
-                // `quick_terminal_size`) — mirrored immediately below,
-                // mirroring `sync_quick_terminal_size_from_committed_rows`.
-                RowDraft::ScratchTerminalKey(_) => {}
-                RowDraft::ScratchTerminalSize(cols, rows) => {
-                    self.config.scratch_terminal_size = noa_config::ScratchTerminalSize {
-                        cols: *cols,
-                        rows: *rows,
-                    };
-                }
-                // `ServerTokenCopy`/`ServerStatus` never set `touched`
-                // (`ThemeSettings::adjust`/`reset_selected_row` both no-op
-                // both), so this loop can't actually reach here — kept
-                // explicit rather than folded into the arm above so a
-                // future variant can't silently start skipping a real
-                // config mirror.
-                RowDraft::ServerTokenCopy(_)
-                | RowDraft::ServerStatus(_)
-                | RowDraft::AgentWorkflowGuide => {}
-            }
-        }
-        if reload_background_image {
-            self.apply_reloaded_background_image();
-        } else if reset_background_image_deadline {
-            self.live_wallpaper_deadline = None;
-        }
     }
 
     fn apply_live_sidebar_preview_lines(&mut self, lines: usize) {
@@ -1290,22 +885,9 @@ impl App {
         self.relayout_all_windows();
     }
 
-    /// Apply a cursor-shape change to every live terminal now (R-10:
-    /// immediate), preserving whichever blink-ness `initial_cursor_style`
-    /// currently carries (blinking by default, matching
-    /// `app::config::resolve_cursor_style`'s own default).
+    /// Preview the shape with the configured blink policy.
     fn apply_live_cursor_style(&mut self, shape: noa_config::CursorShape) {
-        let blinking = match self.initial_cursor_style {
-            Some(style) => matches!(
-                style,
-                CursorStyle::BlinkingBlock
-                    | CursorStyle::BlinkingBar
-                    | CursorStyle::BlinkingUnderline
-                    | CursorStyle::BlinkingBlockHollow
-            ),
-            None => true,
-        };
-        let Some(style) = resolve_cursor_style(Some(shape), Some(blinking)) else {
+        let Some(style) = resolve_cursor_style(Some(shape), self.config.cursor_style_blink) else {
             return;
         };
         for state in self.windows.values() {
@@ -1323,11 +905,7 @@ impl App {
     fn apply_live_background_opacity(&mut self, opacity: f32) {
         // The full apply, not just the renderer's uniform: an `Opaque`
         // swapchain throws the alpha away, and a see-through window sits at
-        // exactly that setting whenever its opacity currently resolves to
-        // `1.0` (what turning `glassmorphism` off does). Previewing a lower
-        // value would then change nothing on screen, and the commit would
-        // mirror the same value into `self.config`, leaving the watcher's
-        // reload-diff with nothing to fix.
+        // that setting whenever its opacity currently resolves to 1.0.
         self.apply_background_opacity_to_windows(opacity);
         for state in self.windows.values() {
             state.window.request_redraw();
@@ -1427,79 +1005,6 @@ fn resolve_current_theme(config: &AppConfig, appearance: winit::window::Theme) -
         .unwrap_or_default()
 }
 
-/// TSV2-1 (judge, CONFIRMED): [`sync_config_from_committed_live_rows`]
-/// mirrors `confirm-quit`, `send-selection-send-enter`, and (via
-/// [`sync_quick_terminal_size_from_committed_rows`])
-/// `quick-terminal-size` into `self.config` on a successful commit, because
-/// all are read back out of `self.config` at runtime rather than applied
-/// live like the R-8 `is_live` rows — an Undo that only rewrote the config
-/// *file* left the running session's `self.config` still holding the
-/// committed (unwanted) value. Standalone (rather than inlined into
-/// [`App::undo_theme_settings_commit`]) so this mirror can be asserted
-/// directly without building a full `App`, matching
-/// `sync_quick_terminal_size_from_committed_rows`'s existing pattern.
-/// `window-padding-x/y`, `macos-titlebar-style`, and `font-family` are
-/// deliberately excluded here: `sync_config_from_committed_live_rows` never
-/// mirrors them into `self.config` either (they're commit-only rows whose
-/// effect is deferred to the next launch), so Undo keeps that exact same
-/// asymmetry — only [`crate::theme_settings::revert_updates`]'s file write
-/// covers them.
-fn sync_reverted_confirm_quit_and_quick_terminal_size(
-    config: &mut AppConfig,
-    revert: &crate::theme_settings::RevertValues,
-) {
-    config.glassmorphism = revert.glassmorphism;
-    config.confirm_quit = revert.confirm_quit;
-    config.send_selection_send_enter = revert.send_selection_send_enter;
-    config.quick_terminal_size =
-        quick_terminal_size_from_height_fraction(revert.quick_terminal_size);
-}
-
-/// Mirror a committed `background-opacity` row into `config`, moving the
-/// `configured_*` twin with it.
-///
-/// The twin means "what the config file asked for", and the commit that
-/// reaches here has just written this row to the file — so the two move
-/// together. This is not bookkeeping: `commit_theme_settings` derives the
-/// opacity it refreshes the macOS window background and titlebar backdrop
-/// at through [`noa_config::resolved_background_opacity`], which reads the
-/// twin. Left stale, that derivation hands back the *previous* opacity and
-/// reverts, at save time, the background the live preview already got
-/// right — and the reload cannot repair it, because mirroring the
-/// effective value above has already flattened `config_reload.rs`'s
-/// `opacity_changed` diff.
-///
-/// Only reached for a row the user actually touched, and `glassmorphism`
-/// holds this row at `touched = false` for as long as it owns it
-/// (`ThemeSettings::snap_glass_managed_rows`), so the twin keeps the user's
-/// own value across a glass toggle rather than picking up the glass one.
-fn mirror_committed_background_opacity(config: &mut AppConfig, opacity: f32) {
-    config.background_opacity = opacity;
-    config.configured_background_opacity = opacity;
-}
-
-/// As [`mirror_committed_background_opacity`], for `background-blur-radius`.
-fn mirror_committed_background_blur_radius(config: &mut AppConfig, radius: u16) {
-    config.background_blur_radius = radius;
-    config.configured_background_blur_radius = radius;
-}
-
-fn sync_quick_terminal_size_from_committed_rows(
-    config: &mut AppConfig,
-    rows: &[SettingsRow; SettingsRowKind::COUNT],
-) {
-    for (kind, row) in SettingsRowKind::ALL.iter().zip(rows.iter()) {
-        if !row.touched {
-            continue;
-        }
-        if let (SettingsRowKind::QuickTerminalHeight, RowDraft::QuickTerminalHeight(size)) =
-            (kind, &row.draft)
-        {
-            config.quick_terminal_size = quick_terminal_size_from_height_fraction(*size);
-        }
-    }
-}
-
 /// The quick-terminal-height settings row only edits a plain percentage —
 /// Ghostty's px/secondary-side forms are config-file-only, not exposed by
 /// this interactive control. Reads the primary side as a `0.0..=1.0`
@@ -1509,21 +1014,6 @@ fn quick_terminal_height_fraction(size: noa_config::QuickTerminalSize) -> f32 {
     match size.primary {
         Some(noa_config::QuickTerminalSizeDim::Percent(pct)) => pct / 100.0,
         _ => 0.4,
-    }
-}
-
-/// Inverse of `quick_terminal_height_fraction`: a percent-only primary with
-/// no secondary side, matching how `RowDraft::QuickTerminalHeight` commits
-/// have always been written to `quick-terminal-size` (see
-/// `ThemeSettings::commit_updates`, which still writes the legacy bare-
-/// fraction string that `quick-terminal-size` parsing accepts for
-/// back-compat).
-fn quick_terminal_size_from_height_fraction(fraction: f32) -> noa_config::QuickTerminalSize {
-    noa_config::QuickTerminalSize {
-        primary: Some(noa_config::QuickTerminalSizeDim::Percent(
-            fraction.clamp(0.0, 1.0) * 100.0,
-        )),
-        secondary: None,
     }
 }
 
@@ -1562,11 +1052,25 @@ fn commit_redraw_targets<Id: Copy + Eq + std::hash::Hash, V>(windows: &HashMap<I
 mod theme_settings_key_action_tests {
     use super::*;
 
-    // Addendum D-3/FM-02: Enter routes to `ConfirmSearch` while search owns
-    // the keyboard, never falling through to `Commit` — this is the router-
-    // level half of the "Enter mid-search must NOT commit" guarantee; the
-    // pure-state half (confirming never touches commit machinery) is
-    // `theme_settings::tests::confirm_settings_search_never_touches_commit_state`.
+    #[test]
+    fn settings_save_and_undo_reload_the_resolved_config() {
+        let source = include_str!("theme_settings.rs");
+        for method in ["commit_theme_settings", "undo_theme_settings_commit"] {
+            let start = format!("fn {method}(");
+            let body = source
+                .split_once(&start)
+                .unwrap()
+                .1
+                .split_once("\n    }")
+                .unwrap()
+                .0;
+            assert!(
+                body.contains("self.reload_config_from_disk"),
+                "{method} must apply resolved settings before returning"
+            );
+        }
+    }
+
     #[test]
     fn enter_confirms_search_when_active_and_commits_otherwise() {
         assert_eq!(
@@ -1681,201 +1185,6 @@ mod commit_theme_settings_tests {
         );
 
         let _ = std::fs::remove_file(&path);
-    }
-
-    // Regression (P1): committing a `background-opacity` change with
-    // `glassmorphism` off used to leave `configured_background_opacity` at
-    // the previous value, so `commit_theme_settings`'s
-    // `resolved_background_opacity` derivation refreshed the macOS window
-    // background and titlebar backdrop at the *old* opacity — undoing at
-    // save time what the live preview had already applied, with no reload
-    // able to repair it (mirroring the effective value flattens
-    // `opacity_changed`). Deliberately uses two values that differ from
-    // each other and from `GLASS_BACKGROUND_OPACITY`, so neither a stale
-    // twin nor the glass takeover can pass by coincidence.
-    #[test]
-    fn committing_background_opacity_moves_the_configured_twin_with_it() {
-        let mut config = AppConfig::from_startup(
-            noa_config::StartupConfig::default(),
-            false,
-            noa_config::ConfigOverrides::default(),
-        );
-        mirror_committed_background_opacity(&mut config, 1.0);
-        mirror_committed_background_blur_radius(&mut config, 0);
-
-        mirror_committed_background_opacity(&mut config, 0.8);
-        mirror_committed_background_blur_radius(&mut config, 12);
-
-        assert_eq!(config.background_opacity, 0.8);
-        assert_eq!(config.background_blur_radius, 12);
-        assert_eq!(
-            config.configured_background_opacity, 0.8,
-            "the twin must move with the committed value, not lag a commit behind"
-        );
-        assert_eq!(config.configured_background_blur_radius, 12);
-
-        // The derivation `commit_theme_settings` actually performs: with
-        // glass off it must reproduce what the user just saved, which is
-        // what the native background gets refreshed at.
-        assert_eq!(
-            noa_config::resolved_background_opacity(
-                noa_config::GlassLevel::Off,
-                config.configured_background_opacity
-            ),
-            0.8,
-            "a stale twin here is what reverted the live-previewed background on save"
-        );
-        assert_eq!(
-            noa_config::resolved_background_blur_radius(
-                noa_config::GlassLevel::Off,
-                config.configured_background_blur_radius
-            ),
-            12
-        );
-        // With glass on the takeover still wins, unchanged by this fix.
-        assert_eq!(
-            noa_config::resolved_background_opacity(
-                noa_config::GlassLevel::One,
-                config.configured_background_opacity
-            ),
-            noa_config::glass_background_opacity(noa_config::GlassLevel::One)
-        );
-    }
-
-    #[test]
-    fn quick_terminal_size_syncs_from_committed_row_into_app_config() {
-        let mut settings = ThemeSettings::open(ThemeSettingsInit {
-            mode: ThemeSettingsMode::Settings,
-            current_theme: "3024 Day".to_string(),
-            font_size: 14.0,
-            cursor_style: noa_config::CursorShape::Block,
-            background_opacity: 1.0,
-            background_blur_radius: 0,
-            configured_background_opacity: 1.0,
-            configured_background_blur_radius: 0,
-            window_created_transparent: false,
-            background_image: String::new(),
-            background_image_opacity: 1.0,
-            background_image_position: noa_config::BackgroundImagePosition::Center,
-            background_image_fit: noa_config::BackgroundImageFit::Contain,
-            background_image_repeat: false,
-            background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
-            ember_idle_after_secs: 0,
-            window_padding_x: 2.0,
-            window_padding_y: 2.0,
-            macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
-            sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
-            sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
-            sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
-            quick_terminal_size: 0.4,
-            glassmorphism: noa_config::GlassLevel::Off,
-            confirm_quit: true,
-            send_selection_send_enter: false,
-            file_link_editor: noa_config::FileLinkEditor::Default,
-            font_family: "Menlo".to_string(),
-            available_font_families: Vec::new(),
-            scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
-            cursor_style_blink: None,
-            minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
-            macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
-            server_enable: false,
-            server_port: noa_config::DEFAULT_SERVER_PORT,
-            server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
-            server_scopes: "read".to_string(),
-            server_status: "Stopped".to_string(),
-            scratch_terminal_key: "cmd+shift+t".to_string(),
-            scratch_terminal_size: (100, 25),
-            scrollback_persist: noa_config::ScrollbackPersist::default(),
-            theme_pair: None,
-            carryover: None,
-            favorites: std::sync::Arc::new(std::collections::HashSet::new()),
-            favorites_epoch: 0,
-        });
-        while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::QuickTerminalHeight
-        {
-            settings.move_down();
-        }
-        assert_eq!(
-            SettingsRowKind::ALL[settings.selected_row()],
-            SettingsRowKind::QuickTerminalHeight
-        );
-        settings.adjust(1, Instant::now());
-
-        let mut config = AppConfig::from_startup(
-            noa_config::StartupConfig::default(),
-            false,
-            noa_config::ConfigOverrides::default(),
-        );
-        sync_quick_terminal_size_from_committed_rows(&mut config, settings.rows());
-
-        assert!(
-            (quick_terminal_height_fraction(config.quick_terminal_size) - 0.45).abs() < 0.001,
-            "committed quick terminal height should update AppConfig for the next toggle"
-        );
-    }
-
-    // TSV2-1 (judge, CONFIRMED): `confirm-quit` and `quick-terminal-size`
-    // are the two commit-only-in-the-R-8-sense rows that
-    // `sync_config_from_committed_live_rows` *does* mirror into
-    // `self.config` on commit (they're read back out of it at runtime,
-    // unlike font-family/window-padding/macos-titlebar-style) — Undo must
-    // mirror them back symmetrically, not just rewrite the file.
-    #[test]
-    fn undo_mirrors_confirm_quit_and_quick_terminal_size_back_into_app_config() {
-        let mut config = AppConfig::from_startup(
-            noa_config::StartupConfig::default(),
-            false,
-            noa_config::ConfigOverrides::default(),
-        );
-        // Simulate the post-commit state a real session would have left
-        // `self.config` in: confirm-quit flipped off, send-selection Enter
-        // flipped on, quick-terminal grown.
-        config.confirm_quit = false;
-        config.send_selection_send_enter = true;
-        config.quick_terminal_size = quick_terminal_size_from_height_fraction(0.9);
-
-        let revert = crate::theme_settings::RevertValues {
-            theme_name: String::new(),
-            font_size: 14.0,
-            cursor_style: noa_config::CursorShape::Block,
-            background_opacity: 1.0,
-            background_blur_radius: 0,
-            configured_background_opacity: 1.0,
-            configured_background_blur_radius: 0,
-            background_image: String::new(),
-            background_image_opacity: 1.0,
-            background_image_position: noa_config::BackgroundImagePosition::Center,
-            background_image_fit: noa_config::BackgroundImageFit::Contain,
-            background_image_repeat: false,
-            background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
-            ember_idle_after_secs: 0,
-            sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
-            sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
-            sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
-            quick_terminal_size: 0.4,
-            window_padding_x: 2.0,
-            window_padding_y: 2.0,
-            macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
-            glassmorphism: noa_config::GlassLevel::Off,
-            confirm_quit: true,
-            send_selection_send_enter: false,
-            file_link_editor: noa_config::FileLinkEditor::Default,
-            font_family: "Menlo".to_string(),
-        };
-        sync_reverted_confirm_quit_and_quick_terminal_size(&mut config, &revert);
-
-        assert!(
-            config.confirm_quit,
-            "confirm-quit must revert to the pre-open value"
-        );
-        assert!(
-            !config.send_selection_send_enter,
-            "send-selection-send-enter must revert to the pre-open value"
-        );
-        assert!(
-            (quick_terminal_height_fraction(config.quick_terminal_size) - 0.4).abs() < 0.001,
-            "quick-terminal-size must revert to the pre-open value"
-        );
     }
 
     #[test]

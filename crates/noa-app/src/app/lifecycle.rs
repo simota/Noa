@@ -1288,9 +1288,7 @@ impl App {
 
     fn new_terminal(&self, grid_size: GridSize) -> Terminal {
         let mut terminal = Terminal::new(grid_size);
-        if let Some(style) = self.initial_cursor_style {
-            terminal.set_default_cursor_style(style);
-        }
+        self.config.apply_default_cursor_style(&mut terminal);
         terminal.title_report = self.config.title_report;
         apply_xt_checksum_policy(&mut terminal, &self.config);
         terminal.scrollback_compression = self.config.scrollback_compression;

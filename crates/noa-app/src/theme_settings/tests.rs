@@ -126,7 +126,10 @@ fn file_link_editor_cycles_in_both_directions_and_applies_on_save() {
         settings.rows()[index].draft,
         RowDraft::FileLinkEditor(FileLinkEditor::Subl)
     );
-    assert_eq!(settings.revert().file_link_editor, FileLinkEditor::Default);
+    assert_eq!(
+        settings.rows()[index].draft,
+        RowDraft::FileLinkEditor(FileLinkEditor::Subl)
+    );
 }
 
 #[test]
@@ -142,7 +145,7 @@ fn file_link_editor_save_undo_and_reset_preserve_unrelated_config() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config");
-    let original = "# keep this comment\nfile-link-editor = cursor\nfont-size = 19\n";
+    let original = "# keep this comment\nfile-link-editor = cursor\nquick-terminal-size = 50%,800px\nfont-size = 19";
     std::fs::write(&path, original).unwrap();
     let mut settings = ThemeSettings::open(ThemeSettingsInit {
         file_link_editor: FileLinkEditor::Cursor,
@@ -156,20 +159,15 @@ fn file_link_editor_save_undo_and_reset_preserve_unrelated_config() {
         settings.commit_updates(),
         vec![("file-link-editor".into(), "zed".into())]
     );
-    let mut writer =
-        |path: &Path, updates: &[(String, String)]| noa_config::write_config_updates(path, updates);
-    settings.commit(&path, &mut writer).unwrap();
+    let undo = settings
+        .commit(&path, &mut noa_config::write_config_updates_with_undo)
+        .unwrap();
     let saved = std::fs::read_to_string(&path).unwrap();
     assert!(saved.contains("file-link-editor = zed"));
     assert!(saved.contains("# keep this comment"));
     assert!(saved.contains("font-size = 19"));
-    let (snapshot, pair) = settings.pre_commit_snapshot();
-    noa_config::write_config_updates(&path, &revert_updates(&snapshot, pair.as_ref())).unwrap();
-    assert!(
-        std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("file-link-editor = cursor")
-    );
+    undo.restore().unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     settings.reset_selected_row(Instant::now());
     assert_eq!(
         settings.commit_updates(),
@@ -826,7 +824,10 @@ fn theme_mode_revert_returns_the_pre_open_snapshot() {
         values.sidebar_preview_lines,
         noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES
     );
-    assert_eq!(values.quick_terminal_size, 0.4);
+    assert_quick_terminal_height(
+        &settings.rows()[row_index(SettingsRowKind::QuickTerminalHeight)].draft,
+        0.4,
+    );
 }
 
 // AC-8-partial (R-16), Settings mode: Esc cancels a pending font-size
@@ -1876,7 +1877,7 @@ fn commit_with_failing_writer_sets_error_and_changes_nothing_else() {
         calls += 1;
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
     };
-    let result = settings.commit(Path::new("/nonexistent/noa/config"), &mut writer);
+    let result: Option<()> = settings.commit(Path::new("/nonexistent/noa/config"), &mut writer);
 
     assert!(result.is_none());
     assert_eq!(calls, 1);
@@ -1902,12 +1903,12 @@ fn commit_success_clears_a_prior_error_and_returns_the_written_updates() {
     settings.adjust(1, Instant::now()); // touch FontSize
 
     let mut fail_once = true;
-    let mut writer = |_: &Path, _: &[(String, String)]| {
+    let mut writer = |_: &Path, updates: &[(String, String)]| {
         if fail_once {
             fail_once = false;
             Err(io::Error::other("transient"))
         } else {
-            Ok(())
+            Ok(updates.to_vec())
         }
     };
     assert!(settings.commit(Path::new("/x"), &mut writer).is_none());
@@ -2756,11 +2757,6 @@ fn ember_idle_after_initializes_saves_reverts_and_resets_live() {
             .contains(&("ember-idle-after".into(), "75".into()))
     );
     assert!(!settings.restart_note(kind));
-    let (snapshot, pair) = settings.pre_commit_snapshot();
-    assert!(
-        revert_updates(&snapshot, pair.as_ref())
-            .contains(&("ember-idle-after".into(), "45".into()))
-    );
     assert_eq!(settings.revert().ember_idle_after_secs, 45);
     assert_eq!(RowDraft::default_for(kind), RowDraft::EmberIdleAfter(0));
     assert_eq!(
@@ -4051,7 +4047,7 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
     let mut writer = |_: &Path, _: &[(String, String)]| {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
     };
-    let _ = settings.commit(Path::new("/nonexistent/noa/config"), &mut writer);
+    let _: Option<()> = settings.commit(Path::new("/nonexistent/noa/config"), &mut writer);
     let fp_after = settings.view_fingerprint_u64();
     assert_ne!(fp_before, fp_after, "commit_error");
 
@@ -4154,9 +4150,13 @@ fn ac50_committed_pair_round_trips_through_the_real_config_parser() {
     while settings.highlighted_theme_name() != Some(target) {
         settings.move_down();
     }
-    let mut writer =
-        |path: &Path, updates: &[(String, String)]| noa_config::write_config_updates(path, updates);
-    assert!(settings.commit(&config_path, &mut writer).is_some());
+    let original = std::fs::read_to_string(&config_path).unwrap();
+    let undo = settings
+        .commit(
+            &config_path,
+            &mut noa_config::write_config_updates_with_undo,
+        )
+        .unwrap();
 
     let (overrides, diagnostics) = noa_config::load_overrides_from_path(&config_path).unwrap();
     assert!(
@@ -4173,6 +4173,8 @@ fn ac50_committed_pair_round_trips_through_the_real_config_parser() {
         ))
     );
 
+    undo.restore().unwrap();
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -4327,198 +4329,35 @@ fn tab_carryover_never_carries_highlight_moved_into_either_mode() {
     assert!(!theme_again.should_preview());
 }
 
-fn sample_revert(theme_name: &str) -> RevertValues {
-    RevertValues {
-        theme_name: theme_name.to_string(),
-        font_size: 16.0,
-        cursor_style: CursorShape::Bar,
-        background_opacity: 0.8,
-        background_blur_radius: 5,
-        configured_background_opacity: 0.8,
-        configured_background_blur_radius: 5,
-        background_image: "/tmp/wall.png".to_string(),
-        background_image_opacity: 0.5,
-        background_image_position: BackgroundImagePosition::Center,
-        background_image_fit: BackgroundImageFit::Cover,
-        background_image_repeat: true,
-        background_image_interval_secs: 30,
-        ember_idle_after_secs: 90,
-        sidebar_preview_lines: 3,
-        sidebar_width: 360.0,
-        sidebar_font_size: 11.5,
-        quick_terminal_size: 0.4,
-        window_padding_x: 2.0,
-        window_padding_y: 2.0,
-        macos_titlebar_style: MacosTitlebarStyle::Native,
-        glassmorphism: GlassLevel::Off,
-        confirm_quit: true,
-        send_selection_send_enter: false,
-        file_link_editor: noa_config::FileLinkEditor::Default,
-        font_family: "Menlo".to_string(),
+#[test]
+fn undo_all_settings_rows_restores_original_directives_byte_for_byte() {
+    let dir = std::env::temp_dir().join(format!("noa-undo-all-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config");
+    let mut carryover = ThemeSettings::open(settings_init()).carryover();
+    for row in &mut carryover.rows {
+        row.touched = true;
     }
-}
-
-// AC-44 (R-31): `revert_updates` writes every snapshot field unconditionally
-// (an absolute restore, not a touched-gated diff).
-#[test]
-fn revert_updates_writes_every_snapshot_field_unconditionally() {
-    let updates = revert_updates(&sample_revert("3024 Day"), None);
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "theme"),
-        Some(&("theme".to_string(), "3024 Day".to_string()))
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "font-size"),
-        Some(&("font-size".to_string(), "16".to_string()))
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "cursor-style"),
-        Some(&("cursor-style".to_string(), "bar".to_string()))
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "background-blur-radius"),
-        Some(&("background-blur-radius".to_string(), "5".to_string()))
-    );
-}
-
-// Undo writes the *configured* pair, never the effective one. Under
-// glassmorphism the effective values are derived (0.50 / 64), so writing
-// those back would overwrite what the user actually had — an unset key would
-// gain a value, an explicit `0.9 / 5` would be destroyed — permanently, and
-// invisibly until glassmorphism is turned off and the wrong appearance shows.
-#[test]
-fn revert_updates_restores_the_configured_pair_not_the_glass_derived_one() {
-    let revert = RevertValues {
-        glassmorphism: GlassLevel::One,
-        background_opacity: noa_config::glass_background_opacity(GlassLevel::One),
-        background_blur_radius: noa_config::glass_background_blur_radius(GlassLevel::One),
-        configured_background_opacity: 0.9,
-        configured_background_blur_radius: 5,
-        ..sample_revert("3024 Day")
-    };
-
-    let updates = revert_updates(&revert, None);
-
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "background-opacity"),
-        Some(&("background-opacity".to_string(), "0.90".to_string()))
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "background-blur-radius"),
-        Some(&("background-blur-radius".to_string(), "5".to_string()))
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "glassmorphism"),
-        Some(&("glassmorphism".to_string(), "1".to_string()))
-    );
-}
-
-// With glassmorphism off the configured and effective pairs are equal by
-// construction, so this is the same write the undo has always made.
-#[test]
-fn revert_updates_still_restores_the_transparency_keys_without_glassmorphism() {
-    let revert = RevertValues {
-        glassmorphism: GlassLevel::Off,
-        ..sample_revert("3024 Day")
-    };
-
-    let updates = revert_updates(&revert, None);
-
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "background-opacity"),
-        Some(&("background-opacity".to_string(), "0.80".to_string()))
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "background-blur-radius"),
-        Some(&("background-blur-radius".to_string(), "5".to_string()))
-    );
-}
-
-// TSV2-1 (judge, CONFIRMED): the 5 commit-only rows were missing from
-// `RevertValues`/`revert_updates` entirely, so a commit of any of
-// font-family / window-padding-x / window-padding-y / macos-titlebar-style
-// / confirm-quit followed by an Undo silently left the disk value at the
-// committed (unwanted) value instead of restoring the pre-open snapshot —
-// asymmetric with `commit_updates`, which does write all of them.
-#[test]
-fn revert_updates_restores_all_five_commit_only_rows() {
-    let updates = revert_updates(&sample_revert("3024 Day"), None);
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "font-family"),
-        Some(&("font-family".to_string(), "Menlo".to_string())),
-        "font-family must revert"
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "window-padding-x"),
-        Some(&("window-padding-x".to_string(), "2".to_string())),
-        "window-padding-x must revert"
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "window-padding-y"),
-        Some(&("window-padding-y".to_string(), "2".to_string())),
-        "window-padding-y must revert"
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "macos-titlebar-style"),
-        Some(&("macos-titlebar-style".to_string(), "native".to_string())),
-        "macos-titlebar-style must revert"
-    );
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "confirm-quit"),
-        Some(&("confirm-quit".to_string(), "true".to_string())),
-        "confirm-quit must revert"
-    );
-    assert_eq!(
-        updates
-            .iter()
-            .find(|(k, _)| k == "send-selection-send-enter"),
-        Some(&("send-selection-send-enter".to_string(), "false".to_string())),
-        "send-selection-send-enter must revert"
-    );
-}
-
-// TSV2-1: `macos-titlebar-style`'s serializer must agree with
-// `commit_updates`'s for *both* variants, not just whichever one
-// `sample_revert` happens to use — a literal `"native"`/`"transparent"`
-// string mismatch between the two paths would silently corrupt the file on
-// undo even though this same test file's `commit_updates` tests pass.
-#[test]
-fn revert_updates_macos_titlebar_style_serialization_matches_commit_updates() {
-    let mut revert = sample_revert("3024 Day");
-    revert.macos_titlebar_style = MacosTitlebarStyle::Transparent;
-    let updates = revert_updates(&revert, None);
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "macos-titlebar-style"),
-        Some(&(
-            "macos-titlebar-style".to_string(),
-            "transparent".to_string()
-        ))
-    );
-}
-
-// AC-44/R-34: an Undo of a pair-config commit must restore pair syntax, not
-// clobber it with a bare name — the same guarantee `commit_updates` gives
-// on the forward path.
-#[test]
-fn revert_updates_preserves_pair_syntax_when_undoing_a_pair_commit() {
-    let pair = ThemePairContext {
-        active_is_light: true,
-        light: "A".to_string(),
-        dark: "B".to_string(),
-    };
-    let updates = revert_updates(&sample_revert("A"), Some(&pair));
-    assert_eq!(
-        updates.iter().find(|(k, _)| k == "theme"),
-        Some(&("theme".to_string(), "light:A,dark:B".to_string()))
-    );
-}
-
-// FM-01-adjacent: an unresolvable original theme (empty name) never writes
-// an empty `theme` value.
-#[test]
-fn revert_updates_omits_theme_key_when_snapshot_theme_name_is_empty() {
-    let updates = revert_updates(&sample_revert(""), None);
-    assert!(updates.iter().all(|(k, _)| k != "theme"));
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        carryover: Some(carryover),
+        ..settings_init()
+    });
+    for level in ["off", "1"] {
+        let original = format!(
+            "# keep\r\ntheme = light:A,dark:B\r\nglassmorphism={level}\r\nbackground-opacity = 0.91\r\nbackground-blur-radius=5\r\nmacos-titlebar-style=tabs\r\nscrollback-limit=10000\r\nquick-terminal-size = 50%,800px"
+        );
+        std::fs::write(&path, &original).unwrap();
+        let undo = settings
+            .commit(&path, &mut noa_config::write_config_updates_with_undo)
+            .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("server-enable = false"));
+        assert!(saved.contains("window-padding-x = 2"));
+        assert!(saved.contains("quick-terminal-size = 0.40"));
+        undo.restore().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 // AC-39 (R-28): `filter_font_families` produces exactly the same
@@ -4821,7 +4660,8 @@ fn ac57_pair_carryover_favorites_toggle_and_commit_integration() {
 
     let mut writer =
         |path: &Path, updates: &[(String, String)]| noa_config::write_config_updates(path, updates);
-    let updates = theme_again
+    let updates = theme_again.commit_updates();
+    theme_again
         .commit(&config_path, &mut writer)
         .expect("commit should succeed");
     assert!(updates.iter().all(|(k, _)| !k.contains("favorite")));

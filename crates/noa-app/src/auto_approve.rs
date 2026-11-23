@@ -439,25 +439,10 @@ pub(crate) fn viewport_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
 /// live rows; scanning the scrolled viewport instead would drop it, and a
 /// wheel scroll back to the bottom produces no pty output to rescan on.
 pub(crate) fn live_rows_from_terminal(terminal: &Terminal) -> Vec<RowText> {
-    let screen = terminal.active();
-    if screen.viewport_offset() == 0 {
-        // The viewport is the grid: read it in place, without the row copies
-        // `visible_rows` makes.
-        return screen
-            .grid
-            .iter()
-            .map(|row| row_text(&row.cells[..row.occupied()]))
-            .collect();
-    }
-    let rows = usize::from(screen.rows);
-    let total = screen.total_rows();
-    (total.saturating_sub(rows)..total)
-        .map(|idx| {
-            screen
-                .absolute_row(idx)
-                .map(|row| row_text(&row.cells[..row.occupied()]))
-                .unwrap_or_default()
-        })
+    terminal
+        .active()
+        .live_rows()
+        .map(|row| row_text(&row.cells[..row.occupied()]))
         .collect()
 }
 

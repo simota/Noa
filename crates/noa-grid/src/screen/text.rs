@@ -844,6 +844,14 @@ impl Screen {
         LogicalLine::collect(|y| self.storage_row(y), idx, margins, viewport_y, self.rows)
     }
 
+    /// The live bottom rows of this screen, independent of `viewport_offset`.
+    /// Unlike [`Self::visible_rows`], this ignores any local scrollback offset
+    /// and borrows the live grid in place without cloning rows.
+    pub fn live_rows(&self) -> crate::cell::RowIter<'_> {
+        debug_assert_eq!(self.grid.len(), usize::from(self.rows));
+        self.grid.iter()
+    }
+
     pub fn visible_rows(&self) -> Vec<Row> {
         let mut out_rows = Vec::new();
         self.visible_rows_into(&mut out_rows);

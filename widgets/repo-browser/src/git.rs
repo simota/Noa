@@ -97,11 +97,19 @@ fn canonical_or_raw(path: &Path) -> String {
         .into_owned()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread called [`inspect_worktree`], for tests.
+    pub(crate) static INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn inspect_worktree(
     cwd: &str,
     mode: DiffMode,
     bases: &mut BaseRefs,
 ) -> Option<WorktreeGitInfo> {
+    #[cfg(test)]
+    INSPECTIONS.with(|n| n.set(n.get() + 1));
     let dir = Path::new(cwd);
     if !dir.is_dir() {
         return None;

@@ -551,42 +551,10 @@ fn build_snapshot(
     commit_cache: &mut git::CommitCache,
 ) -> Result<(RepoData, Option<DiffEntry>), ClientError> {
     let panels = client.list_panels()?;
-    let mut by_worktree: ByWorktree = HashMap::new();
     let mut bases = git::BaseRefs::default();
-
-    for panel in panels {
-        let cwd = panel.cwd.trim();
-        if cwd.is_empty() {
-            continue;
-        }
-        let info = if let Some((existing, _)) = by_worktree.get(cwd) {
-            existing.clone()
-        } else {
-            let Some(info) = git::inspect_worktree(cwd, mode, &mut bases) else {
-                continue;
-            };
-            info
-        };
-
-        let tail = fetch_pane_tail(client, &panel);
-        let summary = PaneSummary {
-            pane_id: panel.pane_id.0,
-            name: panel.name.clone(),
-            label: panel.label.clone(),
-            process: panel.process.clone(),
-            activity: panel_activity(&panel),
-            busy: panel.busy,
-            attention: panel.attention,
-            terminal_tail: tail,
-        };
-        let key = info.worktree_root.clone();
-        by_worktree
-            .entry(key)
-            .or_insert_with(|| (info, Vec::new()))
-            .1
-            .push(summary);
-    }
-
+    let mut by_worktree = place_panes(&panels, mode, &mut bases, |panel| {
+        pane_summary(panel, fetch_pane_tail(client, panel))
+    });
     add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
     let data = repo_data(by_worktree, merges, commit_cache, &mut bases);
 
@@ -608,6 +576,64 @@ fn build_snapshot(
         });
 
     Ok((data, selected_diff))
+}
+
+/// The worktree of each panel's cwd, with the panes in it as `summary` makes
+/// them; a panel whose cwd is no worktree is left out. Each cwd is inspected
+/// once: a later panel in the same one joins the earlier panel's worktree.
+fn place_panes(
+    panels: &[Panel],
+    mode: DiffMode,
+    bases: &mut git::BaseRefs,
+    mut summary: impl FnMut(&Panel) -> PaneSummary,
+) -> ByWorktree {
+    let mut by_worktree: ByWorktree = HashMap::new();
+    for (i, panel) in panels.iter().enumerate() {
+        let cwd = panel.cwd.trim();
+        if cwd.is_empty() {
+            continue;
+        }
+        let info = if let Some((existing, _)) = by_worktree.get(cwd) {
+            existing.clone()
+        } else if let Some(earlier) = panels[..i].iter().find(|p| p.cwd.trim() == cwd) {
+            // Inspecting it again would find the same worktree, which keeps
+            // its first inspection, or again none.
+            let id = earlier.pane_id.0;
+            match by_worktree
+                .values()
+                .find(|(_, panes)| panes.iter().any(|p| p.pane_id == id))
+            {
+                Some((existing, _)) => existing.clone(),
+                None => continue,
+            }
+        } else {
+            let Some(info) = git::inspect_worktree(cwd, mode, bases) else {
+                continue;
+            };
+            info
+        };
+        let summary = summary(panel);
+        let key = info.worktree_root.clone();
+        by_worktree
+            .entry(key)
+            .or_insert_with(|| (info, Vec::new()))
+            .1
+            .push(summary);
+    }
+    by_worktree
+}
+
+fn pane_summary(panel: &Panel, terminal_tail: String) -> PaneSummary {
+    PaneSummary {
+        pane_id: panel.pane_id.0,
+        name: panel.name.clone(),
+        label: panel.label.clone(),
+        process: panel.process.clone(),
+        activity: panel_activity(panel),
+        busy: panel.busy,
+        attention: panel.attention,
+        terminal_tail,
+    }
 }
 
 /// Adds every other worktree of each repository a pane is in, from
@@ -960,6 +986,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn panes_are_placed_in_the_worktree_of_their_cwd() {
+        let repo = temp_repo("live-panes", "main");
+        let _cleanup = TempRepo(format!("{}-wt", repo.0.display()).into());
+        let foo = add_worktree(&repo, "foo", "orch/foo");
+        let plain = TempRepo(format!("{}-plain", repo.0.display()).into());
+        std::fs::create_dir_all(plain.0.join("sub")).unwrap();
+        std::fs::create_dir_all(repo.0.join("sub")).unwrap();
+        let root = repo.0.to_str().unwrap().to_owned();
+        let sub = repo.0.join("sub").to_str().unwrap().to_owned();
+        let foo = foo.to_str().unwrap().to_owned();
+        let plain = plain.0.join("sub").to_str().unwrap().to_owned();
+        let missing = format!("{root}/missing");
+        let cwds = [
+            &sub, &sub, &plain, &root, &foo, &plain, "  ", &missing, &sub, &foo,
+        ];
+        let panels: Vec<Panel> = cwds
+            .iter()
+            .enumerate()
+            .map(|(i, cwd)| panel(i as u64 + 1, cwd))
+            .collect();
+        for mode in DiffMode::ALL {
+            let mut bases = git::BaseRefs::default();
+            let mut summarized = Vec::new();
+            let before = git::INSPECTIONS.with(std::cell::Cell::get);
+            let by_worktree = place_panes(&panels, mode, &mut bases, |panel| {
+                summarized.push(panel.pane_id.0);
+                pane(panel.pane_id.0)
+            });
+            assert_eq!(summarized, vec![1, 2, 4, 5, 9, 10], "{mode:?}");
+            // `/tmp` is a symlink on macOS, so no cwd here is a canonical
+            // worktree root: each is inspected once, a repeat never again.
+            let inspected = git::INSPECTIONS.with(std::cell::Cell::get) - before;
+            assert_eq!(inspected, 5, "{mode:?}");
+            let mut got: Vec<(String, Vec<u64>)> = by_worktree
+                .values()
+                .map(|(info, panes)| {
+                    (
+                        info.branch.clone(),
+                        panes.iter().map(|p| p.pane_id).collect(),
+                    )
+                })
+                .collect();
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    ("main".to_owned(), vec![1, 2, 4, 9]),
+                    ("orch/foo".to_owned(), vec![5, 10]),
+                ],
+                "{mode:?}"
+            );
+        }
+    }
+
     /// The git half of `build_snapshot` for one pane in `cwd`, without a Noa
     /// server: every worktree of its repository, then the first file's diff.
     fn offline_refresh(
@@ -968,11 +1049,33 @@ mod tests {
         merges: &mut git::MergePredictions,
         commit_cache: &mut git::CommitCache,
     ) -> (RepoData, Option<DiffEntry>) {
+        offline_refresh_of(&[panel(1, cwd)], mode, merges, commit_cache)
+    }
+
+    /// A panel of pane `id` in `cwd`, as `noa.listPanels` sends it.
+    fn panel(id: u64, cwd: &str) -> Panel {
+        serde_json::from_value(serde_json::json!({
+            "windowGroupId": "1",
+            "windowId": "1",
+            "paneId": id.to_string(),
+            "name": "zsh",
+            "cwd": cwd,
+            "busy": false,
+            "attention": false,
+            "preview": [],
+        }))
+        .unwrap()
+    }
+
+    /// [`offline_refresh`] with `panels` for panes.
+    fn offline_refresh_of(
+        panels: &[Panel],
+        mode: DiffMode,
+        merges: &mut git::MergePredictions,
+        commit_cache: &mut git::CommitCache,
+    ) -> (RepoData, Option<DiffEntry>) {
         let mut bases = git::BaseRefs::default();
-        let mut by_worktree: ByWorktree = HashMap::new();
-        if let Some(info) = git::inspect_worktree(cwd, mode, &mut bases) {
-            by_worktree.insert(info.worktree_root.clone(), (info, vec![pane(1)]));
-        }
+        let mut by_worktree = place_panes(panels, mode, &mut bases, |panel| pane(panel.pane_id.0));
         add_paneless_worktrees(&mut by_worktree, mode, &mut bases);
         let data = repo_data(by_worktree, merges, commit_cache, &mut bases);
         let diff = data
@@ -992,7 +1095,8 @@ mod tests {
 
     /// Times refreshes of `REPO_BROWSER_BENCH_DIR` (default: this crate's
     /// repository) in every mode, `REPO_BROWSER_BENCH_RUNS` times each after
-    /// one warm-up. Run with a logging `git` first on `PATH` to count spawns.
+    /// one warm-up, with `REPO_BROWSER_BENCH_PANES` panes (default 1) there.
+    /// Run with a logging `git` first on `PATH` to count spawns.
     #[test]
     #[ignore = "benchmark: cargo test -- --ignored --nocapture bench_refresh"]
     fn bench_refresh() {
@@ -1002,6 +1106,11 @@ mod tests {
             .ok()
             .and_then(|n| n.parse().ok())
             .unwrap_or(10);
+        let panes: u64 = std::env::var("REPO_BROWSER_BENCH_PANES")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1);
+        let panels: Vec<Panel> = (1..=panes).map(|id| panel(id, &dir)).collect();
         for mode in DiffMode::ALL {
             let mut merges = git::MergePredictions::default();
             let mut commits = git::CommitCache::default();
@@ -1010,8 +1119,9 @@ mod tests {
             let mut worktrees = 0;
             for i in 0..=runs {
                 let t = Instant::now();
-                let ((data, _), n, peak) =
-                    crate::heap::measure(|| offline_refresh(&dir, mode, &mut merges, &mut commits));
+                let ((data, _), n, peak) = crate::heap::measure(|| {
+                    offline_refresh_of(&panels, mode, &mut merges, &mut commits)
+                });
                 if i > 0 {
                     times.push(t.elapsed().as_secs_f64() * 1000.0);
                     allocs.push(n);

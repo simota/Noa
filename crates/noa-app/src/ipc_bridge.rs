@@ -306,6 +306,28 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// what limits a response.
 const MAX_GRID_ROWS_PER_REQUEST: u64 = 2048;
 
+fn terminal_text_result(
+    terminal: &mut Terminal,
+    source: TextSource,
+    max_bytes: usize,
+) -> TextResult {
+    let (text, truncated) = match source {
+        // Read the live bottom rows regardless of local scrollback so IPC
+        // readers (e.g. `+ctl wait --stall`, `read`, board) observe ongoing
+        // output while a user scrolls through history.
+        TextSource::Screen => (screen_text(terminal.active().live_rows()), false),
+        // Walks rows from the tail under the lock rather than
+        // materializing the full `scrollback_text()` and truncating
+        // after the fact (F-1 / NFR-4).
+        TextSource::Scrollback => terminal.scrollback_text_tail(max_bytes).unwrap_or_default(),
+    };
+    TextResult {
+        text,
+        truncated,
+        alternate_screen: terminal.active_is_alt,
+    }
+}
+
 fn terminal_grid_result(terminal: &Terminal, start_row: u64, row_count: u64) -> GridResult {
     let cols = terminal.active().cols as u32;
     let coordinate_generation = terminal.grid_coordinate_generation();
@@ -413,18 +435,7 @@ impl IpcBackend for AppIpcBackend {
     ) -> Result<TextResult, IpcError> {
         let terminal = self.resolve_terminal(pane)?;
         let mut terminal = terminal.lock();
-        let (text, truncated) = match source {
-            TextSource::Screen => (screen_text(&terminal.active().visible_rows()), false),
-            // Walks rows from the tail under the lock rather than
-            // materializing the full `scrollback_text()` and truncating
-            // after the fact (F-1 / NFR-4).
-            TextSource::Scrollback => terminal.scrollback_text_tail(max_bytes).unwrap_or_default(),
-        };
-        Ok(TextResult {
-            text,
-            truncated,
-            alternate_screen: terminal.active_is_alt,
-        })
+        Ok(terminal_text_result(&mut terminal, source, max_bytes))
     }
 
     fn get_grid(
@@ -521,14 +532,15 @@ impl IpcBackend for AppIpcBackend {
     }
 }
 
-/// Join visible screen rows into `noa.getText(source: "screen")` plain text
-/// (R-2). Trailing spaces are trimmed per unwrapped row — a soft-wrapped
-/// row is full width, so its trailing spaces are real content continued on
-/// the next row and must survive the join (mirrors `noa-grid`'s
-/// `push_selected_row_text`). The trim tracks each row's own start offset
-/// so it can never eat into a preceding wrapped row's real trailing spaces.
-pub(crate) fn screen_text(rows: &[GridRow]) -> String {
-    rows.iter().fold(String::new(), |mut out, row| {
+/// Join screen rows into plain text for `noa.getText(source: "screen")` (live
+/// rows) and AppleScript `contents` (visible viewport) (R-2). Trailing spaces
+/// are trimmed per unwrapped row — a soft-wrapped row is full width, so its
+/// trailing spaces are real content continued on the next row and must survive
+/// the join (mirrors `noa-grid`'s `push_selected_row_text`). The trim tracks
+/// each row's own start offset so it can never eat into a preceding wrapped
+/// row's real trailing spaces.
+pub(crate) fn screen_text<'a>(rows: impl IntoIterator<Item = &'a GridRow>) -> String {
+    rows.into_iter().fold(String::new(), |mut out, row| {
         let before_len = out.len();
         // A wide glyph's spacer and the pad before a wide glyph wrapped to
         // the next row are layout, not text (as in selection extraction).
@@ -1439,5 +1451,68 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].row, oldest);
         assert!(!result.has_more);
+    }
+
+    #[test]
+    fn text_result_screen_reads_live_rows_when_scrolled_back() {
+        let mut terminal = Terminal::new(noa_core::GridSize::new(80, 24));
+        let mut stream = noa_vt::Stream::new();
+        let mut bytes = Vec::new();
+        for i in 0..100 {
+            bytes.extend_from_slice(format!("line-{i:03}\r\n").as_bytes());
+        }
+        stream.feed(&bytes, &mut terminal);
+        terminal.scroll_viewport_up(30);
+        assert_eq!(terminal.viewport_offset(), 30);
+
+        stream.feed(b"LIVE-1\r\n", &mut terminal);
+        let first = terminal_text_result(
+            &mut terminal,
+            TextSource::Screen,
+            noa_ipc::protocol::DEFAULT_TEXT_MAX_BYTES,
+        );
+        assert!(
+            first.text.contains("LIVE-1"),
+            "screen text must read the live rows while scrolled back: {:?}",
+            first.text
+        );
+        assert!(
+            !first.text.contains("line-050"),
+            "screen text must not return the scrolled-back viewport: {:?}",
+            first.text
+        );
+
+        // Further output pushes more rows into scrollback (pinning the scrolled
+        // viewport), while live rows keep changing — stall detection depends on
+        // getText(screen) observing the live change.
+        stream.feed(b"LIVE-2\r\n", &mut terminal);
+        let second = terminal_text_result(
+            &mut terminal,
+            TextSource::Screen,
+            noa_ipc::protocol::DEFAULT_TEXT_MAX_BYTES,
+        );
+        assert_ne!(
+            first.text, second.text,
+            "screen text must reflect live updates while scrolled back"
+        );
+        assert!(second.text.contains("LIVE-2"));
+
+        // Matches the active screen's tail `rows` (active_next_row - rows .. active_next_row).
+        let rows = usize::from(terminal.active().rows);
+        let next = terminal.active_next_row();
+        let tail_rows: Vec<GridRow> = (next.saturating_sub(rows)..next)
+            .filter_map(|y| terminal.active_absolute_row(y))
+            .collect();
+        assert_eq!(second.text, screen_text(&tail_rows));
+
+        // Scrolling back to bottom must produce the exact same screen text.
+        terminal.scroll_viewport_to_bottom();
+        assert_eq!(terminal.viewport_offset(), 0);
+        let at_bottom = terminal_text_result(
+            &mut terminal,
+            TextSource::Screen,
+            noa_ipc::protocol::DEFAULT_TEXT_MAX_BYTES,
+        );
+        assert_eq!(second.text, at_bottom.text);
     }
 }

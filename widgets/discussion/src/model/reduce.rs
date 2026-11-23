@@ -118,6 +118,19 @@ pub enum Event {
         verdict: Verdict,
     },
     SessionClosed,
+    /// The user holds the discussion after each round (or stops holding it).
+    HoldSet {
+        #[serde(default)]
+        hold: bool,
+    },
+    /// The user gave the discussion more rounds: the new limit, which is
+    /// also the user's (the moderator may raise it to twice this). An ended
+    /// discussion is open again.
+    RoundsExtended {
+        max_rounds: RoundNo,
+        #[serde(default)]
+        at: Millis,
+    },
 }
 
 /// The log does not fold: an event names something that is not there, or
@@ -171,6 +184,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
         rounds: Vec::new(),
         debates: Vec::new(),
         closed: false,
+        hold: false,
     };
     for event in rest {
         apply_one(&mut session, event)?;
@@ -422,6 +436,18 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             });
         }
         Event::SessionClosed => session.closed = true,
+        Event::HoldSet { hold } => session.hold = *hold,
+        Event::RoundsExtended { max_rounds, .. } => {
+            if (*max_rounds as usize) <= session.rounds.len() {
+                return err(format!(
+                    "round limit {max_rounds} leaves no round after round {}",
+                    session.rounds.len()
+                ));
+            }
+            session.max_rounds = Some(*max_rounds);
+            session.user_max_rounds = Some(*max_rounds);
+            session.closed = false;
+        }
     }
     Ok(())
 }
@@ -704,5 +730,72 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.0.contains("expected round 1"), "{error}");
+    }
+
+    #[test]
+    fn logs_without_hold_or_extensions_fold_and_the_new_events_round_trip() {
+        let session = create(&created()).unwrap();
+        assert!(!session.hold);
+        // A session serialized before `hold` existed reads it as off.
+        let mut value = serde_json::to_value(&session).unwrap();
+        value.as_object_mut().unwrap().remove("hold");
+        let read: Session = serde_json::from_value(value).unwrap();
+        assert!(!read.hold);
+        for event in [
+            Event::HoldSet { hold: true },
+            Event::RoundsExtended {
+                max_rounds: 3,
+                at: 9,
+            },
+        ] {
+            let line = serde_json::to_string(&event).unwrap();
+            assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), event);
+        }
+        let bare: Event = serde_json::from_str(r#"{"event":"hold_set"}"#).unwrap();
+        assert_eq!(bare, Event::HoldSet { hold: false });
+    }
+
+    #[test]
+    fn an_extension_must_leave_a_round_to_run() {
+        let mut session = create(&created()).unwrap();
+        apply(
+            &mut session,
+            &[
+                Event::RoundStarted {
+                    no: 1,
+                    kind: RoundKind::Open,
+                    at: 0,
+                },
+                Event::SessionClosed,
+            ],
+        )
+        .unwrap();
+        let mut copy = session.clone();
+        assert!(
+            apply(
+                &mut copy,
+                &[Event::RoundsExtended {
+                    max_rounds: 1,
+                    at: 0
+                }]
+            )
+            .is_err()
+        );
+        apply(
+            &mut session,
+            &[
+                Event::HoldSet { hold: true },
+                Event::RoundsExtended {
+                    max_rounds: 2,
+                    at: 0,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(session.hold && !session.closed);
+        assert_eq!(
+            (session.max_rounds, session.user_max_rounds),
+            (Some(2), Some(2))
+        );
     }
 }

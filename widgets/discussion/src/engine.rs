@@ -122,6 +122,22 @@ pub enum Input {
     /// The user ends the discussion: nothing more is sent, and no round
     /// starts.
     UserClose,
+    /// The user holds the discussion after each round (`true`), or lets
+    /// rounds follow each other again. A round already waiting still waits
+    /// for `UserContinue`.
+    UserSetHold {
+        hold: bool,
+    },
+    /// The user starts the next round of a held discussion.
+    UserContinue {
+        at: Millis,
+    },
+    /// The user gives the discussion `by` more rounds; an ended discussion
+    /// that ran all its rounds goes on.
+    UserExtend {
+        by: RoundNo,
+        at: Millis,
+    },
     Tick {
         now: Millis,
     },
@@ -358,7 +374,13 @@ impl Engine {
                 | Input::UserDeclineDebate { .. }
                 | Input::UserStartDebate { .. }
                 | Input::UserRetry
-                | Input::UserClose => rejected("the discussion has ended"),
+                | Input::UserClose
+                | Input::UserSetHold { .. }
+                | Input::UserContinue { .. } => rejected("the discussion has ended"),
+                Input::UserExtend { by, at } => {
+                    self.extend(&mut out, by, at)?;
+                    Ok(out)
+                }
                 // Reports and ticks after the end move nothing.
                 _ => Ok(out),
             };
@@ -459,6 +481,24 @@ impl Engine {
             } => self.user_debate(&mut out, issue, pro, con, at)?,
             Input::UserRetry => self.user_retry(&mut out)?,
             Input::UserClose => self.commit(&mut out, vec![Event::SessionClosed])?,
+            Input::UserSetHold { hold } => {
+                if hold != self.session.hold {
+                    self.commit(&mut out, vec![Event::HoldSet { hold }])?;
+                }
+            }
+            Input::UserContinue { at } => {
+                if !self.session.hold {
+                    return rejected("the discussion is not held");
+                }
+                if self.session.pending_debate().is_some() {
+                    return rejected("a proposed debate waits for approval");
+                }
+                if !self.session.waits_to_continue() {
+                    return rejected("the round is still running");
+                }
+                self.open_next_round(&mut out, at)?;
+            }
+            Input::UserExtend { by, at } => self.extend(&mut out, by, at)?,
             Input::Tick { now } => {
                 self.timeouts(&mut out, now)?;
                 self.advance(&mut out)?;
@@ -561,9 +601,40 @@ impl Engine {
         self.advance(out)
     }
 
+    /// Gives the discussion `by` more rounds past the rounds it may run now
+    /// (or has run); the new limit is the user's, so the moderator may
+    /// raise it to twice that. An ended discussion that ran all its rounds
+    /// is open again, and its next round starts unless it is held.
+    fn extend(&mut self, out: &mut Output, by: RoundNo, at: Millis) -> Result<(), EngineError> {
+        if by == 0 {
+            return rejected("add at least one round");
+        }
+        if let Err(why) = self.session.extendable() {
+            return rejected(why);
+        }
+        let base = self
+            .session
+            .max_rounds
+            .unwrap_or_default()
+            .max(self.session.rounds.len() as RoundNo);
+        let max_rounds = base.saturating_add(by);
+        self.commit(out, vec![Event::RoundsExtended { max_rounds, at }])?;
+        self.next_round(out, at)
+    }
+
     /// Starts the round that follows a closed one (or the first), unless the
-    /// session is over or a proposed debate waits for the user.
+    /// session is over, a proposed debate waits for the user, or the user
+    /// holds the discussion after each round.
     fn next_round(&mut self, out: &mut Output, now: Millis) -> Result<(), EngineError> {
+        self.start_next(out, now, false)
+    }
+
+    /// [`Self::next_round`] past the user's hold: the user continues.
+    fn open_next_round(&mut self, out: &mut Output, now: Millis) -> Result<(), EngineError> {
+        self.start_next(out, now, true)
+    }
+
+    fn start_next(&mut self, out: &mut Output, now: Millis, go: bool) -> Result<(), EngineError> {
         if self.session.closed {
             return Ok(());
         }
@@ -582,6 +653,10 @@ impl Engine {
             return self.commit(out, vec![Event::SessionClosed]);
         }
         if self.session.pending_debate().is_some() {
+            return Ok(());
+        }
+        // Held: the user reads the summary, may intervene, then continues.
+        if self.session.hold && !go && !self.session.rounds.is_empty() {
             return Ok(());
         }
         let debate = |status| {
@@ -2221,6 +2296,242 @@ mod tests {
             e.handle(Input::UserRetry),
             Err(EngineError::Rejected(_))
         ));
+    }
+
+    #[test]
+    fn a_held_discussion_waits_after_the_summary_and_takes_interventions_into_the_next_brief() {
+        let mut e = engine_with_max_rounds(Some(5));
+        feed(&mut e, Input::Start { now: 0 });
+        assert!(matches!(
+            e.handle(Input::UserContinue { at: 0 }),
+            Err(EngineError::Rejected(_))
+        ));
+        let out = feed(&mut e, Input::UserSetHold { hold: true });
+        assert_eq!(out.batches, vec![vec![Event::HoldSet { hold: true }]]);
+        // Setting it again changes nothing.
+        assert!(
+            feed(&mut e, Input::UserSetHold { hold: true })
+                .batches
+                .is_empty()
+        );
+        run_panel(&mut e, 1);
+        assert!(matches!(
+            e.handle(Input::UserContinue { at: 1 }),
+            Err(EngineError::Rejected(why)) if why.contains("still running")
+        ));
+        let out = moderate(&mut e, r#"{"summary":"one"}"#, 2);
+        assert!(sends(&out).is_empty(), "held: no round 2 yet");
+        assert_eq!((no(&e), phase(&e)), (1, Phase::Closed));
+        assert!(e.session().waits_to_continue());
+        // Deadlines move nothing while it waits.
+        let out = feed(
+            &mut e,
+            Input::Tick {
+                now: 10 * CONFIG.reply_timeout,
+            },
+        );
+        assert!(out.batches.is_empty() && out.effects.is_empty());
+
+        feed(
+            &mut e,
+            Input::UserIntervention {
+                to: vec![],
+                body: "Weigh the backup cost too.".into(),
+                at: 3,
+            },
+        );
+        let out = feed(&mut e, Input::UserContinue { at: 4 });
+        assert_eq!(no(&e), 2);
+        assert!(!e.session().waits_to_continue());
+        for part in panel(&e) {
+            assert!(
+                send_to(&out, part.as_str()).contains("Weigh the backup cost too."),
+                "{part}"
+            );
+        }
+        // Still held after round 2; let go, round 3 follows on its own.
+        run_panel(&mut e, 5);
+        moderate(&mut e, r#"{"summary":"two"}"#, 6);
+        assert_eq!(no(&e), 2);
+        feed(&mut e, Input::UserSetHold { hold: false });
+        assert_eq!(no(&e), 2, "letting go does not start the waiting round");
+        assert!(!e.session().waits_to_continue());
+        assert!(matches!(
+            e.handle(Input::UserContinue { at: 7 }),
+            Err(EngineError::Rejected(why)) if why.contains("not held")
+        ));
+    }
+
+    #[test]
+    fn a_held_discussion_still_ends_at_its_limit_and_a_proposed_debate_comes_first() {
+        let mut e = engine_with_max_rounds(Some(2));
+        feed(&mut e, Input::Start { now: 0 });
+        feed(&mut e, Input::UserSetHold { hold: true });
+        run_panel(&mut e, 1);
+        moderate(
+            &mut e,
+            r#"{"summary":"split","issue_ops":[{"op":"add","id":"B","title":"b"},{"op":"set_state","id":"B","state":"contested"}],
+                "propose_debate":{"issue":"B","pro":["claude"],"con":["codex"]}}"#,
+            2,
+        );
+        assert!(!e.session().waits_to_continue(), "the proposal first");
+        assert!(matches!(
+            e.handle(Input::UserContinue { at: 3 }),
+            Err(EngineError::Rejected(why)) if why.contains("approval")
+        ));
+        let id = e.session().pending_debate().unwrap().id.clone();
+        feed(
+            &mut e,
+            Input::UserApproveDebate {
+                id,
+                pro: None,
+                con: None,
+                at: 3,
+            },
+        );
+        assert_eq!(no(&e), 1, "approved, still held");
+        assert!(e.session().waits_to_continue());
+        feed(&mut e, Input::UserContinue { at: 4 });
+        assert!(matches!(round(&e).kind, RoundKind::Debate(_)));
+        run_panel(&mut e, 5);
+        moderate(
+            &mut e,
+            r#"{"summary":"two","verdict":{"outcome":"agreed","rationale":"r"},"conclusion":"Done."}"#,
+            6,
+        );
+        assert!(e.session().closed);
+        assert!(!e.session().waits_to_continue());
+    }
+
+    #[test]
+    fn the_user_extends_a_discussion_that_ran_out_of_rounds() {
+        let mut e = engine_with_max_rounds(Some(1));
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        moderate(&mut e, r#"{"summary":"one","conclusion":"SQLite."}"#, 2);
+        assert!(e.session().closed);
+        assert!(matches!(
+            e.handle(Input::UserExtend { by: 0, at: 3 }),
+            Err(EngineError::Rejected(_))
+        ));
+        let out = feed(&mut e, Input::UserExtend { by: 2, at: 3 });
+        assert_eq!(
+            out.batches[0],
+            vec![Event::RoundsExtended {
+                max_rounds: 3,
+                at: 3
+            }]
+        );
+        assert!(!e.session().closed);
+        assert_eq!(e.session().max_rounds, Some(3));
+        assert_eq!(e.session().user_max_rounds, Some(3));
+        assert_eq!(e.session().round_limit_cap(), Some(6));
+        assert_eq!(no(&e), 2, "the next round starts");
+        assert_eq!(sends(&out).len(), 3);
+        // The earlier conclusion stays in the log as said.
+        assert!(
+            e.session()
+                .messages
+                .iter()
+                .any(|m| m.kind == MsgKind::Conclusion && m.body == "SQLite.")
+        );
+        assert!(send_to(&out, "claude").contains("Round: 2 of 3"));
+        // The moderator's cap follows the new user limit.
+        run_panel(&mut e, 4);
+        let brief = &round(&e).moderator_brief.as_ref().unwrap().body;
+        assert!(brief.contains("raise it (at most 6)"), "{brief}");
+        moderate(&mut e, r#"{"summary":"two","round_limit":7}"#, 5);
+        assert_eq!(e.session().max_rounds, Some(3), "past the cap: turned down");
+        write(
+            &mut e,
+            &p(MODERATOR_ID),
+            r#"{"summary":"two","round_limit":6}"#,
+            6,
+        );
+        assert_eq!(e.session().max_rounds, Some(6));
+        assert_eq!(e.session().user_max_rounds, Some(3));
+
+        // A running discussion can be extended too: past the moderator's
+        // limit, and without starting anything.
+        let out = feed(&mut e, Input::UserExtend { by: 1, at: 7 });
+        assert_eq!(e.session().max_rounds, Some(7));
+        assert!(sends(&out).is_empty());
+        // Folded from its log, the session is the same.
+        let replayed = reduce::replay(
+            std::iter::once(vec![Event::Created {
+                id: SessionId::new("x"),
+                topic: "t".into(),
+                workdir: None,
+                max_rounds: Some(1),
+                moderator: e.session().moderator.clone(),
+                panelists: e.session().panelists.clone(),
+                at: 0,
+            }])
+            .chain(std::iter::once(vec![
+                Event::RoundStarted {
+                    no: 1,
+                    kind: RoundKind::Open,
+                    at: 0,
+                },
+                Event::SessionClosed,
+                Event::RoundsExtended {
+                    max_rounds: 3,
+                    at: 3,
+                },
+            ])),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                replayed.closed,
+                replayed.max_rounds,
+                replayed.user_max_rounds
+            ),
+            (false, Some(3), Some(3))
+        );
+    }
+
+    #[test]
+    fn a_discussion_ended_early_or_without_a_limit_is_not_extended() {
+        // Concluded in round 1 of 5.
+        let mut e = engine_with_max_rounds(Some(5));
+        feed(&mut e, Input::Start { now: 0 });
+        run_panel(&mut e, 1);
+        moderate(&mut e, r#"{"summary":"agreed","conclusion":"SQLite."}"#, 2);
+        assert!(matches!(
+            e.handle(Input::UserExtend { by: 1, at: 3 }),
+            Err(EngineError::Rejected(why)) if why.contains("before its round limit")
+        ));
+        // Ended by the user mid-round, in its last round.
+        let mut e = engine_with_max_rounds(Some(1));
+        feed(&mut e, Input::Start { now: 0 });
+        feed(&mut e, Input::UserClose);
+        assert!(matches!(
+            e.handle(Input::UserExtend { by: 1, at: 3 }),
+            Err(EngineError::Rejected(_))
+        ));
+        // No limit at all.
+        let mut e = engine();
+        feed(&mut e, Input::Start { now: 0 });
+        assert!(matches!(
+            e.handle(Input::UserExtend { by: 1, at: 3 }),
+            Err(EngineError::Rejected(why)) if why.contains("no round limit")
+        ));
+    }
+
+    #[test]
+    fn an_extended_and_held_discussion_waits_for_the_user_after_reopening() {
+        let mut e = engine_with_max_rounds(Some(1));
+        feed(&mut e, Input::Start { now: 0 });
+        feed(&mut e, Input::UserSetHold { hold: true });
+        run_panel(&mut e, 1);
+        moderate(&mut e, r#"{"summary":"one","conclusion":"SQLite."}"#, 2);
+        let out = feed(&mut e, Input::UserExtend { by: 1, at: 3 });
+        assert!(sends(&out).is_empty());
+        assert!(e.session().waits_to_continue());
+        let out = feed(&mut e, Input::UserContinue { at: 4 });
+        assert_eq!(no(&e), 2);
+        assert_eq!(sends(&out).len(), 3);
     }
 
     #[test]

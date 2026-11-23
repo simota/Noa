@@ -861,6 +861,119 @@ fn the_demo_only_says_which_pane_it_would_show() {
     assert_eq!(screen.toasts, ["[DEMO] Noa のペインを表示します"]);
 }
 
+// ── Holding and extending ───────────────────────────────────────────────────
+
+fn limited(mut session: Session, max: RoundNo) -> Session {
+    session.max_rounds = Some(max);
+    session.user_max_rounds = Some(max);
+    // Another rev, as the log would have: the panes are built anew.
+    session.rev += 100;
+    session
+}
+
+#[test]
+fn the_hold_toggle_sends_the_other_state() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = crate::demo::session();
+    h.deliver(Some(session.clone()));
+    assert!(!has_widget_for(&h.screen, &Action::Continue));
+    let hold = widget_for(&h.screen, &Action::SetHold(true));
+    click(&mut h.screen, &mut h.text, hold);
+    assert_eq!(h.drain(), vec![Command::SetHold { hold: true }]);
+    session.hold = true;
+    session.rev += 1;
+    h.deliver(Some(session));
+    // Held mid-round: nothing to continue yet.
+    assert!(has_widget_for(&h.screen, &Action::SetHold(false)));
+    assert!(!has_widget_for(&h.screen, &Action::Continue));
+}
+
+#[test]
+fn a_held_discussion_offers_the_next_round_and_says_it_waits() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let session = crate::demo::held();
+    assert!(session.waits_to_continue());
+    h.deliver(Some(session.clone()));
+    assert!(status_badges(&h.screen).contains(&"一時停止中".to_owned()));
+    let go = widget_for(&h.screen, &Action::Continue);
+    click(&mut h.screen, &mut h.text, go);
+    assert_eq!(h.drain(), vec![Command::Continue]);
+    // The composer stays: an intervention now reaches the next brief.
+    assert!(!h.screen.tree.is_hidden(h.screen.composer.root));
+    // Read-only, a stored held discussion offers neither.
+    h.deliver_with(Link::Stored, Some(session));
+    assert!(!has_widget_for(&h.screen, &Action::Continue));
+    assert!(
+        !h.screen
+            .actions
+            .iter()
+            .any(|(_, a)| matches!(a, Action::SetHold(_)))
+    );
+}
+
+#[test]
+fn more_rounds_are_offered_where_the_engine_takes_them() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    // No round limit: nothing to extend.
+    h.deliver(Some(crate::demo::session()));
+    assert!(!has_widget_for(&h.screen, &Action::Extend(1)));
+    // Running with a limit: offered.
+    let running = limited(crate::demo::session(), 8);
+    h.deliver(Some(running.clone()));
+    for by in EXTEND_BY {
+        assert!(has_widget_for(&h.screen, &Action::Extend(by)));
+    }
+    let three = widget_for(&h.screen, &Action::Extend(3));
+    click(&mut h.screen, &mut h.text, three);
+    assert_eq!(h.drain(), vec![Command::Extend { by: 3 }]);
+    // Ended early (round 5 of 8 was cut short): not offered.
+    let mut early = running.clone();
+    early.closed = true;
+    early.rev += 1;
+    h.deliver(Some(early));
+    assert!(!has_widget_for(&h.screen, &Action::Extend(1)));
+    // Ran out of rounds: offered, live and read-only (which resumes it).
+    let mut ran_out = limited(crate::demo::held(), 4);
+    ran_out.closed = true;
+    ran_out.rev += 1;
+    h.deliver(Some(ran_out.clone()));
+    assert!(has_widget_for(&h.screen, &Action::Extend(1)));
+    h.deliver_with(Link::Stored, Some(ran_out));
+    let one = widget_for(&h.screen, &Action::Extend(1));
+    click(&mut h.screen, &mut h.text, one);
+    assert_eq!(h.drain(), vec![Command::Extend { by: 1 }]);
+    // A stored discussion still going is resumed instead.
+    h.deliver_with(Link::Stored, Some(limited(running, 8)));
+    assert!(!has_widget_for(&h.screen, &Action::Extend(1)));
+}
+
+#[test]
+fn every_status_control_fits_the_smallest_window() {
+    let (w, h_) = MIN_WINDOW;
+    let size = Size::new(w as f32, h_ as f32);
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = limited(crate::demo::held(), 9);
+    session.workdir = Some(std::path::PathBuf::from("/repo"));
+    h.deliver(Some(session));
+    h.screen.prepare(size, &mut h.text);
+    assert!(has_widget_for(&h.screen, &Action::Continue));
+    assert!(has_widget_for(&h.screen, &Action::Extend(3)));
+    for &child in h.screen.tree.children(h.screen.status_trailing) {
+        let [x, _, cw, _] = rect(&h.screen.tree, child);
+        assert!(x >= 0.0 && x + cw <= size.width + 0.5, "{x}+{cw}");
+    }
+    let [lx, _, lw, _] = rect(&h.screen.tree, h.screen.status_leading);
+    let [tx, _, _, _] = rect(&h.screen.tree, h.screen.status_trailing);
+    assert!(
+        lx + lw <= tx + 0.5,
+        "leading {lx}+{lw} runs into trailing at {tx}"
+    );
+}
+
 // ── Link state ──────────────────────────────────────────────────────────────
 
 fn status_badges(screen: &Discussion) -> Vec<String> {

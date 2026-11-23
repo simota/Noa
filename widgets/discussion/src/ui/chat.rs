@@ -114,6 +114,10 @@ fn brief_bar(
         tag(tree, row, &format!("⚔ 討論 {id}"), Tone::Warning);
     }
     caption(tree, row, phase_label(round.phase));
+    if session.waits_to_continue() {
+        tag(tree, row, "一時停止中", Tone::Warning);
+        caption(tree, row, "介入は次のラウンドのブリーフに入ります");
+    }
     for brief in round.briefs.iter().chain(&round.moderator_brief) {
         let delivery = Delivery::of(&brief.receipt);
         let (state, tone) = delivery.tag();

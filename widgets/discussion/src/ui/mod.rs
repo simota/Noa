@@ -36,7 +36,7 @@ use noa_gpui_text::TextStore;
 
 use discussion::model::types::{
     AgentKind, Author, DebateId, DebateStatus, IssueId, IssueState, MODERATOR_ID, Message, MsgKind,
-    PartId, Phase, Position, Receipt, Session,
+    PartId, Phase, Position, Receipt, RoundNo, Session,
 };
 
 use discussion::store::Summary;
@@ -96,7 +96,16 @@ pub enum Action {
     NewDiscussion,
     /// Bring a participant's pane to the front in Noa.
     Focus(PartId),
+    /// Hold the discussion after each round (`true`), or stop holding it.
+    SetHold(bool),
+    /// Start the next round of a held discussion.
+    Continue,
+    /// Give the discussion this many more rounds.
+    Extend(RoundNo),
 }
+
+/// The round counts the "+N ラウンド" buttons offer.
+pub(crate) const EXTEND_BY: [RoundNo; 2] = [1, 3];
 
 impl Action {
     /// Whether the action changes the discussion or its agents, which a
@@ -111,6 +120,8 @@ impl Action {
                 | Action::Send
                 | Action::Close
                 | Action::Implement(_)
+                | Action::SetHold(_)
+                | Action::Continue
         )
     }
 }
@@ -211,6 +222,15 @@ impl Discussion {
         self.history = history;
         self.rebuild(&mut TextStore::new(Default::default()));
         self
+    }
+
+    /// The demo held after a round, waiting for the user (`--demo-held`).
+    pub fn demo_held() -> Self {
+        Self::build(
+            Source::Demo,
+            Link::Live,
+            Some(Arc::new(crate::demo::held())),
+        )
     }
 
     /// The demo's start view, with canned stored discussions
@@ -524,6 +544,60 @@ impl Discussion {
                 format!("第 {} ラウンド · {}", round.no, phase_label(round.phase)),
             );
         }
+        let waits = session.waits_to_continue();
+        if waits {
+            self.tree.insert(
+                Some(self.status_leading),
+                Badge::text("一時停止中").tone(Tone::Warning),
+            );
+        }
+        if !session.closed && !self.read_only() {
+            let hold = self.tree.insert(
+                Some(self.status_trailing),
+                Button::new(if session.hold {
+                    "ラウンド後に停止: オン"
+                } else {
+                    "ラウンド後に停止: オフ"
+                })
+                .control_size(ControlSize::Small)
+                .tooltip("オンにすると、司会の要約のあと次のラウンドを始める前に止まります"),
+            );
+            self.actions.push((hold, Action::SetHold(!session.hold)));
+            if waits {
+                let go = self.tree.insert(
+                    Some(self.status_trailing),
+                    Button::new("次のラウンドへ")
+                        .default_button(true)
+                        .control_size(ControlSize::Small),
+                );
+                self.actions.push((go, Action::Continue));
+            }
+        }
+        // A stored discussion that ran all its rounds is resumed to go on.
+        if session.extendable().is_ok() && (!self.read_only() || session.closed) {
+            if let Some(max) = session.max_rounds {
+                caption(
+                    &mut self.tree,
+                    self.status_trailing,
+                    format!("上限 {max} ラウンド"),
+                );
+            }
+            for by in EXTEND_BY {
+                let more = self.tree.insert(
+                    Some(self.status_trailing),
+                    Button::new(format!("+{by}"))
+                        .control_size(ControlSize::Small)
+                        .tooltip(if self.read_only() {
+                            "再開してラウンドを追加します（エージェントが起動します）"
+                        } else {
+                            "ラウンド数の上限を増やします。終了していれば議論を続けます"
+                        }),
+                );
+                self.tree
+                    .set_accessible_label(more, format!("ラウンドを {by} 追加"));
+                self.actions.push((more, Action::Extend(by)));
+            }
+        }
         if session.closed {
             self.tree.insert(
                 Some(self.status_leading),
@@ -735,6 +809,19 @@ impl Discussion {
                 format!("{} を再開します", dir.display()),
             ),
             Action::NewDiscussion => self.send(Command::NewDiscussion, "開始画面に戻ります"),
+            Action::SetHold(hold) => self.send(
+                Command::SetHold { hold },
+                if hold {
+                    "各ラウンドのあとで止めます"
+                } else {
+                    "ラウンドを続けて進めます"
+                },
+            ),
+            Action::Continue => self.send(Command::Continue, "次のラウンドを始めます"),
+            Action::Extend(by) => self.send(
+                Command::Extend { by },
+                format!("ラウンドを {by} 追加します"),
+            ),
             Action::Focus(part) => self.send(
                 Command::Focus { part: part.clone() },
                 format!("{} のペインを表示します", part_name(&part)),

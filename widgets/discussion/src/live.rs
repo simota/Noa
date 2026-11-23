@@ -87,6 +87,13 @@ pub enum Command {
     Implement { agent: AgentKind },
     /// Bring a participant's pane to the front in Noa (`noa.focusPane`).
     Focus { part: PartId },
+    /// `UserSetHold`: hold the discussion after each round, or stop.
+    SetHold { hold: bool },
+    /// `UserContinue`: start the next round of a held discussion.
+    Continue,
+    /// `UserExtend`: this many more rounds. On a stored discussion shown
+    /// read-only, it is resumed first (its agents run again).
+    Extend { by: RoundNo },
 }
 
 pub struct Channel {
@@ -209,8 +216,8 @@ impl Running {
 enum Shown {
     /// The start view.
     Nothing,
-    /// A stored discussion, read-only.
-    Stored,
+    /// The stored discussion at this directory, read-only.
+    Stored(PathBuf),
     Running(Running),
 }
 
@@ -239,6 +246,13 @@ fn run_commands(
 ) {
     let mut shown = Shown::Nothing;
     for cmd in commands {
+        // Extending a stored discussion resumes it, then extends it.
+        if let (Command::Extend { by }, Shown::Stored(dir)) = (&cmd, &shown) {
+            if let Some(running) = resume_to_extend(dir.clone(), *by, &out, &spawn_session) {
+                shown = Shown::Running(running);
+            }
+            continue;
+        }
         let start = match cmd {
             Command::Start { .. } | Command::Resume { .. } | Command::Open { .. }
                 if shown.busy() =>
@@ -276,7 +290,7 @@ fn run_commands(
                             session: Some(Arc::new(session)),
                         });
                         (out.wake)();
-                        shown = Shown::Stored;
+                        shown = Shown::Stored(dir);
                     }
                     Err(err) => out.notice(format!("{} を開けません: {err}", dir.display())),
                 }
@@ -292,7 +306,7 @@ fn run_commands(
                     (Shown::Running(running), Some(action)) if !running.ended() => {
                         let _ = running.actions.send(action);
                     }
-                    (Shown::Stored, _) => {
+                    (Shown::Stored(_), _) => {
                         out.notice("記録を表示しています。操作するには再開してください")
                     }
                     _ => out.notice("議論が始まっていません"),
@@ -305,6 +319,31 @@ fn run_commands(
     }
     // The UI is gone: end the runner.
     shown.leave();
+}
+
+/// Resumes the stored discussion at `dir` and gives it `by` more rounds,
+/// when it may get them; otherwise says why, and nothing starts.
+fn resume_to_extend(
+    dir: PathBuf,
+    by: RoundNo,
+    out: &Out,
+    spawn_session: &impl Fn(runner::Start) -> SessionHandle,
+) -> Option<Running> {
+    match discussion::store::load(&dir) {
+        Ok(session) => {
+            if let Err(why) = session.extendable() {
+                out.notice(format!("ラウンドを追加できません: {why}"));
+                return None;
+            }
+        }
+        Err(err) => {
+            out.notice(format!("{} を開けません: {err}", dir.display()));
+            return None;
+        }
+    }
+    let running = spawn(spawn_session(runner::Start::Resume { dir }), out);
+    let _ = running.actions.send(Action::Extend { by });
+    Some(running)
 }
 
 /// The runner action a command in a running discussion becomes; `None`
@@ -327,6 +366,9 @@ fn action_of(cmd: Command) -> Option<Action> {
         Command::Close => Action::Close,
         Command::Implement { agent } => Action::Implement { agent },
         Command::Focus { part } => Action::Focus { part },
+        Command::SetHold { hold } => Action::SetHold { hold },
+        Command::Continue => Action::Continue,
+        Command::Extend { by } => Action::Extend { by },
         Command::Start { .. }
         | Command::Open { .. }
         | Command::Resume { .. }
@@ -536,8 +578,19 @@ mod tests {
         linger: Duration,
         starts: Sender<runner::Start>,
     ) -> impl Fn(runner::Start) -> SessionHandle + Send + 'static {
+        fake_runner_seeing(session, linger, starts, mpsc::channel().0)
+    }
+
+    /// [`fake_runner`] that passes on every action it gets but `Stop`.
+    fn fake_runner_seeing(
+        session: Session,
+        linger: Duration,
+        starts: Sender<runner::Start>,
+        seen: Sender<Action>,
+    ) -> impl Fn(runner::Start) -> SessionHandle + Send + 'static {
         move |start| {
             let _ = starts.send(start);
+            let seen = seen.clone();
             let (update_tx, updates) = mpsc::channel();
             let (actions, action_rx) = mpsc::channel();
             let session = Arc::new(session.clone());
@@ -547,6 +600,7 @@ mod tests {
                     if action == Action::Stop {
                         break;
                     }
+                    let _ = seen.send(action);
                 }
                 std::thread::sleep(linger);
                 // Sent late: it must not reach the UI after the start view.
@@ -697,5 +751,88 @@ mod tests {
             })
         );
         assert_eq!(action_of(Command::NewDiscussion), None);
+    }
+
+    #[test]
+    fn extending_a_stored_discussion_resumes_it_first_when_it_ran_out_of_rounds() {
+        let root = temp_root("extend");
+        let ran_out = stored(&root, "disc-4", true);
+        // Ran its one round, then ended.
+        {
+            use discussion::model::reduce::Event;
+            use discussion::model::types::{Phase, RoundKind};
+            let text =
+                std::fs::read_to_string(ran_out.join(discussion::store::EVENTS_FILE)).unwrap();
+            let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+            let closed = lines.pop().unwrap();
+            for batch in [
+                vec![Event::RoundStarted {
+                    no: 1,
+                    kind: RoundKind::Open,
+                    at: 8,
+                }],
+                vec![Event::PhaseChanged {
+                    round: 1,
+                    phase: Phase::Closed,
+                }],
+            ] {
+                lines.push(serde_json::to_string(&batch).unwrap());
+            }
+            lines.push(closed);
+            std::fs::write(
+                ran_out.join(discussion::store::EVENTS_FILE),
+                lines.join("\n") + "\n",
+            )
+            .unwrap();
+        }
+        // Ended before its limit (no round ran).
+        let early = stored(&root, "disc-5", true);
+        let session = discussion::store::load(&ran_out).unwrap();
+        assert!(session.extendable().is_ok());
+        let (starts_tx, starts) = mpsc::channel();
+        let (seen_tx, seen) = mpsc::channel();
+        let channel = start_with(
+            Some(root.clone()),
+            || {},
+            fake_runner_seeing(session, Duration::ZERO, starts_tx, seen_tx),
+        );
+        let _ = channel.history.recv_timeout(Duration::from_secs(1));
+        let _ = snapshot_within(&channel, Duration::from_secs(1));
+
+        channel.send(Command::Open { dir: early.clone() });
+        let _ = snapshot_within(&channel, Duration::from_secs(1));
+        channel.send(Command::Extend { by: 2 });
+        let notices = notices_within(&channel, Duration::from_millis(300));
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("ラウンドを追加できません")),
+            "{notices:?}"
+        );
+        assert!(starts.try_recv().is_err(), "nothing started");
+
+        channel.send(Command::NewDiscussion);
+        let _ = channel.history.recv_timeout(Duration::from_secs(1));
+        let _ = snapshot_within(&channel, Duration::from_secs(1));
+        channel.send(Command::Open {
+            dir: ran_out.clone(),
+        });
+        let _ = snapshot_within(&channel, Duration::from_secs(1));
+        channel.send(Command::Extend { by: 2 });
+        assert_eq!(
+            starts.recv_timeout(Duration::from_secs(1)).unwrap(),
+            runner::Start::Resume { dir: ran_out }
+        );
+        assert_eq!(
+            seen.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Action::Extend { by: 2 }
+        );
+        // Running now: later commands go to the runner.
+        channel.send(Command::SetHold { hold: true });
+        assert_eq!(
+            seen.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Action::SetHold { hold: true }
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

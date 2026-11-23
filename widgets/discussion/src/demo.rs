@@ -133,6 +133,17 @@ fn reply(header: &str, body: &str) -> String {
 
 /// The demo session, folded from the scripted run.
 pub fn session() -> Session {
+    run(false)
+}
+
+/// The demo held after round 4 (`--demo-held`): the user paused the
+/// discussion before the summary, so round 5 waits for the user, who has
+/// written an intervention meanwhile.
+pub fn held() -> Session {
+    run(true)
+}
+
+fn run(held: bool) -> Session {
     let config = Config {
         debate_max_exchanges: 2,
         ..Config::default()
@@ -301,6 +312,9 @@ pub fn session() -> Session {
     }));
 
     // ── Round 4: debate, second exchange and the verdict ───────────────────
+    if held {
+        s.feed(Input::UserSetHold { hold: true });
+    }
     s.panel(&[
         (
             "codex",
@@ -349,6 +363,9 @@ pub fn session() -> Session {
         &["codex"],
         "C については、移行ツールの制約も確認してから答えてください。",
     );
+    if held {
+        return s.engine.session().clone();
+    }
     for part in ["claude", "codex", "agy"] {
         s.deliver(part);
     }

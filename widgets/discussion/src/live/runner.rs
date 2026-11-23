@@ -130,6 +130,17 @@ pub enum Action {
     Focus {
         part: PartId,
     },
+    /// Hold the discussion after each round, or stop holding it.
+    SetHold {
+        hold: bool,
+    },
+    /// Start the next round of a held discussion.
+    Continue,
+    /// Give the discussion this many more rounds (an ended one that ran all
+    /// its rounds goes on).
+    Extend {
+        by: RoundNo,
+    },
     /// End the runner. The agents' panes stay open.
     Stop,
 }
@@ -669,6 +680,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             },
             Action::Retry => Input::UserRetry,
             Action::Close => Input::UserClose,
+            Action::SetHold { hold } => Input::UserSetHold { hold },
+            Action::Continue => Input::UserContinue { at },
+            Action::Extend { by } => Input::UserExtend { by, at },
             Action::Implement { agent } => {
                 self.implement(agent);
                 return Ok(());
@@ -2506,6 +2520,42 @@ mod tests {
                 .iter()
                 .any(|n| n.contains("Noa に接続していません"))
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hold_continue_and_extend_reach_the_engine_and_refusals_come_back() {
+        let root = temp_root("hold");
+        let fake = Fake::new();
+        fake.w().now = 1_000;
+        let mut rig = Rig::open(
+            &fake,
+            Start::New {
+                topic: "Pick a database".into(),
+                workdir: None,
+                max_rounds: Some(1),
+                moderator: AgentKind::Claude.into(),
+                panel: vec![AgentKind::Codex.into()],
+                root: root.clone(),
+            },
+        );
+        rig.step();
+        rig.actions.send(Action::SetHold { hold: true }).unwrap();
+        rig.actions.send(Action::Continue).unwrap();
+        rig.actions.send(Action::Extend { by: 2 }).unwrap();
+        rig.step();
+        assert!(rig.session().hold);
+        assert_eq!(rig.session().max_rounds, Some(3));
+        assert_eq!(rig.session().user_max_rounds, Some(3));
+        assert!(rig.notices().iter().any(|n| n.contains("still running")),);
+        // Stored: a resume folds the same.
+        let dir = rig.dir();
+        rig.actions.send(Action::Stop).unwrap();
+        assert!(!rig.runner.step().unwrap());
+        drop(rig);
+        let (_, session) = Store::open(&dir).unwrap();
+        assert!(session.hold);
+        assert_eq!(session.max_rounds, Some(3));
         let _ = fs::remove_dir_all(&root);
     }
 

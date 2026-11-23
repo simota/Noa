@@ -27,11 +27,12 @@ use discussion::store::Summary;
 use crate::live::{Link, Snapshot};
 use crate::ui::Discussion;
 
-const USAGE: &str = "usage: discussion [--demo | --demo-start | --session=DIR] \
+const USAGE: &str = "usage: discussion [--demo | --demo-start | --demo-held | --session=DIR] \
                      [--snapshot=FILE.png [--size=WxH]]\n  \
                      the live discussion by default; \
                      --demo shows a canned multi-round discussion, \
                      --demo-start the start view with canned stored discussions, \
+                     --demo-held the demo paused after a round, \
                      --session the discussion stored at DIR, read-only";
 const DEFAULT_SIZE: (u32, u32) = (1440, 900);
 const SNAPSHOT_SCALE: f32 = 2.0;
@@ -131,6 +132,7 @@ fn main() -> Result<(), String> {
     let mut snapshot_path = None;
     let mut demo = false;
     let mut demo_start = false;
+    let mut demo_held = false;
     let mut stored = None;
     let mut size = DEFAULT_SIZE;
 
@@ -145,6 +147,8 @@ fn main() -> Result<(), String> {
             demo = true;
         } else if arg == "--demo-start" {
             demo_start = true;
+        } else if arg == "--demo-held" {
+            demo_held = true;
         } else if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
             return Ok(());
@@ -153,9 +157,14 @@ fn main() -> Result<(), String> {
         }
     }
 
-    if usize::from(demo) + usize::from(demo_start) + usize::from(stored.is_some()) > 1 {
+    if usize::from(demo)
+        + usize::from(demo_start)
+        + usize::from(demo_held)
+        + usize::from(stored.is_some())
+        > 1
+    {
         return Err(format!(
-            "--demo, --demo-start and --session do not go together\n{USAGE}"
+            "--demo, --demo-start, --demo-held and --session do not go together\n{USAGE}"
         ));
     }
     // Folded read-only: no agent or runner starts.
@@ -173,6 +182,8 @@ fn main() -> Result<(), String> {
             Discussion::demo()
         } else if demo_start {
             Discussion::demo_start()
+        } else if demo_held {
+            Discussion::demo_held()
         } else if let Some((dir, session)) = stored {
             Discussion::of_stored(dir, session)
         } else {
@@ -190,6 +201,9 @@ fn main() -> Result<(), String> {
         }
         if demo_start {
             return Box::new(Discussion::demo_start());
+        }
+        if demo_held {
+            return Box::new(Discussion::demo_held());
         }
         if let Some((dir, session)) = stored {
             return Box::new(Discussion::of_stored(dir, session));

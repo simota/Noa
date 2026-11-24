@@ -29,8 +29,8 @@ const NEXT_ROUND_HINT: &str =
 /// A panel's deciding round before its verdict brief: that brief carries
 /// every intervention of the competition, whatever its addressees, so
 /// nothing stays blind to the lead.
-const VERDICT_HINT: &str = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届き、次のラウンドのブリーフで宛先パネルに届きます";
-const VERDICT_TOO_HINT: &str = "追加指示は次のラウンドのブリーフで宛先パネルに届きます。宛先にリード審判がいなくても、このラウンドでこのあと出る最終講評のブリーフでリード審判にも届きます";
+const VERDICT_HINT: &str = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます。延長した場合は次のラウンドのブリーフで宛先パネルに届きます";
+const VERDICT_TOO_HINT: &str = "追加指示は宛先にリード審判がいなくても、このラウンドでこのあと出る最終講評のブリーフでリード審判に届きます。延長した場合は次のラウンドのブリーフで宛先パネルに届きます";
 /// A round the lead's scorecard closed before the last: the competition
 /// ends with the verdict and cannot be extended, so there is no next round.
 const EARLY_CLOSE_HINT: &str =

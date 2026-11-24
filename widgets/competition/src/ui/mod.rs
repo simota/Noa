@@ -2945,8 +2945,8 @@ mod tests {
     fn an_intervention_in_a_deciding_round_reaches_the_leads_verdict_brief() {
         let ids = |v: &[&str]| v.iter().map(|x| PartId::new(*x)).collect::<Vec<_>>();
         let next = "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）";
-        let verdict = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届き、次のラウンドのブリーフで宛先パネルに届きます";
-        let verdict_too = "追加指示は次のラウンドのブリーフで宛先パネルに届きます。宛先にリード審判がいなくても、このラウンドでこのあと出る最終講評のブリーフでリード審判にも届きます";
+        let verdict = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます。延長した場合は次のラウンドのブリーフで宛先パネルに届きます";
+        let verdict_too = "追加指示は宛先にリード審判がいなくても、このラウンドでこのあと出る最終講評のブリーフでリード審判に届きます。延長した場合は次のラウンドのブリーフで宛先パネルに届きます";
         let early_close =
             "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます";
         // The last round, being scored, its verdict brief not issued yet.
@@ -2968,6 +2968,12 @@ mod tests {
             assert_eq!(composer::hint(&session, &to), verdict_too, "{to:?}");
         }
         assert!(!verdict.contains("ブラインド") && !verdict_too.contains("ブラインド"));
+        // The last round has no next round unless extended: delivery to the
+        // lead is stated as certain, to the recipients as conditional.
+        for hint in [verdict, verdict_too] {
+            assert!(hint.contains("最終講評のブリーフでリード審判に届きます"), "{hint}");
+            assert!(hint.contains("延長した場合は次のラウンドのブリーフで宛先パネルに届きます"), "{hint}");
+        }
 
         // A round before the last: the next round's briefs, until the
         // lead's scorecard closes the competition. Closed early, it cannot

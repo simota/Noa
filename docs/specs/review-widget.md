@@ -299,6 +299,15 @@ Added after v1: a review can be run again as it was set up, typically after its 
 
 Added after v1: when Noa opens the review (View → Review, the palette's Open Review, `review.open`), it passes the focused pane's working directory (a local pane's OSC 7 directory that exists) as `review --repo=DIR`; no other widget gets an argument (`helper_program::launch_args`). The start view's repository (git), root (files) and working directory (document) fields start with `DIR`; the rest of the form is the clean one, and the installed-agents check that reports later keeps them. `--repo` takes an absolute path and goes with neither `--demo*` nor `--session` (refused before a window opens); with `--snapshot` it renders the live start view filled.
 
+### L1-12. Finding search and file filter
+
+Added after v1, on the 指摘 board:
+
+- 検索 in the tab row (⌘F, a toggle; its accessible label 指摘を検索) opens a search field under the tabs, on the findings tab, focused; closing it drops its words. Closed, it takes no line, so the smallest window shows as much of the list as before. The field outlives rebuilds, so typing goes on while the list narrows.
+- A finding passes when it holds every word typed (split on spaces, case aside) in its id, claim, rationale, fix or location, or in a source's claim, evidence or fix.
+- In the matrix tab's file coverage, a file that any finding points into (its own location or a source's, whatever its status) has このファイルの指摘: it opens the board filtered to that file, shown as the chip 「ファイル: <path> ✕」 in the tab row, which takes the filter off.
+- Both combine with the other five filters; every chip's count stays what choosing it shows, and 表示 n / 全 m counts with them. 条件をすべて解除 also clears the words and the file; a matrix cell keeps neither. The 表示中 scope of 修正を依頼 (L1-9) is what the board shows with them.
+
 ## L2: Detail
 
 ### L2-1. Crate layout
@@ -458,10 +467,13 @@ Unit tests live beside the modules; golden tests in `tests/`; headless snapshots
 40. AC-40 Every readable past row offers 再レビュー, an unreadable one does not; kinds not installed are left out (UI tests).
 41. AC-41 `review --repo=DIR` fills the repository, root and working directory fields and keeps them when the agent check reports; a relative `--repo` and `--repo` with a demo or `--session` exit non-zero (UI, flag and CLI tests). Noa passes `--repo=<focused pane's directory>` to the review only, none when the directory is unknown or relative; the other four widgets start with no argument (noa-app test).
 42. AC-42 (manual) Opening Review from a pane inside a repository shows that repository in the start view.
+43. AC-43 Typing in the search narrows the rows and 表示 n / 全 m, keeps the field focused with its text, and 条件をすべて解除 empties it; words match ids, paths and a source's evidence in any case, every word required (UI tests).
+44. AC-44 このファイルの指摘 appears exactly for files a finding points into, opens the board on them, and its chip takes the filter off; chip counts equal what choosing them shows with words and a file on (UI tests).
+45. AC-45 The search is closed by default, opens with ⌘F on the findings tab, focused, hides on the other tabs, and closing it drops the words; the smallest window's first row is where it was (UI tests, including the existing layout test).
 
 ## Scope
 
-In scope: L1-1 … L1-11 above.
+In scope: L1-1 … L1-12 above.
 
 Out of scope:
 - Applying fixes inside the widget, or tracking whether a fix request was carried out: 修正を依頼 (L1-9) starts the agent and hands it the findings; the agent works in its own tab.

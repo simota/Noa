@@ -3,7 +3,7 @@
 //! then file coverage: per target file its findings and who reviewed it.
 
 use noa_gpui_core::style::{AlignItems, Size as LayoutSize, auto, length};
-use noa_gpui_core::widgets::{Container, Label, Pressable, Tone, Truncation};
+use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Pressable, Tone, Truncation};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use review::model::types::{Session, Severity, covers};
@@ -227,6 +227,20 @@ pub(super) fn insert(
                 counts.join(" · ")
             },
         );
+        // Every finding that points into the file, whatever its status:
+        // the board shows them with the file filter on.
+        if session
+            .findings
+            .iter()
+            .any(|f| super::board::touches(session, f, &file.path))
+        {
+            let show = tree.insert(
+                Some(top),
+                Button::new("このファイルの指摘").control_size(ControlSize::Small),
+            );
+            tree.set_accessible_label(show, format!("{} の指摘を表示", file.path));
+            actions.push((show, Action::FilterFile(Some(file.path.clone()))));
+        }
         let reviewed: Vec<String> = session
             .coverage
             .iter()

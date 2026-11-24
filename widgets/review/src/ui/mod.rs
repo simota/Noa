@@ -32,9 +32,10 @@ use noa_gpui_core::style::{
 };
 use noa_gpui_core::widgets::{
     Alert, AlertResponse, AlertStyle, Button, ButtonClicked, Container, ControlSize, Label,
-    ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, Toast, Tone,
+    ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, TextChanged, TextField,
+    Toast, Tone,
 };
-use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
+use noa_gpui_core::{Message as UiMessage, Role, Shortcut, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
 use noa_gpui_text::TextStore;
 
@@ -78,6 +79,12 @@ pub enum Action {
     ToggleStatus(FindingStatus),
     ToggleAgreement(Agreement),
     FilterReviewer(Option<PartId>),
+    /// The board narrowed to the findings pointing into one target file
+    /// (from the file coverage), or no longer.
+    FilterFile(Option<String>),
+    /// Opens the findings search (on the findings tab, focused), or
+    /// closes it and drops its words.
+    ToggleSearch,
     ClearFilters,
     /// A matrix cell: the board filtered to one lens (and severity).
     ShowCell(String, Option<Severity>),
@@ -136,6 +143,12 @@ pub struct Filters {
     pub statuses: BTreeSet<FindingStatusKey>,
     pub agreements: BTreeSet<AgreementKey>,
     pub reviewer: Option<PartId>,
+    /// Words a finding must hold (its id, claim, rationale, fix, location,
+    /// or a source's claim, evidence or fix), case aside; empty: any.
+    pub query: String,
+    /// A target file a finding must point into (its own location or a
+    /// source's).
+    pub path: Option<String>,
 }
 
 /// [`FindingStatus`] in a set (by its order in `FindingStatus::ALL`).
@@ -172,6 +185,8 @@ impl Default for Filters {
             .collect(),
             agreements: BTreeSet::new(),
             reviewer: None,
+            query: String::new(),
+            path: None,
         }
     }
 }
@@ -235,6 +250,13 @@ pub struct Review {
     left_host: WidgetId,
     header_host: WidgetId,
     progress_host: WidgetId,
+    /// The center tabs and the findings summary.
+    tabs_host: WidgetId,
+    /// The findings search: kept across rebuilds, so typing in it goes on.
+    search_row: WidgetId,
+    search: WidgetId,
+    /// The search row is open (it takes no line of the board otherwise).
+    search_open: bool,
     center_host: WidgetId,
     right_host: WidgetId,
     composer: composer::Parts,
@@ -365,6 +387,27 @@ impl Review {
         let center_col = tree.insert(Some(split), pane_column(Role::Background));
         let header_host = tree.insert(Some(center_col), strip_host());
         let progress_host = tree.insert(Some(center_col), strip_host());
+        let tabs_host = tree.insert(Some(center_col), strip_host());
+        let search_row = tree.insert(
+            Some(center_col),
+            Container::new(Style {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::CENTER,
+                flex_shrink: 0.0,
+                padding: LayoutRect {
+                    left: length(12.0),
+                    right: length(12.0),
+                    top: length(0.0),
+                    bottom: length(6.0),
+                },
+                ..Default::default()
+            }),
+        );
+        let search = tree.insert(
+            Some(search_row),
+            TextField::new("指摘を検索（ID・主張・根拠・修正案・パス）", 360.0),
+        );
+        tree.set_accessible_label(search, "指摘を検索");
         let center_host = tree.insert(Some(center_col), Container::new(fill()));
         let composer = composer::insert(&mut tree, center_col);
         let right_host = tree.insert(Some(split), pane_column(Role::Surface));
@@ -399,6 +442,10 @@ impl Review {
             left_host,
             header_host,
             progress_host,
+            tabs_host,
+            search_row,
+            search,
+            search_open: false,
             center_host,
             right_host,
             composer,
@@ -532,6 +579,7 @@ impl Review {
         self.extending = false;
         self.tab = CenterTab::Findings;
         self.filters = Filters::default();
+        self.search_open = false;
         self.selected = None;
         self.pending_intervention = None;
         composer::reset(&mut self.tree, &mut self.composer);
@@ -651,12 +699,23 @@ impl Review {
     }
 
     fn rebuild_center(&mut self, text: &mut TextStore) {
+        clear_children(&mut self.tree, self.tabs_host, text);
         clear_children(&mut self.tree, self.center_host, text);
+        self.tree.set_hidden(
+            self.search_row,
+            !(self.search_open && self.tab == CenterTab::Findings),
+        );
+        // The field shows the query the filters hold (cleared with them).
+        if self.tree.get::<TextField>(self.search).map(|f| f.text()) != Some(&self.filters.query) {
+            let query = self.filters.query.clone();
+            self.tree
+                .update::<TextField, _>(self.search, |f, cx| f.set_text(cx, query));
+        }
         let Some(session) = self.session.clone() else {
             return;
         };
         let tabs = self.tree.insert(
-            Some(self.center_host),
+            Some(self.tabs_host),
             Container::new(Style {
                 flex_direction: FlexDirection::Row,
                 // Wraps when the tabs, the findings summary and the
@@ -699,6 +758,16 @@ impl Review {
             );
             self.actions.push((btn, Action::ShowTab(tab)));
         }
+        let search = self.tree.insert(
+            Some(tabs),
+            Button::new("検索")
+                .control_size(ControlSize::Small)
+                .selected(self.search_open)
+                .shortcut(Shortcut::command('f'))
+                .tooltip("指摘を言葉やパスで絞り込みます（⌘F）"),
+        );
+        self.tree.set_accessible_label(search, "指摘を検索");
+        self.actions.push((search, Action::ToggleSearch));
         spacer(&mut self.tree, tabs);
         if self.tab == CenterTab::Findings {
             board::summary(
@@ -1222,6 +1291,23 @@ impl Review {
                 self.tab = CenterTab::Findings;
                 self.rebuild(text);
             }
+            Action::ToggleSearch => {
+                self.search_open = !self.search_open;
+                if self.search_open {
+                    self.tab = CenterTab::Findings;
+                } else {
+                    self.filters.query.clear();
+                }
+                self.rebuild(text);
+                if self.search_open {
+                    self.tree.set_focus(Some(self.search));
+                }
+            }
+            Action::FilterFile(path) => {
+                self.filters.path = path;
+                self.tab = CenterTab::Findings;
+                self.rebuild(text);
+            }
             Action::ClearFilters => {
                 self.filters = Filters {
                     statuses: BTreeSet::new(),
@@ -1436,6 +1522,15 @@ impl Screen for Review {
             self.close_alert = None;
             if answer.button == 1 {
                 self.send_cmd(Command::Close);
+            }
+            return;
+        }
+        if let Some(TextChanged(query)) = message.downcast_ref::<TextChanged>()
+            && message.source == self.search
+        {
+            if self.filters.query != *query {
+                self.filters.query = query.clone();
+                self.rebuild(text);
             }
             return;
         }

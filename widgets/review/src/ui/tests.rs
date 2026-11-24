@@ -1844,3 +1844,190 @@ fn the_place_stays_when_the_agent_check_reports_later() {
             .all(|row| row.agent.kind == AgentKind::Codex)
     );
 }
+
+// ---- 指摘の検索とファイルの絞り込み ----
+
+/// Types `typed` into the findings search, as keystrokes do.
+fn type_search(screen: &mut Review, typed: &str, text: &mut TextStore) {
+    if !screen.search_open {
+        act(screen, Action::ToggleSearch);
+        assert_eq!(screen.tree.focused(), Some(screen.search));
+    }
+    // (A click in the field focuses it.)
+    screen.tree.set_focus(Some(screen.search));
+    screen.dispatch(noa_gpui_core::Event::Text(typed.to_owned()), text);
+}
+
+fn shown_ids(screen: &Review) -> Vec<String> {
+    board::shown(screen.session.as_ref().unwrap(), &screen.filters)
+        .into_iter()
+        .map(|f| f.id.clone())
+        .collect()
+}
+
+#[test]
+fn typing_in_the_search_narrows_the_board_and_keeps_the_field() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    let mut text = TextStore::new(Default::default());
+    let all = rows(&screen);
+    assert!(all > 1);
+    // "シェル" is in F2's claim only (its evidence too).
+    type_search(&mut screen, "シェル", &mut text);
+    assert_eq!(screen.filters.query, "シェル");
+    assert_eq!(shown_ids(&screen), ["F2"]);
+    assert_eq!(rows(&screen), 1);
+    let summary = labels_under(&screen.tree, screen.tabs_host).join(" ");
+    assert!(
+        summary.contains(&format!(
+            "表示 1 / 全 {}",
+            screen.session.as_ref().unwrap().findings.len()
+        )),
+        "{summary}"
+    );
+    // The field is the same widget, still focused, still holding the text.
+    assert_eq!(screen.tree.focused(), Some(screen.search));
+    assert_eq!(
+        screen.tree.get::<TextField>(screen.search).unwrap().text(),
+        "シェル"
+    );
+    // Clearing the filters clears the search too.
+    act(&mut screen, Action::ClearFilters);
+    assert!(screen.filters.query.is_empty());
+    assert!(
+        screen
+            .tree
+            .get::<TextField>(screen.search)
+            .unwrap()
+            .text()
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_search_matches_ids_paths_and_evidence_in_any_case_and_every_word() {
+    let session = crate::demo::session();
+    let mut filters = Filters::default();
+    let ids = |filters: &Filters| -> Vec<String> {
+        board::shown(&session, filters)
+            .into_iter()
+            .map(|f| f.id.clone())
+            .collect()
+    };
+    // F1 itself, and any finding whose text names it.
+    filters.query = "f1".into();
+    let named = ids(&filters);
+    assert_eq!(named.first().map(String::as_str), Some("F1"), "{named:?}");
+    assert!(named.len() < ids(&Filters::default()).len());
+    filters.query = "STORE.RS".into();
+    let by_path = ids(&filters);
+    assert!(by_path.contains(&"F1".to_owned()), "{by_path:?}");
+    // Evidence only a source holds ("touch" is in codex/2's evidence).
+    filters.query = "touch".into();
+    assert_eq!(ids(&filters), ["F2"]);
+    // Every word must be there.
+    filters.query = "touch store.rs".into();
+    assert!(ids(&filters).is_empty());
+    filters.query = "   ".into();
+    assert_eq!(ids(&filters), ids(&Filters::default()));
+}
+
+#[test]
+fn a_file_in_the_coverage_opens_the_board_on_its_findings() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+    let files: Vec<String> = acts(&screen)
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::FilterFile(Some(path)) => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert!(files.contains(&"src/store.rs".to_owned()), "{files:?}");
+    // A file no finding points into has no button.
+    let session = screen.session.clone().unwrap();
+    for file in &session.manifest.files {
+        let any = session
+            .findings
+            .iter()
+            .any(|f| board::touches(&session, f, &file.path));
+        assert_eq!(files.contains(&file.path), any, "{}", file.path);
+    }
+    act(&mut screen, Action::FilterFile(Some("src/store.rs".into())));
+    assert_eq!(screen.tab, CenterTab::Findings);
+    let shown = shown_ids(&screen);
+    assert!(!shown.is_empty());
+    for id in &shown {
+        let f = session.finding(id).unwrap();
+        assert!(board::touches(&session, f, "src/store.rs"), "{id}");
+    }
+    // The chip says which file and takes it off.
+    assert!(acts(&screen).contains(&Action::FilterFile(None)));
+    act(&mut screen, Action::FilterFile(None));
+    assert_eq!(screen.filters.path, None);
+}
+
+#[test]
+fn chip_counts_hold_with_a_query_and_a_file() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    screen.filters.query = "の".into();
+    screen.filters.path = Some("src/store.rs".into());
+    screen.rebuild(&mut TextStore::new(Default::default()));
+    let session = screen.session.clone().unwrap();
+    // Every severity chip's count is what choosing it shows.
+    for s in Severity::ALL {
+        let mut chosen = screen.filters.clone();
+        chosen.severities = [s].into();
+        let label = format!("{} {}", s.label(), board::count(&session, &chosen));
+        assert!(
+            screen
+                .actions
+                .iter()
+                .any(|(id, a)| *a == Action::ToggleSeverity(s)
+                    && screen
+                        .tree
+                        .get::<noa_gpui_core::widgets::Button>(*id)
+                        .map(|b| b.label().to_owned())
+                        == Some(label.clone())),
+            "{label}"
+        );
+        assert_eq!(
+            board::shown(&session, &chosen).len(),
+            board::count(&session, &chosen)
+        );
+    }
+}
+
+#[test]
+fn the_search_opens_on_demand_on_the_findings_tab_and_closing_drops_it() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    // Closed by default: it takes no line of the board.
+    assert!(screen.tree.is_hidden(screen.search_row));
+    act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+    // ⌘F (the button's shortcut) opens it on the findings tab, focused.
+    let button = widget_for(&screen, &Action::ToggleSearch).unwrap();
+    assert!(
+        !screen
+            .tree
+            .get::<noa_gpui_core::widgets::Button>(button)
+            .unwrap()
+            .is_selected()
+    );
+    act(&mut screen, Action::ToggleSearch);
+    assert_eq!(screen.tab, CenterTab::Findings);
+    assert!(!screen.tree.is_hidden(screen.search_row));
+    assert_eq!(screen.tree.focused(), Some(screen.search));
+    assert_eq!(
+        screen.tree.accessible_label(screen.search),
+        Some("指摘を検索")
+    );
+    act(&mut screen, Action::ShowTab(CenterTab::Report));
+    assert!(screen.tree.is_hidden(screen.search_row));
+    act(&mut screen, Action::ShowTab(CenterTab::Findings));
+    let mut text = TextStore::new(Default::default());
+    type_search(&mut screen, "シェル", &mut text);
+    assert_eq!(rows(&screen), 1);
+    act(&mut screen, Action::ToggleSearch);
+    assert!(screen.tree.is_hidden(screen.search_row));
+    assert!(screen.filters.query.is_empty());
+    assert!(rows(&screen) > 1);
+}

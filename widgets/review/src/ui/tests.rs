@@ -1052,3 +1052,31 @@ fn the_matrix_fits_the_smallest_window() {
     lay_out(&mut screen, SMALLEST);
     assert_eq!(cut_off(&screen, screen.center_host), vec![]);
 }
+
+/// The height of the scrolled area under the center tabs.
+fn center_scroll_height(screen: &Review) -> f32 {
+    let scroll = screen
+        .tree
+        .children(screen.center_host)
+        .iter()
+        .copied()
+        .find(|&id| {
+            screen
+                .tree
+                .get::<noa_gpui_core::widgets::ScrollView>(id)
+                .is_some()
+        })
+        .unwrap();
+    screen.tree.window_rect(scroll).unwrap().height
+}
+
+#[test]
+fn a_held_review_in_the_smallest_window_keeps_room_for_its_findings() {
+    let mut screen = Review::demo_held();
+    lay_out(&mut screen, SMALLEST);
+    // Two finding rows fit once the filters scroll away.
+    let row = widget_for(&screen, &Action::SelectFinding(Some("F2".into()))).unwrap();
+    let row = screen.tree.window_rect(row).unwrap().height;
+    let height = center_scroll_height(&screen);
+    assert!(height >= 2.0 * row, "{height} < 2 × {row}");
+}

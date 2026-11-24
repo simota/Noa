@@ -74,12 +74,17 @@ pub(super) fn insert(
     selected: Option<&str>,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
+    // The filters head the scrolled list, so a short pane gives its height
+    // to the findings once scrolled past them.
+    let list = scroll_column(tree, host, 8.0);
+    keep_scroll(tree, list, session, "board");
     let bar = tree.insert(
-        Some(host),
+        Some(list),
         Container::column()
             .gap(4.0)
             .padding(10.0)
-            .background(Role::SurfaceAlt),
+            .background(Role::SurfaceAlt)
+            .radius(8.0),
     );
     let count =
         |pred: &dyn Fn(&Finding) -> bool| session.findings.iter().filter(|f| pred(f)).count();
@@ -165,8 +170,6 @@ pub(super) fn insert(
         actions,
     );
 
-    let list = scroll_column(tree, host, 8.0);
-    keep_scroll(tree, list, session, "board");
     if session.findings.is_empty() {
         note(
             tree,

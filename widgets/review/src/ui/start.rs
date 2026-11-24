@@ -17,7 +17,7 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
 use review::model::types::{
-    AgentChoice, AgentKind, AgentSetup, BuiltinLens, DEFAULT_MAX_ROUNDS, Head, LensChoice,
+    AgentChoice, AgentKind, AgentSetup, BuiltinLens, DEFAULT_MAX_ROUNDS, Head, Lens, LensChoice,
     MAX_MAX_ROUNDS, MAX_PANEL, MIN_PANEL, Millis, ReviewerChoice, RoundNo, Session, Severity,
     Target, TargetKind,
 };
@@ -296,6 +296,115 @@ impl Form {
             self.panel.push(row);
         }
         (self, left_out)
+    }
+}
+
+/// Where the note a review again adds to its request starts: an earlier
+/// one is cut there, so notes do not pile up review after review.
+pub(super) const AGAIN_MARK: &str = "（前回のレビュー ";
+
+/// What a review again asks on top of `session`'s request: that its
+/// verdict's live must-fix findings be checked. `None` without any.
+pub(super) fn again_note(session: &Session) -> Option<String> {
+    let verdict = session.verdict()?;
+    let must_fix: Vec<_> = verdict
+        .must_fix
+        .iter()
+        .filter_map(|id| session.finding(id))
+        .filter(|f| f.status.is_live())
+        .collect();
+    if must_fix.is_empty() {
+        return None;
+    }
+    let mut out = format!(
+        "{AGAIN_MARK}{} の総合判定: {}）\n前回は次の指摘を必ず直すものとしました。\
+         直っているか、直し方に新しい問題がないかを確かめてください:",
+        session.id,
+        verdict.decision.label()
+    );
+    for f in must_fix {
+        let at = f
+            .location
+            .as_ref()
+            .map(|loc| format!("（{loc}）"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "\n- {} [{}] {}{at}",
+            f.id,
+            f.severity.label(),
+            f.claim
+        ));
+    }
+    Some(out)
+}
+
+impl Form {
+    /// The form that starts `session` again: the same target, panel,
+    /// round limit and request, the request followed by [`again_note`]
+    /// (an earlier such note is dropped first).
+    pub(super) fn from_session(session: &Session) -> Self {
+        let target = &session.target;
+        let path = |p: &Option<PathBuf>| {
+            p.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        };
+        let mut form = Self {
+            kind: target.kind,
+            request: String::new(),
+            max_rounds: session.max_rounds,
+            lead: AgentChoice {
+                kind: session.lead.kind,
+                setup: session.lead.setup.clone(),
+            },
+            panel: session
+                .reviewers
+                .iter()
+                .map(|part| ReviewerChoice {
+                    agent: AgentChoice {
+                        kind: part.kind,
+                        setup: part.setup.clone(),
+                    },
+                    lens: match &part.lens {
+                        Some(Lens::Custom { text, .. }) => LensChoice::Custom(text.clone()),
+                        Some(Lens::Builtin { id }) => LensChoice::Builtin(*id),
+                        None => LensChoice::Builtin(BuiltinLens::Correctness),
+                    },
+                })
+                .collect(),
+            ..Self::for_kinds(&AgentKind::ALL)
+        };
+        match target.kind {
+            TargetKind::Git => {
+                form.repo = path(&target.path);
+                form.base = target.base.clone().unwrap_or_default();
+                form.head = match &target.head {
+                    Head::Worktree => String::new(),
+                    Head::Ref(head) => head.clone(),
+                };
+                form.filter = target.paths.join("\n");
+            }
+            TargetKind::Files => {
+                form.root = path(&target.path);
+                form.paths = target.paths.join("\n");
+            }
+            TargetKind::Document => {
+                form.text = target.text.clone().unwrap_or_default();
+                form.document_file = path(&target.path);
+                form.document_workdir = path(&target.workdir);
+            }
+        }
+        let asked = match session.request.find(AGAIN_MARK) {
+            Some(at) => &session.request[..at],
+            None => session.request.as_str(),
+        }
+        .trim_end();
+        form.request = match (asked.is_empty(), again_note(session)) {
+            (_, None) => asked.to_owned(),
+            (true, Some(note)) => note,
+            (false, Some(note)) => format!("{asked}\n\n{note}"),
+        };
+        form
     }
 }
 
@@ -1173,8 +1282,16 @@ pub(super) fn rebuild_past(
         actions.push(open);
         if !summary.closed && !summary.busy {
             let view = tree.insert(Some(buttons), small("表示"));
-            actions.push((view, Action::OpenPast(dir)));
+            actions.push((view, Action::OpenPast(dir.clone())));
         }
+        let again = tree.insert(
+            Some(buttons),
+            small("再レビュー").tooltip(
+                "同じ対象・パネル・依頼で開始ビューを埋めます（前回の要修正を依頼に添えます）",
+            ),
+        );
+        tree.set_accessible_label(again, format!("{} を同じ設定で再レビュー", summary.label));
+        actions.push((again, Action::ReviewAgain(Some(dir))));
     }
 }
 

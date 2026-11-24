@@ -287,6 +287,14 @@ Added after v1 (the first version left starting an agent on the findings out of 
 - Refusals (a notice, nothing written or started): no finding of the review in the scope, a document review, no workdir, Noa unreachable, the reply dir behind a link or not writable. A tab Noa refuses to open leaves the task written and the notice names it.
 - Nothing is written to `events.jsonl` or `report.md`; the log format is unchanged.
 
+### L1-10. Reviewing again (同じ設定で再レビュー)
+
+Added after v1: a review can be run again as it was set up, typically after its findings were fixed.
+
+- Where: 同じ設定で再レビュー in the board's status bar (the review on screen, running, finished or stored), and 再レビュー on every readable row of 過去のレビュー (an unreadable one has none).
+- What it does: leaves the review on screen as 新しいレビュー does (a running one is interrupted, resumable from the list), and fills the start view from the stored setup: the target (kind; repository, base — empty stays automatic —, head, path filter; root and paths; document text, file and working directory), the lead and every reviewer (kind, model, effort, lens; a custom lens with its text), the round limit (as it ended, after any +N) and the request. Agents that are not installed are left out as for any form, with the usual notice. Nothing starts until レビューを開始.
+- The request: what was asked, followed (after a blank line) by a note when the verdict had live must-fix findings: `（前回のレビュー <id> の総合判定: <decision>）`, a line asking to check whether they were fixed and whether the fix brought new problems, and one line per finding (`- F1 [高] claim（path:line）`). An earlier such note (from a review that was itself a re-review) is cut at its first line, so notes do not pile up. The request stays editable; it reaches every brief as any request does. No log format changes.
+
 ## L2: Detail
 
 ### L2-1. Crate layout
@@ -441,10 +449,13 @@ Unit tests live beside the modules; golden tests in `tests/`; headless snapshots
 35. AC-35 No buttons, and a reason, for a document review, a review without a workdir and while the agent check runs; no card in a headless stored view (UI tests).
 36. AC-36 A request writes `fix-1.md`, then `fix-2.md`, with the findings ranked and the guard lines, and opens exactly one tab: new tab, the workdir, focus, no auto approval; refusals write and start nothing; a reply dir behind a link is refused; the prompt survives a quote in the path (tests against a fake Noa, `live/fix.rs`).
 37. AC-37 (manual) In a real Noa, 修正を依頼 opens a focused tab in which the agent reads the task and starts on the findings.
+38. AC-38 同じ設定で再レビュー fills the start view so that it gives back the stored target (git with a ref, a filter and a custom lens; files; a typed document with a working directory; a document file), lead, panel and limit; starting it sends a `Start` with them, in two steps (UI tests).
+39. AC-39 The request keeps what was asked and adds the live must-fix findings; a re-review of a re-review has one note; a review without a verdict keeps its request (UI tests).
+40. AC-40 Every readable past row offers 再レビュー, an unreadable one does not; kinds not installed are left out (UI tests).
 
 ## Scope
 
-In scope: L1-1 … L1-9 above.
+In scope: L1-1 … L1-10 above.
 
 Out of scope:
 - Applying fixes inside the widget, or tracking whether a fix request was carried out: 修正を依頼 (L1-9) starts the agent and hands it the findings; the agent works in its own tab.

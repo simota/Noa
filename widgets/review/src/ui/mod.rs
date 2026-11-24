@@ -100,6 +100,9 @@ pub enum Action {
     ResumeShown,
     /// Writes the stored review's report again from its log.
     RegenerateReport,
+    /// Fills the start view to review again what the review shown
+    /// (`None`) or the one stored in the folder reviewed, as it was set up.
+    ReviewAgain(Option<PathBuf>),
     /// Starts `agent` on fixing the findings of `scope` in a new tab.
     RequestFix {
         agent: AgentKind,
@@ -932,6 +935,13 @@ impl Review {
                 .insert(Some(self.status_trailing), small("失敗を再試行"));
             self.actions.push((retry, Action::Retry));
         }
+        let again = self.tree.insert(
+            Some(self.status_trailing),
+            small("同じ設定で再レビュー").tooltip(
+                "同じ対象・パネル・依頼で開始ビューを埋めます（前回の要修正を依頼に添えます）",
+            ),
+        );
+        self.actions.push((again, Action::ReviewAgain(None)));
         let new = self
             .tree
             .insert(Some(self.status_trailing), small("新しいレビュー"));
@@ -1318,6 +1328,31 @@ impl Review {
                     self.send_cmd(Command::Resume { dir });
                     self.rebuild(text);
                 }
+            }
+            Action::ReviewAgain(dir) => {
+                let session = match &dir {
+                    None => match &self.session {
+                        Some(session) => Session::clone(session),
+                        None => return,
+                    },
+                    Some(dir) => match self.load_stored(dir) {
+                        Ok(session) => session,
+                        Err(why) => return self.toast(why),
+                    },
+                };
+                let form = start::Form::from_session(&session);
+                if self.session.is_some() {
+                    self.leave();
+                }
+                let left_out = start::fill(&mut self.tree, &mut self.start, &form, text);
+                if !left_out.is_empty() {
+                    self.toast(start::left_out_message(&left_out));
+                }
+                self.toast(format!(
+                    "{} と同じ設定を入れました。確かめてから「レビューを開始」を押してください",
+                    session.id
+                ));
+                self.rebuild(text);
             }
             Action::RequestFix { agent, scope } => {
                 let Some(session) = self.session.clone() else {

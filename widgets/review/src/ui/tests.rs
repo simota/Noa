@@ -1604,3 +1604,211 @@ fn a_stored_review_in_the_live_window_can_be_fixed() {
     assert_eq!(req.dir, dir);
     let _ = std::fs::remove_dir_all(root);
 }
+
+// ---- 同じ設定で再レビュー ----
+
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("noa-review-again-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The demo review as if it had reviewed `repo`, with a custom lens and a
+/// path filter.
+fn demo_in(repo: &Path) -> Session {
+    let mut session = crate::demo::session();
+    session.target.path = Some(repo.to_owned());
+    session.target.paths = vec!["src/".into(), "docs/a b.md".into()];
+    session.reviewers[2].lens = Some(review::model::types::Lens::Custom {
+        id: "custom".into(),
+        text: "API 互換性と移行手順".into(),
+    });
+    session
+}
+
+fn panel_of(session: &Session) -> Vec<ReviewerChoice> {
+    session
+        .reviewers
+        .iter()
+        .map(|p| ReviewerChoice {
+            agent: review::model::types::AgentChoice {
+                kind: p.kind,
+                setup: p.setup.clone(),
+            },
+            lens: match p.lens.as_ref().unwrap() {
+                review::model::types::Lens::Builtin { id } => LensChoice::Builtin(*id),
+                review::model::types::Lens::Custom { text, .. } => LensChoice::Custom(text.clone()),
+            },
+        })
+        .collect()
+}
+
+#[test]
+fn reviewing_again_fills_the_start_view_with_the_same_target_panel_and_limit() {
+    let repo = temp_dir("git");
+    let session = demo_in(&repo);
+    let (mut screen, _link) = live_with(session.clone());
+    assert!(acts(&screen).contains(&Action::ReviewAgain(None)));
+    act(&mut screen, Action::ReviewAgain(None));
+    assert!(screen.session.is_none());
+    assert!(!screen.tree.is_hidden(screen.start.root));
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.target().unwrap(), session.target);
+    assert_eq!(form.panel, panel_of(&session));
+    assert_eq!(form.lead.kind, session.lead.kind);
+    assert_eq!(form.lead.setup, session.lead.setup);
+    assert_eq!(form.max_rounds, session.max_rounds);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn files_and_document_reviews_come_back_as_they_were_set_up() {
+    let root = temp_dir("files");
+    let mut files = crate::demo::session();
+    files.target = review::model::types::Target {
+        kind: TargetKind::Files,
+        path: Some(root.clone()),
+        base: None,
+        head: review::model::types::Head::Worktree,
+        paths: vec!["src".into(), "README.md".into()],
+        text: None,
+        workdir: None,
+    };
+    assert_eq!(
+        start::Form::from_session(&files).target().unwrap(),
+        files.target
+    );
+    let mut typed = files.clone();
+    typed.target = review::model::types::Target {
+        kind: TargetKind::Document,
+        path: None,
+        text: Some("\n  # Plan\n\nstep 1\n".into()),
+        workdir: Some(root.clone()),
+        ..files.target.clone()
+    };
+    typed.target.paths.clear();
+    assert_eq!(
+        start::Form::from_session(&typed).target().unwrap(),
+        typed.target
+    );
+    let doc = root.join("plan.md");
+    std::fs::write(&doc, "# plan\n").unwrap();
+    let mut from_file = typed.clone();
+    from_file.target.text = None;
+    from_file.target.path = Some(doc);
+    from_file.target.workdir = None;
+    assert_eq!(
+        start::Form::from_session(&from_file).target().unwrap(),
+        from_file.target
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_request_keeps_what_was_asked_and_adds_the_must_fix_to_check() {
+    let session = crate::demo::session();
+    let form = start::Form::from_session(&session);
+    assert!(form.request.starts_with(session.request.trim_end()));
+    let note = &form.request[session.request.trim_end().len()..];
+    assert!(
+        note.starts_with("\n\n（前回のレビュー rev-demo の総合判定: 要修正）"),
+        "{note}"
+    );
+    for id in &session.verdict().unwrap().must_fix {
+        let f = session.finding(id).unwrap();
+        assert!(
+            note.contains(&format!("- {id} [{}] {}", f.severity.label(), f.claim)),
+            "{note}"
+        );
+    }
+    // Reviewed again after that: the earlier note gives way to the new one.
+    let mut again = session.clone();
+    again.request = form.request.clone();
+    let twice = start::Form::from_session(&again).request;
+    assert_eq!(twice, form.request);
+    assert_eq!(twice.matches("（前回のレビュー ").count(), 1);
+}
+
+#[test]
+fn a_review_without_a_verdict_keeps_its_request_as_it_was() {
+    let session = crate::demo::held();
+    assert!(session.verdict().is_none());
+    assert_eq!(
+        start::Form::from_session(&session).request,
+        session.request.trim_end()
+    );
+}
+
+#[test]
+fn past_reviews_can_be_reviewed_again_from_the_list() {
+    let mut screen = Review::demo_start();
+    let again: Vec<Action> = acts(&screen)
+        .into_iter()
+        .filter(|a| matches!(a, Action::ReviewAgain(Some(_))))
+        .collect();
+    // One per readable row; an unreadable log offers none.
+    let readable = screen.past.iter().filter(|l| l.summary.is_ok()).count();
+    assert!(screen.past.len() > readable);
+    assert_eq!(again.len(), readable);
+    let Action::ReviewAgain(Some(dir)) = again[0].clone() else {
+        unreachable!()
+    };
+    let stored = screen.load_stored(&dir).unwrap();
+    act(&mut screen, again[0].clone());
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.kind, stored.target.kind);
+    assert_eq!(form.panel, panel_of(&stored));
+    assert_eq!(form.max_rounds, stored.max_rounds);
+}
+
+#[test]
+fn starting_the_filled_form_starts_the_same_review_in_two_steps() {
+    let repo = temp_dir("start");
+    let session = demo_in(&repo);
+    let (mut screen, link) = live_with(session.clone());
+    // Two steps: 同じ設定で再レビュー, then レビューを開始.
+    act(&mut screen, Action::ReviewAgain(None));
+    act(&mut screen, Action::Start);
+    let started: Vec<Command> = commands(&link)
+        .into_iter()
+        .filter(|c| matches!(c, Command::Start { .. }))
+        .collect();
+    let [
+        Command::Start {
+            request,
+            target,
+            max_rounds,
+            lead,
+            panel,
+        },
+    ] = started.as_slice()
+    else {
+        panic!("{started:?}");
+    };
+    assert_eq!(**target, session.target);
+    assert_eq!(*max_rounds, session.max_rounds);
+    assert_eq!(lead.kind, session.lead.kind);
+    assert_eq!(*panel, panel_of(&session));
+    assert!(request.starts_with(session.request.trim_end()));
+    assert!(request.contains("（前回のレビュー rev-demo"));
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn reviewing_again_leaves_out_agents_that_are_not_installed() {
+    let repo = temp_dir("installed");
+    let (mut screen, _link, tx, mut text) = live_pending();
+    report(&mut screen, &tx, found(&[AgentKind::Claude]), &mut text);
+    screen.session = Some(Arc::new(demo_in(&repo)));
+    screen.rebuild(&mut text);
+    act(&mut screen, Action::ReviewAgain(None));
+    let form = start::read(&screen.tree, &screen.start);
+    assert!(
+        form.panel
+            .iter()
+            .all(|row| row.agent.kind == AgentKind::Claude)
+    );
+    assert_eq!(form.lead.kind, AgentKind::Claude);
+    let _ = std::fs::remove_dir_all(repo);
+}

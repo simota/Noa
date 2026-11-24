@@ -116,14 +116,18 @@ impl UsageWindow {
             .map(|e| self.used_percent / 100.0 - e)
     }
 
-    /// When the current burn rate reaches 100 %, if before the reset.
+    /// When the current burn rate reaches 100 %, if before the reset. A window
+    /// whose known reset has already passed is not projected at all.
     pub fn projected_exhaustion(&self, now: Unix) -> Option<Unix> {
+        if self.resets_at.is_some_and(|r| r <= now) {
+            return None;
+        }
         if self.used_percent >= 100.0 {
             return Some(now);
         }
         let resets_at = self.resets_at?;
         let span = self.span_secs()?;
-        if resets_at <= now || self.used_percent <= 0.0 {
+        if self.used_percent <= 0.0 {
             return None;
         }
         let elapsed = self.elapsed_fraction(now).filter(|e| *e >= 0.1)?;
@@ -550,6 +554,25 @@ mod tests {
         // 7290 s elapsed, 41 % used: exactly 0.5 points ahead.
         let w = window("5h", 41.0, Some(10_710), Some(300));
         assert_eq!(format::over_pace(&w, NOW).as_deref(), Some("+1% over pace"));
+    }
+
+    #[test]
+    fn window_past_its_reset_is_not_projected_or_binding() {
+        // Full, but its reset passed 60 s ago (sample read 30 s ago, after it).
+        let past = window("5h", 100.0, Some(-60), Some(300));
+        assert_eq!(past.projected_exhaustion(NOW), None);
+        let sources = [source(Agent::Codex, vec![past], NOW - 30)];
+        assert!(binding_window(&sources, NOW).is_none());
+        // Reset exactly now counts as passed.
+        assert_eq!(
+            window("5h", 100.0, Some(0), Some(300)).projected_exhaustion(NOW),
+            None
+        );
+        // Unknown reset keeps the full-window behaviour.
+        assert_eq!(
+            window("full", 100.0, None, Some(300)).projected_exhaustion(NOW),
+            Some(NOW)
+        );
     }
 
     #[test]

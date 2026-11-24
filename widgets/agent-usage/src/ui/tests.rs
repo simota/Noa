@@ -5,15 +5,18 @@ use noa_gpui_core::widgets::{Label, Tag};
 use noa_gpui_core::{Event, Key, Modifiers};
 use noa_gpui_scene::Size;
 
-use agent_usage::model::format;
+use agent_usage::model::{Agent, format};
 
 use super::charts::{Dot, Gauge};
+use super::style::CellText;
 use super::*;
 use crate::demo;
 
-/// The demo's data, with the sources a test wants, recording refreshes.
+/// The demo's data, with the sources (and the report) a test wants,
+/// recording refreshes.
 struct TestFeed {
     sources: Vec<UsageSource>,
+    report: Option<StatsReport>,
     pending: bool,
     calls: Rc<RefCell<Vec<&'static str>>>,
 }
@@ -40,7 +43,11 @@ impl Feed for TestFeed {
         tz: &dyn Tz,
         force: bool,
     ) -> Option<StatsReport> {
-        force.then(|| demo::report(period, filter, now, tz))
+        force.then(|| {
+            self.report
+                .clone()
+                .unwrap_or_else(|| demo::report(period, filter, now, tz))
+        })
     }
 
     fn limit_series(&self, _range: (Unix, Unix)) -> Vec<Series> {
@@ -61,9 +68,19 @@ fn screen_with(
     prefs: Prefs,
     store: Option<PrefsStore>,
 ) -> (AgentUsage, Rc<RefCell<Vec<&'static str>>>, TextStore) {
+    feed_screen(sources, None, prefs, store)
+}
+
+fn feed_screen(
+    sources: Vec<UsageSource>,
+    report: Option<StatsReport>,
+    prefs: Prefs,
+    store: Option<PrefsStore>,
+) -> (AgentUsage, Rc<RefCell<Vec<&'static str>>>, TextStore) {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let feed = TestFeed {
         sources,
+        report,
         pending: true,
         calls: calls.clone(),
     };
@@ -86,6 +103,7 @@ fn labels_under(tree: &UiTree, id: WidgetId) -> Vec<String> {
     let own = tree
         .get::<Label>(id)
         .map(|l| l.text().to_owned())
+        .or_else(|| tree.get::<CellText>(id).map(|c| c.text().to_owned()))
         .or_else(|| tree.get::<Tag>(id).map(|t| t.text().to_owned()));
     own.into_iter()
         .chain(
@@ -368,7 +386,12 @@ fn stats_view_shows_dash_for_unavailable_values() {
         assert_eq!(agy[i], stats::DASH, "column {i}");
     }
     let codex = rows.iter().find(|r| r[0] == "Codex").unwrap();
-    assert_eq!(codex[12], stats::DASH, "Codex has no prices");
+    // Codex has no prices: a dash, and the tokens that leaves out.
+    assert!(
+        codex[12].starts_with(&format!("{} · 未計上 (", stats::DASH)),
+        "{}",
+        codex[12]
+    );
     assert_ne!(codex[6], stats::DASH);
     let claude = rows.iter().find(|r| r[0] == "Claude Code").unwrap();
     assert!(claude[12].starts_with('$'));
@@ -872,5 +895,260 @@ fn stale_rows_and_gauges_are_drawn_at_half_opacity() {
                 assert!(alphas.iter().any(|a| *a > 0.99), "{alphas:?}");
             }
         }
+    }
+}
+
+/// The cells' texts under `id`, in order.
+fn cell_texts(tree: &UiTree, id: WidgetId) -> Vec<WidgetId> {
+    let own = tree.get::<CellText>(id).map(|_| id);
+    own.into_iter()
+        .chain(tree.children(id).iter().flat_map(|c| cell_texts(tree, *c)))
+        .collect()
+}
+
+#[test]
+fn long_names_are_cut_in_their_column_and_whole_on_hover() {
+    use noa_gpui_core::widgets::Tooltip;
+    use noa_gpui_scene::{DrawCommand, Point};
+    let now = demo::now();
+    let tz = demo::tz();
+    // The demo's long project path, a model and an MCP tool: each longer
+    // than its column.
+    let path = demo::PROJECTS[1];
+    let model = "claude-sonnet-5-5-20261001-extended-context-preview";
+    let tool = "mcp__github__create_pull_request_review_comment";
+    let mut report = demo::report(Period::Days7, AgentFilter::All, now, &tz);
+    report.per_model[0].model = model.to_owned();
+    report.tools[0].0 = tool.to_owned();
+    let prefs = Prefs {
+        tab: Tab::Stats,
+        agent: AgentFilter::All,
+        ..Prefs::default()
+    };
+    // Tall enough that every table is drawn.
+    let size = Size::new(1280.0, 3200.0);
+    let (mut screen, _, mut text) = feed_screen(demo::sources(now), Some(report), prefs, None);
+    screen.prepare(size, &mut text);
+    let tree = &screen.tree;
+    let drawn: Vec<noa_gpui_scene::Rect> = tree
+        .display_list()
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            DrawCommand::Text { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    let mut cut = Vec::new();
+    for id in cell_texts(tree, screen.stats_host) {
+        let cell = tree.get::<CellText>(id).unwrap();
+        let column = window_rect(tree, tree.parent(id).unwrap());
+        // The text drawn for a cell ends inside it, before the next column.
+        let own: Vec<_> = drawn
+            .iter()
+            .filter(|r| column.contains(Point::new(r.x, r.y)))
+            .collect();
+        assert_eq!(own.len(), 1, "{:?} in {column:?}", cell.text());
+        assert!(
+            own[0].right() <= column.right() + 0.5,
+            "{:?} drawn to {} past its column {column:?}",
+            cell.text(),
+            own[0].right()
+        );
+        if cell.shown_text() != cell.text() {
+            assert!(cell.shown_text().contains('…'), "{:?}", cell.shown_text());
+            cut.push(cell.text().to_owned());
+        }
+    }
+    // The long names are cut (the model in its table and in the share
+    // legend), and nothing else is.
+    cut.sort();
+    let mut expected = vec![model, model, path, tool];
+    expected.sort();
+    assert_eq!(cut, expected);
+    let shown = |name: &str| {
+        let id = cell_texts(tree, screen.stats_host)
+            .into_iter()
+            .find(|id| tree.get::<CellText>(*id).unwrap().text() == name)
+            .unwrap();
+        (
+            id,
+            tree.get::<CellText>(id).unwrap().shown_text().to_owned(),
+        )
+    };
+    // Cut in the middle, the path keeps its start and its end.
+    let (path_cell, short) = shown(path);
+    assert!(
+        short.starts_with("~/repos/") && short.ends_with("components"),
+        "{short}"
+    );
+    let (alpha, _) = shown("~/work/alpha");
+
+    // Hovering the cut path shows it whole; a name that fits has no tooltip.
+    let hover = |screen: &mut AgentUsage, text: &mut TextStore, id: WidgetId| {
+        let r = window_rect(&screen.tree, id);
+        let pos = Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0);
+        screen.dispatch(Event::PointerMove { pos }, text);
+        let later = screen.tree.now() + 1.0;
+        screen.tree.animate(later, text);
+        screen
+            .tree
+            .tooltip_overlay()
+            .and_then(|o| screen.tree.get::<Tooltip>(o))
+            .map(|t| t.text().to_owned())
+    };
+    assert_eq!(
+        hover(&mut screen, &mut text, path_cell).as_deref(),
+        Some(path)
+    );
+    assert_eq!(hover(&mut screen, &mut text, alpha), None);
+}
+
+/// Limit sources that answer one batch per wake.
+struct Trickle(Vec<Vec<UsageSource>>);
+
+impl Feed for Trickle {
+    fn refresh(&mut self) {}
+
+    fn drain(&mut self) -> Vec<UsageSource> {
+        if self.0.is_empty() {
+            Vec::new()
+        } else {
+            self.0.remove(0)
+        }
+    }
+
+    fn report(
+        &mut self,
+        period: Period,
+        filter: AgentFilter,
+        now: Unix,
+        tz: &dyn Tz,
+        force: bool,
+    ) -> Option<StatsReport> {
+        force.then(|| demo::report(period, filter, now, tz))
+    }
+
+    fn limit_series(&self, _range: (Unix, Unix)) -> Vec<Series> {
+        Vec::new()
+    }
+
+    fn offer(&mut self, _source: &UsageSource, _now: Unix) {}
+}
+
+#[test]
+fn a_source_not_heard_from_yet_is_fetching_not_unconfigured() {
+    let now = demo::now();
+    let claude = demo::sources(now).remove(0);
+    // Claude answers at once; Codex later, without its CLI; agy not yet.
+    let feed = Trickle(vec![
+        vec![claude],
+        vec![UsageSource::placeholder(Agent::Codex)],
+    ]);
+    let mut screen = AgentUsage::new(
+        Box::new(feed),
+        Clock::fixed(now, demo::tz()),
+        Prefs::default(),
+        None,
+    );
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(window(), &mut text);
+    assert_eq!(cards(&screen).len(), 3);
+    for agent in [Agent::Codex, Agent::Agy] {
+        assert_eq!(
+            card_labels(&screen, agent),
+            vec![agent.display(), limits::FETCHING],
+            "{agent:?}"
+        );
+        assert_eq!(
+            dot_under(&screen.tree, card_of(&screen, agent)),
+            Some(false)
+        );
+    }
+    assert!(has(&card_labels(&screen, Agent::Claude), "34%"));
+    assert!(summary_of(&screen).starts_with("Claude Code "));
+
+    // Codex's first answer: unconfigured, and how to set it up.
+    screen.woken(&mut text);
+    screen.prepare(window(), &mut text);
+    let codex = card_labels(&screen, Agent::Codex);
+    assert!(
+        has(&codex, "未設定") && codex.iter().any(|l| l.contains("codex login")),
+        "{codex:?}"
+    );
+    assert!(!has(&codex, limits::FETCHING), "{codex:?}");
+    assert_eq!(
+        card_labels(&screen, Agent::Agy),
+        vec!["Antigravity", limits::FETCHING]
+    );
+}
+
+#[test]
+fn a_wholly_unpriced_row_says_how_many_tokens_it_leaves_out() {
+    use agent_usage::stats::types::Counts;
+    // A model missing from the price table: 12,345 tokens, no cost.
+    let mut c = Counts::empty();
+    c.c.tokens.input = 12_345;
+    c.unpriced_tokens = 12_345;
+    assert_eq!(stats::cost_text(&c, true), "— · 未計上 (12.3K tokens)");
+    // Tokens the agent does not record, or none used: a dash alone.
+    assert_eq!(stats::cost_text(&c, false), stats::DASH);
+    assert_eq!(stats::cost_text(&Counts::empty(), true), stats::DASH);
+
+    // Codex has no prices: every table says what its cost leaves out.
+    let now = demo::now();
+    let codex = demo::report(
+        Period::Days7,
+        AgentFilter::One(Agent::Codex),
+        now,
+        &demo::tz(),
+    );
+    let unpriced = |s: &str| s.starts_with("— · 未計上 (") && s.ends_with(" tokens)");
+    assert!(
+        unpriced(&stats::agent_rows(&codex)[0][12]),
+        "{:?}",
+        stats::agent_rows(&codex)[0]
+    );
+    for row in stats::project_rows(&codex) {
+        assert!(unpriced(&row[4]), "{row:?}");
+    }
+    let (screen, _, _) = screen_with(
+        demo::sources(now),
+        Prefs {
+            tab: Tab::Stats,
+            agent: AgentFilter::One(Agent::Codex),
+            ..Prefs::default()
+        },
+        None,
+    );
+    let models = labels_under(&screen.tree, scroll_of(&screen, "models"));
+    assert_eq!(
+        models.iter().filter(|l| unpriced(l)).count(),
+        codex.per_model.len(),
+        "{models:?}"
+    );
+}
+
+#[test]
+fn a_first_failure_shows_its_reason_once() {
+    let now = demo::now();
+    let reason = "Token expired (launch Claude Code to renew)";
+    // The source puts the reason in its state and among its notes, with no
+    // earlier value and with one.
+    let failed = |earlier: Option<UsageSource>| UsageSource {
+        state: SourceState::Error(reason.into()),
+        notes: vec![reason.into()],
+        ..earlier.unwrap_or_else(|| UsageSource::placeholder(Agent::Claude))
+    };
+    for earlier in [None, Some(demo::sources(now).remove(0))] {
+        let mut s = demo::sources(now);
+        s[0] = failed(earlier);
+        let (screen, _, _) = screen_with(s, Prefs::default(), None);
+        let claude = card_labels(&screen, Agent::Claude);
+        assert_eq!(
+            claude.iter().filter(|l| *l == reason).count(),
+            1,
+            "{claude:?}"
+        );
     }
 }

@@ -342,9 +342,10 @@ fn add_counts(into: &mut Counts, c: &Counts) {
     into.workers += c.workers;
 }
 
-const PROJECTS: [&str; 18] = [
+/// The second is longer than its column: the table cuts it.
+pub const PROJECTS: [&str; 18] = [
     "~/work/alpha",
-    "~/work/beta",
+    "~/repos/github.com/example-organization/customer-support-platform/integrations/shared-components",
     "~/work/gamma",
     "~/work/delta",
     "~/work/epsilon",

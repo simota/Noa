@@ -28,8 +28,12 @@ const ROW_FONT: f32 = 12.0;
 /// these side by side, the cards wrap.
 const CARD_BASIS: f32 = 340.0;
 
+/// The header of a card whose source has not answered yet.
+pub const FETCHING: &str = "取得中…";
+
 pub struct Input<'a> {
-    pub sources: &'a [UsageSource],
+    /// By [`Agent::index`]; `None` until the source's first answer.
+    pub sources: &'a [Option<UsageSource>],
     pub series: &'a [Series],
     pub range: (Unix, Unix),
     pub period: Period,
@@ -84,6 +88,7 @@ fn setup_hint(agent: Agent) -> &'static str {
 /// row of cards (one per agent, in `Agent::ALL` order) and the history card.
 pub fn build(tree: &mut UiTree, parent: WidgetId, input: &Input) {
     let now = input.now;
+    let answered: Vec<UsageSource> = input.sources.iter().flatten().cloned().collect();
     let summary_row = tree.insert(Some(parent), Container::new(style::row(10.0)));
     tree.insert(
         Some(summary_row),
@@ -93,7 +98,7 @@ pub fn build(tree: &mut UiTree, parent: WidgetId, input: &Input) {
     );
     tree.insert(
         Some(summary_row),
-        Label::new(summary_text(input.sources, now, input.tz))
+        Label::new(summary_text(&answered, now, input.tz))
             .font_size(14.0)
             .weight(600),
     );
@@ -107,9 +112,10 @@ pub fn build(tree: &mut UiTree, parent: WidgetId, input: &Input) {
         }),
     );
     for agent in Agent::ALL {
-        if let Some(source) = input.sources.iter().find(|s| s.agent == agent) {
-            card(tree, row, source, now, input.tz);
-        }
+        match answered.iter().find(|s| s.agent == agent) {
+            Some(source) => card(tree, row, source, now, input.tz),
+            None => fetching_card(tree, row, agent),
+        };
     }
     history_card(tree, parent, input);
 }
@@ -137,7 +143,15 @@ pub fn stale_reason(s: &UsageSource, now: Unix) -> Option<String> {
     }
 }
 
-fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dyn Tz) -> WidgetId {
+/// A card and its header row, which starts with the state mark and the
+/// agent's name.
+fn card_head(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    agent: Agent,
+    mark: Paint,
+    filled: bool,
+) -> (WidgetId, WidgetId) {
     let card = style::card(
         tree,
         parent,
@@ -146,14 +160,7 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
             ..style::wrap_item(CARD_BASIS, 1.0)
         },
     );
-    let state = s.aged_state(now);
     let header = tree.insert(Some(card), Container::new(style::row(8.0)));
-    let (mark, filled) = match &state {
-        SourceState::Ok => (Paint::Fixed(GREEN), true),
-        SourceState::Stale { .. } => (Paint::Fixed(ORANGE), false),
-        SourceState::Error(_) => (Paint::Fixed(RED), true),
-        SourceState::Unconfigured => (Paint::Role(Role::Muted), false),
-    };
     tree.insert(
         Some(header),
         Dot {
@@ -163,8 +170,33 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
     );
     tree.insert(
         Some(header),
-        Label::new(s.agent.display()).font_size(15.0).weight(700),
+        Label::new(agent.display()).font_size(15.0).weight(700),
     );
+    (card, header)
+}
+
+/// The card of a source that has not answered yet: "取得中…". Only the
+/// source can tell that it is unconfigured (L1-2.4), and a first answer can
+/// take a while (a CLI starting, a request timing out).
+fn fetching_card(tree: &mut UiTree, parent: WidgetId, agent: Agent) -> WidgetId {
+    let (card, header) = card_head(tree, parent, agent, Paint::Role(Role::Muted), false);
+    style::spacer(tree, header);
+    tree.insert(
+        Some(header),
+        Label::new(FETCHING).font_size(11.0).color(Role::Muted),
+    );
+    card
+}
+
+fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dyn Tz) -> WidgetId {
+    let state = s.aged_state(now);
+    let (mark, filled) = match &state {
+        SourceState::Ok => (Paint::Fixed(GREEN), true),
+        SourceState::Stale { .. } => (Paint::Fixed(ORANGE), false),
+        SourceState::Error(_) => (Paint::Fixed(RED), true),
+        SourceState::Unconfigured => (Paint::Role(Role::Muted), false),
+    };
+    let (card, header) = card_head(tree, parent, s.agent, mark, filled);
     if let Some(plan) = &s.plan {
         tree.insert(Some(header), Tag::new(capitalised(plan)).tone(Tone::Accent));
     }
@@ -319,7 +351,9 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
         sub_line(tree, card, spend.detail.clone(), None, opacity);
     }
     if !notes_shown {
-        for note in &s.notes {
+        // A first failure's source may also put its reason among the notes:
+        // the reason is on the card once.
+        for note in s.notes.iter().filter(|n| !reasons.contains(n)) {
             tree.insert(
                 Some(card),
                 Label::new(note.clone())

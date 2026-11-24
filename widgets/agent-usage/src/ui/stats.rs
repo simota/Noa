@@ -3,7 +3,9 @@
 //! project, tool and Noa worker. A value an agent cannot provide is "—".
 
 use noa_gpui_core::style::{FlexDirection, FlexWrap, Size as LayoutSize, auto, length};
-use noa_gpui_core::widgets::{Chart, ChartSeries, Container, Label, ScrollView, ScrollerStyle};
+use noa_gpui_core::widgets::{
+    Chart, ChartSeries, Container, Label, ScrollView, ScrollerStyle, Truncation,
+};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Color;
 
@@ -13,7 +15,7 @@ use agent_usage::stats::types::{AgentFilter, Availability, Counts, Period, Stats
 use super::charts::{Heatmap, ShareBar, Swatch, WEEKDAYS_JA, fold_shares, heat_max};
 use super::limits::{filter_label, period_label};
 use super::style::{
-    self, agent_color, caption, card, cell, count, duration, gap, heading, tokens, usd,
+    self, agent_color, caption, card, cell, count, cut_cell, duration, gap, heading, tokens, usd,
 };
 use super::style::{wrap_item, wrap_row};
 
@@ -113,9 +115,13 @@ pub fn unavailable_reason(report: &StatsReport, what: &str) -> String {
     parts.join(" · ")
 }
 
-/// "$612.40", "$612.40 · 一部未計上 (1.2M tokens)", or "—".
+/// "$612.40", "$612.40 · 一部未計上 (1.2M tokens)", "— · 未計上 (1.2M
+/// tokens)" when nothing of it is priced, or "—" (L1-3.5).
 pub fn cost_text(c: &Counts, known: bool) -> String {
     match (known, c.cost_usd) {
+        (true, None) if c.unpriced_tokens > 0 => {
+            format!("{DASH} · 未計上 ({} tokens)", tokens(c.unpriced_tokens))
+        }
         (false, _) | (true, None) => DASH.to_owned(),
         (true, Some(v)) if c.unpriced_tokens > 0 => format!(
             "{} · 一部未計上 ({} tokens)",
@@ -561,13 +567,15 @@ fn table_item(columns: &Columns, grow: f32) -> Style {
 }
 
 /// A table of fixed-width columns in a view that scrolls sideways when the
-/// card is narrower; the first `left` columns align at the start, the others
+/// card is narrower; the first `left` columns hold names, at the start and
+/// cut where `cut` says when longer than their column, the others numbers,
 /// at the end. Returns the scroll view.
 fn table(
     tree: &mut UiTree,
     parent: WidgetId,
     columns: &Columns,
     left: usize,
+    cut: Truncation,
     rows: &[Vec<String>],
 ) -> WidgetId {
     let width: f32 = columns.iter().map(|c| c.1).sum();
@@ -626,7 +634,7 @@ fn table(
             .radius(4.0),
         );
         for (i, ((_, w), text)) in columns.iter().zip(row).enumerate() {
-            cell(
+            cut_cell(
                 tree,
                 line,
                 *w,
@@ -634,6 +642,7 @@ fn table(
                 Label::new(text.clone())
                     .font_size(12.0)
                     .weight(if i == 0 { 600 } else { 400 }),
+                if i < left { cut } else { Truncation::Tail },
             );
         }
     }
@@ -649,7 +658,14 @@ fn agent_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scroll
     }
     scrolls.push((
         "agents",
-        table(tree, c, &AGENT_COLUMNS, 1, &agent_rows(report)),
+        table(
+            tree,
+            c,
+            &AGENT_COLUMNS,
+            1,
+            Truncation::Tail,
+            &agent_rows(report),
+        ),
     ));
     for (agent, _, a) in &report.per_agent {
         if let Availability::Missing(why) = a {
@@ -684,7 +700,10 @@ fn model_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scroll
             ]
         })
         .collect();
-    scrolls.push(("models", table(tree, c, &MODEL_COLUMNS, 2, &rows)));
+    scrolls.push((
+        "models",
+        table(tree, c, &MODEL_COLUMNS, 2, Truncation::Tail, &rows),
+    ));
 }
 
 /// The project table's rows: name, sessions, turns, tokens and the cost,
@@ -714,9 +733,17 @@ fn project_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scro
         caption(tree, c, "プロジェクトの記録がありません");
         return;
     }
+    // Cut in the middle, a path keeps its start and its end.
     scrolls.push((
         "projects",
-        table(tree, c, &PROJECT_COLUMNS, 1, &project_rows(report)),
+        table(
+            tree,
+            c,
+            &PROJECT_COLUMNS,
+            1,
+            Truncation::Middle,
+            &project_rows(report),
+        ),
     ));
     let rest =
         report.other_projects + report.per_project.len().saturating_sub(PROJECTS_SHOWN) as u64;
@@ -749,7 +776,12 @@ fn tools_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scroll
         .take(PROJECTS_SHOWN)
         .map(|(name, n)| vec![name.clone(), count(*n)])
         .collect();
-    scrolls.push(("tools", table(tree, c, &TOOL_COLUMNS, 1, &rows)));
+    // Cut in the middle, an MCP tool ("mcp__<server>__<tool>") keeps the
+    // start of its server and the end of its name.
+    scrolls.push((
+        "tools",
+        table(tree, c, &TOOL_COLUMNS, 1, Truncation::Middle, &rows),
+    ));
 }
 
 fn workers_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scrolls: &mut Scrolls) {
@@ -764,6 +796,9 @@ fn workers_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scro
         .iter()
         .map(|(agent, c, _)| vec![agent.display().to_owned(), count(c.workers)])
         .collect();
-    scrolls.push(("workers", table(tree, c, &WORKER_COLUMNS, 1, &rows)));
+    scrolls.push((
+        "workers",
+        table(tree, c, &WORKER_COLUMNS, 1, Truncation::Tail, &rows),
+    ));
     caption(tree, c, "ctl ジャーナルの spawn から");
 }

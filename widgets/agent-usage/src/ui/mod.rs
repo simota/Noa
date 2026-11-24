@@ -30,7 +30,7 @@ use noa_gpui_text::TextStore;
 
 use agent_usage::history::{self, History, Series};
 use agent_usage::limits::LimitsHandle;
-use agent_usage::model::{Agent, Origin, SourceState, Unix, UsageSource};
+use agent_usage::model::{Origin, SourceState, Unix, UsageSource};
 use agent_usage::paths::{self, Roots};
 use agent_usage::stats::types::{AgentFilter, Period, StatsReport};
 use agent_usage::stats::{self as stats_index, Index, StatsHandle};
@@ -241,7 +241,9 @@ pub struct AgentUsage {
     clock: Clock,
     prefs: Prefs,
     store: Option<PrefsStore>,
-    sources: Vec<UsageSource>,
+    /// The latest of each source, in `Agent::ALL` order; `None` until its first
+    /// answer, which the card shows as being fetched.
+    sources: [Option<UsageSource>; 3],
     report: StatsReport,
     tabs: WidgetId,
     period: WidgetId,
@@ -254,7 +256,7 @@ pub struct AgentUsage {
     built_minute: Option<Unix>,
     /// Each source's state, aged, when the tab was built: a value going stale
     /// (its age or a reset) rebuilds the cards within the minute.
-    built_states: Vec<SourceState>,
+    built_states: Vec<Option<SourceState>>,
     /// The statistics tables' sideways scroll views, kept across rebuilds.
     stats_scrolls: stats::Scrolls,
 }
@@ -342,10 +344,7 @@ impl AgentUsage {
             clock,
             prefs,
             store,
-            sources: Agent::ALL
-                .into_iter()
-                .map(UsageSource::placeholder)
-                .collect(),
+            sources: Default::default(),
             report: StatsReport::empty((now, now)),
             tabs,
             period,
@@ -382,7 +381,7 @@ impl AgentUsage {
                 self.feed.offer(&source, now);
             }
             let at = source.agent.index();
-            self.sources[at] = source;
+            self.sources[at] = Some(source);
             changed = true;
         }
         if let Some(report) = self.feed.report(
@@ -404,8 +403,11 @@ impl AgentUsage {
         }
     }
 
-    fn aged_states(&self, now: Unix) -> Vec<SourceState> {
-        self.sources.iter().map(|s| s.aged_state(now)).collect()
+    fn aged_states(&self, now: Unix) -> Vec<Option<SourceState>> {
+        self.sources
+            .iter()
+            .map(|s| s.as_ref().map(|s| s.aged_state(now)))
+            .collect()
     }
 
     fn period_range(&self) -> (Unix, Unix) {

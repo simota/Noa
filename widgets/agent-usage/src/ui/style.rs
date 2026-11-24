@@ -4,9 +4,12 @@ use noa_gpui_core::style::{
     AlignItems, Dimension, FlexDirection, FlexWrap, JustifyContent, LengthPercentage,
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
-use noa_gpui_core::widgets::{Container, Label};
-use noa_gpui_core::{Paint, PaintCx, Role, Style, UiTree, Widget, WidgetId};
-use noa_gpui_scene::Color;
+use noa_gpui_core::widgets::{Container, Label, Truncation};
+use noa_gpui_core::{
+    MeasureCx, MeasureInput, Paint, PaintCx, Role, Style, UiTree, Widget, WidgetId, accesskit,
+};
+use noa_gpui_scene::{Color, Point, Size};
+use noa_gpui_text::TextStore;
 
 use agent_usage::model::{Agent, Severity};
 
@@ -153,8 +156,76 @@ pub fn card(tree: &mut UiTree, parent: WidgetId, style: Style) -> WidgetId {
     )
 }
 
-/// A fixed-width cell holding one line, its text at the start or the end.
+/// A cell's line of text, cut with an ellipsis where `cut` says to the
+/// width the cell gives it, so it never runs into the next column; when cut,
+/// its whole text is the tooltip.
+pub struct CellText(Label);
+
+impl CellText {
+    pub fn new(label: Label, cut: Truncation) -> CellText {
+        CellText(label.truncation(cut))
+    }
+
+    pub fn text(&self) -> &str {
+        self.0.text()
+    }
+
+    /// What is drawn: the text, or its cut form.
+    pub fn shown_text(&self) -> &str {
+        self.0.shown_text()
+    }
+}
+
+impl Widget for CellText {
+    fn style(&self) -> Style {
+        self.0.style()
+    }
+
+    fn measures(&self) -> bool {
+        true
+    }
+
+    fn measure(&mut self, cx: &mut MeasureCx, input: MeasureInput) -> Size {
+        self.0.measure(cx, input)
+    }
+
+    fn paint(&mut self, cx: &mut PaintCx) {
+        self.0.paint(cx);
+    }
+
+    fn tooltip(&self, _local: Point) -> Option<String> {
+        (self.shown_text() != self.text()).then(|| self.text().to_owned())
+    }
+
+    fn accessibility_role(&self) -> Option<accesskit::Role> {
+        self.0.accessibility_role()
+    }
+
+    fn accessibility(&self, node: &mut accesskit::Node) {
+        self.0.accessibility(node);
+    }
+
+    fn removed(&mut self, text: &mut TextStore) {
+        self.0.removed(text);
+    }
+}
+
+/// A fixed-width cell holding one line, its text at the start or the end,
+/// cut at its end when longer than the cell.
 pub fn cell(tree: &mut UiTree, parent: WidgetId, width: f32, end: bool, label: Label) -> WidgetId {
+    cut_cell(tree, parent, width, end, label, Truncation::Tail)
+}
+
+/// [`cell`], the text cut where `cut` says ([`Truncation::Middle`] keeps
+/// both ends of a path).
+pub fn cut_cell(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    width: f32,
+    end: bool,
+    label: Label,
+    cut: Truncation,
+) -> WidgetId {
     let host = tree.insert(
         Some(parent),
         Container::new(Style {
@@ -176,7 +247,7 @@ pub fn cell(tree: &mut UiTree, parent: WidgetId, width: f32, end: bool, label: L
             ..Default::default()
         }),
     );
-    tree.insert(Some(host), label);
+    tree.insert(Some(host), CellText::new(label, cut));
     host
 }
 

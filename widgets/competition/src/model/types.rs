@@ -719,6 +719,10 @@ impl Session {
         if !self.closed {
             return if at_limit {
                 Err("最終ラウンドの進行中です（最終判定の後に追加できます）")
+            } else if self.lead_closes_current_round() {
+                // Co-judges still scoring: the round will end the
+                // competition early, and an extension would be lost.
+                Err("リード審判が早期終了を決めています")
             } else {
                 Ok(())
             };
@@ -728,6 +732,14 @@ impl Session {
         } else {
             Err("ラウンド上限の前に終了したコンペです")
         }
+    }
+
+    /// Whether the lead's accepted scorecard of the current round asks to
+    /// end the competition early (panel only).
+    fn lead_closes_current_round(&self) -> bool {
+        self.current_round()
+            .and_then(|round| round.scorecards.get(&self.judge.id))
+            .is_some_and(|card| card.close)
     }
 
     /// The judge's final verdict on the winner now decided: that of the
@@ -1183,7 +1195,10 @@ mod tests {
         // The lead asks to close early, before the limit.
         all.get_mut(&judge_id(0)).unwrap().close = true;
         settle(&mut session, 1, &all).unwrap();
-        assert_eq!(session.extendable(), Ok(()));
+        assert_eq!(
+            session.extendable(),
+            Err("リード審判が早期終了を決めています")
+        );
         let brief = Brief {
             to: judge_id(0),
             base_rev: session.rev,

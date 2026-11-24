@@ -2788,6 +2788,54 @@ mod tests {
     }
 
     #[test]
+    fn a_round_the_lead_closes_early_is_not_extended_while_judges_still_score() {
+        let mut l = Logged::panel(Some(5));
+        l.compete(1);
+        l.score_all(1, [(70, 80), (72, 79), (74, 78)]);
+        l.compete(2);
+        for n in 0..3 {
+            l.sent(2, n);
+        }
+        // The lead ends the competition early; judge-2 is still scoring.
+        l.write(2, 0, &card_json(0, 2, 71, 85, r#", "close": true"#));
+        l.write(2, 2, &card_json(2, 2, 70, 80, ""));
+        assert!(l.current().verdict_brief.is_none());
+        let err = l
+            .try_feed(Input::UserExtend { by: 1, at: 2_100 })
+            .unwrap_err();
+        assert!(err.contains("リード審判が早期終了を決めています"), "{err}");
+        assert_eq!(l.engine.session().max_rounds, Some(5));
+        assert!(
+            !l.log
+                .iter()
+                .flatten()
+                .any(|e| matches!(e, Event::RoundsExtended { .. }))
+        );
+        l.write(2, 1, &card_json(1, 2, 72, 79, ""));
+        l.step(Input::Sent {
+            round: 2,
+            part: seat(0),
+            at: 2_200,
+        });
+        l.write(2, 0, r#"{"winner": "codex", "final_verdict": "codex"}"#);
+        let session = l.engine.session();
+        assert!(session.closed);
+        assert_eq!(session.winner, Some(PartId::new("codex")));
+
+        // The last round's limit message is unchanged by the lead's close.
+        let mut l = Logged::panel(Some(1));
+        l.compete(1);
+        for n in 0..3 {
+            l.sent(1, n);
+        }
+        l.write(1, 0, &card_json(0, 1, 71, 85, r#", "close": true"#));
+        let err = l
+            .try_feed(Input::UserExtend { by: 1, at: 1_100 })
+            .unwrap_err();
+        assert!(err.contains("最終ラウンドの進行中です"), "{err}");
+    }
+
+    #[test]
     fn a_held_panel_waits_after_the_combined_judgment() {
         let mut l = Logged::panel(Some(3));
         l.step(Input::UserSetHold { hold: true, at: 3 });

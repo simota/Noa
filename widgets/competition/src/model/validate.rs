@@ -303,8 +303,12 @@ pub fn parse_scorecard(
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty());
 
+    // In a panel any non-null winner breaks the seat rule, whatever it
+    // names, so only the seat problem is reported: a "not a contestant"
+    // line alone would cost the judge a retry to learn the seat rule.
+    let names_winner = winner.is_some();
     let winner_id = match winner {
-        Some(w) => {
+        Some(w) if !panel => {
             if !expected.contains(w.as_str()) {
                 problems.push(format!("winner {w:?} is not a contestant"));
                 None
@@ -312,12 +316,12 @@ pub fn parse_scorecard(
                 Some(PartId::new(w))
             }
         }
-        None => None,
+        _ => None,
     };
 
     if panel {
         if is_lead {
-            if winner_id.is_some() {
+            if names_winner {
                 problems.push(
                     "winner: leave null; the lead names the winner in the verdict step, after every judge has scored"
                         .to_owned(),
@@ -340,7 +344,7 @@ pub fn parse_scorecard(
                     "close: only the lead judge ({lead}) can end the competition early"
                 ));
             }
-            if winner_id.is_some() {
+            if names_winner {
                 problems.push("winner: only the lead judge names the winner".to_owned());
             }
             if final_verdict.is_some() {
@@ -952,6 +956,37 @@ mod tests {
         let s = panel_session(Some(3));
         let out = parse_scorecard(&scorecard(r#", "close": true"#), &s, 1, &judge_id(0));
         assert!(out.unwrap().close);
+    }
+
+    #[test]
+    fn a_panel_seat_hears_the_seat_rule_even_for_a_misspelled_winner() {
+        // A winner that is not a contestant id must not hide the seat rule,
+        // or fixing the spelling costs the judge a second rejection.
+        let s = panel_session(Some(1));
+        let raw = scorecard(r#", "winner": "Claude""#);
+        let err = parse_scorecard(&raw, &s, 1, &judge_id(1)).unwrap_err();
+        assert_eq!(
+            err.problems,
+            ["winner: only the lead judge names the winner"]
+        );
+        let err = parse_scorecard(&raw, &s, 1, &judge_id(0)).unwrap_err();
+        assert_eq!(
+            err.problems,
+            [
+                "winner: leave null; the lead names the winner in the verdict step, after every judge has scored"
+            ]
+        );
+        // A single judge still hears that the name is not a contestant.
+        let single = session(Some(1));
+        let raw = scorecard(r#", "winner": "Claude", "final_verdict": "v""#);
+        let err = parse_judge(&raw, &single, 1).unwrap_err();
+        assert_eq!(
+            err.problems,
+            [
+                "winner \"Claude\" is not a contestant",
+                "\"winner\" is required when closing or on the final round",
+            ]
+        );
     }
 
     #[test]

@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use crate::model::brief;
 use crate::model::reduce::{self, Event, ReduceError};
 use crate::model::types::{
-    AgentChoice, ArtifactFile, Author, Brief, JUDGE_ID, MAX_PANEL, Message, Millis, MsgKind,
-    PartId, Participant, Phase, Role, RoundKind, RoundNo, Session, SessionId, Submission,
+    AgentChoice, ArtifactFile, Author, Brief, MAX_JUDGES, MAX_PANEL, Message, Millis, MsgKind,
+    PartId, Participant, Phase, Role, RoundKind, RoundNo, Session, SessionId, Submission, judge_id,
 };
 use crate::model::validate;
 use crate::store;
@@ -171,7 +171,18 @@ fn rejected<T>(why: impl Into<String>) -> Result<T, EngineError> {
     Err(EngineError::Rejected(why.into()))
 }
 
-pub fn participants(judge: &AgentChoice, panel: &[AgentChoice]) -> (Participant, Vec<Participant>) {
+/// A competition's seats: the lead judge, the co-judges, the contestants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seats {
+    pub judge: Participant,
+    pub co_judges: Vec<Participant>,
+    pub contestants: Vec<Participant>,
+}
+
+/// The participants `judges` (seat order, lead first; at least one) and
+/// `panel` give. Judge ids follow the seat (`judge`, `judge-2`, …),
+/// contestant ids the kind (`claude`, `claude-2`, …).
+pub fn participants(judges: &[AgentChoice], panel: &[AgentChoice]) -> Seats {
     let mut contestants: Vec<Participant> = Vec::with_capacity(panel.len());
     for choice in panel {
         let kind = choice.kind;
@@ -188,14 +199,19 @@ pub fn participants(judge: &AgentChoice, panel: &[AgentChoice]) -> (Participant,
             setup: choice.setup.clone(),
         });
     }
-    let judge = Participant {
-        id: PartId::new(JUDGE_ID),
-        kind: judge.kind,
+    let mut judges = judges.iter().enumerate().map(|(seat, choice)| Participant {
+        id: judge_id(seat),
+        kind: choice.kind,
         role: Role::Judge,
         pane_id: None,
-        setup: judge.setup.clone(),
-    };
-    (judge, contestants)
+        setup: choice.setup.clone(),
+    });
+    let judge = judges.next().expect("a competition has at least one judge");
+    Seats {
+        judge,
+        co_judges: judges.collect(),
+        contestants,
+    }
 }
 
 /// Whether `logged` and `want` name the same file: the same path, or the
@@ -233,18 +249,27 @@ pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
         kind: p.kind,
         setup: p.setup.clone(),
     };
-    for part in std::iter::once(&session.judge).chain(&session.contestants) {
+    // The ids below are derived from the log's own judge count, so its
+    // bound is checked here, as a new session's is.
+    let judge_count = session.judges().count();
+    if judge_count > MAX_JUDGES {
+        return Err(format!(
+            "ログの審判が{judge_count}人います（審判は1〜{MAX_JUDGES}人です）"
+        ));
+    }
+    for part in session.judges().chain(&session.contestants) {
         part.setup.check(part.kind)?;
     }
+    let judges: Vec<AgentChoice> = session.judges().map(choice).collect();
     let panel: Vec<AgentChoice> = session.contestants.iter().map(choice).collect();
-    let (judge, contestants) = participants(&choice(&session.judge), &panel);
+    let seats = participants(&judges, &panel);
     let same = |a: &Participant, b: &Participant| a.id == b.id && a.role == b.role;
-    if !same(&judge, &session.judge)
-        || contestants.len() != session.contestants.len()
-        || !contestants
-            .iter()
-            .zip(&session.contestants)
-            .all(|(a, b)| same(a, b))
+    let all_same = |want: &[Participant], logged: &[Participant]| {
+        want.len() == logged.len() && want.iter().zip(logged).all(|(a, b)| same(a, b))
+    };
+    if !same(&seats.judge, &session.judge)
+        || !all_same(&seats.co_judges, &session.co_judges)
+        || !all_same(&seats.contestants, &session.contestants)
     {
         return Err("ログの参加者 ID がパネルと一致しません".to_owned());
     }
@@ -267,11 +292,36 @@ pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
             && (brief.to != session.judge.id
                 || !same_file(
                     &brief.reply_path,
-                    &store::judge_reply_path(&reply_dir, round.no),
+                    &store::judge_reply_path(&reply_dir, round.no, &brief.to),
                 ))
         {
             return Err(format!(
                 "R{} の審判の返答パスがこのコンペの保存先と一致しません",
+                round.no
+            ));
+        }
+        for brief in &round.co_judge_briefs {
+            if !session.co_judges.iter().any(|j| j.id == brief.to)
+                || !same_file(
+                    &brief.reply_path,
+                    &store::judge_reply_path(&reply_dir, round.no, &brief.to),
+                )
+            {
+                return Err(format!(
+                    "R{} の審判 {} の返答パスがこのコンペの保存先と一致しません",
+                    round.no, brief.to
+                ));
+            }
+        }
+        if let Some(brief) = &round.verdict_brief
+            && (brief.to != session.judge.id
+                || !same_file(
+                    &brief.reply_path,
+                    &store::verdict_reply_path(&reply_dir, round.no),
+                ))
+        {
+            return Err(format!(
+                "R{} の最終講評の返答パスがこのコンペの保存先と一致しません",
                 round.no
             ));
         }
@@ -285,7 +335,8 @@ pub struct Setup<'a> {
     pub max_rounds: Option<RoundNo>,
     pub reveal_interval: RoundNo,
     pub workdir: Option<PathBuf>,
-    pub judge: AgentChoice,
+    /// The judge panel in seat order, lead first.
+    pub judges: &'a [AgentChoice],
     pub panel: &'a [AgentChoice],
 }
 
@@ -315,12 +366,24 @@ impl Engine {
         if setup.panel.len() > MAX_PANEL {
             return rejected(format!("参加パネルは{MAX_PANEL}体までです"));
         }
-        for choice in std::iter::once(&setup.judge).chain(setup.panel) {
+        if setup.judges.is_empty() || setup.judges.len() > MAX_JUDGES {
+            return rejected("審判は1〜3人です");
+        }
+        for choice in setup.judges.iter().chain(setup.panel) {
             if let Err(why) = choice.setup.check(choice.kind) {
                 return rejected(why);
             }
         }
-        let (judge, contestants) = participants(&setup.judge, setup.panel);
+        // #TODO(agent): Unit 2 lifts this, once the engine runs a panel's
+        // rounds (per-judge briefs, combining, the verdict step).
+        if setup.judges.len() > 1 {
+            return rejected("複数の審判にはまだ対応していません");
+        }
+        let Seats {
+            judge,
+            co_judges,
+            contestants,
+        } = participants(setup.judges, setup.panel);
         let batch = vec![Event::Created {
             id,
             request: request.to_owned(),
@@ -328,6 +391,7 @@ impl Engine {
             max_rounds: setup.max_rounds,
             reveal_interval: setup.reveal_interval,
             judge,
+            co_judges,
             contestants,
             at: now,
         }];
@@ -514,7 +578,7 @@ impl Engine {
     }
 
     fn is_judge(&self, part: &PartId) -> bool {
-        *part == self.session.judge.id
+        self.session.is_judge(part)
     }
 
     fn current_no(&self) -> Option<RoundNo> {
@@ -741,7 +805,7 @@ impl Engine {
 
     fn judge_round(&mut self, out: &mut Output, no: RoundNo) -> Result<(), EngineError> {
         let reply_dir = self.reply_dir();
-        let path = store::judge_reply_path(&reply_dir, no);
+        let path = store::judge_reply_path(&reply_dir, no, &self.session.judge.id);
         let brief = brief::judge_brief(&self.session, no, &reply_dir, &path);
         self.commit(
             out,
@@ -1100,7 +1164,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::types::{AgentKind, ArtifactKind};
+    use crate::model::types::{AgentKind, AgentSetup, ArtifactKind, JUDGE_ID};
 
     fn run_one_round(engine: &mut Engine, round: RoundNo, close: bool) {
         for part in [PartId::new("claude"), PartId::new("codex")] {
@@ -1170,7 +1234,7 @@ mod tests {
             max_rounds: Some(2),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Agy.into(),
+            judges: &[AgentKind::Agy.into()],
             panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
         };
         let (mut engine, _) = Engine::create_in(
@@ -1252,7 +1316,7 @@ mod tests {
             max_rounds: Some(10),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Agy.into(),
+            judges: &[AgentKind::Agy.into()],
             panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
         };
         let (mut engine, _) = Engine::create_in(
@@ -1336,7 +1400,7 @@ mod tests {
             max_rounds: Some(2),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Agy.into(),
+            judges: &[AgentKind::Agy.into()],
             panel: &panel,
         };
         let err = Engine::create_in(
@@ -1348,9 +1412,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("6体まで"), "{err}");
-        let (judge, contestants) = participants(&AgentKind::Agy.into(), &panel[..MAX_PANEL]);
-        assert_eq!(judge.id.as_str(), JUDGE_ID);
-        let ids: Vec<&str> = contestants.iter().map(|p| p.id.as_str()).collect();
+        let seats = participants(&[AgentKind::Agy.into()], &panel[..MAX_PANEL]);
+        assert_eq!(seats.judge.id.as_str(), JUDGE_ID);
+        let ids: Vec<&str> = seats.contestants.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(
             ids,
             [
@@ -1366,7 +1430,7 @@ mod tests {
             max_rounds: Some(2),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Agy.into(),
+            judges: &[AgentKind::Agy.into()],
             panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
         };
         let (mut engine, _) = Engine::create_in(
@@ -1390,7 +1454,7 @@ mod tests {
             max_rounds: Some(2),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Agy.into(),
+            judges: &[AgentKind::Agy.into()],
             panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
         };
         let (_, created) = Engine::create_in(
@@ -1485,7 +1549,7 @@ mod tests {
                 max_rounds,
                 reveal_interval: 5,
                 workdir: None,
-                judge: AgentKind::Agy.into(),
+                judges: &[AgentKind::Agy.into()],
                 panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
             };
             let (engine, out) = Engine::create_in(
@@ -1850,5 +1914,178 @@ mod tests {
         let out = e.handle(Input::UserExtend { by: 1, at: 6 }).unwrap();
         assert_eq!(out.batches.len(), 1);
         assert_eq!(e.session().max_rounds, Some(RoundNo::MAX));
+    }
+
+    #[test]
+    fn more_than_three_judges_are_refused() {
+        let create = |judges: &[AgentChoice]| {
+            let setup = Setup {
+                request: "x",
+                max_rounds: Some(2),
+                reveal_interval: 5,
+                workdir: None,
+                judges,
+                panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+            };
+            Engine::create_in(
+                SessionId::new("comp-test"),
+                setup,
+                Path::new("/tmp/comp-test"),
+                Config::default(),
+                1,
+            )
+            .map(|(engine, _)| engine)
+            .map_err(|e| e.to_string())
+        };
+        let agy = AgentChoice::from(AgentKind::Agy);
+        for judges in [vec![], vec![agy.clone(); MAX_JUDGES + 1]] {
+            assert_eq!(
+                create(&judges).err().as_deref(),
+                Some("審判は1〜3人です"),
+                "{} judges",
+                judges.len()
+            );
+        }
+        // Every judge's setup is checked, the third one's too.
+        let bad = AgentChoice {
+            kind: AgentKind::Agy,
+            setup: AgentSetup {
+                model: None,
+                effort: Some("ultra".into()),
+            },
+        };
+        let err = create(&[agy.clone(), agy.clone(), bad]).unwrap_err();
+        assert!(err.contains("ultra"), "{err}");
+        // #TODO(agent): Unit 2 lifts this: until then a panel is refused.
+        for n in 2..=MAX_JUDGES {
+            assert!(create(&vec![agy.clone(); n]).is_err(), "{n} judges");
+        }
+        let one = create(std::slice::from_ref(&agy)).unwrap();
+        assert!(!one.session().is_panel());
+        assert_eq!(one.session().judge.id.as_str(), JUDGE_ID);
+    }
+
+    #[test]
+    fn check_resumable_refuses_more_judges_than_a_panel_takes() {
+        let dir = Path::new("/tmp/competitions/comp-crowd");
+        let seats = participants(
+            &vec![AgentKind::Agy.into(); MAX_JUDGES + 1],
+            &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+        );
+        let ids: Vec<&str> = std::iter::once(&seats.judge)
+            .chain(&seats.co_judges)
+            .map(|j| j.id.as_str())
+            .collect();
+        assert_eq!(ids, ["judge", "judge-2", "judge-3", "judge-4"]);
+        let session = reduce::replay([vec![Event::Created {
+            id: SessionId::new("comp-crowd"),
+            request: "x".into(),
+            workdir: None,
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            judge: seats.judge,
+            co_judges: seats.co_judges,
+            contestants: seats.contestants,
+            at: 1,
+        }]])
+        .unwrap();
+        let err = check_resumable(&session, dir).unwrap_err();
+        assert!(err.contains("審判") && err.contains('4'), "{err}");
+        // One fewer is a panel it takes.
+        let mut three = session.clone();
+        three.co_judges.pop();
+        assert_eq!(check_resumable(&three, dir), Ok(()));
+    }
+
+    #[test]
+    fn check_resumable_checks_every_judge() {
+        use crate::model::types::{Receipt, judge_id};
+        let id = SessionId::new("comp-panel");
+        let dir = Path::new("/tmp/competitions/comp-panel");
+        let seats = participants(
+            &[
+                AgentKind::Agy.into(),
+                AgentKind::Claude.into(),
+                AgentKind::Claude.into(),
+            ],
+            &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+        );
+        let created = Event::Created {
+            id,
+            request: "x".into(),
+            workdir: None,
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            judge: seats.judge,
+            co_judges: seats.co_judges,
+            contestants: seats.contestants,
+            at: 1,
+        };
+        let brief = |to: PartId, path: PathBuf| Event::BriefIssued {
+            round: 1,
+            brief: Brief {
+                to,
+                base_rev: 2,
+                body: String::new(),
+                reply_path: path,
+                receipt: Receipt::default(),
+            },
+        };
+        let judge_path = |seat: usize| store::judge_reply_path(dir, 1, &judge_id(seat));
+        let session = reduce::replay([
+            vec![created],
+            vec![
+                Event::RoundStarted {
+                    no: 1,
+                    kind: RoundKind::Blind,
+                    at: 2,
+                },
+                Event::PhaseChanged {
+                    round: 1,
+                    phase: Phase::Judging,
+                },
+                brief(judge_id(0), judge_path(0)),
+                brief(judge_id(1), judge_path(1)),
+                brief(judge_id(2), judge_path(2)),
+            ],
+        ])
+        .unwrap();
+        assert_eq!(check_resumable(&session, dir), Ok(()));
+
+        // Ids and roles re-derived from the logged setups.
+        let mut renamed = session.clone();
+        renamed.co_judges[1].id = PartId::new("judge-9");
+        assert!(check_resumable(&renamed, dir).is_err());
+        let mut demoted = session.clone();
+        demoted.co_judges[0].role = Role::Contestant;
+        assert!(check_resumable(&demoted, dir).is_err());
+        let mut dropped = session.clone();
+        dropped.co_judges.pop();
+        assert!(check_resumable(&dropped, dir).is_err());
+        // Each judge's setup.
+        let mut unsafe_model = session.clone();
+        unsafe_model.co_judges[1].setup.model = Some("$(x)".into());
+        assert!(check_resumable(&unsafe_model, dir).is_err());
+        // Each co-judge brief's reply path is its own file.
+        let mut swapped = session.clone();
+        swapped.rounds[0].co_judge_briefs[1].reply_path = judge_path(1);
+        let err = check_resumable(&swapped, dir).unwrap_err();
+        assert!(err.contains("judge-3"), "{err}");
+        let mut lead_elsewhere = session.clone();
+        lead_elsewhere.rounds[0]
+            .judge_brief
+            .as_mut()
+            .unwrap()
+            .reply_path = judge_path(2);
+        assert!(check_resumable(&lead_elsewhere, dir).is_err());
+        // The verdict brief's is r<N>/verdict.json.
+        let mut verdict = session.clone();
+        let mut asked = verdict.rounds[0].judge_brief.clone().unwrap();
+        asked.reply_path = judge_path(0);
+        verdict.rounds[0].verdict_brief = Some(asked);
+        assert!(check_resumable(&verdict, dir).is_err());
+        verdict.rounds[0].verdict_brief.as_mut().unwrap().reply_path =
+            store::verdict_reply_path(dir, 1);
+        assert_eq!(check_resumable(&verdict, dir), Ok(()));
     }
 }

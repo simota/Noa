@@ -310,6 +310,9 @@ pub fn session() -> Session {
             ],
             submissions,
             judge_brief: Some(make_brief(&judge, t + 20)),
+            co_judge_briefs: Vec::new(),
+            scorecards: BTreeMap::new(),
+            verdict_brief: None,
             outcome: Some(JudgeOutput {
                 overview,
                 evaluations,
@@ -332,6 +335,7 @@ pub fn session() -> Session {
         rev: 24,
         created_at: 1,
         judge: p(JUDGE_ID, AgentKind::Claude, Role::Judge),
+        co_judges: Vec::new(),
         contestants: vec![
             p("claude", AgentKind::Claude, Role::Contestant),
             p("codex", AgentKind::Codex, Role::Contestant),

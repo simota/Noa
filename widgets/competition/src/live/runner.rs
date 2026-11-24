@@ -51,7 +51,8 @@ pub enum Start {
         workdir: Option<PathBuf>,
         max_rounds: Option<RoundNo>,
         reveal_interval: RoundNo,
-        judge: AgentChoice,
+        /// The judge panel in seat order, lead first.
+        judges: Vec<AgentChoice>,
         panel: Vec<AgentChoice>,
         root: PathBuf,
     },
@@ -414,7 +415,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 workdir,
                 max_rounds,
                 reveal_interval,
-                judge,
+                judges,
                 panel,
                 root,
             } => {
@@ -429,7 +430,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     workdir,
                     max_rounds,
                     reveal_interval,
-                    judge,
+                    judges: &judges,
                     panel: &panel,
                 };
                 let (engine, output) =
@@ -1685,7 +1686,7 @@ mod tests {
             workdir: None,
             max_rounds: Some(2),
             reveal_interval: 5,
-            judge: AgentKind::Claude.into(),
+            judges: vec![AgentKind::Claude.into()],
             panel,
             root: root.to_owned(),
         }
@@ -2378,7 +2379,7 @@ mod tests {
             max_rounds: Some(max_rounds),
             reveal_interval: 5,
             workdir,
-            judge: AgentKind::Claude.into(),
+            judges: &[AgentKind::Claude.into()],
             panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
         };
         let (mut engine, out) = Engine::create_in(id, setup, &dir, CONFIG, 1_000).unwrap();
@@ -2544,7 +2545,7 @@ mod tests {
             workdir: Some(work.clone()),
             max_rounds: Some(1),
             reveal_interval: 5,
-            judge: AgentKind::Claude.into(),
+            judges: vec![AgentKind::Claude.into()],
             panel: vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
             root: root.clone(),
         };

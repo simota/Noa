@@ -623,6 +623,7 @@ mod tests {
             rev: 10,
             created_at: 1,
             judge: p(JUDGE_ID, AgentKind::Claude, Role::Judge),
+            co_judges: Vec::new(),
             contestants: vec![
                 p("claude", AgentKind::Claude, Role::Contestant),
                 p("codex", AgentKind::Codex, Role::Contestant),
@@ -694,6 +695,9 @@ mod tests {
                 briefs: vec![],
                 submissions,
                 judge_brief: None,
+                co_judge_briefs: Vec::new(),
+                scorecards: BTreeMap::new(),
+                verdict_brief: None,
                 outcome: Some(JudgeOutput {
                     overview: format!("R{no} overview: Codex leads slightly"),
                     evaluations,

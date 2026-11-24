@@ -1,12 +1,14 @@
 //! Codex limits from a long-lived `codex app-server` child speaking
 //! newline-delimited JSON-RPC on stdio: `initialize` → notify `initialized` →
 //! `account/read` → `account/rateLimits/read`; a pushed
-//! `account/rateLimits/updated` triggers a re-read. When `codex` is missing or
-//! the server fails, the newest rollout log's last `token_count.rate_limits`
-//! stands in (`Origin::Log`), or the last live value kept stale, whichever is
-//! newer.
+//! `account/rateLimits/updated` triggers a re-read (after the one in flight,
+//! if any). When `codex` is missing or the server fails, the newest
+//! `token_count.rate_limits` sample of the latest rollouts under
+//! `sessions` stands in (`Origin::Log`), or the last live value kept stale,
+//! whichever is newer.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
@@ -22,9 +24,10 @@ use crate::model::{Agent, Origin, SourceState, Unix, UsageSource, UsageSpend, Us
 use crate::paths::Roots;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-/// How much of the newest rollout is scanned for a `token_count`.
+/// How much of each rollout is scanned for a `token_count`.
 const LOG_TAIL_BYTES: u64 = 256 * 1024;
-/// Rollouts tried, newest first, when the newest holds no rate limits yet.
+/// Rollouts scanned (the most recently modified); the sample with the newest
+/// line timestamp among them wins.
 const LOG_FILES_TRIED: usize = 3;
 /// A line longer than this from the server is dropped unread.
 const MAX_LINE: usize = 1 << 20;
@@ -79,9 +82,28 @@ struct Snapshot {
 }
 
 #[derive(Deserialize)]
+struct ResetCredit {
+    status: Option<String>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ResetCredits {
     available_count: Option<i64>,
+    credits: Option<Vec<ResetCredit>>,
+}
+
+impl ResetCredits {
+    /// `availableCount`, else the credits listed as available.
+    fn count(&self) -> i64 {
+        self.available_count.unwrap_or_else(|| {
+            self.credits
+                .iter()
+                .flatten()
+                .filter(|c| c.status.as_deref() == Some("available"))
+                .count() as i64
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -90,6 +112,27 @@ struct RateLimitsResult {
     rate_limits: Snapshot,
     rate_limits_by_limit_id: Option<BTreeMap<String, Snapshot>>,
     rate_limit_reset_credits: Option<ResetCredits>,
+    /// `false` means ordinary usage is stopped, whatever the percentages say.
+    ordinary_usage_allowed: Option<bool>,
+}
+
+/// What the read says beyond the snapshot (a log sample has neither).
+#[derive(Clone, Copy, Default)]
+struct Status {
+    reset_count: Option<i64>,
+    usage_allowed: Option<bool>,
+}
+
+impl RateLimitsResult {
+    fn status(&self) -> Status {
+        Status {
+            reset_count: self
+                .rate_limit_reset_credits
+                .as_ref()
+                .map(ResetCredits::count),
+            usage_allowed: self.ordinary_usage_allowed,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -178,9 +221,10 @@ pub fn amount(value: &str) -> String {
     }
 }
 
-fn notes(snap: &Snapshot, reset_count: Option<i64>) -> Vec<String> {
+fn notes(snap: &Snapshot, status: Status) -> Vec<String> {
     let mut notes = Vec::new();
     match snap.rate_limit_reached_type.as_deref() {
+        None if status.usage_allowed == Some(false) => notes.push("Usage blocked".into()),
         None => {}
         Some("rate_limit_reached") => notes.push("Limit reached".into()),
         Some(k) if k.contains("credits_depleted") => {
@@ -191,7 +235,7 @@ fn notes(snap: &Snapshot, reset_count: Option<i64>) -> Vec<String> {
         }
         Some(_) => notes.push("Usage blocked".into()),
     }
-    if let Some(n) = reset_count.filter(|n| *n > 0) {
+    if let Some(n) = status.reset_count.filter(|n| *n > 0) {
         notes.push(format!("{n} free reset{}", if n == 1 { "" } else { "s" }));
     }
     if let Some(c) = &snap.credits
@@ -208,7 +252,7 @@ fn notes(snap: &Snapshot, reset_count: Option<i64>) -> Vec<String> {
 fn source_from(
     snap: &Snapshot,
     by_id: Option<&BTreeMap<String, Snapshot>>,
-    reset_count: Option<i64>,
+    status: Status,
     now: Unix,
     origin: Origin,
 ) -> UsageSource {
@@ -253,7 +297,7 @@ fn source_from(
         plan: snap.plan_type.as_deref().and_then(plan_name),
         windows,
         spend,
-        notes: notes(snap, reset_count),
+        notes: notes(snap, status),
         last_updated: Some(now),
         state: SourceState::Ok,
         origin,
@@ -323,14 +367,22 @@ struct LogPayload {
     rate_limits: Option<Snapshot>,
 }
 
-/// The newest rollout's last `token_count` with rate limits, as a source
-/// sampled at the line's timestamp.
+/// The `token_count` with rate limits and the newest line timestamp in the
+/// most recently modified rollouts, as a source sampled at that timestamp.
 pub fn log_fallback(roots: &[PathBuf]) -> Option<UsageSource> {
-    for (_, path) in rollouts(roots).into_iter().take(LOG_FILES_TRIED) {
-        let Some(tail) = read_tail(&path, LOG_TAIL_BYTES) else {
-            continue;
-        };
-        let hit = tail.split(|b| *b == b'\n').rev().find_map(|line| {
+    rollouts(roots)
+        .into_iter()
+        .take(LOG_FILES_TRIED)
+        // Oldest first, so a tie goes to the most recently modified file.
+        .rev()
+        .filter_map(|(_, path)| newest_sample(&path))
+        .max_by_key(|s| s.last_updated)
+}
+
+fn newest_sample(path: &Path) -> Option<UsageSource> {
+    let tail = read_tail(path, LOG_TAIL_BYTES)?;
+    tail.split(|b| *b == b'\n')
+        .filter_map(|line| {
             if !line.windows(11).any(|w| w == b"token_count") {
                 return None;
             }
@@ -340,16 +392,10 @@ pub fn log_fallback(roots: &[PathBuf]) -> Option<UsageSource> {
                 return None;
             }
             let ts = crate::time::parse_rfc3339(l.timestamp.as_deref()?)?;
-            Some((p.rate_limits?, ts))
-        });
-        if let Some((snap, ts)) = hit {
-            let s = source_from(&snap, None, None, ts, Origin::Log);
-            if !s.windows.is_empty() {
-                return Some(s);
-            }
-        }
-    }
-    None
+            let s = source_from(&p.rate_limits?, None, Status::default(), ts, Origin::Log);
+            (!s.windows.is_empty()).then_some(s)
+        })
+        .max_by_key(|s| s.last_updated)
 }
 
 // MARK: - Deps
@@ -365,15 +411,22 @@ pub struct Deps {
 }
 
 impl Deps {
-    pub fn system(roots: &Roots, now: Clock) -> Deps {
+    pub fn system(roots: &Roots, now: Clock, resolver: Arc<cli::Resolver>) -> Deps {
         Deps {
-            make_process: Arc::new(|| {
-                let r = cli::resolve("codex")?;
+            make_process: Arc::new(move || {
+                let r = resolver.resolve("codex")?;
                 let mut c = Command::new(&r.path);
-                c.arg("app-server").env_clear().envs(&r.env);
+                c.arg("app-server").env_clear().envs(r.env.iter());
                 Some(c)
             }),
-            sessions: roots.codex_sessions.clone(),
+            // Limits come from live sessions only: an archived rollout is an
+            // older session, whatever its mtime.
+            sessions: roots
+                .codex_sessions
+                .iter()
+                .filter(|p| p.file_name() != Some(OsStr::new("archived_sessions")))
+                .cloned()
+                .collect(),
             now,
             request_timeout: REQUEST_TIMEOUT,
         }
@@ -403,6 +456,9 @@ struct Worker {
     generation: u64,
     next_id: i64,
     pending: HashMap<i64, (&'static str, Instant)>,
+    /// A push came while a rate-limits read was out: its answer may predate
+    /// the push, so read again once it is in.
+    reread: bool,
     /// Kept in memory only to notice an account switch; never published.
     account: Option<String>,
     account_plan: Option<String>,
@@ -424,6 +480,7 @@ pub(crate) fn spawn(deps: Deps, spawner: &Spawner) -> Slot {
             generation: 0,
             next_id: 1,
             pending: HashMap::new(),
+            reread: false,
             account: None,
             account_plan: None,
             last_good: None,
@@ -554,6 +611,7 @@ impl Worker {
     fn disconnect(&mut self) {
         self.generation += 1;
         self.pending.clear();
+        self.reread = false;
         self.stdin = None;
         // Dropping the guard kills the server's group and reaps it.
         self.child = None;
@@ -634,7 +692,11 @@ impl Worker {
             if self.state == State::Ready
                 && env.method.as_deref() == Some("account/rateLimits/updated")
             {
-                self.refresh();
+                if self.pending.is_empty() {
+                    self.refresh();
+                } else {
+                    self.reread = true;
+                }
             }
             return;
         };
@@ -674,6 +736,8 @@ impl Worker {
                     .and_then(|a| a.plan_type)
                     .as_deref()
                     .and_then(plan_name);
+                // Sent after any push so far, so it answers them.
+                self.reread = false;
                 self.send("account/rateLimits/read", Value::Null);
             }
             "account/rateLimits/read" => {
@@ -684,7 +748,7 @@ impl Worker {
                 let mut s = source_from(
                     &r.rate_limits,
                     r.rate_limits_by_limit_id.as_ref(),
-                    r.rate_limit_reset_credits.and_then(|c| c.available_count),
+                    r.status(),
                     now,
                     Origin::Live,
                 );
@@ -696,6 +760,9 @@ impl Worker {
                 self.poll_due = now + POLL_SECS;
                 self.last_good = Some(s.clone());
                 self.publish(s);
+                if std::mem::take(&mut self.reread) && self.pending.is_empty() {
+                    self.send("account/read", json!({}));
+                }
             }
             _ => {}
         }
@@ -713,6 +780,11 @@ mod tests {
     /// A fake `codex app-server`: answers by method, logs what it got.
     /// `on_limits` runs after each rateLimits answer (`$n` counts them).
     fn server(dir: &Path, limits: &[&str], on_limits: &str) -> PathBuf {
+        server_with(dir, limits, "", on_limits)
+    }
+
+    /// `server`, with `before_limits` run just before each rateLimits answer.
+    fn server_with(dir: &Path, limits: &[&str], before_limits: &str, on_limits: &str) -> PathBuf {
         let log = dir.join("methods");
         let mut cases = String::new();
         for (i, body) in limits.iter().enumerate() {
@@ -742,6 +814,7 @@ while IFS= read -r line; do
       case $n in
 {cases}      *) body='{last}' ;;
       esac
+      {before_limits}
       printf '{{"id":%s,"result":%s}}\n' "$id" "$body"
       {on_limits}
       ;;
@@ -856,7 +929,7 @@ done
         let s = source_from(
             &r.rate_limits,
             r.rate_limits_by_limit_id.as_ref(),
-            r.rate_limit_reset_credits.and_then(|c| c.available_count),
+            r.status(),
             T0,
             Origin::Live,
         );
@@ -999,5 +1072,126 @@ done
         assert!(matches!(card.aged_state(later), SourceState::Stale { .. }));
         // Nothing at all: unconfigured.
         assert!(log_fallback(&[dir.path().join("absent")]).is_none());
+    }
+
+    #[test]
+    fn push_during_a_read_reads_again_after_it() {
+        // The server builds the old answer, pushes the update, then sends
+        // the old answer: it must be read again.
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (simple(50.0), simple(70.0));
+        let push = r#"if [ $n = 1 ]; then printf '{"method":"account/rateLimits/updated","params":{}}\n'; fi"#;
+        let script = server_with(dir.path(), &[&first, &second], push, "");
+        let (_, clock) = fake_clock();
+        let sp = spawner();
+        let h = handle(
+            vec![spawn(
+                deps_for(Some(script), &dir.path().join("none"), clock),
+                &sp,
+            )],
+            &sp,
+        );
+        assert_eq!(next(&h).windows[0].used_percent, 50.0);
+        assert_eq!(next(&h).windows[0].used_percent, 70.0);
+        assert_eq!(
+            methods(dir.path()),
+            [
+                "initialize",
+                "initialized",
+                "account/read",
+                "account/rateLimits/read",
+                "account/read",
+                "account/rateLimits/read"
+            ]
+        );
+        quiet(&h);
+    }
+
+    fn notes_of(json: &str) -> Vec<String> {
+        let r: RateLimitsResult = serde_json::from_str(json).unwrap();
+        source_from(&r.rate_limits, None, r.status(), T0, Origin::Live).notes
+    }
+
+    #[test]
+    fn usage_stopped_and_free_resets_are_noted_without_codes_or_counts() {
+        let low = r#""rateLimits":{"limitId":"codex","primary":{"usedPercent":12,"windowDurationMins":300}}"#;
+        let credits = r#""credits":[{"id":"a","status":"available","expiresAt":4000000000},{"id":"b","status":"used"}]"#;
+        // Stopped with no reason code, low usage; one available credit and
+        // no availableCount.
+        assert_eq!(
+            notes_of(&format!(
+                r#"{{{low},"ordinaryUsageAllowed":false,"rateLimitResetCredits":{{{credits}}}}}"#
+            )),
+            ["Usage blocked", "1 free reset"]
+        );
+        // availableCount, when given, is the count.
+        assert_eq!(
+            notes_of(&format!(
+                r#"{{{low},"ordinaryUsageAllowed":true,"rateLimitResetCredits":{{"availableCount":3,{credits}}}}}"#
+            )),
+            ["3 free resets"]
+        );
+        // Unknown or allowed: no stop note; a reason code names the stop.
+        assert!(notes_of(&format!(r#"{{{low},"ordinaryUsageAllowed":null}}"#)).is_empty());
+        let reached = r#""rateLimits":{"limitId":"codex","primary":{"usedPercent":12,"windowDurationMins":300},"rateLimitReachedType":"workspace_member_credits_depleted"}"#;
+        assert_eq!(
+            notes_of(&format!(r#"{{{reached},"ordinaryUsageAllowed":false}}"#)),
+            ["Workspace credits depleted"]
+        );
+    }
+
+    #[test]
+    fn log_fallback_picks_the_newest_sample_not_the_newest_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(T0 as u64);
+        // Touched last, but its samples are older.
+        rollout(
+            &sessions.join("2027/01/14"),
+            "rollout-2027-01-14T08-00-00-touched.jsonl",
+            &[token_count("2027-01-15T08:00:00Z", Some(80.0))],
+            base,
+        );
+        rollout(
+            &sessions.join("2027/01/15"),
+            "rollout-2027-01-15T09-00-00-current.jsonl",
+            &[
+                token_count("2027-01-15T09:30:00Z", Some(30.0)),
+                token_count("2027-01-15T09:00:00Z", Some(25.0)),
+            ],
+            base - Duration::from_secs(60),
+        );
+        let s = log_fallback(std::slice::from_ref(&sessions)).unwrap();
+        assert_eq!(
+            s.last_updated,
+            crate::time::parse_rfc3339("2027-01-15T09:30:00Z")
+        );
+        assert_eq!(s.windows[0].used_percent, 30.0);
+        // Archived rollouts are not read for limits, however new their
+        // mtime or samples.
+        let codex = dir.path().join("codex");
+        let archived = codex.join("archived_sessions");
+        rollout(
+            &archived,
+            "rollout-2027-01-15T10-00-00-archived.jsonl",
+            &[token_count("2027-01-15T11:00:00Z", Some(99.0))],
+            base + Duration::from_secs(60),
+        );
+        rollout(
+            &codex.join("sessions/2027/01/15"),
+            "rollout-2027-01-15T09-00-00-live.jsonl",
+            &[token_count("2027-01-15T09:30:00Z", Some(30.0))],
+            base,
+        );
+        let roots = Roots {
+            codex_sessions: vec![codex.join("sessions"), archived],
+            ..Roots::default()
+        };
+        let resolver = Arc::new(cli::Resolver::new(cli::Env::default(), vec![], Vec::new));
+        let (_, clock) = fake_clock();
+        let deps = Deps::system(&roots, clock, resolver);
+        assert_eq!(deps.sessions, [codex.join("sessions")]);
+        let s = log_fallback(&deps.sessions).unwrap();
+        assert_eq!(s.windows[0].used_percent, 30.0);
     }
 }

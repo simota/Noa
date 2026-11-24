@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::model::{Agent, SourceState, Unix, UsageSource};
 use crate::paths::Roots;
@@ -24,6 +24,9 @@ use cli::Cancel;
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 /// Unix seconds; injected so tests drive the schedules.
 pub type Clock = Arc<dyn Fn() -> Unix + Send + Sync>;
+/// Monotonic time since an arbitrary origin (unaffected by setting the
+/// wall clock); injected like `Clock`.
+pub type Mono = Arc<dyn Fn() -> Duration + Send + Sync>;
 
 /// Every source polls at this interval.
 pub const POLL_SECS: i64 = 300;
@@ -63,12 +66,16 @@ impl<E> Link<E> {
 
     /// The next message, or `None` once `clock` reaches `deadline`. A closed
     /// channel reads as `Stop`.
-    pub(crate) fn wait(&self, clock: &Clock, deadline: Option<Unix>) -> Option<Ctl<E>> {
+    pub(crate) fn wait<T: PartialOrd>(
+        &self,
+        clock: impl Fn() -> T,
+        deadline: Option<T>,
+    ) -> Option<Ctl<E>> {
         loop {
             if self.stopped() {
                 return Some(Ctl::Stop);
             }
-            if deadline.is_some_and(|d| clock() >= d) {
+            if deadline.as_ref().is_some_and(|d| clock() >= *d) {
                 return None;
             }
             match self.rx.recv_timeout(self.tick) {
@@ -189,14 +196,27 @@ pub fn start(roots: Roots, wake: Arc<dyn Fn() + Send + Sync>) -> LimitsHandle {
         tick: LIVE_TICK,
     };
     let clock: Clock = Arc::new(crate::time::now);
+    let origin = Instant::now();
+    let mono: Mono = Arc::new(move || origin.elapsed());
     let cancel = spawner.cancel.clone();
+    // Looks nothing up yet: each source finds its tools on its own thread.
+    let resolver = Arc::new(cli::Resolver::system(cancel.clone()));
     let slots = vec![
         claude::spawn(
-            claude::Deps::system(&roots, clock.clone(), cancel.clone()),
+            claude::Deps::system(
+                &roots,
+                clock.clone(),
+                mono,
+                cancel.clone(),
+                resolver.clone(),
+            ),
             &spawner,
         ),
-        codex::spawn(codex::Deps::system(&roots, clock.clone()), &spawner),
-        agy::spawn(agy::Deps::system(clock, cancel), &spawner),
+        codex::spawn(
+            codex::Deps::system(&roots, clock.clone(), resolver.clone()),
+            &spawner,
+        ),
+        agy::spawn(agy::Deps::system(clock, cancel, resolver), &spawner),
     ];
     LimitsHandle::from_slots(slots, spawner.cancel)
 }
@@ -299,7 +319,7 @@ pub(crate) fn in_secs(secs: i64) -> String {
     if secs < 60 {
         format!("in {}s", secs.max(0))
     } else {
-        format!("in {}m", (secs + 59) / 60)
+        format!("in {}m", secs.saturating_add(59) / 60)
     }
 }
 
@@ -326,7 +346,6 @@ pub(crate) fn plan_name(kind: &str) -> Option<String> {
 pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::AtomicI64;
-    use std::time::Instant;
 
     pub(crate) const T0: Unix = 1_800_000_000;
 
@@ -481,6 +500,85 @@ pub(crate) mod tests {
         let later = collect(&h, 2);
         assert!(later.iter().all(|s| s.agent != Agent::Agy), "{later:?}");
         assert!(later.iter().any(|s| s.agent == Agent::Codex));
+    }
+
+    #[test]
+    fn a_slow_tool_lookup_blocks_no_other_source() {
+        let spawner = spawner();
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clock) = fake_clock();
+        // Claude's curl lookup and agy's lookup hang (a login shell taking
+        // its time) until the test lets them go.
+        let (release, gate) = mpsc::channel::<()>();
+        let gate = Arc::new(Mutex::new(gate));
+        let (mut claude, fake) =
+            claude::tests::deps(clock.clone(), vec![claude::tests::ok(claude::tests::USAGE)]);
+        let (inner, held) = (claude.http.clone(), gate.clone());
+        claude.http = Arc::new(move || {
+            let _ = held.lock().unwrap().recv();
+            inner()
+        });
+        let held = gate.clone();
+        let agy = agy::Deps {
+            resolve: Arc::new(move || {
+                let _ = held.lock().unwrap().recv();
+                None
+            }),
+            now: clock.clone(),
+            cancel: spawner.cancel.clone(),
+            version_timeout: Duration::from_secs(3),
+            usage_timeout: Duration::from_secs(12),
+        };
+        let codex = codex::Deps {
+            make_process: Arc::new(|| None),
+            sessions: vec![dir.path().join("sessions")],
+            now: clock,
+            request_timeout: Duration::from_secs(5),
+        };
+        let start = Instant::now();
+        let slots = vec![
+            claude::spawn(claude, &spawner),
+            codex::spawn(codex, &spawner),
+            agy::spawn(agy, &spawner),
+        ];
+        let h = handle(slots, &spawner);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        // Codex answers while both lookups are still out.
+        let s = next(&h);
+        assert_eq!(s.agent, Agent::Codex);
+        assert_eq!(s.notes, ["codex not found in PATH"]);
+        quiet(&h);
+        assert!(fake.requests.lock().unwrap().is_empty());
+        drop(release);
+        let got = collect(&h, 2);
+        assert_eq!(by_agent(&got, Agent::Claude).state, SourceState::Ok);
+        assert_eq!(by_agent(&got, Agent::Agy).state, SourceState::Unconfigured);
+    }
+
+    #[test]
+    fn dropping_the_handle_stops_a_login_shell_probe() {
+        let spawner = spawner();
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("started");
+        let shell = cli::tests::script(
+            dir.path(),
+            "slow-shell",
+            &format!("trap '' TERM\n: > '{}'\nsleep 30", started.display()),
+        );
+        let cancel = spawner.cancel.clone();
+        // An empty PATH: agy is found nowhere but (maybe) the login shell.
+        let resolver = Arc::new(cli::Resolver::new(
+            [("PATH", "")].into_iter().collect(),
+            vec![],
+            move || cli::login_shell_path(&shell, &cancel),
+        ));
+        let (_, clock) = fake_clock();
+        let agy = agy::Deps::system(clock, spawner.cancel.clone(), resolver);
+        let h = handle(vec![agy::spawn(agy, &spawner)], &spawner);
+        until("the login shell", || started.exists());
+        let start = Instant::now();
+        drop(h);
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

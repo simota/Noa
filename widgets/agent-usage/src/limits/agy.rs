@@ -80,9 +80,9 @@ pub struct Deps {
 }
 
 impl Deps {
-    pub fn system(now: Clock, cancel: Cancel) -> Deps {
+    pub fn system(now: Clock, cancel: Cancel, resolver: Arc<cli::Resolver>) -> Deps {
         Deps {
-            resolve: Arc::new(|| cli::resolve("agy")),
+            resolve: Arc::new(move || resolver.resolve("agy")),
             now,
             cancel,
             version_timeout: Duration::from_secs(3),
@@ -91,28 +91,31 @@ impl Deps {
     }
 }
 
-/// `1.1.11` or later; "agy 1.5.16" and "v1.5.16" are read too.
-pub fn supports_usage(version: &str) -> bool {
-    let Some(word) = version
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().last())
-    else {
-        return false;
+/// The installed version from `agy --version`: the first line is
+/// `X.Y.Z`, `vX.Y.Z` or either after the word `agy`; anything after that
+/// token (an "update available: …" notice) is ignored. `None` for any other
+/// shape.
+pub fn installed_version(output: &str) -> Option<(u64, u64, u64)> {
+    let mut words = output.trim_start().lines().next()?.split_whitespace();
+    let mut word = words.next()?;
+    if word == "agy" {
+        word = words.next()?;
+    }
+    let mut parts = word.strip_prefix('v').unwrap_or(word).split('.');
+    let mut number = || {
+        parts
+            .next()
+            .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))?
+            .parse::<u64>()
+            .ok()
     };
-    let parts: Vec<u64> = match word
-        .trim_start_matches('v')
-        .split('.')
-        .map(|p| p.parse::<u64>())
-        .collect()
-    {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let [major, minor, patch] = parts[..] else {
-        return false;
-    };
-    (major, minor, patch) >= (1, 1, 11)
+    let version = (number()?, number()?, number()?);
+    parts.next().is_none().then_some(version)
+}
+
+/// `1.1.11` or later. A version it cannot read is refused.
+pub fn supports_usage(output: &str) -> bool {
+    installed_version(output).is_some_and(|v| v >= (1, 1, 11))
 }
 
 fn short_group(name: &str) -> String {
@@ -242,7 +245,7 @@ pub(crate) fn spawn(deps: Deps, spawner: &Spawner) -> Slot {
             link.publish(source);
             let due = (deps.now)() + POLL_SECS;
             loop {
-                match link.wait(&deps.now, Some(due)) {
+                match link.wait(&*deps.now, Some(due)) {
                     None | Some(Ctl::Refresh) => break,
                     Some(Ctl::Stop) => return,
                     Some(Ctl::Event(())) => {}
@@ -282,7 +285,7 @@ mod tests {
             resolve: Arc::new(move || {
                 Some(Resolution {
                     path: tool.clone(),
-                    env: [("PATH".to_string(), "/usr/bin:/bin".to_string())].into(),
+                    env: [("PATH", "/usr/bin:/bin")].into_iter().collect(),
                 })
             }),
             now: clock,
@@ -311,15 +314,44 @@ mod tests {
         assert!(!supports_usage("1.2"));
         assert!(!supports_usage("1.2.x"));
         assert!(!supports_usage(""));
-        let dir = tempfile::tempdir().unwrap();
-        let tool = fake(dir.path(), "1.1.10", "echo should-not-run");
-        let h = started(tool, Duration::from_secs(12));
-        let s = next(&h);
+        // Only the installed version counts, never a later token.
         assert_eq!(
-            s.state,
-            SourceState::Error(Failure::Outdated.reason().into())
+            installed_version("agy 1.1.10 update available: 1.5.16"),
+            Some((1, 1, 10))
         );
-        assert_eq!(calls(dir.path()), ["--version"]);
+        assert!(!supports_usage("agy 1.1.10 update available: 1.5.16"));
+        assert!(supports_usage("agy v1.5.16 (update available: 2.0.0)\n"));
+        // Any other shape is refused.
+        for unreadable in [
+            "Antigravity CLI 1.5.16",
+            "update available: 1.5.16",
+            "agy version 1.5.16",
+            "agy",
+            "1.5.16.2",
+            "1.5.16-beta",
+            "1.+5.16",
+            "1..16",
+            "notice\n1.5.16",
+        ] {
+            assert_eq!(installed_version(unreadable), None, "{unreadable}");
+            assert!(!supports_usage(unreadable), "{unreadable}");
+        }
+        for version in [
+            "1.1.10",
+            "agy 1.1.10 update available: 1.5.16",
+            "Antigravity 1.5.16",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let tool = fake(dir.path(), version, "echo should-not-run");
+            let h = started(tool, Duration::from_secs(12));
+            let s = next(&h);
+            assert_eq!(
+                s.state,
+                SourceState::Error(Failure::Outdated.reason().into()),
+                "{version}"
+            );
+            assert_eq!(calls(dir.path()), ["--version"], "{version}");
+        }
     }
 
     #[test]

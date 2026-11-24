@@ -7,31 +7,43 @@
 //! is never read. stderr is dropped; the token is never formatted anywhere
 //! but the config text written to curl's stdin.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::cli::{self, Cancel};
+use super::cli::{self, Cancel, Env, Resolver};
 
 pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CURL_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpResponse {
-    /// 0 when nothing came back (no connection, curl failed or is missing).
+    /// 0 when no status came back (no connection, curl failed or is missing).
     pub status: u16,
+    /// The request may have reached the server: curl got past connecting
+    /// (a response, a cut-off one, or a failure it cannot place before that).
+    pub sent: bool,
     /// The raw `Retry-After` value of the final response.
     pub retry_after: Option<String>,
     pub body: Vec<u8>,
 }
 
 impl HttpResponse {
+    /// Nothing left this machine: no connection, or curl never ran.
     pub fn no_connection() -> HttpResponse {
         HttpResponse {
             status: 0,
+            sent: false,
             retry_after: None,
             body: Vec::new(),
+        }
+    }
+
+    /// Sent, but no usable response came back (cut off, timed out).
+    pub fn interrupted() -> HttpResponse {
+        HttpResponse {
+            sent: true,
+            ..HttpResponse::no_connection()
         }
     }
 }
@@ -134,6 +146,7 @@ pub fn parse(raw: &[u8]) -> HttpResponse {
     }
     HttpResponse {
         status: code.or(status_line).unwrap_or(0),
+        sent: true,
         retry_after,
         body: rest.to_vec(),
     }
@@ -172,19 +185,41 @@ pub fn retry_after_secs(value: Option<&str>, now: i64) -> Option<i64> {
     Some((at - now).max(1))
 }
 
-/// `/usr/bin/curl`, else `curl` on the resolved PATH.
-pub fn find_curl() -> Option<(PathBuf, Option<cli::Env>)> {
+/// curl exit codes for failures before the request is written: setup, the
+/// proxy or host lookup, the connection and the TLS handshake. Any other
+/// failure may come after the server read the request.
+const BEFORE_REQUEST: [i32; 24] = [
+    1, 2, 3, 4, 5, 6, 7, 26, 35, 43, 45, 48, 49, 53, 54, 58, 59, 60, 77, 83, 90, 91, 97, 98,
+];
+
+/// What a curl run says about the request (curl exits 0 once a response
+/// came back, whatever its status).
+pub fn response_of(result: Result<Vec<u8>, cli::RunFailure>) -> HttpResponse {
+    use cli::RunFailure;
+    match result {
+        Ok(out) => parse(&out),
+        Err(RunFailure::NotRun) => HttpResponse::no_connection(),
+        Err(RunFailure::Exit(code)) if BEFORE_REQUEST.contains(&code) => {
+            HttpResponse::no_connection()
+        }
+        // Cut off, timed out, too large or killed: it may have been read.
+        Err(_) => HttpResponse::interrupted(),
+    }
+}
+
+/// `/usr/bin/curl`, else `curl` on the resolved PATH. The fallback may ask
+/// the login shell: call it on the source's own thread.
+pub fn find_curl(resolver: &Resolver) -> Option<(PathBuf, Env)> {
     let system = Path::new("/usr/bin/curl");
     if cli::is_executable(system) {
-        return Some((system.to_path_buf(), None));
+        return Some((system.to_path_buf(), resolver.inherited().clone()));
     }
-    cli::resolve("curl").map(|r| (r.path, Some(r.env)))
+    resolver.resolve("curl").map(|r| (r.path, r.env))
 }
 
 /// The real request through curl; `None` when curl is not found.
-pub fn system_http(cancel: Cancel) -> Option<HttpFn> {
-    let (curl, env) = find_curl()?;
-    let mut env: cli::Env = env.unwrap_or_else(|| std::env::vars().collect::<HashMap<_, _>>());
+pub fn system_http(resolver: &Resolver, cancel: Cancel) -> Option<HttpFn> {
+    let (curl, mut env) = find_curl(resolver)?;
     // Would make curl write TLS session keys (enough to read the token off a
     // capture) or find a config file.
     env.remove("SSLKEYLOGFILE");
@@ -193,7 +228,7 @@ pub fn system_http(cancel: Cancel) -> Option<HttpFn> {
         let args = args(url);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let config = config_text(token, user_agent);
-        match cli::run(
+        response_of(cli::run(
             &curl,
             &args,
             Some(&env),
@@ -201,10 +236,7 @@ pub fn system_http(cancel: Cancel) -> Option<HttpFn> {
             CURL_TIMEOUT,
             &[0],
             Some(&cancel),
-        ) {
-            Ok(out) => parse(&out),
-            Err(_) => HttpResponse::no_connection(),
-        }
+        ))
     }))
 }
 
@@ -240,7 +272,7 @@ mod tests {
         let out = cli::run(
             &fake,
             &args,
-            Some(&[("PATH".to_string(), "/usr/bin:/bin".to_string())].into()),
+            Some(&[("PATH", "/usr/bin:/bin")].into_iter().collect()),
             Some(config.as_bytes()),
             Duration::from_secs(5),
             &[0],
@@ -282,9 +314,9 @@ mod tests {
         assert_eq!(ok.status, 200);
         assert_eq!(ok.retry_after, None);
         assert_eq!(ok.body, b"{\"limits\":[]}");
-        // No connection: curl prints only the write-out.
-        assert_eq!(parse(b"\n000"), HttpResponse::no_connection());
-        assert_eq!(parse(b""), HttpResponse::no_connection());
+        // Exit 0 without a status: still a request that went out.
+        assert_eq!(parse(b"\n000"), HttpResponse::interrupted());
+        assert_eq!(parse(b""), HttpResponse::interrupted());
         // A body with blank lines of its own is kept whole.
         let multi = parse(b"HTTP/1.1 200 OK\r\n\r\na\n\nb\n200");
         assert_eq!(multi.body, b"a\n\nb");
@@ -309,5 +341,54 @@ mod tests {
         );
         // Exactly two lines, so nothing can add an option.
         assert_eq!(config.lines().count(), 2);
+    }
+
+    #[test]
+    fn a_failure_after_connecting_counts_as_sent() {
+        use cli::RunFailure;
+        // Lookup, connection and handshake failures: nothing was sent.
+        for code in [6, 7, 35, 60] {
+            assert_eq!(
+                response_of(Err(RunFailure::Exit(code))),
+                HttpResponse::no_connection(),
+                "{code}"
+            );
+        }
+        assert!(!response_of(Err(RunFailure::NotRun)).sent);
+        // Cut off mid-response, timed out, too large, killed: it may have.
+        for failure in [
+            RunFailure::Exit(18),
+            RunFailure::Exit(28),
+            RunFailure::Exit(52),
+            RunFailure::Exit(56),
+            RunFailure::Exit(92),
+            RunFailure::Signal(6),
+            RunFailure::TimedOut,
+            RunFailure::TooLarge,
+        ] {
+            let r = response_of(Err(failure));
+            assert_eq!((r.status, r.sent), (0, true), "{failure:?}");
+        }
+        // Through a fake curl that dies mid-body (exit 56, recv error).
+        let dir = tempfile::tempdir().unwrap();
+        let fake = cli::tests::script(
+            dir.path(),
+            "curl",
+            "cat > /dev/null\nprintf 'HTTP/2 200\\r\\n\\r\\n{\"lim'\nexit 56",
+        );
+        let run = |tool: &Path| {
+            response_of(cli::run(
+                tool,
+                &[],
+                Some(&[("PATH", "/usr/bin:/bin")].into_iter().collect()),
+                Some(b"header = \"X: y\"\n"),
+                Duration::from_secs(5),
+                &[0],
+                None,
+            ))
+        };
+        assert_eq!(run(&fake), HttpResponse::interrupted());
+        let refused = cli::tests::script(dir.path(), "curl-refused", "cat > /dev/null\nexit 7");
+        assert_eq!(run(&refused), HttpResponse::no_connection());
     }
 }

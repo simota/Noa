@@ -2,14 +2,20 @@
 //! `codex`, `agy`, `curl`, `security`).
 //!
 //! Noa started from Finder has a bare PATH, so a tool is looked up on the
-//! inherited PATH, then the usual install prefixes, then (once, cached) the
-//! login shell's PATH. Every child runs in its own process group with a
-//! timeout, stdin closed unless used, stderr dropped and stdout capped; on a
-//! timeout or cancellation the whole group is killed and the child reaped.
+//! inherited PATH, then the usual install prefixes, then (once per handle,
+//! cached) the login shell's PATH. Lookups run on the asking source's thread
+//! and never wait for one another, except that a tool missing everywhere else
+//! waits for the one login-shell probe, which stops when the handle is
+//! dropped. Every child runs in its own process group with a timeout, stdin
+//! closed unless used, stderr dropped and stdout capped; on a timeout or
+//! cancellation the whole group is killed and the child reaped.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -18,7 +24,49 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-pub type Env = HashMap<String, String>;
+/// A child's environment. Values may be any bytes (read with `vars_os`, so a
+/// non-UTF-8 variable is carried, not a panic) and are never formatted:
+/// `Debug` shows only how many there are.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Env(HashMap<OsString, OsString>);
+
+impl Env {
+    /// This process's environment.
+    pub fn inherited() -> Env {
+        std::env::vars_os().collect()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&OsStr> {
+        self.0.get(OsStr::new(name)).map(OsString::as_os_str)
+    }
+
+    pub fn set(&mut self, name: &str, value: impl Into<OsString>) {
+        self.0.insert(name.into(), value.into());
+    }
+
+    pub fn remove(&mut self, name: &str) {
+        self.0.remove(OsStr::new(name));
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&OsStr, &OsStr)> {
+        self.0.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str()))
+    }
+}
+
+impl<K: Into<OsString>, V: Into<OsString>> FromIterator<(K, V)> for Env {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Env {
+        Env(iter
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect())
+    }
+}
+
+impl std::fmt::Debug for Env {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Env(<{} variables>)", self.0.len())
+    }
+}
 
 /// Set when the limits handle is dropped: running children are killed.
 pub type Cancel = Arc<AtomicBool>;
@@ -33,11 +81,13 @@ pub struct Resolution {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunFailure {
-    /// Could not be started (or the run was cancelled before it started).
+    /// Could not be started (or the run was cancelled).
     NotRun,
     TimedOut,
-    /// An exit status not accepted, or the signal number of a signalled child.
+    /// An exit status not accepted.
     Exit(i32),
+    /// Killed by this signal.
+    Signal(i32),
     TooLarge,
 }
 
@@ -48,140 +98,153 @@ pub const MAX_OUTPUT: usize = 1 << 20;
 const PATH_MARKER: &str = "noa-usage-path=";
 const SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn default_prefixes(home: &str) -> Vec<String> {
+fn default_prefixes(home: &Path) -> Vec<PathBuf> {
     vec![
-        format!("{home}/.local/bin"),
+        home.join(".local/bin"),
         "/opt/homebrew/bin".into(),
         "/usr/local/bin".into(),
-        format!("{home}/.npm-global/bin"),
-        format!("{home}/.bun/bin"),
-        format!("{home}/.cargo/bin"),
+        home.join(".npm-global/bin"),
+        home.join(".bun/bin"),
+        home.join(".cargo/bin"),
     ]
 }
 
-type ShellPathFn = Box<dyn Fn() -> Vec<String> + Send + Sync>;
+type ShellPathFn = Box<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
 
-#[derive(Default)]
-struct ResolverState {
-    resolved: HashMap<String, Resolution>,
-    /// The login shell's PATH, asked once.
-    shell: Option<Vec<String>>,
-}
-
+/// Tool lookups for one limits handle, shared by its source threads.
 pub struct Resolver {
     inherited: Env,
-    prefixes: Vec<String>,
+    prefixes: Vec<PathBuf>,
     shell_path: ShellPathFn,
-    state: Mutex<ResolverState>,
+    /// Locked only to read or store a hit, never across a search.
+    resolved: Mutex<HashMap<String, Resolution>>,
+    /// The login shell's PATH, asked once; only a lookup that missed
+    /// everywhere else waits for it.
+    shell: OnceLock<Vec<PathBuf>>,
 }
 
 impl Resolver {
     pub fn new(
         inherited: Env,
-        prefixes: Vec<String>,
-        shell_path: impl Fn() -> Vec<String> + Send + Sync + 'static,
+        prefixes: Vec<PathBuf>,
+        shell_path: impl Fn() -> Vec<PathBuf> + Send + Sync + 'static,
     ) -> Resolver {
         Resolver {
             inherited,
             prefixes,
             shell_path: Box::new(shell_path),
-            state: Mutex::default(),
+            resolved: Mutex::default(),
+            shell: OnceLock::new(),
         }
     }
 
+    /// The inherited environment, the usual prefixes and `$SHELL -lic`,
+    /// whose probe is killed once `cancel` is set. Runs nothing itself.
+    pub fn system(cancel: Cancel) -> Resolver {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let shell = std::env::var_os("SHELL")
+            .map(PathBuf::from)
+            .filter(|s| s.is_absolute())
+            .unwrap_or_else(|| "/bin/sh".into());
+        Resolver::new(Env::inherited(), default_prefixes(&home), move || {
+            login_shell_path(&shell, &cancel)
+        })
+    }
+
+    /// The environment children get when no lookup was needed.
+    pub fn inherited(&self) -> &Env {
+        &self.inherited
+    }
+
+    fn hits(&self) -> std::sync::MutexGuard<'_, HashMap<String, Resolution>> {
+        self.resolved.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn resolve(&self, tool: &str) -> Option<Resolution> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(hit) = state.resolved.get(tool) {
+        if let Some(hit) = self.hits().get(tool) {
             return Some(hit.clone());
         }
-        let inherited = self
+        let inherited: Vec<PathBuf> = self
             .inherited
             .get("PATH")
-            .map(|p| p.split(':').map(String::from).collect::<Vec<_>>())
+            .map(|p| std::env::split_paths(p).collect())
             .unwrap_or_default();
         let mut search = dedupe(inherited.into_iter().chain(self.prefixes.iter().cloned()));
         let mut hit = executable(tool, &search);
         if hit.is_none() {
-            let shell = state
-                .shell
-                .get_or_insert_with(|| (self.shell_path)())
-                .clone();
-            search = dedupe(search.into_iter().chain(shell));
+            let shell = self.shell.get_or_init(|| (self.shell_path)());
+            search = dedupe(search.into_iter().chain(shell.iter().cloned()));
             hit = executable(tool, &search);
         }
         let mut env = self.inherited.clone();
-        env.insert("PATH".into(), search.join(":"));
+        env.set("PATH", join_paths(&search));
         let resolution = Resolution { path: hit?, env };
-        state.resolved.insert(tool.to_string(), resolution.clone());
+        self.hits().insert(tool.to_string(), resolution.clone());
         Some(resolution)
     }
 }
 
-fn dedupe(paths: impl Iterator<Item = String>) -> Vec<String> {
+fn dedupe(paths: impl Iterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     paths
-        .filter(|p| p.starts_with('/') && seen.insert(p.clone()))
+        .filter(|p| p.is_absolute() && seen.insert(p.clone()))
         .collect()
+}
+
+fn join_paths(paths: &[PathBuf]) -> OsString {
+    let mut out = OsString::new();
+    for (i, p) in paths.iter().enumerate() {
+        if i > 0 {
+            out.push(":");
+        }
+        out.push(p);
+    }
+    out
 }
 
 pub fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-fn executable(tool: &str, dirs: &[String]) -> Option<PathBuf> {
-    dirs.iter()
-        .map(|d| Path::new(d).join(tool))
-        .find(|p| is_executable(p))
+fn executable(tool: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    dirs.iter().map(|d| d.join(tool)).find(|p| is_executable(p))
 }
 
 /// The PATH the login shell printed after the marker; empty when absent.
-pub fn parse_login_shell_path(output: &str) -> Vec<String> {
+pub fn parse_login_shell_path(output: &[u8]) -> Vec<PathBuf> {
     output
-        .lines()
+        .split(|b| *b == b'\n')
         .rev()
-        .find_map(|line| line.trim_end_matches('\r').strip_prefix(PATH_MARKER))
+        .find_map(|line| {
+            line.strip_suffix(b"\r")
+                .unwrap_or(line)
+                .strip_prefix(PATH_MARKER.as_bytes())
+        })
         .map(|p| {
-            p.split(':')
-                .filter(|d| d.starts_with('/'))
-                .map(String::from)
+            std::env::split_paths(OsStr::from_bytes(p))
+                .filter(|d| d.is_absolute())
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn login_shell_path() -> Vec<String> {
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| s.starts_with('/'))
-        .unwrap_or_else(|| "/bin/sh".into());
+/// `shell -lic` printing its PATH, killed after 5 s or once `cancel` is set.
+pub fn login_shell_path(shell: &Path, cancel: &Cancel) -> Vec<PathBuf> {
     let script = format!("printf \"\\n{PATH_MARKER}%s\\n\" \"$PATH\"");
     match run(
-        Path::new(&shell),
+        shell,
         &["-lic", &script],
         None,
         None,
         SHELL_TIMEOUT,
         &[0],
-        None,
+        Some(cancel),
     ) {
-        Ok(out) => parse_login_shell_path(&String::from_utf8_lossy(&out)),
+        Ok(out) => parse_login_shell_path(&out),
         Err(_) => Vec::new(),
     }
-}
-
-/// The process-wide resolver (inherited env, usual prefixes, login shell).
-pub fn resolve(tool: &str) -> Option<Resolution> {
-    static RESOLVER: OnceLock<Resolver> = OnceLock::new();
-    RESOLVER
-        .get_or_init(|| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            Resolver::new(
-                std::env::vars().collect(),
-                default_prefixes(&home),
-                login_shell_path,
-            )
-        })
-        .resolve(tool)
 }
 
 /// A spawned child in its own process group; dropping it kills the group and
@@ -272,10 +335,6 @@ pub fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn exit_code(status: std::process::ExitStatus) -> i32 {
-    status.code().or(status.signal()).unwrap_or(-1)
-}
-
 /// Runs a tool and returns its stdout. `env` replaces the environment when
 /// given. `stdin` is written then closed (the null device when `None`). The
 /// read is non-blocking so a descendant holding stdout open cannot defeat the
@@ -304,7 +363,7 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some(env) = env {
-        command.env_clear().envs(env);
+        command.env_clear().envs(env.iter());
     }
     let mut guard = Guarded::spawn(command).map_err(|_| RunFailure::NotRun)?;
     if let (Some(bytes), Some(mut pipe)) = (stdin, guard.child().stdin.take()) {
@@ -364,10 +423,11 @@ pub fn run(
             }
         }
     };
-    if status.code().is_none() || !ok_codes.contains(&exit_code(status)) {
-        return Err(RunFailure::Exit(exit_code(status)));
+    match status.code() {
+        Some(code) if ok_codes.contains(&code) => Ok(out),
+        Some(code) => Err(RunFailure::Exit(code)),
+        None => Err(RunFailure::Signal(status.signal().unwrap_or(-1))),
     }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -470,9 +530,10 @@ pub(crate) mod tests {
             run(sh, &["-c", "cat"], None, Some(b"secret-in"), t, &[0], None),
             Ok(b"secret-in".to_vec())
         );
+        // A signal is not an exit status, whatever the accepted codes.
         assert_eq!(
             run(sh, &["-c", "kill -TERM $$"], None, None, t, &[0, 15], None),
-            Err(RunFailure::Exit(15))
+            Err(RunFailure::Signal(15))
         );
         assert_eq!(
             run(
@@ -517,9 +578,12 @@ pub(crate) mod tests {
 
     #[test]
     fn login_shell_path_is_parsed_from_marker() {
-        let out = "motd line\nnoa-usage-path=not-this\n\x1b]7;x\x07\nnoa-usage-path=/a/bin:relative:/b/bin:\n";
-        assert_eq!(parse_login_shell_path(out), ["/a/bin", "/b/bin"]);
-        assert!(parse_login_shell_path("no marker\n").is_empty());
+        let out = b"motd line\nnoa-usage-path=not-this\n\x1b]7;x\x07\nnoa-usage-path=/a/bin:relative:/b/bin:\n";
+        assert_eq!(
+            parse_login_shell_path(out),
+            [PathBuf::from("/a/bin"), PathBuf::from("/b/bin")]
+        );
+        assert!(parse_login_shell_path(b"no marker\n").is_empty());
         // The resolver asks the shell only when the usual search misses, once.
         let dir = tempfile::tempdir().unwrap();
         let login = dir.path().join("login");
@@ -527,21 +591,169 @@ pub(crate) mod tests {
         script(&login, "fake-tool", "exit 0");
         let asked = Arc::new(Mutex::new(0));
         let count = asked.clone();
-        let login_dir = login.to_string_lossy().into_owned();
+        let login_dir = login.clone();
         let resolver = Resolver::new(
-            [("PATH".to_string(), "/usr/bin:/bin".to_string())].into(),
+            [("PATH", "/usr/bin:/bin")].into_iter().collect(),
             vec![],
             move || {
                 *count.lock().unwrap() += 1;
-                parse_login_shell_path(&format!("\n{PATH_MARKER}{login_dir}\n"))
+                let mut out = format!("\n{PATH_MARKER}").into_bytes();
+                out.extend_from_slice(login_dir.as_os_str().as_bytes());
+                parse_login_shell_path(&out)
             },
         );
         assert!(resolver.resolve("sh").is_some());
         assert_eq!(*asked.lock().unwrap(), 0);
         let hit = resolver.resolve("fake-tool").unwrap();
         assert_eq!(hit.path, login.join("fake-tool"));
-        assert!(hit.env["PATH"].ends_with(&login.to_string_lossy().into_owned()));
+        let path = hit.env.get("PATH").unwrap().as_bytes();
+        assert!(path.ends_with(login.as_os_str().as_bytes()));
         assert!(resolver.resolve("no-such-tool-anywhere").is_none());
         assert_eq!(*asked.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn resolution_debug_hides_environment_values() {
+        const TOKEN: &str = "sk-ant-oat01-SYNTHETIC-env-token";
+        let env: Env = [
+            ("CLAUDE_CODE_OAUTH_TOKEN", TOKEN),
+            ("PATH", "/synthetic/secret-bin"),
+        ]
+        .into_iter()
+        .collect();
+        let r = Resolution {
+            path: PathBuf::from("/usr/bin/curl"),
+            env: env.clone(),
+        };
+        for text in [format!("{r:?}"), format!("{r:#?}"), format!("{env:?}")] {
+            assert!(!text.contains(TOKEN), "{text}");
+            assert!(!text.contains("/synthetic/secret-bin"), "{text}");
+        }
+        assert!(format!("{r:?}").contains("/usr/bin/curl"));
+        // The child still gets the values.
+        let out = run(
+            Path::new("/bin/sh"),
+            &["-c", "printf %s \"$CLAUDE_CODE_OAUTH_TOKEN\""],
+            Some(&env),
+            None,
+            Duration::from_secs(5),
+            &[0],
+            None,
+        );
+        assert_eq!(out, Ok(TOKEN.as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn a_path_hit_does_not_wait_for_another_tools_shell_probe() {
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let resolver = Arc::new(Resolver::new(
+            [("PATH", "/usr/bin:/bin")].into_iter().collect(),
+            vec![],
+            move || {
+                let _ = entered_tx.send(());
+                let _ = released.lock().unwrap().recv();
+                Vec::new()
+            },
+        ));
+        let missing = resolver.clone();
+        let probe = std::thread::spawn(move || missing.resolve("no-such-tool-anywhere"));
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The probe is still running: a tool on the PATH resolves anyway.
+        let start = Instant::now();
+        assert!(resolver.resolve("sh").is_some());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        release.send(()).unwrap();
+        assert!(probe.join().unwrap().is_none());
+    }
+
+    #[test]
+    fn login_shell_probe_stops_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        // A login shell whose profile hangs (and ignores TERM).
+        let shell = script(dir.path(), "slow-shell", "trap '' TERM\nsleep 30");
+        let cancel: Cancel = Arc::default();
+        let probe_cancel = cancel.clone();
+        let resolver = Arc::new(Resolver::new(
+            [("PATH", "/usr/bin:/bin")].into_iter().collect(),
+            vec![],
+            move || login_shell_path(&shell, &probe_cancel),
+        ));
+        let r = resolver.clone();
+        let start = Instant::now();
+        let lookup = std::thread::spawn(move || r.resolve("no-such-tool-anywhere"));
+        std::thread::sleep(Duration::from_millis(150));
+        cancel.store(true, Ordering::SeqCst);
+        assert!(lookup.join().unwrap().is_none());
+        assert!(start.elapsed() < Duration::from_secs(3));
+        // A shell that answers is read.
+        let answering = script(
+            dir.path(),
+            "answering-shell",
+            &format!("printf 'motd\\n{PATH_MARKER}/x/bin:/y/bin\\n'"),
+        );
+        assert_eq!(
+            login_shell_path(&answering, &Cancel::default()),
+            [PathBuf::from("/x/bin"), PathBuf::from("/y/bin")]
+        );
+    }
+
+    const NON_UTF8_VAR: &str = "NOA_USAGE_SYNTHETIC_NON_UTF8";
+    const MARKER_VAR: &str = "NOA_USAGE_SYNTHETIC_MARKER";
+
+    /// Runs `reads_a_non_utf8_environment` in a child test process whose
+    /// environment holds a non-UTF-8 value (setting one here would race the
+    /// other tests' threads).
+    #[test]
+    fn non_utf8_environment_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "limits::cli::tests::reads_a_non_utf8_environment",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(NON_UTF8_VAR, OsStr::from_bytes(b"syn\xff\xfethetic"))
+            .env(MARKER_VAR, &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(marker.exists(), "the child test did not run");
+    }
+
+    #[test]
+    #[ignore = "run by non_utf8_environment_does_not_panic in a child process"]
+    fn reads_a_non_utf8_environment() {
+        let Some(marker) = std::env::var_os(MARKER_VAR) else {
+            return;
+        };
+        let value = b"syn\xff\xfethetic";
+        let env = Env::inherited();
+        assert_eq!(env.get(NON_UTF8_VAR).map(OsStr::as_bytes), Some(&value[..]));
+        let resolver = Resolver::new(env, vec![], Vec::new);
+        let sh = resolver.resolve("sh").unwrap();
+        assert_eq!(
+            sh.env.get(NON_UTF8_VAR).map(OsStr::as_bytes),
+            Some(&value[..])
+        );
+        // curl's environment is built from the same inherited one.
+        let _ = crate::limits::curl::system_http(&resolver, Cancel::default());
+        // And a child receives the value unchanged.
+        let out = run(
+            &sh.path,
+            &["-c", &format!("printf %s \"${NON_UTF8_VAR}\"")],
+            Some(&sh.env),
+            None,
+            Duration::from_secs(5),
+            &[0],
+            None,
+        );
+        assert_eq!(out, Ok(value.to_vec()));
+        std::fs::write(marker, "ok").unwrap();
     }
 }

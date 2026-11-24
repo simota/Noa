@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::cli::{self, Cancel};
+use super::cli::{self, Cancel, Resolver};
 use super::curl::{self, HttpFn, HttpResponse};
-use super::{Clock, Ctl, Link, POLL_SECS, RETRY_SECS, Slot, Spawner, in_secs, unavailable};
+use super::{Clock, Ctl, Link, Mono, POLL_SECS, RETRY_SECS, Slot, Spawner, in_secs, unavailable};
 use crate::model::{
     Agent, Origin, SourceState, Unix, UsageBucket, UsageSource, UsageSpend, UsageWindow,
 };
@@ -196,8 +196,8 @@ fn valid_version(v: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
-fn version_from_cli(cancel: &Cancel) -> Option<String> {
-    let r = cli::resolve("claude")?;
+fn version_from_cli(resolver: &Resolver, cancel: &Cancel) -> Option<String> {
+    let r = resolver.resolve("claude")?;
     let out = cli::run(
         &r.path,
         &["--version"],
@@ -216,23 +216,34 @@ fn version_from_cli(cancel: &Cancel) -> Option<String> {
 }
 
 pub type CredentialFn = Arc<dyn Fn() -> Credential + Send + Sync>;
+/// Finds curl and returns the request function, or `None` when curl is not
+/// found. Called on the source's thread (the lookup may take seconds).
+pub type MakeHttp = Arc<dyn Fn() -> Option<HttpFn> + Send + Sync>;
 
 pub struct Deps {
-    /// `None`: curl not found.
-    pub http: Option<HttpFn>,
+    pub http: MakeHttp,
     pub credential: CredentialFn,
     pub version: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+    /// Sample times and `Retry-After` dates.
     pub now: Clock,
+    /// Every schedule: the request gap, back-off and polls.
+    pub mono: Mono,
 }
 
 impl Deps {
-    pub fn system(roots: &Roots, now: Clock, cancel: Cancel) -> Deps {
+    pub fn system(
+        roots: &Roots,
+        now: Clock,
+        mono: Mono,
+        cancel: Cancel,
+        resolver: Arc<Resolver>,
+    ) -> Deps {
         let path = roots.claude_credentials.clone();
         let (clock, keychain_cancel) = (now.clone(), cancel.clone());
         let projects = roots.claude_projects.clone();
-        let version_cancel = cancel.clone();
+        let (version_cancel, version_resolver) = (cancel.clone(), resolver.clone());
         Deps {
-            http: curl::system_http(cancel),
+            http: Arc::new(move || curl::system_http(&resolver, cancel.clone())),
             credential: Arc::new(move || {
                 let now = clock();
                 if cfg!(target_os = "macos")
@@ -249,9 +260,10 @@ impl Deps {
                 projects
                     .as_deref()
                     .and_then(version_from_logs)
-                    .or_else(|| version_from_cli(&version_cancel))
+                    .or_else(|| version_from_cli(&version_resolver, &version_cancel))
             }),
             now,
+            mono,
         }
     }
 }
@@ -401,32 +413,45 @@ fn spend_row(spend: Option<Spend>) -> Option<UsageSpend> {
 
 // MARK: - Worker
 
+fn secs(s: i64) -> Duration {
+    Duration::from_secs(s.max(0) as u64)
+}
+
+/// Whole seconds, rounded up (a note never promises a request too early).
+fn ceil_secs(d: Duration) -> i64 {
+    let whole = i64::try_from(d.as_secs()).unwrap_or(i64::MAX);
+    whole.saturating_add(i64::from(d.subsec_nanos() > 0))
+}
+
 struct Worker {
     deps: Deps,
     link: Link<()>,
+    /// Found on first use.
+    http: Option<HttpFn>,
     last_good: Option<UsageSource>,
     last_published: Option<UsageSource>,
     plan: Option<String>,
     user_agent: Option<String>,
-    /// When a request last reached the server (any HTTP status).
-    last_request: Option<Unix>,
-    backoff_until: Option<Unix>,
+    /// When the last request that may have reached the server started.
+    last_sent: Option<Duration>,
+    backoff_until: Option<Duration>,
     attempt: usize,
     /// The next fetch.
-    due: Unix,
+    due: Duration,
 }
 
 pub(crate) fn spawn(deps: Deps, spawner: &Spawner) -> Slot {
     spawner.spawn(Agent::Claude, move |link: Link<()>| {
-        let due = (deps.now)();
+        let due = (deps.mono)();
         Worker {
             deps,
             link,
+            http: None,
             last_good: None,
             last_published: None,
             plan: None,
             user_agent: None,
-            last_request: None,
+            last_sent: None,
             backoff_until: None,
             attempt: 0,
             due,
@@ -436,33 +461,36 @@ pub(crate) fn spawn(deps: Deps, spawner: &Spawner) -> Slot {
 }
 
 impl Worker {
-    fn now(&self) -> Unix {
-        (self.deps.now)()
+    fn mono(&self) -> Duration {
+        (self.deps.mono)()
     }
 
-    /// The earliest a request may go out: 180 s after the last one that
-    /// reached the server, and not inside a back-off.
-    fn earliest(&self) -> Unix {
-        let gap = self.last_request.map_or(Unix::MIN, |t| t + MIN_GAP_SECS);
-        gap.max(self.backoff_until.unwrap_or(Unix::MIN))
+    /// The earliest a request may go out: 180 s after the start of the last
+    /// one that may have reached the server, and not inside a back-off.
+    fn earliest(&self) -> Duration {
+        let gap = self
+            .last_sent
+            .map_or(Duration::ZERO, |t| t.saturating_add(secs(MIN_GAP_SECS)));
+        gap.max(self.backoff_until.unwrap_or(Duration::ZERO))
     }
 
     fn run(mut self) {
         loop {
-            match self.link.wait(&self.deps.now, Some(self.due)) {
+            match self.link.wait(&*self.deps.mono, Some(self.due)) {
                 None => {
-                    let now = self.now();
-                    if now < self.earliest() {
+                    if self.mono() < self.earliest() {
                         self.due = self.earliest();
                     } else {
-                        self.cycle(now);
+                        self.cycle();
                     }
                 }
+                // Also one pressed while a request was out: it is answered
+                // by the next request, not by the one already sent.
                 Some(Ctl::Refresh) => {
-                    let now = self.now();
+                    let now = self.mono();
                     let earliest = self.earliest();
                     if now >= earliest {
-                        self.cycle(now);
+                        self.cycle();
                     } else {
                         // Deferred: the card says when the request runs.
                         self.due = self.due.min(earliest);
@@ -475,8 +503,11 @@ impl Worker {
         }
     }
 
-    fn publish_deferred(&mut self, wait: i64) {
-        let note = format!("Refresh deferred (next request {})", in_secs(wait));
+    fn publish_deferred(&mut self, wait: Duration) {
+        let note = format!(
+            "Refresh deferred (next request {})",
+            in_secs(ceil_secs(wait))
+        );
         let mut s = self
             .last_published
             .clone()
@@ -487,11 +518,11 @@ impl Worker {
     }
 
     fn publish(&mut self, mut source: UsageSource) {
+        if self.link.stopped() {
+            return;
+        }
         if source.plan.is_none() {
             source.plan = self.plan.clone();
-        }
-        if self.link.absorb_refreshes() {
-            return;
         }
         self.last_published = Some(source.clone());
         self.link.publish(source);
@@ -503,8 +534,8 @@ impl Worker {
     }
 
     /// One fetch cycle: read the credential, request, publish; sets `due`.
-    fn cycle(&mut self, now: Unix) {
-        self.due = now + POLL_SECS;
+    fn cycle(&mut self) {
+        self.due = self.mono().saturating_add(secs(POLL_SECS));
         let token = match (self.deps.credential)() {
             Credential::Token { token, plan } => {
                 self.plan = plan;
@@ -512,8 +543,10 @@ impl Worker {
             }
             Credential::Expired => return self.unavailable(EXPIRED, false),
             Credential::Missing => {
-                // Signed out: an earlier account's values are not this one's.
+                // Signed out: an earlier account's values and plan are not
+                // this one's.
                 self.last_good = None;
+                self.plan = None;
                 return self
                     .unavailable("Not signed in to Claude Code (run claude and log in)", true);
             }
@@ -525,7 +558,10 @@ impl Worker {
                 );
             }
         };
-        let Some(http) = self.deps.http.clone() else {
+        if self.http.is_none() {
+            self.http = (self.deps.http)();
+        }
+        let Some(http) = self.http.clone() else {
             return self.unavailable("curl not found", false);
         };
         let version = self.deps.version.clone();
@@ -538,17 +574,17 @@ impl Worker {
                 )
             })
             .clone();
+        let started = self.mono();
         let response: HttpResponse = http(curl::USAGE_URL, token.expose(), &ua);
         drop(token);
         if self.link.stopped() {
             return;
         }
-        let now = self.now();
-        if response.status != 0 {
-            self.last_request = Some(now);
+        if response.sent {
+            self.last_sent = Some(started);
         }
         match response.status {
-            200 => match normalise(&response.body, now) {
+            200 => match normalise(&response.body, (self.deps.now)()) {
                 Ok(source) => {
                     self.attempt = 0;
                     self.backoff_until = None;
@@ -561,20 +597,22 @@ impl Worker {
             },
             0 | 429 => {
                 let delay = if response.status == 429 {
-                    curl::retry_after_secs(response.retry_after.as_deref(), now)
+                    curl::retry_after_secs(response.retry_after.as_deref(), (self.deps.now)())
                 } else {
                     None
                 }
                 .unwrap_or(RETRY_SECS[self.attempt.min(RETRY_SECS.len() - 1)]);
                 self.attempt += 1;
-                self.backoff_until = Some(now + delay);
+                let now = self.mono();
+                self.backoff_until = Some(now.saturating_add(secs(delay)));
                 self.due = self.earliest();
-                let what = if response.status == 0 {
-                    "Cannot connect"
-                } else {
-                    "Rate limited"
+                let what = match (response.status, response.sent) {
+                    (0, false) => "Cannot connect",
+                    (0, true) => "No response",
+                    _ => "Rate limited",
                 };
-                let reason = format!("{what} (retry {})", in_secs(self.due - now));
+                let wait = self.due.saturating_sub(now);
+                let reason = format!("{what} (retry {})", in_secs(ceil_secs(wait)));
                 self.unavailable(&reason, false);
             }
             401 | 403 => self.unavailable(EXPIRED, false),
@@ -597,6 +635,7 @@ pub(crate) mod tests {
     pub(crate) fn ok(body: &str) -> HttpResponse {
         HttpResponse {
             status: 200,
+            sent: true,
             retry_after: None,
             body: body.as_bytes().to_vec(),
         }
@@ -605,6 +644,7 @@ pub(crate) mod tests {
     fn status(code: u16, retry: Option<&str>) -> HttpResponse {
         HttpResponse {
             status: code,
+            sent: true,
             retry_after: retry.map(String::from),
             body: b"{\"error\":\"synthetic\"}".to_vec(),
         }
@@ -622,6 +662,12 @@ pub(crate) mod tests {
         }
     }
 
+    /// Monotonic time that follows the fake wall clock from `T0`.
+    fn mono_of(clock: &Clock) -> Mono {
+        let clock = clock.clone();
+        Arc::new(move || secs(clock() - T0))
+    }
+
     pub(crate) fn deps(clock: Clock, responses: Vec<HttpResponse>) -> (Deps, Fake) {
         let fake = Fake {
             requests: Arc::default(),
@@ -629,18 +675,20 @@ pub(crate) mod tests {
         };
         let (requests, credential) = (fake.requests.clone(), fake.credential.clone());
         let queue = Arc::new(Mutex::new(responses));
+        let http: HttpFn = Arc::new(move |_url: &str, token: &str, ua: &str| {
+            requests.lock().unwrap().push((token.into(), ua.into()));
+            let mut q = queue.lock().unwrap();
+            if q.is_empty() {
+                HttpResponse::no_connection()
+            } else {
+                q.remove(0)
+            }
+        });
         let deps = Deps {
-            http: Some(Arc::new(move |_url: &str, token: &str, ua: &str| {
-                requests.lock().unwrap().push((token.into(), ua.into()));
-                let mut q = queue.lock().unwrap();
-                if q.is_empty() {
-                    HttpResponse::no_connection()
-                } else {
-                    q.remove(0)
-                }
-            })),
+            http: Arc::new(move || Some(http.clone())),
             credential: Arc::new(move || credential.lock().unwrap().clone()),
             version: Arc::new(|| Some("9.9.9".into())),
+            mono: mono_of(&clock),
             now: clock,
         };
         (deps, fake)
@@ -929,7 +977,7 @@ pub(crate) mod tests {
     fn missing_curl_and_missing_login_are_named() {
         let (_, clock) = fake_clock();
         let (mut d, fake) = deps(clock, vec![]);
-        d.http = None;
+        d.http = Arc::new(|| None);
         let sp = spawner();
         let h = handle(vec![spawn(d, &sp)], &sp);
         let s = next(&h);
@@ -942,5 +990,129 @@ pub(crate) mod tests {
             s.notes,
             ["Not signed in to Claude Code (run claude and log in)"]
         );
+    }
+
+    #[test]
+    fn refresh_pressed_during_a_request_is_deferred_then_run() {
+        let (at, clock) = fake_clock();
+        let (mut d, fake) = deps(clock, vec![ok(USAGE), ok(USAGE)]);
+        // The first request stays out until the test lets it answer.
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Arc::new(Mutex::new(gate));
+        let inner = d.http.clone();
+        d.http = Arc::new(move || {
+            let real = inner()?;
+            let gate = gate.clone();
+            Some(Arc::new(move |url: &str, token: &str, ua: &str| {
+                let answer = real(url, token, ua);
+                let _ = gate.lock().unwrap().recv();
+                answer
+            }) as HttpFn)
+        });
+        let sp = spawner();
+        let h = handle(vec![spawn(d, &sp)], &sp);
+        let count = || fake.requests.lock().unwrap().len();
+        until("the first request", || count() == 1);
+        at.store(T0 + 1, Ordering::SeqCst);
+        h.refresh();
+        at.store(T0 + 2, Ordering::SeqCst);
+        drop(release);
+        let first = next(&h);
+        assert_eq!(first.state, SourceState::Ok);
+        assert!(first.notes.is_empty());
+        // The refresh is not answered by the request already out.
+        let deferred = next(&h);
+        assert_eq!(deferred.state, SourceState::Ok);
+        assert_eq!(deferred.notes, ["Refresh deferred (next request in 3m)"]);
+        at.store(T0 + 179, Ordering::SeqCst);
+        quiet(&h);
+        assert_eq!(count(), 1);
+        at.store(T0 + 180, Ordering::SeqCst);
+        let s = next(&h);
+        assert_eq!(s.last_updated, Some(T0 + 180));
+        assert!(s.notes.is_empty());
+        assert_eq!(count(), 2);
+    }
+
+    #[test]
+    fn a_cut_off_request_still_holds_the_180s_gap() {
+        // curl failed after connecting: the server may have counted it.
+        let (h, fake, at) = started(vec![HttpResponse::interrupted(), ok(USAGE)]);
+        let count = || fake.requests.lock().unwrap().len();
+        let s = next(&h);
+        assert_eq!(s.notes, ["No response (retry in 3m)"]);
+        assert_eq!(
+            s.state,
+            SourceState::Error("No response (retry in 3m)".into())
+        );
+        // Not at the 30 s connection back-off.
+        at.store(T0 + 30, Ordering::SeqCst);
+        quiet(&h);
+        h.refresh();
+        assert_eq!(
+            next(&h).notes.last().map(String::as_str),
+            Some("Refresh deferred (next request in 3m)")
+        );
+        at.store(T0 + 179, Ordering::SeqCst);
+        quiet(&h);
+        assert_eq!(count(), 1);
+        at.store(T0 + 180, Ordering::SeqCst);
+        assert_eq!(next(&h).state, SourceState::Ok);
+        assert_eq!(count(), 2);
+        // A connection that never opened backs off 30 s only.
+        let (h, fake, at) = started(vec![HttpResponse::no_connection(), ok(USAGE)]);
+        assert_eq!(next(&h).notes, ["Cannot connect (retry in 30s)"]);
+        at.store(T0 + 30, Ordering::SeqCst);
+        assert_eq!(next(&h).state, SourceState::Ok);
+        assert_eq!(fake.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_gap_runs_on_the_monotonic_clock() {
+        let (wall, clock) = fake_clock();
+        let (mut d, fake) = deps(clock, vec![ok(USAGE), ok(USAGE)]);
+        let elapsed = Arc::new(AtomicI64::new(0));
+        let read = elapsed.clone();
+        d.mono = Arc::new(move || secs(read.load(Ordering::SeqCst)));
+        let sp = spawner();
+        let h = handle(vec![spawn(d, &sp)], &sp);
+        let count = || fake.requests.lock().unwrap().len();
+        assert_eq!(next(&h).state, SourceState::Ok);
+        // The wall clock is set an hour ahead; only 10 s have passed.
+        wall.store(T0 + 3_600, Ordering::SeqCst);
+        elapsed.store(10, Ordering::SeqCst);
+        h.refresh();
+        assert_eq!(
+            next(&h).notes.last().map(String::as_str),
+            Some("Refresh deferred (next request in 3m)")
+        );
+        quiet(&h);
+        assert_eq!(count(), 1);
+        elapsed.store(179, Ordering::SeqCst);
+        quiet(&h);
+        assert_eq!(count(), 1);
+        elapsed.store(180, Ordering::SeqCst);
+        let s = next(&h);
+        assert_eq!(s.state, SourceState::Ok);
+        // The sample time is still the wall clock's.
+        assert_eq!(s.last_updated, Some(T0 + 3_600));
+        assert_eq!(count(), 2);
+    }
+
+    #[test]
+    fn signing_out_drops_the_old_plan() {
+        let (h, fake, at) = started(vec![ok(USAGE)]);
+        assert_eq!(next(&h).plan.as_deref(), Some("Max"));
+        *fake.credential.lock().unwrap() = Credential::Missing;
+        at.store(T0 + POLL_SECS, Ordering::SeqCst);
+        let s = next(&h);
+        assert_eq!(s.state, SourceState::Unconfigured);
+        assert_eq!(s.plan, None);
+        assert!(s.windows.is_empty());
+        // A deferred note on top of it carries no plan either.
+        h.refresh();
+        let s = next(&h);
+        assert_eq!(s.plan, None);
+        assert_eq!(fake.requests.lock().unwrap().len(), 1);
     }
 }

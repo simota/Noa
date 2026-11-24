@@ -414,6 +414,12 @@ impl MacosMenu {
                     None,
                 ),
                 &MenuItem::with_id(AppCommand::OpenReview.menu_id(), "Review", true, None),
+                &MenuItem::with_id(
+                    AppCommand::OpenAgentUsage.menu_id(),
+                    "Agent Usage",
+                    true,
+                    None,
+                ),
                 &auto_approve,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(

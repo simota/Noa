@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent Usage (`widgets/agent-usage`): View → Agent Usage (and the command
+  palette's Open Agent Usage) opens a window with the usage limits of Claude
+  Code, Codex and Antigravity (used %, reset, pace and when a window runs
+  out, stale values marked with their age) and statistics and graphs read
+  from the agents' local logs (sessions, tokens, cost estimate, models,
+  projects, tools, heatmap, limit history). Read-only; writes only under
+  `<data dir>/noa/agent-usage/`. `agent-usage --demo --snapshot=FILE.png`
+  renders it headlessly. `scripts/bundle-macos.sh` ships it as
+  `Noa Agent Usage`.
 - Competition: the start view seats 1–3 judges (agent, model and effort
   per row; `judge` leads, `judge-2` and `judge-3` only score), and a
   rematch fills every judge row. With more than one judge the leaderboard,

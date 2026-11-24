@@ -1,7 +1,8 @@
 //! Start a noa-gpui widget program (`widgets/<crate>`, with its own event
 //! loop) beside Noa: the agent dashboard (`agent-dashboard.open`), the repo
 //! browser (`repo-browser.open`), the discussion (`discussion.open`), the
-//! competition (`competition.open`) and the review (`review.open`). They
+//! competition (`competition.open`), the review (`review.open`) and the agent
+//! usage (`agent-usage.open`). They
 //! read Noa's panes through the control server, so each runs as a process of
 //! its own. Only the review gets an argument: the focused pane's directory.
 
@@ -52,6 +53,12 @@ pub(crate) const REVIEW: HelperProgram = HelperProgram {
     title: "Review",
     bundled: "Noa Review",
     crate_name: "review",
+};
+
+pub(crate) const AGENT_USAGE: HelperProgram = HelperProgram {
+    title: "Agent Usage",
+    bundled: "Noa Agent Usage",
+    crate_name: "agent-usage",
 };
 
 /// What `helper` is started with, given the working directory of the
@@ -259,6 +266,7 @@ mod tests {
             DISCUSSION,
             COMPETITION,
             REVIEW,
+            AGENT_USAGE,
         ] {
             let dirs = dev_build_dirs(helper);
             assert_eq!(dirs.len(), 2);
@@ -360,6 +368,30 @@ mod tests {
         assert_eq!(
             locate(REVIEW, Some(&exe_dir), std::slice::from_ref(&dev)),
             Some(exe_dir.join("Noa Review"))
+        );
+        for dir in [exe_dir, dev] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn agent_usage_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("agent-usage-exe");
+        let dev = scratch_dir("agent-usage-dev");
+        std::fs::write(dev.join(REVIEW.crate_name), "").unwrap();
+        assert_eq!(
+            locate(AGENT_USAGE, Some(&exe_dir), std::slice::from_ref(&dev)),
+            None
+        );
+        std::fs::write(dev.join("agent-usage"), "").unwrap();
+        assert_eq!(
+            locate(AGENT_USAGE, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(dev.join("agent-usage"))
+        );
+        std::fs::write(exe_dir.join("Noa Agent Usage"), "").unwrap();
+        assert_eq!(
+            locate(AGENT_USAGE, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(exe_dir.join("Noa Agent Usage"))
         );
         for dir in [exe_dir, dev] {
             let _ = std::fs::remove_dir_all(dir);

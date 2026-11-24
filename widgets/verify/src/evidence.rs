@@ -6,6 +6,7 @@
 //! exclusively (`fsx::open_dir`, `fsx::write_new_at`): no link is followed
 //! and nothing is written over.
 
+use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -260,7 +261,10 @@ fn write_below(base: &Path, dir: &Path, rel: &Path, bytes: &[u8]) -> io::Result<
 /// The source is read as [`inspect`] looks at it (a link on the way,
 /// also a parent folder swapped for one after validation, refuses it; a
 /// FIFO cannot block); one grown past its cap since validation is refused
-/// rather than cut. The copy is created exclusively.
+/// rather than cut. The copy is created exclusively. Items citing the same
+/// path share one copy: it is read and stored once (to the largest of
+/// their caps) and each gets the same [`Stored`], or the same error, an
+/// item whose own cap the file passes getting the cap error.
 pub fn ingest(
     src_base: &Path,
     src_dir: &Path,
@@ -272,11 +276,18 @@ pub fn ingest(
 ) -> Vec<(EvidenceKey, Result<Stored, String>)> {
     let into = store::round_evidence_dir(reply_dir, round, part);
     let recorded = store::round_evidence_dir(Path::new(""), round, part);
+    let mut copies: BTreeMap<PathBuf, Result<Stored, String>> = BTreeMap::new();
     items
         .iter()
         .map(|item| {
             let rel = Path::new(&item.path);
-            let copied = (|| {
+            let copied = copies.entry(rel.to_owned()).or_insert_with(|| {
+                let cap = items
+                    .iter()
+                    .filter(|other| Path::new(&other.path) == rel)
+                    .map(|other| other.cap)
+                    .max()
+                    .unwrap_or(item.cap);
                 let (file, _) = open_below(src_base, src_dir, rel).map_err(|r| match r {
                     Refused::Missing => {
                         format!("{} がありません（検証の後に消えました）", item.path)
@@ -287,13 +298,10 @@ pub fn ingest(
                     ),
                     other => other.message(rel),
                 })?;
-                let (bytes, over) = fsx::read_capped(file, item.cap)
+                let (bytes, over) = fsx::read_capped(file, cap)
                     .map_err(|e| format!("{} を読めません: {e}", item.path))?;
                 if over {
-                    return Err(format!(
-                        "{} が上限 {} バイトを超えています（検証の後に大きくなりました）",
-                        item.path, item.cap
-                    ));
+                    return Err(grown(&item.path, cap));
                 }
                 write_below(reply_base, &into, rel, &bytes)
                     .map_err(|e| format!("{} を保存できません: {e}", item.path))?;
@@ -302,10 +310,18 @@ pub fn ingest(
                     bytes: bytes.len() as u64,
                     digest: digest_bytes(&bytes),
                 })
-            })();
+            });
+            let copied = match copied {
+                Ok(stored) if stored.bytes > item.cap => Err(grown(&item.path, item.cap)),
+                other => other.clone(),
+            };
             (item.key.clone(), copied)
         })
         .collect()
+}
+
+fn grown(path: &str, cap: u64) -> String {
+    format!("{path} が上限 {cap} バイトを超えています（検証の後に大きくなりました）")
 }
 
 /// Copies the person's `source` (validated as media, L1-5a) to
@@ -918,6 +934,51 @@ mod tests {
         );
         assert!(out[0].1.is_err());
         assert!(!outside.join("shots").exists());
+    }
+
+    #[test]
+    fn ac09_items_citing_the_same_file_share_one_copy() {
+        let f = fixture_dirs();
+        fs::write(f.src_dir.join("logs/1.log"), "0123456789").unwrap();
+        let items = [
+            item("e1", "logs/1.log", MAX_LOG_BYTES),
+            item("e2", "logs/./1.log", MAX_LOG_BYTES),
+            // Within one item's cap and past another's.
+            item("e3", "logs/1.log", 4),
+        ];
+        let out = ingest(
+            &f.src_base,
+            &f.src_dir,
+            &f.reply_base,
+            &f.reply_dir,
+            1,
+            &part(),
+            &items,
+        );
+        let first = out[0].1.clone().unwrap();
+        assert_eq!(out[1].1, Ok(first.clone()));
+        assert_eq!(first.path, PathBuf::from("evidence/r1/claude/logs/1.log"));
+        assert!(out[2].1.as_ref().unwrap_err().contains("上限 4"), "{out:?}");
+        assert_eq!(
+            files_below(&f.reply_base),
+            [".noa/verify/ver-1/evidence/r1/claude/logs/1.log"]
+        );
+        // A path gone for one is gone for all its items, each told so.
+        let out = ingest(
+            &f.src_base,
+            &f.src_dir,
+            &f.reply_base,
+            &f.reply_dir,
+            2,
+            &part(),
+            &[
+                item("e1", "logs/none.log", 8),
+                item("e2", "logs/none.log", 8),
+            ],
+        );
+        for (_, result) in out {
+            assert!(result.unwrap_err().contains("ありません"));
+        }
     }
 
     #[test]

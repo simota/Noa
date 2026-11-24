@@ -50,18 +50,18 @@ pub fn path_for(main: &Path, id: &SessionId, part: &PartId) -> PathBuf {
     PathBuf::from(dir).join(format!("verify-{id}-{part}"))
 }
 
-/// Git run in `dir` with its output in the C locale, no prompt, and no
-/// hook: a checkout into a verifier's worktree must not run the
-/// repository's `post-checkout` hook.
+/// Git run in `dir` with its output in the C locale, no prompt, no hook (a
+/// checkout into a verifier's worktree must not run the repository's
+/// `post-checkout` hook), and nothing in the environment that points it at
+/// another repository or index ([`capture::clear_repo_env`]).
 fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
-    cmd.arg("-C")
+    capture::clear_repo_env(&mut cmd)
+        .arg("-C")
         .arg(dir)
         .args(["-c", "core.hooksPath=/dev/null"])
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     cmd
@@ -102,14 +102,15 @@ fn run(mut cmd: Command, input: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-/// `path` with its existing part resolved (`/var` → `/private/var` on
-/// macOS), so a path the log records compares with the one git prints.
+/// `path` with its folders resolved (`/var` → `/private/var` on macOS), so
+/// a path the log records compares with the one git prints; its last
+/// component is kept as it is, never followed: a link there names itself,
+/// not the worktree it may point to.
 fn resolved(path: &Path) -> PathBuf {
-    if let Ok(real) = fs::canonicalize(path) {
-        return real;
-    }
     match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => resolved(parent).join(name),
+        (Some(parent), Some(name)) => fs::canonicalize(parent)
+            .unwrap_or_else(|_| resolved(parent))
+            .join(name),
         _ => path.to_owned(),
     }
 }
@@ -160,19 +161,20 @@ pub fn add(
     manifest: &TargetManifest,
     rebuild: &Rebuild,
 ) -> Result<(), String> {
-    let read = |rel: &Path, cap: u64| -> Result<Vec<u8>, String> {
-        let file = fsx::open_read(target_dir, &target_dir.join(rel))
-            .map_err(|e| format!("{} を読めません: {e}", rel.display()))?;
-        let (bytes, over) = fsx::read_capped(file, cap)
-            .map_err(|e| format!("{} を読めません: {e}", rel.display()))?;
+    // The bytes of a snapshot file and whether it is executable.
+    let read = |rel: &Path, cap: u64| -> Result<(Vec<u8>, bool), String> {
+        let cannot = |e: std::io::Error| format!("{} を読めません: {e}", rel.display());
+        let file = fsx::open_read(target_dir, &target_dir.join(rel)).map_err(cannot)?;
+        let exec = capture::is_executable(&file).map_err(cannot)?;
+        let (bytes, over) = fsx::read_capped(file, cap).map_err(cannot)?;
         if over {
             return Err(format!("{} が大きすぎます", rel.display()));
         }
-        Ok(bytes)
+        Ok((bytes, exec))
     };
     let patch = match rebuild.worktree_patch {
         Some(want) => {
-            let bytes = read(Path::new(WORKTREE_PATCH), MAX_WORKTREE_PATCH_BYTES)?;
+            let (bytes, _) = read(Path::new(WORKTREE_PATCH), MAX_WORKTREE_PATCH_BYTES)?;
             if capture::digest_bytes(&bytes) != want {
                 return Err(format!(
                     "スナップショットの {WORKTREE_PATCH} が記録と一致しません"
@@ -187,14 +189,19 @@ pub fn add(
     for (file, want) in &rebuild.untracked {
         let rel =
             relative(file).ok_or_else(|| format!("未追跡のファイル {file:?} のパスが不正です"))?;
-        let bytes = read(
+        let (bytes, exec) = read(
             &Path::new(UNTRACKED_DIR).join(&rel),
             capture::MAX_UNTRACKED_BINARY_BYTES,
         )?;
         if capture::digest_bytes(&bytes) != *want {
             tampered.push(file.as_str());
         }
-        untracked.push((rel, bytes));
+        untracked.push(Untracked {
+            file: file.as_str(),
+            rel,
+            bytes,
+            exec,
+        });
     }
     if !tampered.is_empty() {
         return Err(format!(
@@ -214,7 +221,8 @@ pub fn add(
     cmd.arg(path).arg(&rebuild.head_sha);
     run(cmd, b"").map_err(|e| format!("worktree を作れません: {e}"))?;
 
-    let built = fill(path, &patch, &untracked).and_then(|()| check_files(path, manifest, rebuild));
+    let built =
+        fill(path, &patch, &untracked).and_then(|()| check_files(path, manifest, &untracked));
     if let Err(why) = built {
         let mut cmd = git(repo);
         cmd.args(["worktree", "remove", "--force"]).arg(path);
@@ -226,49 +234,77 @@ pub fn add(
     Ok(())
 }
 
+/// One untracked file of the snapshot, read and checked, to copy into a
+/// worktree.
+struct Untracked<'a> {
+    /// As the recipe names it.
+    file: &'a str,
+    rel: PathBuf,
+    bytes: Vec<u8>,
+    /// Whether the snapshot's copy is executable (capture keeps the bit).
+    exec: bool,
+}
+
 /// Applies the work-tree patch and copies the untracked files into the
-/// fresh worktree `path`.
-fn fill(path: &Path, patch: &[u8], untracked: &[(PathBuf, Vec<u8>)]) -> Result<(), String> {
+/// fresh worktree `path`, an executable one made executable.
+fn fill(path: &Path, patch: &[u8], untracked: &[Untracked]) -> Result<(), String> {
     if !patch.is_empty() {
         let mut cmd = git(path);
         cmd.args(["apply", "--binary", "--whitespace=nowarn", "-"]);
         run(cmd, patch).map_err(|e| format!("{WORKTREE_PATCH} を当てられません: {e}"))?;
     }
-    for (rel, bytes) in untracked {
-        let dir = fsx::open_dir(
+    for file in untracked {
+        let rel = &file.rel;
+        fsx::open_dir(
             path,
             &path.join(rel.parent().unwrap_or(Path::new(""))),
             true,
         )
-        .and_then(|dir| fsx::write_new_at(&dir, rel.file_name().unwrap_or(OsStr::new("")), bytes));
-        dir.map_err(|e| format!("{} を写せません: {e}", rel.display()))?;
+        .and_then(|dir| {
+            fsx::write_new_at(&dir, rel.file_name().unwrap_or(OsStr::new("")), &file.bytes)
+        })
+        .and_then(|()| {
+            if !file.exec {
+                return Ok(());
+            }
+            capture::make_executable(&fsx::open_read(path, &path.join(rel))?)
+        })
+        .map_err(|e| format!("{} を写せません: {e}", rel.display()))?;
     }
     Ok(())
 }
 
 /// Every manifest file and untracked file of the rebuilt worktree `path`
-/// against its digest; the error names each that differs.
-fn check_files(path: &Path, manifest: &TargetManifest, rebuild: &Rebuild) -> Result<(), String> {
-    let digest = |file: &str| -> Option<u64> {
+/// against its digest, and each untracked file's execute bit against the
+/// snapshot's; the error names each that differs.
+fn check_files(
+    path: &Path,
+    manifest: &TargetManifest,
+    untracked: &[Untracked],
+) -> Result<(), String> {
+    // The digest of a file of the worktree and whether it is executable.
+    let read = |file: &str| -> Option<(u64, bool)> {
         let full = path.join(relative(file)?);
         let file = fsx::open_read(path, &full).ok()?;
+        let exec = capture::is_executable(&file).ok()?;
         let (bytes, over) = fsx::read_capped(file, MAX_WORKTREE_PATCH_BYTES).ok()?;
-        (!over).then(|| capture::digest_bytes(&bytes))
+        (!over).then(|| (capture::digest_bytes(&bytes), exec))
     };
     let mut differ: Vec<&str> = Vec::new();
     for file in &manifest.files {
         let ok = if file.status == FileStatus::Deleted {
             relative(&file.path).is_some_and(|rel| fs::symlink_metadata(path.join(rel)).is_err())
         } else {
-            digest(&file.path) == Some(file.digest)
+            read(&file.path).map(|(digest, _)| digest) == Some(file.digest)
         };
         if !ok {
             differ.push(&file.path);
         }
     }
-    for (file, want) in &rebuild.untracked {
-        if digest(file) != Some(*want) && !differ.contains(&file.as_str()) {
-            differ.push(file);
+    for file in untracked {
+        let want = (capture::digest_bytes(&file.bytes), file.exec);
+        if read(file.file) != Some(want) && !differ.contains(&file.file) {
+            differ.push(file.file);
         }
     }
     if differ.is_empty() {
@@ -315,9 +351,15 @@ pub fn check(repo: &Path, path: &Path, head_sha: &str) -> Result<(), String> {
 
 /// Removes `path` with `git worktree remove --force` when `git worktree
 /// list --porcelain` shows it as a detached worktree of `repo` at that
-/// path; anything else is left, and the error says why.
+/// path; anything else is left, and the error says why. The recorded path
+/// itself is compared, never what it points to: a link at it is refused.
 pub fn remove(repo: &Path, path: &Path) -> Result<(), String> {
     let shown = path.display();
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(format!(
+            "{shown} はシンボリックリンクのため削除しません（記録した worktree ではありません）"
+        ));
+    }
     let entries = list(repo)?;
     let Some(index) = entries.iter().position(|e| same_path(&e.path, path)) else {
         return Err(format!(
@@ -558,6 +600,143 @@ mod tests {
         // Never the repository itself.
         assert!(remove(&repo, &repo).is_err());
         assert!(repo.join("a.txt").exists());
+    }
+
+    #[test]
+    fn ac04_a_link_at_the_recorded_path_is_refused_and_the_worktree_it_points_to_kept() {
+        let repo = repo();
+        let (c, target_dir, path) = setup(&repo, Head::Ref("feat".into()));
+        let other = path.with_file_name("verify-ver-1-codex");
+        add(&repo, &other, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        // The recorded path is now a link to another detached worktree of
+        // the same repository.
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        let err = remove(&repo, &path).unwrap_err();
+        assert!(err.contains("シンボリックリンク"), "{err}");
+        assert!(other.join("a.txt").exists());
+        assert!(entry_at(&repo, &other).unwrap().is_some());
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        // `check` does not take it for that worktree either.
+        assert!(check(&repo, &path, &c.rebuild.head_sha).is_err());
+        remove(&repo, &other).unwrap();
+    }
+
+    #[test]
+    fn ac03_an_executable_untracked_file_stays_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let repo = repo();
+        fs::write(repo.join("run.sh"), "#!/bin/sh\necho ok\n").unwrap();
+        fs::set_permissions(repo.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(repo.join("notes.txt"), "plain\n").unwrap();
+        fs::set_permissions(repo.join("notes.txt"), fs::Permissions::from_mode(0o644)).unwrap();
+        let (c, target_dir, path) = setup(&repo, Head::Worktree);
+        assert_eq!(
+            mode(&target_dir.join(UNTRACKED_DIR).join("run.sh")) & 0o111,
+            0o111
+        );
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        assert_eq!(mode(&path.join("run.sh")) & 0o111, 0o111);
+        assert_eq!(mode(&path.join("notes.txt")) & 0o111, 0);
+        let ran = Command::new(path.join("run.sh")).output().unwrap();
+        assert_eq!(ran.stdout, b"ok\n");
+
+        // A rebuilt file without the bit the snapshot gives it is refused.
+        let built = vec![Untracked {
+            file: "notes.txt",
+            rel: PathBuf::from("notes.txt"),
+            bytes: b"plain\n".to_vec(),
+            exec: true,
+        }];
+        let err = check_files(&path, &c.manifest, &built).unwrap_err();
+        assert!(err.contains("notes.txt"), "{err}");
+    }
+
+    #[test]
+    fn ac03_a_file_removed_from_the_index_but_kept_is_rebuilt_as_the_untracked_file_it_is() {
+        let repo = repo();
+        sh(&repo, &["rm", "-q", "--cached", "a.txt"]);
+        fs::write(repo.join("a.txt"), "kept\nand changed\n").unwrap();
+        let (c, target_dir, path) = setup(&repo, Head::Worktree);
+        let listed: Vec<&FileStatus> = c
+            .manifest
+            .files
+            .iter()
+            .filter(|f| f.path == "a.txt")
+            .map(|f| &f.status)
+            .collect();
+        assert_eq!(listed, [&FileStatus::Untracked]);
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("a.txt")).unwrap(),
+            "kept\nand changed\n"
+        );
+    }
+
+    /// Run by [`ac03_git_takes_no_repository_from_the_widgets_environment`]
+    /// in a test process of its own, whose environment points git at
+    /// another repository and index; does nothing otherwise.
+    #[test]
+    #[ignore = "run by ac03_git_takes_no_repository_from_the_widgets_environment"]
+    fn git_in_a_foreign_environment() {
+        if std::env::var_os("NOA_VERIFY_FOREIGN_GIT").is_none() {
+            return;
+        }
+        let repo = repo();
+        dirty(&repo);
+        let head = sh(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        let (c, target_dir, path) = setup(&repo, Head::Worktree);
+        assert_eq!(c.rebuild.head_sha, head);
+        assert_eq!(c.manifest.repo.as_deref(), Some(repo.as_path()));
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        check(&repo, &path, &head).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("notes/draft.txt")).unwrap(),
+            "wip\nmore\n"
+        );
+        remove(&repo, &path).unwrap();
+        println!("foreign environment: done");
+    }
+
+    #[test]
+    fn ac03_git_takes_no_repository_from_the_widgets_environment() {
+        let other = repo();
+        let index = fs::read(other.join(".git/index")).unwrap();
+        let stray = temp("stray-index").join("index");
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "worktree::tests::git_in_a_foreign_environment",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("NOA_VERIFY_FOREIGN_GIT", "1")
+            .env("GIT_DIR", other.join(".git"))
+            .env("GIT_WORK_TREE", &other)
+            .env("GIT_INDEX_FILE", &stray)
+            .env("GIT_OBJECT_DIRECTORY", other.join(".git/objects"))
+            .output()
+            .unwrap();
+        let shown = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{shown}");
+        assert!(shown.contains("foreign environment: done"), "{shown}");
+        assert!(!stray.exists(), "the stray index was written");
+        assert_eq!(fs::read(other.join(".git/index")).unwrap(), index);
+        assert_eq!(
+            list(&other).unwrap().len(),
+            1,
+            "a worktree went to the other repository"
+        );
     }
 
     #[test]

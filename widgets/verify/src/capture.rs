@@ -123,6 +123,41 @@ fn write_file(dest: &Path, root: &Path, rel: &str, bytes: &[u8]) -> io::Result<(
     fsx::write_replace(dest, &path, bytes)
 }
 
+/// The environment variables that pick another repository, index, object
+/// store or way of finding them than `-C <dir>` says (`git rev-parse
+/// --local-env-vars`, plus `GIT_NAMESPACE` and the two that bound
+/// discovery): every git command the widget runs has them cleared, so
+/// that, say, a `GIT_INDEX_FILE` the widget was started with is never
+/// written.
+const REPO_ENV: [&str; 18] = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+/// Clears [`REPO_ENV`] from `cmd`'s environment.
+pub(crate) fn clear_repo_env(cmd: &mut Command) -> &mut Command {
+    for var in REPO_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 /// Git with every setting that changes the output it is parsed from pinned.
 fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
@@ -140,7 +175,8 @@ fn git(dir: &Path) -> Command {
     ] {
         cmd.args(["-c", setting]);
     }
-    cmd.env("GIT_OPTIONAL_LOCKS", "0")
+    clear_repo_env(&mut cmd)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C")
         .env_remove("GIT_EXTERNAL_DIFF");
     cmd
@@ -303,6 +339,20 @@ fn parse_raw(bytes: &[u8]) -> Result<Vec<RawEntry>, String> {
         i += 1 + paths;
     }
     Ok(out)
+}
+
+/// How many `diff --git` sections git's patch gives `entry`: two for a
+/// change of file type (a file that became a link, a link or a submodule
+/// that became a file, …), which git shows as a deletion and then an
+/// addition of the path; one otherwise.
+fn sections(entry: &RawEntry) -> usize {
+    let kind = |mode: &str| u32::from_str_radix(mode, 8).map_or(0, |mode| mode & 0o170000);
+    let (old, new) = (kind(&entry.old_mode), kind(&entry.new_mode));
+    if old != 0 && new != 0 && old != new {
+        2
+    } else {
+        1
+    }
 }
 
 /// Per file of a unified diff: additions, deletions and the new side's
@@ -590,6 +640,25 @@ fn diff_view(
 /// The bytes of a work-tree file under `repo`, read to at most `cap`:
 /// `Err` gives the omission reason (a link, a submodule, unreadable).
 fn read_worktree(repo: &Path, path: &str, cap: u64) -> Result<(Vec<u8>, bool), String> {
+    read_worktree_file(repo, path, cap).map(|(bytes, over, _)| (bytes, over))
+}
+
+/// Whether `file` is executable as git counts it (the owner's bit).
+pub(crate) fn is_executable(file: &fs::File) -> io::Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(file.metadata()?.permissions().mode() & 0o100 != 0)
+}
+
+/// Gives `file` the execute bits matching its read bits (`0644` → `0755`,
+/// `0600` → `0700`), as git checks out an executable file.
+pub(crate) fn make_executable(file: &fs::File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = file.metadata()?.permissions().mode() & 0o7777;
+    file.set_permissions(fs::Permissions::from_mode(mode | ((mode & 0o444) >> 2)))
+}
+
+/// As [`read_worktree`], with whether the file is executable.
+fn read_worktree_file(repo: &Path, path: &str, cap: u64) -> Result<(Vec<u8>, bool, bool), String> {
     let Some(rel) = safe_relative(path) else {
         return Err("パスがルートの外を指しています".to_owned());
     };
@@ -602,7 +671,11 @@ fn read_worktree(repo: &Path, path: &str, cap: u64) -> Result<(Vec<u8>, bool), S
         _ => {}
     }
     fsx::open_read(repo, &full)
-        .and_then(|file| fsx::read_capped(file, cap))
+        .and_then(|file| {
+            let exec = is_executable(&file)?;
+            let (bytes, over) = fsx::read_capped(file, cap)?;
+            Ok((bytes, over, exec))
+        })
         .map_err(|e| {
             if fsx::is_link_error(&e) {
                 LINK_REASON.to_owned()
@@ -653,8 +726,10 @@ fn recipe_view(repo: &Path, head_sha: &str) -> Result<RecipeView, String> {
 }
 
 /// Writes the rebuild recipe of `view` into `dest`: `worktree.patch`, and
-/// each untracked file copied as is into `untracked/<path>`. Untracked
-/// links and nested repositories are not copied (a worktree gets no link
+/// each untracked file copied as is into `untracked/<path>`, an executable
+/// one kept executable (the copy's mode is what the rebuild gives the
+/// worktree's file). Untracked links and nested repositories are not
+/// copied (a worktree gets no link
 /// the person's tree pointed elsewhere with); a file over
 /// [`MAX_UNTRACKED_BINARY_BYTES`] or one that cannot be read refuses the
 /// start, named, since the worktree could not be rebuilt without it.
@@ -680,7 +755,7 @@ fn write_recipe(
     let mut total = 0u64;
     let mut untracked = Vec::new();
     for path in files {
-        let (bytes, over) = match read_worktree(repo, path, MAX_UNTRACKED_BINARY_BYTES) {
+        let (bytes, over, exec) = match read_worktree_file(repo, path, MAX_UNTRACKED_BINARY_BYTES) {
             Ok(read) => read,
             Err(reason) if reason == LINK_REASON || reason == SUBMODULE_REASON => continue,
             Err(reason) => return Err(format!("未追跡のファイル {path} を{reason}")),
@@ -699,7 +774,15 @@ fn write_recipe(
         if total > MAX_TARGET_BYTES {
             return Err(too_many_bytes());
         }
-        write_file(dest, &dest.join(UNTRACKED_DIR), path, &bytes)
+        let root = dest.join(UNTRACKED_DIR);
+        write_file(dest, &root, path, &bytes)
+            .and_then(|()| {
+                if !exec {
+                    return Ok(());
+                }
+                let copy = root.join(safe_relative(path).expect("written above"));
+                make_executable(&fsx::open_read(dest, &copy)?)
+            })
             .map_err(|e| format!("{path} を書き出せません: {e}"))?;
         untracked.push((path.clone(), digest_bytes(&bytes)));
     }
@@ -863,7 +946,8 @@ fn capture_diff(
         return Err("差分がありません".to_owned());
     }
     let stats = parse_sections(&String::from_utf8_lossy(&view.patch));
-    let patched = view.raw.len() + view.untracked.iter().filter(|p| !p.ends_with('/')).count();
+    let patched = view.raw.iter().map(sections).sum::<usize>()
+        + view.untracked.iter().filter(|p| !p.ends_with('/')).count();
     if stats.len() != patched {
         return Err(format!(
             "差分を読み取れません（ファイル {patched} 件に対してパッチ {} 件）",
@@ -881,7 +965,16 @@ fn capture_diff(
     };
     let mut stats = stats.into_iter();
     for entry in &view.raw {
-        let stat = stats.next().unwrap_or_default();
+        let mut stat = stats.next().unwrap_or_default();
+        if sections(entry) == 2 {
+            // The deletion of the old type, then the addition of the new.
+            let added = stats.next().unwrap_or_default();
+            stat = DiffStat {
+                additions: stat.additions + added.additions,
+                deletions: stat.deletions + added.deletions,
+                changed: added.changed,
+            };
+        }
         let status = match entry.status {
             'A' => FileStatus::Added,
             'D' => FileStatus::Deleted,
@@ -895,6 +988,13 @@ fn capture_diff(
             continue;
         }
         if status == FileStatus::Deleted {
+            // Deleted from the index only (`git rm --cached`) and still in
+            // the work tree as an untracked file: one path, listed once, as
+            // the untracked file it now is (below), which is also what a
+            // verifier's worktree is rebuilt with.
+            if view.untracked.contains(&entry.path) {
+                continue;
+            }
             collector.files.push(TargetFile {
                 path: entry.path.clone(),
                 status,
@@ -1096,7 +1196,8 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn sh(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let mut git = Command::new("git");
+        let out = clear_repo_env(&mut git)
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -1447,6 +1548,62 @@ pub(crate) mod tests {
             capture(&bulk, &dest("bytes"), 0).unwrap_err(),
             too_many_bytes()
         );
+    }
+
+    #[test]
+    fn ac02_a_worktree_patch_over_16_mib_refuses_the_start() {
+        let repo = repo();
+        // An uncommitted change whose `git diff --binary HEAD` passes the
+        // cap; checked before the 4 MiB diff cap is reached.
+        let line = "a line of the work-tree change\n";
+        let big = line.repeat(MAX_WORKTREE_PATCH_BYTES as usize / line.len() + 1);
+        fs::write(repo.join("a.txt"), big).unwrap();
+        let dest = temp("patch-cap").join("target");
+        let err = capture(&diff_target(&repo, Head::Worktree), &dest, 0).unwrap_err();
+        assert_eq!(err, "作業ツリーの変更が大きすぎます（上限 16 MiB）");
+        assert!(!dest.exists(), "a refused capture left its directory");
+    }
+
+    #[test]
+    fn ac01_a_file_that_became_a_link_and_a_link_that_became_a_file_are_read() {
+        let repo = temp("typechange");
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("to-link.txt"), "was a file\n").unwrap();
+        std::os::unix::fs::symlink("to-link.txt", repo.join("to-file.txt")).unwrap();
+        fs::write(repo.join("z.txt"), "one\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        sh(&repo, &["checkout", "-q", "-b", "feat"]);
+        fs::remove_file(repo.join("to-link.txt")).unwrap();
+        std::os::unix::fs::symlink("z.txt", repo.join("to-link.txt")).unwrap();
+        fs::remove_file(repo.join("to-file.txt")).unwrap();
+        fs::write(repo.join("to-file.txt"), "now\na file\n").unwrap();
+        fs::write(repo.join("z.txt"), "one\ntwo\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "types"]);
+        // One raw entry each, two patch sections each.
+        let raw = sh(&repo, &["diff", "--raw", "main", "feat"]);
+        assert_eq!(raw.matches(" T\t").count(), 2, "{raw}");
+
+        for head in [Head::Ref("feat".into()), Head::Worktree] {
+            let dest = temp("typechange-dest").join("target");
+            let c = capture(&diff_target(&repo, head.clone()), &dest, 0).unwrap();
+            let m = &c.manifest;
+            assert!(m.is_omitted("to-link.txt"), "{head:?}: {m:?}");
+            let file = m.file("to-file.txt").unwrap();
+            assert_eq!(
+                (file.lines, file.additions, file.changed.clone()),
+                (2, 2, vec![(1, 2)]),
+                "{head:?}"
+            );
+            // The sections after them still go to the right files.
+            let z = m.file("z.txt").unwrap();
+            assert_eq!(
+                (z.additions, z.deletions, z.changed.clone()),
+                (1, 0, vec![(2, 2)])
+            );
+            verify(&dest, m, &c.rebuild, None).unwrap();
+        }
     }
 
     #[test]

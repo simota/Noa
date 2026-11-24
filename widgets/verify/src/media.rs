@@ -4,12 +4,23 @@
 
 use crate::model::types::{MAX_FILE_BYTES, MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, Media};
 
-/// How many leading bytes [`sniff`] needs.
-pub const SNIFF_BYTES: usize = 32;
+/// How many leading bytes [`sniff`] needs: enough for a WebM's whole EBML
+/// header (about 40 bytes as muxers write it, its `DocType` at bytes 24–35).
+pub const SNIFF_BYTES: usize = 64;
+
+/// The major brands of an `ftyp` box that say MP4 video: the ISO base
+/// media and MP4 families, H.264 and Apple's M4V. Any other brand (HEIF
+/// and AVIF images — `heic`, `heix`, `mif1`, `avif` — M4A audio, 3GP, …)
+/// is not media here.
+const MP4_BRANDS: [&[u8; 4]; 14] = [
+    b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"M4V ",
+    b"M4VH", b"M4VP", b"dash", b"mmp4",
+];
 
 /// The media `head` (a file's first [`SNIFF_BYTES`] bytes, or fewer for a
 /// short file) starts like: PNG, JPEG, GIF, WebP, MP4 / QuickTime (`ftyp`
-/// box) or WebM; `None` for anything else.
+/// box with a video brand) or WebM (an EBML header whose `DocType` is
+/// `webm`); `None` for anything else.
 pub fn sniff(head: &[u8]) -> Option<Media> {
     if head.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some(Media::Png);
@@ -26,22 +37,65 @@ pub fn sniff(head: &[u8]) -> Option<Media> {
     // ISO base media: a first box of type `ftyp`, its major brand saying
     // QuickTime (`qt  `) or one of the MP4 family.
     if head.len() >= 12 && &head[4..8] == b"ftyp" {
-        return Some(if &head[8..12] == b"qt  " {
-            Media::QuickTime
-        } else {
-            Media::Mp4
-        });
+        let brand = &head[8..12];
+        if brand == b"qt  " {
+            return Some(Media::QuickTime);
+        }
+        return MP4_BRANDS
+            .iter()
+            .any(|mp4| brand == &mp4[..])
+            .then_some(Media::Mp4);
     }
-    // EBML: WebM and Matroska share the header; only a Matroska DocType is
-    // told apart, since WebM's may sit past the bytes read.
-    if head.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) && !contains(head, b"matroska") {
-        return Some(Media::Webm);
+    // EBML: WebM and Matroska share the header, told apart by its DocType.
+    if head.starts_with(&EBML_ID) {
+        return (doc_type(head)? == b"webm").then_some(Media::Webm);
     }
     None
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
+/// The EBML header's element id; the `DocType` element's.
+const EBML_ID: [u8; 4] = [0x1a, 0x45, 0xdf, 0xa3];
+const DOC_TYPE_ID: [u8; 2] = [0x42, 0x82];
+
+/// An EBML variable-length integer at the start of `bytes`: its value
+/// (the length marker taken off) and its length; `None` when it does not
+/// fit in `bytes` or is longer than eight bytes.
+fn vint(bytes: &[u8]) -> Option<(u64, usize)> {
+    let first = *bytes.first()?;
+    let len = first.leading_zeros() as usize + 1;
+    if len > 8 || bytes.len() < len {
+        return None;
+    }
+    let value = bytes[1..len]
+        .iter()
+        .fold(u64::from(first) & (0xff >> len), |value, &b| {
+            (value << 8) | u64::from(b)
+        });
+    Some((value, len))
+}
+
+/// The `DocType` of the EBML header `head` starts with, read element by
+/// element inside the header; `None` when it is not within `head`.
+fn doc_type(head: &[u8]) -> Option<&[u8]> {
+    let (size, len) = vint(&head[EBML_ID.len()..])?;
+    let start = EBML_ID.len() + len;
+    let end = start
+        .saturating_add(usize::try_from(size).ok()?)
+        .min(head.len());
+    let mut at = start;
+    while at < end {
+        // An element id keeps its length marker: one to four bytes.
+        let (_, id_len) = vint(&head[at..end]).filter(|(_, n)| *n <= 4)?;
+        let id = &head[at..at + id_len];
+        let (size, size_len) = vint(&head[at + id_len..end])?;
+        let data = at + id_len + size_len;
+        let next = data.checked_add(usize::try_from(size).ok()?)?;
+        if id == DOC_TYPE_ID {
+            return head.get(data..next);
+        }
+        at = next;
+    }
+    None
 }
 
 /// The media `path`'s extension names (case-insensitive); `None` for any
@@ -172,6 +226,60 @@ pub(crate) mod tests {
         let mut mkv = vec![0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x82, 0x88];
         mkv.extend_from_slice(b"matroska");
         assert_eq!(sniff(&mkv), None);
+    }
+
+    /// An EBML header as ffmpeg writes it (its size in eight bytes, so the
+    /// `DocType` sits at bytes 31–34), with `doc_type`.
+    fn ebml(doc_type: &[u8]) -> Vec<u8> {
+        let mut body = vec![
+            0x42, 0x86, 0x81, 0x01, 0x42, 0xf7, 0x81, 0x01, 0x42, 0xf2, 0x81, 0x04, 0x42, 0xf3,
+            0x81, 0x08, 0x42, 0x82,
+        ];
+        body.push(0x80 | doc_type.len() as u8);
+        body.extend_from_slice(doc_type);
+        body.extend_from_slice(&[0x42, 0x87, 0x81, 0x04, 0x42, 0x85, 0x81, 0x02]);
+        let mut out = vec![0x1a, 0x45, 0xdf, 0xa3, 0x01, 0, 0, 0, 0, 0, 0];
+        out.push(body.len() as u8);
+        out.extend(body);
+        out
+    }
+
+    fn ftyp(brand: &[u8; 4], compatible: &[u8]) -> Vec<u8> {
+        let mut out = vec![0, 0, 0, 0x18];
+        out.extend_from_slice(b"ftyp");
+        out.extend_from_slice(brand);
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(compatible);
+        out
+    }
+
+    #[test]
+    fn ac30_ftyp_brands_and_ebml_doc_types_are_read_not_guessed() {
+        for brand in [b"isom", b"iso2", b"mp41", b"mp42", b"avc1", b"M4V "] {
+            assert_eq!(sniff(&ftyp(brand, b"isom")), Some(Media::Mp4), "{brand:?}");
+        }
+        assert_eq!(sniff(&ftyp(b"qt  ", b"qt  ")), Some(Media::QuickTime));
+        // HEIF / AVIF images, M4A audio: ISO base media, but not video.
+        for brand in [
+            b"heic", b"heix", b"mif1", b"msf1", b"avif", b"avis", b"M4A ",
+        ] {
+            assert_eq!(sniff(&ftyp(brand, b"mif1miaf")), None, "{brand:?}");
+        }
+
+        let webm = ebml(b"webm");
+        assert_eq!(&webm[31..35], b"webm", "past the first 32 bytes");
+        assert_eq!(
+            sniff(&webm[..SNIFF_BYTES.min(webm.len())]),
+            Some(Media::Webm)
+        );
+        let mkv = ebml(b"matroska");
+        assert!(mkv.len() > 32 && !mkv[..32].windows(8).any(|w| w == b"matroska"));
+        assert_eq!(sniff(&mkv), None);
+        // A header cut before its DocType is not taken for WebM.
+        assert_eq!(sniff(&webm[..32]), None);
+        assert_eq!(sniff(&webm[..33]), None);
+        assert_eq!(sniff(&[0x1a, 0x45, 0xdf, 0xa3]), None);
+        assert_eq!(sniff(&[0x1a, 0x45, 0xdf, 0xa3, 0x00, 0x42]), None);
     }
 
     #[test]

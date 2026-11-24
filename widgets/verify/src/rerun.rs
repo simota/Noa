@@ -38,6 +38,15 @@ pub const STOPPED: &str =
 /// Why a command that never started after the one before it ended is
 /// `not_run`, with every later one (L1-5 step 3).
 pub const DID_NOT_FINISH: &str = "re-run did not finish";
+/// Why every item of a script that never wrote its first `.pid` is
+/// `not_run` once the re-run brief's start timeout has passed (L1-5 step
+/// 4): [`poll`] leaves those items without an outcome, as the brief may be
+/// sent again, and the runner ends them with this.
+pub const DID_NOT_START: &str = "re-run did not start";
+/// Why a command whose `cd` to its reported cwd failed is `not_run`: it
+/// never ran (`cd`'s error is in its log).
+pub const NO_CWD: &str =
+    "the reported cwd could not be entered in the worktree; the command did not run";
 /// Why every item of a script whose files differ from the ones written is
 /// `not_run` (L1-5 step 5).
 pub const SCRIPT_CHANGED: &str = "re-run script was changed";
@@ -72,9 +81,11 @@ pub struct Command {
 pub struct ItemStatus {
     /// Counted from 1.
     pub n: u32,
-    /// From `<n>.pid`, once written.
+    /// From `<n>.pid` as first read; a later rewrite of the file is not
+    /// followed.
     pub pid: Option<i32>,
-    /// Whether that process still exists (`kill(pid, 0)`).
+    /// Whether that process still runs as the run's command: it leads its
+    /// own process group, in the session it was first seen in.
     pub alive: bool,
     /// From `<n>.exit`, once written.
     pub exit: Option<i32>,
@@ -113,6 +124,9 @@ pub struct Watch {
     limits: Limits,
     /// When each command's `.pid` was first seen, by `n`.
     seen: BTreeMap<u32, Millis>,
+    /// Each command's process as its `.pid` was first read: the only one
+    /// ever signalled for it.
+    procs: BTreeMap<u32, Proc>,
     /// When each command's process group was sent SIGTERM past its limit.
     term: BTreeMap<u32, Millis>,
     /// How each command ended and when that was first seen: once decided,
@@ -125,8 +139,73 @@ impl Watch {
         Watch {
             limits,
             seen: BTreeMap::new(),
+            procs: BTreeMap::new(),
             term: BTreeMap::new(),
             ended: BTreeMap::new(),
+        }
+    }
+}
+
+/// A command's process as first read from its `<n>.pid`, which `run.sh`
+/// writes as `<pid> <pid of run.sh>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Proc {
+    pid: i32,
+    /// The session the process was in when first seen, given only when it
+    /// then led a process group of its own (pgid = pid) in the session of
+    /// the `run.sh` named beside it. `None`: it was never the run's
+    /// command (gone already, a reused or rewritten pid, or no group of its
+    /// own); it is taken as gone and never signalled.
+    sid: Option<i32>,
+}
+
+/// `getpgid` and `getsid` of `pid`; -1 for one that is gone.
+fn group_and_session(pid: i32) -> (i32, i32) {
+    // SAFETY: both only read the process table.
+    unsafe { (libc::getpgid(pid), libc::getsid(pid)) }
+}
+
+impl Proc {
+    /// Checks `pid` at first sight against the `run.sh` that wrote it.
+    fn first_seen(pid: i32, run: Option<i32>) -> Proc {
+        let sid = run.filter(|&run| run > 1 && run != pid).and_then(|run| {
+            let (group, sid) = group_and_session(pid);
+            let (run_group, run_sid) = group_and_session(run);
+            (group == pid && sid > 0 && sid == run_sid && run_group != pid).then_some(sid)
+        });
+        Proc { pid, sid }
+    }
+
+    /// Whether the command still runs: its pid still leads its own group,
+    /// in the session recorded (a pid given to another process since leads
+    /// none, or another one).
+    fn leads(&self) -> bool {
+        self.sid
+            .is_some_and(|sid| group_and_session(self.pid) == (self.pid, sid))
+    }
+
+    /// Whether anything of its process group is left: the command itself,
+    /// or, with its pid gone, processes it started. A process group id
+    /// still in use is never given to a new process, so a group of that id
+    /// whose leader is gone is still the command's.
+    fn group_left(&self) -> bool {
+        if self.sid.is_none() {
+            return false;
+        }
+        if self.leads() {
+            return true;
+        }
+        // SAFETY: only reads the process table.
+        let gone = unsafe { libc::getpgid(self.pid) } == -1
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        gone && group_exists(self.pid)
+    }
+
+    /// Sends `signal` to its process group, checked just before as still
+    /// the command's ([`Proc::group_left`]); nothing otherwise.
+    fn signal(&self, signal: Signal) {
+        if self.group_left() {
+            let _ = kill_group(self.pid, signal);
         }
     }
 }
@@ -151,24 +230,30 @@ fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
-/// `run.sh` for `items` (`(n, cwd)` pairs): `set -m`, then per command `cd`
-/// to `<worktree>/<cwd>`, run `"${SHELL:-/bin/sh}" <dir>/<n>.cmd` in the
-/// background with output to `<n>.log`, its pid to `<n>.pid`, wait, its
-/// exit status to `<n>.exit` (temporary file + `mv`); at the end `done`
-/// holding `nonce`. Every path single-quoted; no reported text in it.
+/// `run.sh` for `items` (`(n, cwd)` pairs): run again with bash unless bash
+/// runs it, `set -m`, then per command `cd` to `<worktree>/<cwd>`, run
+/// `"${SHELL:-/bin/sh}" <dir>/<n>.cmd` in the background with output to
+/// `<n>.log`, its pid and the script's own to `<n>.pid`, wait, its exit
+/// status to `<n>.exit` (temporary file + `mv`); at the end `done` holding
+/// `nonce`. Every path single-quoted; no reported text in it.
 ///
 /// Each command runs in a background subshell, which `set -m` makes the
 /// leader of a process group of its own (its pid is `<n>.pid`, and the
-/// group the timeout kill signals); the subshell writes `<n>.exit` itself
-/// before it ends, so a `<n>.pid` whose process is gone without an
-/// `<n>.exit` means it was stopped, never that the status is still on its
-/// way. A `cd` that fails ends the command with `cd`'s status, its error in
-/// the log.
+/// group the timeout kill signals). That takes job control, which bash
+/// gives without a terminal while dash turns it off ("can't access tty")
+/// and zsh as `sh` refuses `set -m` and ends the script, so the script
+/// runs itself again with `/bin/bash` under any other `sh`. The subshell
+/// writes `<n>.exit` itself before it ends, so a `<n>.pid` whose process
+/// is gone without an `<n>.exit` means it was stopped, never that the
+/// status is still on its way. A `cd` that fails writes `<n>.nocwd`
+/// instead (its error in the log), and the command does not run.
 pub fn script(nonce: &str, dir: &Path, worktree: &Path, items: &[(u32, &str)]) -> String {
     let mut out = String::from(
         "#!/bin/sh\n\
          # Noa Verify re-run script, generated: do not edit. Runs each reported\n\
-         # command again, one after another, each in a process group of its own.\n\
+         # command again, one after another, each in a process group of its own\n\
+         # (job control, which only bash gives without a terminal).\n\
+         [ -n \"${BASH_VERSION-}\" ] || exec /bin/bash \"$0\"\n\
          set -m\n",
     );
     let _ = writeln!(out, "d={}", quote(&dir.to_string_lossy()));
@@ -176,7 +261,9 @@ pub fn script(nonce: &str, dir: &Path, worktree: &Path, items: &[(u32, &str)]) -
     for (n, cwd) in items {
         let _ = writeln!(
             out,
-            "( cd \"$w\"/{cwd} && \"${{SHELL:-/bin/sh}}\" \"$d/{n}.cmd\"; s=$?; \
+            "( cd \"$w\"/{cwd} || {{ echo \"$?\" > \"$d/{n}.nocwd.tmp\" && \
+             mv -f \"$d/{n}.nocwd.tmp\" \"$d/{n}.nocwd\"; exit 1; }}; \
+             \"${{SHELL:-/bin/sh}}\" \"$d/{n}.cmd\"; s=$?; \
              echo \"$s\" > \"$d/{n}.exit.tmp\" && mv -f \"$d/{n}.exit.tmp\" \"$d/{n}.exit\" ) \
              < /dev/null > \"$d/{n}.log\" 2>&1 &",
             cwd = quote(cwd)
@@ -184,7 +271,7 @@ pub fn script(nonce: &str, dir: &Path, worktree: &Path, items: &[(u32, &str)]) -
         let _ = writeln!(out, "p=$!");
         let _ = writeln!(
             out,
-            "echo \"$p\" > \"$d/{n}.pid.tmp\" && mv -f \"$d/{n}.pid.tmp\" \"$d/{n}.pid\""
+            "echo \"$p $$\" > \"$d/{n}.pid.tmp\" && mv -f \"$d/{n}.pid.tmp\" \"$d/{n}.pid\""
         );
         let _ = writeln!(out, "wait \"$p\"");
     }
@@ -265,12 +352,17 @@ fn read_number(dir: &Path, name: &str) -> io::Result<Option<i32>> {
         .and_then(|bytes| String::from_utf8_lossy(&bytes).trim().parse().ok()))
 }
 
-/// Whether process `pid` exists (`kill(pid, 0)`; one we may not signal
-/// exists too).
-fn exists(pid: i32) -> bool {
-    // SAFETY: signal 0 only checks.
-    let found = unsafe { libc::kill(pid, 0) } == 0;
-    found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+/// `<n>.pid`: the command's pid (never 0 or 1) and, beside it, the pid of
+/// the `run.sh` that started it.
+fn read_pid(dir: &Path, n: u32) -> io::Result<Option<(i32, Option<i32>)>> {
+    Ok(
+        read_small(dir, dir, &format!("{n}.pid"), 64)?.and_then(|bytes| {
+            let text = String::from_utf8_lossy(&bytes);
+            let mut words = text.split_whitespace().map(|word| word.parse::<i32>().ok());
+            let pid = words.next().flatten().filter(|pid| *pid > 1)?;
+            Some((pid, words.next().flatten()))
+        }),
+    )
 }
 
 /// Whether any process of the group `pid` leads still exists.
@@ -283,21 +375,29 @@ fn group_exists(pid: i32) -> bool {
 /// What `dir` shows of `request`'s commands at `now`, each with its
 /// outcome once it has one (L1-5 steps 3–4), timed by `watch`:
 /// - an `.exit` ends it [`End::Exited`];
+/// - a `.nocwd` (its `cd` failed) ends it [`End::NotRun`] ([`NO_CWD`]);
 /// - a process gone without an `.exit` ends it [`End::NotRun`] at once
 ///   ("the re-run was stopped before it finished; …");
 /// - past `watch`'s run limit, its process group gets SIGTERM, SIGKILL
-///   [`RERUN_KILL_GRACE`](crate::model::types::RERUN_KILL_GRACE) later,
-///   and it ends [`End::TimedOut`];
+///   [`RERUN_KILL_GRACE`](crate::model::types::RERUN_KILL_GRACE) later
+///   (again at every poll while any of the group is left), and it ends
+///   [`End::TimedOut`] once nothing of its group is left;
 /// - no next `.pid` within the next-start limit after one ended ends that
 ///   command and every later one [`End::NotRun`] ("re-run did not
 ///   finish").
 ///
-/// A timed-out command ends once its whole group is gone, or when SIGKILL
-/// is sent; an outcome once given stays, whatever the files show later.
-/// The first command waiting for its `.pid` stays without an outcome:
-/// whether the script started at all is the re-run brief's start timeout.
-/// Files are read without following a link; a `.pid` of 0 or 1 is never
-/// taken for a process.
+/// A command's pid is read once, when its `.pid` is first seen, and
+/// checked then against the `run.sh` pid beside it: it must lead a process
+/// group of its own in that script's session. A pid that does not is
+/// never the run's command (taken as gone, never signalled), and a later
+/// rewrite of the file is not read. Before each signal the process is
+/// checked again (still leading its group, in the same session), or, its
+/// leader gone, its group must still have members. An outcome once given
+/// stays, whatever the files show later. The first command waiting for
+/// its `.pid` stays without an outcome: whether the script started at all
+/// is the re-run brief's start timeout ([`DID_NOT_START`]). Files are read
+/// without following a link; a `.pid` of 0 or 1 is never taken for a
+/// process.
 pub fn poll(
     dir: &Path,
     request: &RerunRequest,
@@ -310,31 +410,37 @@ pub fn poll(
     let mut stalled = false;
     for item in &request.items {
         let n = item.n;
-        let pid = read_number(dir, &format!("{n}.pid"))?.filter(|pid| *pid > 1);
-        let alive = pid.is_some_and(exists);
-        // Read after the liveness check: the subshell writes it before it
-        // ends, so a process found gone has written it by now if ever.
-        let exit = read_number(dir, &format!("{n}.exit"))?;
-        if pid.is_some() {
-            watch.seen.entry(n).or_insert(now);
+        if !watch.procs.contains_key(&n)
+            && let Some((pid, run)) = read_pid(dir, n)?
+        {
+            watch.seen.insert(n, now);
+            watch.procs.insert(n, Proc::first_seen(pid, run));
         }
+        let proc = watch.procs.get(&n).copied();
+        let alive = proc.is_some_and(|proc| proc.leads());
+        // Read after the liveness check: the subshell writes them before
+        // it ends, so a process found gone has written one by now if ever.
+        let exit = read_number(dir, &format!("{n}.exit"))?;
+        let no_cwd = read_small(dir, dir, &format!("{n}.nocwd"), 64)?.is_some();
         if !watch.ended.contains_key(&n) {
-            let decided = if let (Some(pid), Some(&term_at)) = (pid, watch.term.get(&n)) {
-                if !group_exists(pid) {
-                    Some(End::TimedOut)
-                } else if now.saturating_sub(term_at) >= RERUN_KILL_GRACE {
-                    let _ = kill_group(pid, Signal::Kill);
+            let decided = if let (Some(proc), Some(&term_at)) = (proc, watch.term.get(&n)) {
+                if !proc.group_left() {
                     Some(End::TimedOut)
                 } else {
+                    if now.saturating_sub(term_at) >= RERUN_KILL_GRACE {
+                        proc.signal(Signal::Kill);
+                    }
                     None
                 }
             } else if let Some(code) = exit {
                 Some(End::Exited(code))
-            } else if let Some(pid) = pid {
+            } else if no_cwd {
+                Some(End::NotRun(NO_CWD.to_owned()))
+            } else if let Some(proc) = proc {
                 if !alive {
                     Some(End::NotRun(STOPPED.to_owned()))
                 } else if now.saturating_sub(watch.seen[&n]) >= limits.run {
-                    let _ = kill_group(pid, Signal::Term);
+                    proc.signal(Signal::Term);
                     watch.term.insert(n, now);
                     None
                 } else {
@@ -356,7 +462,7 @@ pub fn poll(
         previous_end = ended.map(|(_, at)| *at);
         items.push(ItemStatus {
             n,
-            pid,
+            pid: proc.map(|proc| proc.pid),
             alive,
             exit,
             end: ended.map(|(end, _)| end.clone()),
@@ -489,6 +595,7 @@ mod tests {
     use super::*;
     use crate::capture::tests::temp;
     use std::fs;
+    use std::os::unix::process::CommandExt;
     use std::path::PathBuf;
     use std::process::{Child, Stdio};
     use std::time::{Duration, Instant};
@@ -517,7 +624,12 @@ mod tests {
     /// The fake agent: starts `run.sh` as the re-run brief says, detached
     /// from nothing but the test, with `sh`.
     fn start(dir: &Path) -> Child {
-        std::process::Command::new("sh")
+        start_with(Path::new("sh"), dir)
+    }
+
+    /// As [`start`], with `shell` as the `sh` that runs it.
+    fn start_with(shell: &Path, dir: &Path) -> Child {
+        std::process::Command::new(shell)
             .arg(dir.join(SCRIPT_FILE))
             .env("SHELL", "/bin/sh")
             .stdin(Stdio::null())
@@ -553,6 +665,18 @@ mod tests {
         run: 60_000,
         next_start: 10_000,
     };
+
+    /// Whether process `pid` exists (one we may not signal exists too).
+    fn running(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks.
+        let found = unsafe { libc::kill(pid, 0) } == 0;
+        found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    /// The pid of the `run.sh` that wrote `dir`'s `<n>.pid`.
+    fn run_pid(dir: &Path, n: u32) -> i32 {
+        read_pid(dir, n).unwrap().unwrap().1.unwrap()
+    }
 
     #[test]
     fn ac10_same_status_is_matched_another_differed_and_a_long_log_cut_and_marked() {
@@ -651,17 +775,13 @@ mod tests {
             run: 500,
             next_start: 10_000,
         };
-        let mut groups = Vec::new();
         let started = Instant::now();
+        // `alive` is checked by `poll` itself (the pid leads a process
+        // group of its own), so seeing it says each had its own group.
+        let mut own_group = [false; 2];
         let status = watch_all(&dir, &request, limits, |status| {
-            for item in &status.items {
-                if let (Some(pid), true, None) = (item.pid, item.alive, &item.end)
-                    && !groups.contains(&pid)
-                {
-                    // SAFETY: only reads the process group id.
-                    assert_eq!(unsafe { libc::getpgid(pid) }, pid, "not its own group");
-                    groups.push(pid);
-                }
+            for (seen, item) in own_group.iter_mut().zip(&status.items) {
+                *seen |= item.alive;
             }
         });
         child.wait().unwrap();
@@ -671,18 +791,157 @@ mod tests {
             .map(|i| i.end.clone().unwrap())
             .collect();
         assert_eq!(ends, [End::TimedOut, End::TimedOut, End::Exited(0)]);
+        assert_eq!(own_group, [true; 2], "not each in a group of its own");
         assert!(
             started.elapsed() >= Duration::from_millis(RERUN_KILL_GRACE),
             "the TERM-proof command ended before its SIGKILL"
         );
-        assert_eq!(groups.len(), 2, "{groups:?}");
-        std::thread::sleep(Duration::from_millis(200));
-        for pid in groups {
+        // `timed_out` is given only once nothing of the group is left: the
+        // command and the `sleep` it started are gone by then.
+        for item in &status.items[..2] {
+            let pid = item.pid.unwrap();
             assert!(!group_exists(pid), "process group {pid} still runs");
+            assert!(!running(pid), "command {pid} still runs");
         }
         assert!(matches!(
             outcome(0, End::TimedOut, None),
             Rerun::TimedOut { log: None }
+        ));
+    }
+
+    #[test]
+    fn ac10_the_timeout_kill_works_whatever_sh_starts_the_script() {
+        // macOS's `/bin/sh` (bash), dash, which turns job control off
+        // without a terminal, and zsh as `sh`, which refuses `set -m`.
+        let zsh = temp("zsh-as-sh").join("sh");
+        std::os::unix::fs::symlink("/bin/zsh", &zsh).unwrap();
+        for shell in [PathBuf::from("/bin/sh"), PathBuf::from("/bin/dash"), zsh] {
+            let (worktree, dir) = layout("shells");
+            let commands = [command("e1", "sleep 30", "."), command("e2", "exit 0", ".")];
+            let request = write_request(&worktree, &dir, &worktree, &commands).unwrap();
+            let mut child = start_with(&shell, &dir);
+            let limits = Limits {
+                run: 300,
+                next_start: 10_000,
+            };
+            let status = watch_all(&dir, &request, limits, |_| {});
+            child.wait().unwrap();
+            let ends: Vec<End> = status
+                .items
+                .iter()
+                .map(|i| i.end.clone().unwrap())
+                .collect();
+            assert_eq!(ends, [End::TimedOut, End::Exited(0)], "{shell:?}");
+            let pid = status.items[0].pid.unwrap();
+            assert!(!running(pid), "{shell:?}: command {pid} still runs");
+            assert!(!group_exists(pid), "{shell:?}: group {pid} still runs");
+        }
+    }
+
+    #[test]
+    fn ac10_signals_go_only_to_the_process_first_read_while_it_is_still_the_runs() {
+        // A bystander leading a process group of its own, as a command does.
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let other = bystander.id() as i32;
+
+        // `.pid` rewritten to name the bystander while the command runs
+        // (between its SIGTERM and its SIGKILL): the pid first read is the
+        // one killed, the bystander is left.
+        let (worktree, dir) = layout("rewritten");
+        let commands = [command("e1", "trap '' TERM; sleep 30", ".")];
+        let request = write_request(&worktree, &dir, &worktree, &commands).unwrap();
+        let mut child = start(&dir);
+        let limits = Limits {
+            run: 300,
+            next_start: 10_000,
+        };
+        let started = Instant::now();
+        let mut rewritten = false;
+        let status = watch_all(&dir, &request, limits, |status| {
+            if !rewritten && status.items[0].pid.is_some() && started.elapsed().as_millis() > 1500 {
+                let run = run_pid(&dir, 1);
+                fs::write(dir.join("1.pid"), format!("{other} {run}\n")).unwrap();
+                rewritten = true;
+            }
+        });
+        child.wait().unwrap();
+        assert!(rewritten);
+        assert_eq!(status.items[0].end, Some(End::TimedOut));
+        assert_ne!(status.items[0].pid, Some(other));
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "the bystander was killed"
+        );
+
+        // A `.pid` naming the bystander from the start, beside no `run.sh`
+        // or one of another session: never the run's command, stopped at
+        // once and never signalled.
+        let mut stranger = std::process::Command::new("sleep");
+        stranger.arg("30");
+        // SAFETY: `setsid` is async-signal-safe and touches no memory.
+        unsafe {
+            stranger.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let stranger = stranger.spawn().unwrap();
+        for content in [format!("{other}\n"), format!("{other} {}\n", stranger.id())] {
+            let (worktree, dir) = layout("stranger");
+            let request =
+                write_request(&worktree, &dir, &worktree, &[command("e1", "exit 0", ".")]).unwrap();
+            fs::write(dir.join("1.pid"), content).unwrap();
+            let mut watch = Watch::new(Limits {
+                run: 0,
+                next_start: 10_000,
+            });
+            let status = poll(&dir, &request, &mut watch, 0).unwrap();
+            assert!(!status.items[0].alive);
+            assert_eq!(status.items[0].end, Some(End::NotRun(STOPPED.into())));
+            poll(&dir, &request, &mut watch, RERUN_KILL_GRACE * 2).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                bystander.try_wait().unwrap().is_none(),
+                "the bystander was signalled"
+            );
+        }
+        for mut process in [bystander, stranger] {
+            let _ = process.kill();
+            let _ = process.wait();
+        }
+    }
+
+    #[test]
+    fn ac10_a_cwd_that_cannot_be_entered_is_not_run_rather_than_cds_status() {
+        let (worktree, dir) = layout("nocwd");
+        let commands = [
+            command("e1", "touch ran.txt; exit 1", "missing"),
+            command("e2", "exit 0", "sub"),
+        ];
+        let request = write_request(&worktree, &dir, &worktree, &commands).unwrap();
+        let mut child = start(&dir);
+        let status = watch_all(&dir, &request, LIMITS, |_| {});
+        child.wait().unwrap();
+        let ends: Vec<End> = status
+            .items
+            .iter()
+            .map(|i| i.end.clone().unwrap())
+            .collect();
+        assert_eq!(ends, [End::NotRun(NO_CWD.into()), End::Exited(0)]);
+        assert!(!dir.join("1.exit").exists());
+        assert!(!worktree.join("ran.txt").exists() && !dir.join("ran.txt").exists());
+        // Reported with `cd`'s status (1), it is still not `matched`.
+        let log = fs::read_to_string(dir.join("1.log")).unwrap();
+        assert!(log.contains("missing"), "{log}");
+        assert!(matches!(
+            outcome(1, ends[0].clone(), None),
+            Rerun::NotRun { ref why, .. } if why == NO_CWD
         ));
     }
 
@@ -749,16 +1008,48 @@ mod tests {
             ],
         )
         .unwrap();
-        // Nothing written yet: no outcome (the brief's start timeout).
+        // Nothing written yet: no outcome from `poll`, however long it
+        // waits (the brief's start timeout decides, and the brief may be
+        // sent again) ...
         let mut watch = Watch::new(LIMITS);
-        let status = poll(&dir, &request, &mut watch, 0).unwrap();
-        assert!(
-            status
-                .items
-                .iter()
-                .all(|i| i.end.is_none() && i.pid.is_none())
+        for now in [0, LIMITS.next_start, 10 * (LIMITS.run + LIMITS.next_start)] {
+            let status = poll(&dir, &request, &mut watch, now).unwrap();
+            assert!(
+                status
+                    .items
+                    .iter()
+                    .all(|i| i.end.is_none() && i.pid.is_none() && !i.alive)
+            );
+            assert_eq!(status.done, None);
+        }
+        // ... and once it has passed, every item ends `not_run` with the
+        // reason, without a log: the script wrote none.
+        let reply_base = temp("rerun-repo");
+        let reply_dir = reply_base.join(".noa/verify/ver-1");
+        let logs = ingest_logs(
+            &worktree,
+            &dir,
+            &reply_base,
+            &reply_dir,
+            1,
+            &part(),
+            &request,
         );
-        assert_eq!(status.done, None);
+        let outcomes: Vec<Rerun> = logs
+            .into_iter()
+            .map(|(_, log)| outcome(0, End::NotRun(DID_NOT_START.into()), log.ok()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                Rerun::NotRun {
+                    why: DID_NOT_START.into(),
+                    log: None
+                };
+                3
+            ]
+        );
+        check_digests(&worktree, &dir, &request).unwrap();
 
         // Command 1 ran and ended; command 2's process died without an
         // `.exit` (stopped), and command 3 never got a `.pid`.
@@ -820,10 +1111,11 @@ mod tests {
         );
         assert!(text.contains("d='/w/it'\\''s/.noa/rerun'\n"), "{text}");
         assert!(text.contains("w='/w/it'\\''s'\n"), "{text}");
-        assert!(text.contains("cd \"$w\"/'a b' &&"), "{text}");
-        assert!(text.contains("cd \"$w\"/'x'\\''y' &&"), "{text}");
+        assert!(text.contains("cd \"$w\"/'a b' ||"), "{text}");
+        assert!(text.contains("cd \"$w\"/'x'\\''y' ||"), "{text}");
         assert!(text.starts_with("#!/bin/sh\n"));
-        assert!(text.contains("\nset -m\n"));
+        assert!(text.contains("\n[ -n \"${BASH_VERSION-}\" ] || exec /bin/bash \"$0\"\nset -m\n"));
+        assert!(text.contains("echo \"$p $$\" > \"$d/2.pid.tmp\""), "{text}");
         assert!(text.contains("echo '00ff' > \"$d/done.tmp\""));
         assert!(nonce().unwrap() != nonce().unwrap());
         assert!(nonce().unwrap().bytes().all(|b| b.is_ascii_hexdigit()));

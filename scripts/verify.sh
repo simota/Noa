@@ -61,14 +61,16 @@ for dep, pkg in bad:
 sys.exit(1 if bad else 0)'
 }
 
-# widgets/agent-dashboard, widgets/repo-browser, widgets/discussion and
-# widgets/competition are crates of their own, outside the workspace. Each is
+# widgets/agent-dashboard, widgets/repo-browser, widgets/discussion,
+# widgets/competition and widgets/review are crates of their own, outside the
+# workspace. Each is
 # built with its tests everywhere; the tests run on macOS only, because some
 # expect the text widths of macOS's system fonts.
 dashboard=widgets/agent-dashboard/Cargo.toml
 browser=widgets/repo-browser/Cargo.toml
 discussion=widgets/discussion/Cargo.toml
 competition=widgets/competition/Cargo.toml
+review=widgets/review/Cargo.toml
 widget_check() {
   cargo build --manifest-path "$1" --locked --all-targets || return
   [ "$os" = Darwin ] || return 0
@@ -100,6 +102,7 @@ if [ "$full" = 1 ]; then
   run browser widget_check "$browser"
   run discussion widget_check "$discussion"
   run competition widget_check "$competition"
+  run review widget_check "$review"
   run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
   if [ "$os" = Linux ]; then
@@ -107,13 +110,14 @@ if [ "$full" = 1 ]; then
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
 elif [ "${#changed[@]}" -gt 0 ]; then
-  pkgs=() hook=0 skill=0 dash=0 rb=0 disc=0 comp=0
+  pkgs=() hook=0 skill=0 dash=0 rb=0 disc=0 comp=0 rev=0
   for path in "${changed[@]}"; do
     p=$(package_of "$path"); [ -n "$p" ] && pkgs+=("$p")
     case $path in widgets/agent-dashboard/*) dash=1 ;; esac
     case $path in widgets/repo-browser/*) rb=1 ;; esac
     case $path in widgets/discussion/*) disc=1 ;; esac
     case $path in widgets/competition/*) comp=1 ;; esac
+    case $path in widgets/review/*) rev=1 ;; esac
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
     case $path in scripts/install-agent-skill.sh | scripts/test_install_agent_skill.py | skills/*) skill=1 ;; esac
   done
@@ -151,11 +155,18 @@ elif [ "${#changed[@]}" -gt 0 ]; then
       echo "verify: cannot list the competition's packages; checking it anyway"
       comp=1
     fi
+    if uses=$(widget_uses "$review"); then
+      for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && rev=1; done
+    else
+      echo "verify: cannot list the review's packages; checking it anyway"
+      rev=1
+    fi
   fi
   [ "$dash" = 1 ] && run dashboard widget_check "$dashboard"
   [ "$rb" = 1 ] && run browser widget_check "$browser"
   [ "$disc" = 1 ] && run discussion widget_check "$discussion"
   [ "$comp" = 1 ] && run competition widget_check "$competition"
+  [ "$rev" = 1 ] && run review widget_check "$review"
   [ "$hook" = 1 ] && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   [ "$skill" = 1 ] && run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
 fi

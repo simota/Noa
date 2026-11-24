@@ -1,0 +1,1118 @@
+===== R1 brief to claude =====
+## 1. Review request and round
+You are: reviewer claude
+Round: 1 of 3 — BLIND independent review (you see no other reviewer's work)
+Rounds left after this one: 2
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Your lens
+Review from this angle first and most thoroughly:
+correctness (正確性): Logic errors, unhandled edge cases (empty, zero, maximum, Unicode, concurrent access), error handling that loses or hides failures, data loss, contract violations between callers and callees, and regressions of existing behaviour.
+Report anything serious you notice outside it too, with the matching category (or `other`).
+
+## 4. Rules
+- BLIND ROUND: review on your own. Do not open other reply files in the round directories; you will see the other reviewers' findings next round.
+- Review the snapshot. Do NOT modify any file in the workspace or the snapshot: you review, you do not fix. Write only your reply file.
+- Back every finding with evidence from the files (a quote, a trace through the code, a reproduction). Mark anything you could not verify as unverified in the evidence.
+- Prefer a few precise, well-evidenced findings over many vague ones; say so when the target looks sound.
+- Do not contact or type into other panes.
+- Write the reply in the language of the user's request (English when there is none); keep ids, field names and enum values as given.
+
+## 5. User interventions
+(none)
+
+## 6. How to reply
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r1/claude.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "what you reviewed and your overall assessment",
+  "findings": [{"id": "1", "location": {"path": "src/a.rs", "line": 10, "end_line": 14},
+                "severity": "high", "category": "correctness", "confidence": "medium",
+                "claim": "one line", "evidence": "…", "fix": "…"}],
+  "coverage": {"reviewed": ["src/a.rs", "src/ui/"], "skipped": [{"path": "docs/", "reason": "…"}]} }
+
+Rules:
+- findings: at most 50; each id 1-16 letters, digits, '-' or '_', new (not one you used in an earlier round)
+- location: null for the target as a whole, else a path from the file list; line and end_line (optional) within that file in the snapshot
+- severity: critical, high, medium, low or info; confidence: high, medium or low
+- category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- claim: one line, at most 300 characters; evidence: required; fix: optional
+- coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R1 brief to codex =====
+## 1. Review request and round
+You are: reviewer codex
+Round: 1 of 3 — BLIND independent review (you see no other reviewer's work)
+Rounds left after this one: 2
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Your lens
+Review from this angle first and most thoroughly:
+security (セキュリティ): Validation of input at system boundaries, injection (shell, SQL, path, template), authentication and authorization, secrets in code or logs, path traversal, unsafe deserialization, privilege and sandbox escapes, and risky dependencies.
+Report anything serious you notice outside it too, with the matching category (or `other`).
+
+## 4. Rules
+- BLIND ROUND: review on your own. Do not open other reply files in the round directories; you will see the other reviewers' findings next round.
+- Review the snapshot. Do NOT modify any file in the workspace or the snapshot: you review, you do not fix. Write only your reply file.
+- Back every finding with evidence from the files (a quote, a trace through the code, a reproduction). Mark anything you could not verify as unverified in the evidence.
+- Prefer a few precise, well-evidenced findings over many vague ones; say so when the target looks sound.
+- Do not contact or type into other panes.
+- Write the reply in the language of the user's request (English when there is none); keep ids, field names and enum values as given.
+
+## 5. User interventions
+(none)
+
+## 6. How to reply
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r1/codex.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "what you reviewed and your overall assessment",
+  "findings": [{"id": "1", "location": {"path": "src/a.rs", "line": 10, "end_line": 14},
+                "severity": "high", "category": "correctness", "confidence": "medium",
+                "claim": "one line", "evidence": "…", "fix": "…"}],
+  "coverage": {"reviewed": ["src/a.rs", "src/ui/"], "skipped": [{"path": "docs/", "reason": "…"}]} }
+
+Rules:
+- findings: at most 50; each id 1-16 letters, digits, '-' or '_', new (not one you used in an earlier round)
+- location: null for the target as a whole, else a path from the file list; line and end_line (optional) within that file in the snapshot
+- severity: critical, high, medium, low or info; confidence: high, medium or low
+- category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- claim: one line, at most 300 characters; evidence: required; fix: optional
+- coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R1 brief to agy =====
+## 1. Review request and round
+You are: reviewer agy
+Round: 1 of 3 — BLIND independent review (you see no other reviewer's work)
+Rounds left after this one: 2
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Your lens
+Review from this angle first and most thoroughly:
+custom (custom lens): API compatibility & migration
+Report anything serious you notice outside it too, with the matching category (or `other`).
+
+## 4. Rules
+- BLIND ROUND: review on your own. Do not open other reply files in the round directories; you will see the other reviewers' findings next round.
+- Review the snapshot. Do NOT modify any file in the workspace or the snapshot: you review, you do not fix. Write only your reply file.
+- Back every finding with evidence from the files (a quote, a trace through the code, a reproduction). Mark anything you could not verify as unverified in the evidence.
+- Prefer a few precise, well-evidenced findings over many vague ones; say so when the target looks sound.
+- Do not contact or type into other panes.
+- Write the reply in the language of the user's request (English when there is none); keep ids, field names and enum values as given.
+
+## 5. User interventions
+(none)
+
+## 6. How to reply
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r1/agy.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "what you reviewed and your overall assessment",
+  "findings": [{"id": "1", "location": {"path": "src/a.rs", "line": 10, "end_line": 14},
+                "severity": "high", "category": "correctness", "confidence": "medium",
+                "claim": "one line", "evidence": "…", "fix": "…"}],
+  "coverage": {"reviewed": ["src/a.rs", "src/ui/"], "skipped": [{"path": "docs/", "reason": "…"}]} }
+
+Rules:
+- findings: at most 50; each id 1-16 letters, digits, '-' or '_', new (not one you used in an earlier round)
+- location: null for the target as a whole, else a path from the file list; line and end_line (optional) within that file in the snapshot
+- severity: critical, high, medium, low or info; confidence: high, medium or low
+- category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- claim: one line, at most 300 characters; evidence: required; fix: optional
+- coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R1 correction to claude =====
+Your review JSON could not be used:
+- not valid review JSON: missing field `severity` at line 1 column 40
+
+Fix it and write the whole file again at:
+/golden/reviews/rev-golden/r1/claude.json
+===== R1 brief to lead =====
+## 1. Review request and round
+You are: the lead (you consolidate; you write no findings of your own)
+Round: 1 of 3 — consolidation of the blind round (each reviewer worked alone)
+Rounds left after this one: 2
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Panel
+- claude (claude): replied
+  Lens: correctness (正確性): Logic errors, unhandled edge cases (empty, zero, maximum, Unicode, concurrent access), error handling that loses or hides failures, data loss, contract violations between callers and callees, and regressions of existing behaviour.
+  Summary: Read the store and the lock.
+- codex (codex): replied
+  Lens: security (セキュリティ): Validation of input at system boundaries, injection (shell, SQL, path, template), authentication and authorization, secrets in code or logs, path traversal, unsafe deserialization, privilege and sandbox escapes, and risky dependencies.
+  Summary: Checked trust boundaries.
+- agy (agy): replied
+  Lens: custom (custom lens): API compatibility & migration
+  Summary: Looked at the API.
+
+## 4. Raw findings this round
+### claude/1 · high · correctness · high · src/store.rs:44-48
+Claim: A torn last line is kept and the next batch joins it
+Evidence: store.rs:44 returns before set_len when kept == len.
+Fix: Always truncate to kept.
+
+### claude/2 · info · design · low · src/lock.rs:3
+Claim: The lock module could be private
+Evidence: Only store.rs uses it.
+
+### codex/a · medium · security · medium · src/store.rs:46
+Claim: A <torn> line can be replayed as another event
+Evidence: serde accepts the joined line "as is".
+Fix: Truncate on open.
+
+### agy/x1 · medium · custom · high · (whole target)
+Claim: Renaming flock.rs to lock.rs breaks the public path
+Evidence: lib.rs re-exported flock.
+
+## 5. Findings so far
+(no live findings)
+
+## 6. User interventions
+- [m1 R1 to codex] Look at the lock's error paths too.
+
+## 7. This round
+2 round(s) left after this one. Ask each reviewer the question that will settle what is still open or disputed. Leave "verdict" out unless you close the review.
+"close" is not allowed in round 1: the findings must be cross-examined first.
+
+## 8. Your output
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r1/lead.json
+Write the whole file in one go when you are done. Do not answer in the terminal.
+
+{ "summary": "what this round found and what is still in dispute",
+  "ops": [{"op": "add", "id": "F1", "from": ["claude/1", "codex/2"], "claim": "one line",
+           "location": {"path": "src/a.rs", "line": 10}, "severity": "high", "category": "correctness",
+           "confidence": "high", "status": "open", "rationale": "…", "fix": "…"},
+          {"op": "merge", "id": "F1", "from": ["agy/4"]},
+          {"op": "update", "id": "F2", "severity": "medium", "status": "disputed", "rationale": "…"},
+          {"op": "dismiss", "raw": "agy/5", "reason": "…"}],
+  "questions": {"codex": "…"},
+  "close": false }
+
+Rules:
+- every raw finding in section 4 goes into exactly one add or merge "from", or one dismiss with a reason; none may be left out
+- new finding ids: 1-16 letters, digits, '-' or '_', not taken; the next free one is F1
+- merge "from" may also name other live findings, which become merged into "id"
+- update changes at least one of claim, location, severity, category, confidence, status, rationale, fix
+- status: open, agreed, disputed or rejected (rejected needs a rationale)
+- severity: critical, high, medium, low, info; confidence: high, medium, low; category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- questions: reviewer ids: claude, codex, agy; a reviewer with no question gets a default one
+- verdict.decision: approve (no must_fix), approve_with_fixes or request_changes (at least one must_fix), reject; must_fix lists live finding ids
+- verdict: only in the last round or with "close": true
+===== R2 brief to claude =====
+## 1. Review request and round
+You are: reviewer claude
+Round: 2 of 3 — CROSS-EXAMINATION (every finding so far is shown to every reviewer)
+Rounds left after this one: 1
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Your lens
+Review from this angle first and most thoroughly:
+correctness (正確性): Logic errors, unhandled edge cases (empty, zero, maximum, Unicode, concurrent access), error handling that loses or hides failures, data loss, contract violations between callers and callees, and regressions of existing behaviour.
+Report anything serious you notice outside it too, with the matching category (or `other`).
+
+## 4. Findings so far
+### F1 [open] high · correctness · high · src/store.rs:44-48
+Claim: Torn last line joins the next batch
+Lead's rationale: Traced by claude.
+Suggested fix: Truncate to kept.
+Sources:
+- claude/1 (R1, high, high): A torn last line is kept and the next batch joins it
+  Evidence: store.rs:44 returns before set_len when kept == len.
+  Fix: Always truncate to kept.
+- codex/a (R1, medium, medium): A <torn> line can be replayed as another event
+  Evidence: serde accepts the joined line "as is".
+  Fix: Truncate on open.
+Stances: (none yet)
+
+### F2 [open] medium · custom · medium · (whole target)
+Claim: The rename breaks a public path
+Lead's rationale: Needs a check of lib.rs.
+Sources:
+- agy/x1 (R1, medium, high): Renaming flock.rs to lock.rs breaks the public path
+  Evidence: lib.rs re-exported flock.
+Stances: (none yet)
+
+
+## 5. The lead's summary and your question
+Lead's summary of R1:
+Two findings; the design nit is dismissed.
+
+Your question: Check the findings above against the target: confirm what holds, dispute what does not with evidence, and add what everyone missed.
+
+Rules:
+- Review the snapshot. Do NOT modify any file in the workspace or the snapshot: you review, you do not fix. Write only your reply file.
+- Back every finding with evidence from the files (a quote, a trace through the code, a reproduction). Mark anything you could not verify as unverified in the evidence.
+- Prefer a few precise, well-evidenced findings over many vague ones; say so when the target looks sound.
+- Do not contact or type into other panes.
+- Write the reply in the language of the user's request (English when there is none); keep ids, field names and enum values as given.
+
+## 6. User interventions
+(none)
+
+## 7. How to reply
+Stances required on: F2
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r2/claude.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "what you reviewed and your overall assessment",
+  "findings": [{"id": "1", "location": {"path": "src/a.rs", "line": 10, "end_line": 14},
+                "severity": "high", "category": "correctness", "confidence": "medium",
+                "claim": "one line", "evidence": "…", "fix": "…"}],
+  "stances": [{"finding": "F1", "stance": "dispute", "note": "…", "evidence": "…", "severity": "low"}],
+  "coverage": {"reviewed": ["src/a.rs", "src/ui/"], "skipped": [{"path": "docs/", "reason": "…"}]} }
+
+Rules:
+- findings: at most 50; each id 1-16 letters, digits, '-' or '_', new (not one you used in an earlier round)
+- location: null for the target as a whole, else a path from the file list; line and end_line (optional) within that file in the snapshot
+- severity: critical, high, medium, low or info; confidence: high, medium or low
+- category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- claim: one line, at most 300 characters; evidence: required; fix: optional
+- stance: confirm, dispute, refine or unsure on findings you did not raise; refine or withdraw on your own; note required for dispute and refine; severity is an optional proposal
+- coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R2 brief to codex =====
+## 1. Review request and round
+You are: reviewer codex
+Round: 2 of 3 — CROSS-EXAMINATION (every finding so far is shown to every reviewer)
+Rounds left after this one: 1
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Your lens
+Review from this angle first and most thoroughly:
+security (セキュリティ): Validation of input at system boundaries, injection (shell, SQL, path, template), authentication and authorization, secrets in code or logs, path traversal, unsafe deserialization, privilege and sandbox escapes, and risky dependencies.
+Report anything serious you notice outside it too, with the matching category (or `other`).
+
+## 4. Findings so far
+### F1 [open] high · correctness · high · src/store.rs:44-48
+Claim: Torn last line joins the next batch
+Lead's rationale: Traced by claude.
+Suggested fix: Truncate to kept.
+Sources:
+- claude/1 (R1, high, high): A torn last line is kept and the next batch joins it
+  Evidence: store.rs:44 returns before set_len when kept == len.
+  Fix: Always truncate to kept.
+- codex/a (R1, medium, medium): A <torn> line can be replayed as another event
+  Evidence: serde accepts the joined line "as is".
+  Fix: Truncate on open.
+Stances: (none yet)
+
+### F2 [open] medium · custom · medium · (whole target)
+Claim: The rename breaks a public path
+Lead's rationale: Needs a check of lib.rs.
+Sources:
+- agy/x1 (R1, medium, high): Renaming flock.rs to lock.rs breaks the public path
+  Evidence: lib.rs re-exported flock.
+Stances: (none yet)
+
+
+## 5. The lead's summary and your question
+Lead's summary of R1:
+Two findings; the design nit is dismissed.
+
+Your question: Is F2 a compatibility break for users?
+
+Rules:
+- Review the snapshot. Do NOT modify any file in the workspace or the snapshot: you review, you do not fix. Write only your reply file.
+- Back every finding with evidence from the files (a quote, a trace through the code, a reproduction). Mark anything you could not verify as unverified in the evidence.
+- Prefer a few precise, well-evidenced findings over many vague ones; say so when the target looks sound.
+- Do not contact or type into other panes.
+- Write the reply in the language of the user's request (English when there is none); keep ids, field names and enum values as given.
+
+## 6. User interventions
+- [m1 R1] Look at the lock's error paths too.
+
+## 7. How to reply
+Stances required on: F2
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r2/codex.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "what you reviewed and your overall assessment",
+  "findings": [{"id": "1", "location": {"path": "src/a.rs", "line": 10, "end_line": 14},
+                "severity": "high", "category": "correctness", "confidence": "medium",
+                "claim": "one line", "evidence": "…", "fix": "…"}],
+  "stances": [{"finding": "F1", "stance": "dispute", "note": "…", "evidence": "…", "severity": "low"}],
+  "coverage": {"reviewed": ["src/a.rs", "src/ui/"], "skipped": [{"path": "docs/", "reason": "…"}]} }
+
+Rules:
+- findings: at most 50; each id 1-16 letters, digits, '-' or '_', new (not one you used in an earlier round)
+- location: null for the target as a whole, else a path from the file list; line and end_line (optional) within that file in the snapshot
+- severity: critical, high, medium, low or info; confidence: high, medium or low
+- category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- claim: one line, at most 300 characters; evidence: required; fix: optional
+- stance: confirm, dispute, refine or unsure on findings you did not raise; refine or withdraw on your own; note required for dispute and refine; severity is an optional proposal
+- coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R2 brief to agy =====
+## 1. Review request and round
+You are: reviewer agy
+Round: 2 of 3 — CROSS-EXAMINATION (every finding so far is shown to every reviewer)
+Rounds left after this one: 1
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Your lens
+Review from this angle first and most thoroughly:
+custom (custom lens): API compatibility & migration
+Report anything serious you notice outside it too, with the matching category (or `other`).
+
+## 4. Findings so far
+### F1 [open] high · correctness · high · src/store.rs:44-48
+Claim: Torn last line joins the next batch
+Lead's rationale: Traced by claude.
+Suggested fix: Truncate to kept.
+Sources:
+- claude/1 (R1, high, high): A torn last line is kept and the next batch joins it
+  Evidence: store.rs:44 returns before set_len when kept == len.
+  Fix: Always truncate to kept.
+- codex/a (R1, medium, medium): A <torn> line can be replayed as another event
+  Evidence: serde accepts the joined line "as is".
+  Fix: Truncate on open.
+Stances: (none yet)
+
+### F2 [open] medium · custom · medium · (whole target)
+Claim: The rename breaks a public path
+Lead's rationale: Needs a check of lib.rs.
+Sources:
+- agy/x1 (R1, medium, high): Renaming flock.rs to lock.rs breaks the public path
+  Evidence: lib.rs re-exported flock.
+Stances: (none yet)
+
+
+## 5. The lead's summary and your question
+Lead's summary of R1:
+Two findings; the design nit is dismissed.
+
+Your question: Check the findings above against the target: confirm what holds, dispute what does not with evidence, and add what everyone missed.
+
+Rules:
+- Review the snapshot. Do NOT modify any file in the workspace or the snapshot: you review, you do not fix. Write only your reply file.
+- Back every finding with evidence from the files (a quote, a trace through the code, a reproduction). Mark anything you could not verify as unverified in the evidence.
+- Prefer a few precise, well-evidenced findings over many vague ones; say so when the target looks sound.
+- Do not contact or type into other panes.
+- Write the reply in the language of the user's request (English when there is none); keep ids, field names and enum values as given.
+
+## 6. User interventions
+(none)
+
+## 7. How to reply
+Stances required on: F1
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r2/agy.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "what you reviewed and your overall assessment",
+  "findings": [{"id": "1", "location": {"path": "src/a.rs", "line": 10, "end_line": 14},
+                "severity": "high", "category": "correctness", "confidence": "medium",
+                "claim": "one line", "evidence": "…", "fix": "…"}],
+  "stances": [{"finding": "F1", "stance": "dispute", "note": "…", "evidence": "…", "severity": "low"}],
+  "coverage": {"reviewed": ["src/a.rs", "src/ui/"], "skipped": [{"path": "docs/", "reason": "…"}]} }
+
+Rules:
+- findings: at most 50; each id 1-16 letters, digits, '-' or '_', new (not one you used in an earlier round)
+- location: null for the target as a whole, else a path from the file list; line and end_line (optional) within that file in the snapshot
+- severity: critical, high, medium, low or info; confidence: high, medium or low
+- category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- claim: one line, at most 300 characters; evidence: required; fix: optional
+- stance: confirm, dispute, refine or unsure on findings you did not raise; refine or withdraw on your own; note required for dispute and refine; severity is an optional proposal
+- coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R2 correction to codex =====
+Your review JSON could not be used:
+- stances[0].note is required for refine
+- stances[1].finding "F9" is not a finding; findings: F1, F2
+
+Fix it and write the whole file again at:
+/golden/reviews/rev-golden/r2/codex.json
+===== R2 brief to lead =====
+## 1. Review request and round
+You are: the lead (you consolidate; you write no findings of your own)
+Round: 2 of 3 — consolidation of a cross-examination round
+Rounds left after this one: 1
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Panel
+- claude (claude): replied
+  Lens: correctness (正確性): Logic errors, unhandled edge cases (empty, zero, maximum, Unicode, concurrent access), error handling that loses or hides failures, data loss, contract violations between callers and callees, and regressions of existing behaviour.
+  Summary: F2 is not public.
+- codex (codex): replied
+  Lens: security (セキュリティ): Validation of input at system boundaries, injection (shell, SQL, path, template), authentication and authorization, secrets in code or logs, path traversal, unsafe deserialization, privilege and sandbox escapes, and risky dependencies.
+  Summary: Withdrawing my part of F1; F2 needs a note.
+- agy (agy): replied
+  Lens: custom (custom lens): API compatibility & migration
+  Summary: F1 holds; one more.
+
+## 4. Raw findings this round
+### agy/x2 · low · tests · high · src/store.rs:50
+Claim: No test covers the torn line
+Evidence: tests have no torn case.
+
+### agy/x3 · low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Evidence: open() is untested.
+
+## 5. Findings so far
+### F1 [open] high · correctness · high · src/store.rs:44-48
+Claim: Torn last line joins the next batch
+Lead's rationale: Traced by claude.
+Suggested fix: Truncate to kept.
+Sources:
+- claude/1 (R1, high, high): A torn last line is kept and the next batch joins it
+  Evidence: store.rs:44 returns before set_len when kept == len.
+  Fix: Always truncate to kept.
+- codex/a (R1, medium, medium): A <torn> line can be replayed as another event
+  Evidence: serde accepts the joined line "as is".
+  Fix: Truncate on open.
+Stances:
+- agy R2: confirm
+- codex R2: withdraw
+
+### F2 [open] medium · custom · medium · (whole target)
+Claim: The rename breaks a public path
+Lead's rationale: Needs a check of lib.rs.
+Sources:
+- agy/x1 (R1, medium, high): Renaming flock.rs to lock.rs breaks the public path
+  Evidence: lib.rs re-exported flock.
+Stances:
+- claude R2: dispute — flock was never exported.
+  Evidence: lib.rs has no pub use.
+- codex R2: refine (severity low) — Breaks only the docs link.
+
+
+## 6. User interventions
+- [m1 R1 to codex] Look at the lock's error paths too.
+
+## 7. This round
+1 round(s) left after this one. Ask each reviewer the question that will settle what is still open or disputed. Leave "verdict" out unless you close the review.
+You may set "close": true with a "verdict" if nothing is left to settle.
+
+## 8. Your output
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r2/lead.json
+Write the whole file in one go when you are done. Do not answer in the terminal.
+
+{ "summary": "what this round found and what is still in dispute",
+  "ops": [{"op": "add", "id": "F3", "from": ["claude/1", "codex/2"], "claim": "one line",
+           "location": {"path": "src/a.rs", "line": 10}, "severity": "high", "category": "correctness",
+           "confidence": "high", "status": "open", "rationale": "…", "fix": "…"},
+          {"op": "merge", "id": "F1", "from": ["agy/4"]},
+          {"op": "update", "id": "F2", "severity": "medium", "status": "disputed", "rationale": "…"},
+          {"op": "dismiss", "raw": "agy/5", "reason": "…"}],
+  "questions": {"codex": "…"},
+  "close": false }
+
+Rules:
+- every raw finding in section 4 goes into exactly one add or merge "from", or one dismiss with a reason; none may be left out
+- new finding ids: 1-16 letters, digits, '-' or '_', not taken; the next free one is F3
+- merge "from" may also name other live findings, which become merged into "id"
+- update changes at least one of claim, location, severity, category, confidence, status, rationale, fix
+- status: open, agreed, disputed or rejected (rejected needs a rationale)
+- severity: critical, high, medium, low, info; confidence: high, medium, low; category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- questions: reviewer ids: claude, codex, agy; a reviewer with no question gets a default one
+- verdict.decision: approve (no must_fix), approve_with_fixes or request_changes (at least one must_fix), reject; must_fix lists live finding ids
+- verdict: only in the last round or with "close": true
+===== R3 brief to claude =====
+## 1. Review request and round
+You are: reviewer claude
+Round: 3 of 3 — CROSS-EXAMINATION (every finding so far is shown to every reviewer)
+This is the FINAL round.
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Your lens
+Review from this angle first and most thoroughly:
+correctness (正確性): Logic errors, unhandled edge cases (empty, zero, maximum, Unicode, concurrent access), error handling that loses or hides failures, data loss, contract violations between callers and callees, and regressions of existing behaviour.
+Report anything serious you notice outside it too, with the matching category (or `other`).
+
+## 4. Findings so far
+### F1 [agreed] high · correctness · high · src/store.rs:44-48
+Claim: Torn last line joins the next batch
+Lead's rationale: Traced by claude.
+Suggested fix: Truncate to kept.
+Sources:
+- claude/1 (R1, high, high): A torn last line is kept and the next batch joins it
+  Evidence: store.rs:44 returns before set_len when kept == len.
+  Fix: Always truncate to kept.
+- codex/a (R1, medium, medium): A <torn> line can be replayed as another event
+  Evidence: serde accepts the joined line "as is".
+  Fix: Truncate on open.
+Stances:
+- agy R2: confirm
+- codex R2: withdraw
+
+### F2 [disputed] medium · custom · medium · (whole target)
+Claim: The rename breaks a public path
+Lead's rationale: claude and agy disagree on the export.
+Sources:
+- agy/x1 (R1, medium, high): Renaming flock.rs to lock.rs breaks the public path
+  Evidence: lib.rs re-exported flock.
+Stances:
+- claude R2: dispute — flock was never exported.
+  Evidence: lib.rs has no pub use.
+- codex R2: refine (severity low) — Breaks only the docs link.
+
+### F3 [open] low · tests · high · src/store.rs:50
+Claim: No test covers the torn line
+Lead's rationale: Needed for F1's fix.
+Sources:
+- agy/x2 (R2, low, high): No test covers the torn line
+  Evidence: tests have no torn case.
+Stances: (none yet)
+
+### F4 [open] low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Lead's rationale: Worth checking separately.
+Sources:
+- agy/x3 (R2, low, medium): The open path has no regression test
+  Evidence: open() is untested.
+Stances: (none yet)
+
+
+## 5. The lead's summary and your question
+Lead's summary of R2:
+F1 agreed; F2 disputed; F3 added.
+
+Your question: Does F3 need more than one test?
+
+Rules:
+- Review the snapshot. Do NOT modify any file in the workspace or the snapshot: you review, you do not fix. Write only your reply file.
+- Back every finding with evidence from the files (a quote, a trace through the code, a reproduction). Mark anything you could not verify as unverified in the evidence.
+- Prefer a few precise, well-evidenced findings over many vague ones; say so when the target looks sound.
+- Do not contact or type into other panes.
+- Write the reply in the language of the user's request (English when there is none); keep ids, field names and enum values as given.
+
+## 6. User interventions
+(none)
+
+## 7. How to reply
+Stances required on: F3, F4
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r3/claude.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "what you reviewed and your overall assessment",
+  "findings": [{"id": "1", "location": {"path": "src/a.rs", "line": 10, "end_line": 14},
+                "severity": "high", "category": "correctness", "confidence": "medium",
+                "claim": "one line", "evidence": "…", "fix": "…"}],
+  "stances": [{"finding": "F1", "stance": "dispute", "note": "…", "evidence": "…", "severity": "low"}],
+  "coverage": {"reviewed": ["src/a.rs", "src/ui/"], "skipped": [{"path": "docs/", "reason": "…"}]} }
+
+Rules:
+- findings: at most 50; each id 1-16 letters, digits, '-' or '_', new (not one you used in an earlier round)
+- location: null for the target as a whole, else a path from the file list; line and end_line (optional) within that file in the snapshot
+- severity: critical, high, medium, low or info; confidence: high, medium or low
+- category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- claim: one line, at most 300 characters; evidence: required; fix: optional
+- stance: confirm, dispute, refine or unsure on findings you did not raise; refine or withdraw on your own; note required for dispute and refine; severity is an optional proposal
+- coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R3 brief to codex =====
+## 1. Review request and round
+You are: reviewer codex
+Round: 3 of 3 — CROSS-EXAMINATION (every finding so far is shown to every reviewer)
+This is the FINAL round.
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Your lens
+Review from this angle first and most thoroughly:
+security (セキュリティ): Validation of input at system boundaries, injection (shell, SQL, path, template), authentication and authorization, secrets in code or logs, path traversal, unsafe deserialization, privilege and sandbox escapes, and risky dependencies.
+Report anything serious you notice outside it too, with the matching category (or `other`).
+
+## 4. Findings so far
+### F1 [agreed] high · correctness · high · src/store.rs:44-48
+Claim: Torn last line joins the next batch
+Lead's rationale: Traced by claude.
+Suggested fix: Truncate to kept.
+Sources:
+- claude/1 (R1, high, high): A torn last line is kept and the next batch joins it
+  Evidence: store.rs:44 returns before set_len when kept == len.
+  Fix: Always truncate to kept.
+- codex/a (R1, medium, medium): A <torn> line can be replayed as another event
+  Evidence: serde accepts the joined line "as is".
+  Fix: Truncate on open.
+Stances:
+- agy R2: confirm
+- codex R2: withdraw
+
+### F2 [disputed] medium · custom · medium · (whole target)
+Claim: The rename breaks a public path
+Lead's rationale: claude and agy disagree on the export.
+Sources:
+- agy/x1 (R1, medium, high): Renaming flock.rs to lock.rs breaks the public path
+  Evidence: lib.rs re-exported flock.
+Stances:
+- claude R2: dispute — flock was never exported.
+  Evidence: lib.rs has no pub use.
+- codex R2: refine (severity low) — Breaks only the docs link.
+
+### F3 [open] low · tests · high · src/store.rs:50
+Claim: No test covers the torn line
+Lead's rationale: Needed for F1's fix.
+Sources:
+- agy/x2 (R2, low, high): No test covers the torn line
+  Evidence: tests have no torn case.
+Stances: (none yet)
+
+### F4 [open] low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Lead's rationale: Worth checking separately.
+Sources:
+- agy/x3 (R2, low, medium): The open path has no regression test
+  Evidence: open() is untested.
+Stances: (none yet)
+
+
+## 5. The lead's summary and your question
+Lead's summary of R2:
+F1 agreed; F2 disputed; F3 added.
+
+Your question: Check the findings above against the target: confirm what holds, dispute what does not with evidence, and add what everyone missed.
+
+Rules:
+- Review the snapshot. Do NOT modify any file in the workspace or the snapshot: you review, you do not fix. Write only your reply file.
+- Back every finding with evidence from the files (a quote, a trace through the code, a reproduction). Mark anything you could not verify as unverified in the evidence.
+- Prefer a few precise, well-evidenced findings over many vague ones; say so when the target looks sound.
+- Do not contact or type into other panes.
+- Write the reply in the language of the user's request (English when there is none); keep ids, field names and enum values as given.
+
+## 6. User interventions
+- [m1 R1] Look at the lock's error paths too.
+
+## 7. How to reply
+Stances required on: F3, F4
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r3/codex.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "what you reviewed and your overall assessment",
+  "findings": [{"id": "1", "location": {"path": "src/a.rs", "line": 10, "end_line": 14},
+                "severity": "high", "category": "correctness", "confidence": "medium",
+                "claim": "one line", "evidence": "…", "fix": "…"}],
+  "stances": [{"finding": "F1", "stance": "dispute", "note": "…", "evidence": "…", "severity": "low"}],
+  "coverage": {"reviewed": ["src/a.rs", "src/ui/"], "skipped": [{"path": "docs/", "reason": "…"}]} }
+
+Rules:
+- findings: at most 50; each id 1-16 letters, digits, '-' or '_', new (not one you used in an earlier round)
+- location: null for the target as a whole, else a path from the file list; line and end_line (optional) within that file in the snapshot
+- severity: critical, high, medium, low or info; confidence: high, medium or low
+- category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- claim: one line, at most 300 characters; evidence: required; fix: optional
+- stance: confirm, dispute, refine or unsure on findings you did not raise; refine or withdraw on your own; note required for dispute and refine; severity is an optional proposal
+- coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R3 brief to agy =====
+## 1. Review request and round
+You are: reviewer agy
+Round: 3 of 3 — CROSS-EXAMINATION (every finding so far is shown to every reviewer)
+This is the FINAL round.
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Your lens
+Review from this angle first and most thoroughly:
+custom (custom lens): API compatibility & migration
+Report anything serious you notice outside it too, with the matching category (or `other`).
+
+## 4. Findings so far
+### F1 [agreed] high · correctness · high · src/store.rs:44-48
+Claim: Torn last line joins the next batch
+Lead's rationale: Traced by claude.
+Suggested fix: Truncate to kept.
+Sources:
+- claude/1 (R1, high, high): A torn last line is kept and the next batch joins it
+  Evidence: store.rs:44 returns before set_len when kept == len.
+  Fix: Always truncate to kept.
+- codex/a (R1, medium, medium): A <torn> line can be replayed as another event
+  Evidence: serde accepts the joined line "as is".
+  Fix: Truncate on open.
+Stances:
+- agy R2: confirm
+- codex R2: withdraw
+
+### F2 [disputed] medium · custom · medium · (whole target)
+Claim: The rename breaks a public path
+Lead's rationale: claude and agy disagree on the export.
+Sources:
+- agy/x1 (R1, medium, high): Renaming flock.rs to lock.rs breaks the public path
+  Evidence: lib.rs re-exported flock.
+Stances:
+- claude R2: dispute — flock was never exported.
+  Evidence: lib.rs has no pub use.
+- codex R2: refine (severity low) — Breaks only the docs link.
+
+### F3 [open] low · tests · high · src/store.rs:50
+Claim: No test covers the torn line
+Lead's rationale: Needed for F1's fix.
+Sources:
+- agy/x2 (R2, low, high): No test covers the torn line
+  Evidence: tests have no torn case.
+Stances: (none yet)
+
+### F4 [open] low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Lead's rationale: Worth checking separately.
+Sources:
+- agy/x3 (R2, low, medium): The open path has no regression test
+  Evidence: open() is untested.
+Stances: (none yet)
+
+
+## 5. The lead's summary and your question
+Lead's summary of R2:
+F1 agreed; F2 disputed; F3 added.
+
+Your question: Check the findings above against the target: confirm what holds, dispute what does not with evidence, and add what everyone missed.
+
+Rules:
+- Review the snapshot. Do NOT modify any file in the workspace or the snapshot: you review, you do not fix. Write only your reply file.
+- Back every finding with evidence from the files (a quote, a trace through the code, a reproduction). Mark anything you could not verify as unverified in the evidence.
+- Prefer a few precise, well-evidenced findings over many vague ones; say so when the target looks sound.
+- Do not contact or type into other panes.
+- Write the reply in the language of the user's request (English when there is none); keep ids, field names and enum values as given.
+
+## 6. User interventions
+(none)
+
+## 7. How to reply
+Stances required on: (none; you may still revise earlier stances)
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r3/agy.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "what you reviewed and your overall assessment",
+  "findings": [{"id": "1", "location": {"path": "src/a.rs", "line": 10, "end_line": 14},
+                "severity": "high", "category": "correctness", "confidence": "medium",
+                "claim": "one line", "evidence": "…", "fix": "…"}],
+  "stances": [{"finding": "F1", "stance": "dispute", "note": "…", "evidence": "…", "severity": "low"}],
+  "coverage": {"reviewed": ["src/a.rs", "src/ui/"], "skipped": [{"path": "docs/", "reason": "…"}]} }
+
+Rules:
+- findings: at most 50; each id 1-16 letters, digits, '-' or '_', new (not one you used in an earlier round)
+- location: null for the target as a whole, else a path from the file list; line and end_line (optional) within that file in the snapshot
+- severity: critical, high, medium, low or info; confidence: high, medium or low
+- category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- claim: one line, at most 300 characters; evidence: required; fix: optional
+- stance: confirm, dispute, refine or unsure on findings you did not raise; refine or withdraw on your own; note required for dispute and refine; severity is an optional proposal
+- coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R3 brief to lead =====
+## 1. Review request and round
+You are: the lead (you consolidate; you write no findings of your own)
+Round: 3 of 3 — consolidation of a cross-examination round
+This is the FINAL round.
+What the user asked for:
+Review the lock rewrite; it must stay "crash-safe" & <fast>.
+
+## 2. Target
+Kind: git diff
+Label: feat/lock … main（4 ファイル）
+Source: /golden/repo
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/lock (bbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (review THIS, read-only): /golden/reviews/rev-golden/target
+- /golden/reviews/rev-golden/target/diff.patch: the diff from the merge base
+- /golden/reviews/rev-golden/target/files/<path>: the new side of every changed text file
+Line numbers in findings refer to the snapshot files (the new side).
+Files (3):
+- M src/store.rs (120 lines, +13 -3) changed: 40-52
+- R src/lock.rs (60 lines, +8 -3) from src/flock.rs changed: 1-8
+- A README.md (10 lines, +10 -3) changed: 1-10
+Left out of the snapshot (not reviewable here):
+- logo.png: バイナリ（テキストではない）
+
+## 3. Panel
+- claude (claude): replied
+  Lens: correctness (正確性): Logic errors, unhandled edge cases (empty, zero, maximum, Unicode, concurrent access), error handling that loses or hides failures, data loss, contract violations between callers and callees, and regressions of existing behaviour.
+  Summary: One test is enough.
+- codex (codex): replied
+  Lens: security (セキュリティ): Validation of input at system boundaries, injection (shell, SQL, path, template), authentication and authorization, secrets in code or logs, path traversal, unsafe deserialization, privilege and sandbox escapes, and risky dependencies.
+  Summary: Agree.
+- agy (agy): replied
+  Lens: custom (custom lens): API compatibility & migration
+  Summary: Nothing more.
+
+## 4. Raw findings this round
+(none)
+## 5. Findings so far
+### F1 [agreed] high · correctness · high · src/store.rs:44-48
+Claim: Torn last line joins the next batch
+Lead's rationale: Traced by claude.
+Suggested fix: Truncate to kept.
+Sources:
+- claude/1 (R1, high, high): A torn last line is kept and the next batch joins it
+  Evidence: store.rs:44 returns before set_len when kept == len.
+  Fix: Always truncate to kept.
+- codex/a (R1, medium, medium): A <torn> line can be replayed as another event
+  Evidence: serde accepts the joined line "as is".
+  Fix: Truncate on open.
+Stances:
+- agy R2: confirm
+- codex R2: withdraw
+
+### F2 [disputed] medium · custom · medium · (whole target)
+Claim: The rename breaks a public path
+Lead's rationale: claude and agy disagree on the export.
+Sources:
+- agy/x1 (R1, medium, high): Renaming flock.rs to lock.rs breaks the public path
+  Evidence: lib.rs re-exported flock.
+Stances:
+- claude R2: dispute — flock was never exported.
+  Evidence: lib.rs has no pub use.
+- codex R2: refine (severity low) — Breaks only the docs link.
+
+### F3 [open] low · tests · high · src/store.rs:50
+Claim: No test covers the torn line
+Lead's rationale: Needed for F1's fix.
+Sources:
+- agy/x2 (R2, low, high): No test covers the torn line
+  Evidence: tests have no torn case.
+Stances:
+- claude R3: confirm
+- codex R3: confirm
+
+### F4 [open] low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Lead's rationale: Worth checking separately.
+Sources:
+- agy/x3 (R2, low, medium): The open path has no regression test
+  Evidence: open() is untested.
+Stances:
+- claude R3: confirm — Same test as F3.
+- codex R3: confirm
+
+
+## 6. User interventions
+- [m1 R1 to codex] Look at the lock's error paths too.
+
+## 7. This round
+This is the LAST round: "verdict" is required, and no finding may stay open: settle each one as agreed, disputed or rejected. Weigh the evidence yourself where the reviewers disagree; you may read the snapshot to decide.
+
+## 8. Your output
+Write ONLY this JSON to the file:
+/golden/reviews/rev-golden/r3/lead.json
+Write the whole file in one go when you are done. Do not answer in the terminal.
+
+{ "summary": "what this round found and what is still in dispute",
+  "ops": [{"op": "add", "id": "F5", "from": ["claude/1", "codex/2"], "claim": "one line",
+           "location": {"path": "src/a.rs", "line": 10}, "severity": "high", "category": "correctness",
+           "confidence": "high", "status": "open", "rationale": "…", "fix": "…"},
+          {"op": "merge", "id": "F1", "from": ["agy/4"]},
+          {"op": "update", "id": "F2", "severity": "medium", "status": "disputed", "rationale": "…"},
+          {"op": "dismiss", "raw": "agy/5", "reason": "…"}],
+  "questions": {"codex": "…"},
+  "verdict": {"decision": "request_changes", "rationale": "…", "must_fix": ["F1"]},
+  "close": false }
+
+Rules:
+- every raw finding in section 4 goes into exactly one add or merge "from", or one dismiss with a reason; none may be left out
+- new finding ids: 1-16 letters, digits, '-' or '_', not taken; the next free one is F5
+- merge "from" may also name other live findings, which become merged into "id"
+- update changes at least one of claim, location, severity, category, confidence, status, rationale, fix
+- status: open, agreed, disputed or rejected (rejected needs a rationale)
+- severity: critical, high, medium, low, info; confidence: high, medium, low; category: correctness, security, performance, design, tests, ux_docs, custom (= API compatibility & migration), other
+- questions: reviewer ids: claude, codex, agy; a reviewer with no question gets a default one
+- verdict.decision: approve (no must_fix), approve_with_fixes or request_changes (at least one must_fix), reject; must_fix lists live finding ids
+- verdict: only in the last round or with "close": true

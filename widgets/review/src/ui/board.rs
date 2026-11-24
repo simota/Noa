@@ -137,10 +137,12 @@ pub(super) fn insert(
     }
     let row = filter_row(tree, bar, "合意度");
     for a in Agreement::ALL {
+        // Counted over live findings, as the severities are.
+        let n = count(&|f| f.status.is_live() && session.tally(f).agreement == a);
         chip(
             tree,
             row,
-            a.label().to_owned(),
+            format!("{} {n}", a.label()),
             filters.agreements.contains(&agreement_key(a)),
             Action::ToggleAgreement(a),
             actions,

@@ -1080,3 +1080,43 @@ fn a_held_review_in_the_smallest_window_keeps_room_for_its_findings() {
     let height = center_scroll_height(&screen);
     assert!(height >= 2.0 * row, "{height} < 2 × {row}");
 }
+
+fn button_label(screen: &Review, action: &Action) -> String {
+    let id = widget_for(screen, action).unwrap();
+    screen
+        .tree
+        .get::<noa_gpui_core::widgets::Button>(id)
+        .unwrap()
+        .label()
+        .to_owned()
+}
+
+#[test]
+fn the_agreement_filters_count_live_findings_as_the_severities_do() {
+    let screen = Review::demo();
+    let session = screen.session.as_ref().unwrap();
+    let live: Vec<_> = session
+        .findings
+        .iter()
+        .filter(|f| f.status.is_live())
+        .collect();
+    for a in Agreement::ALL {
+        let n = live
+            .iter()
+            .filter(|f| session.tally(f).agreement == a)
+            .count();
+        assert_eq!(
+            button_label(&screen, &Action::ToggleAgreement(a)),
+            format!("{} {n}", a.label())
+        );
+    }
+    let total: usize = Agreement::ALL
+        .iter()
+        .map(|a| {
+            live.iter()
+                .filter(|f| session.tally(f).agreement == *a)
+                .count()
+        })
+        .sum();
+    assert_eq!(total, live.len());
+}

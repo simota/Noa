@@ -442,9 +442,10 @@ fn steps_entry(text: &str) -> String {
 }
 
 /// A note after a list entry's label and `sep` (`" — "`, `": "`): one
-/// line with its spaces collapsed, or several as a code block inside the
-/// entry, as given (a line break may be part of a command: `cd bench`,
-/// then `./open-tab --cold`).
+/// line, or several as a code block inside the entry, as given but for the
+/// ends trimmed. Its spaces are kept: a note may hold a command whose
+/// quoted argument has a run of them (`cd '/tmp/two  spaces'`), and a line
+/// break may be part of one (`cd bench`, then `./open-tab --cold`).
 fn note_entry(sep: &str, text: &str) -> String {
     let text = text.trim();
     if text.lines().count() > 1 {
@@ -454,7 +455,7 @@ fn note_entry(sep: &str, text: &str) -> String {
             crate::model::brief::fenced(text, "  ")
         )
     } else {
-        format!("{sep}{}", one_line(text))
+        format!("{sep}{text}")
     }
 }
 
@@ -663,11 +664,12 @@ fn write_cross_checks(out: &mut String, session: &Session) {
             c.subject,
             c.outcome.label()
         );
-        // A note of several lines goes last, as a block of its own.
+        // A note of several lines goes last, as a block of its own; one
+        // line keeps its spaces (it may be a command, see `note_entry`).
         let note = c.note.trim();
         let block = note.lines().count() > 1;
         if !note.is_empty() && !block {
-            let _ = write!(out, " — {}", one_line(note));
+            let _ = write!(out, " — {note}");
         }
         if !c.evidence.is_empty() {
             let keys: Vec<&str> = c.evidence.iter().map(EvidenceKey::as_str).collect();
@@ -2115,6 +2117,71 @@ mod tests {
         let gaps = gaps_section(&report);
         let want = "- AC-3 を claude-2 が実行できませんでした（R1）:\n  ```\n  No display here; it needs:\n  cargo run -p noa\n  open -a Noa\n  ```\n";
         assert!(gaps.contains(want), "{want:?} in\n{gaps}");
+    }
+
+    #[test]
+    fn ac24_a_one_line_note_keeps_its_runs_of_spaces_in_the_fix_task_and_the_report() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply("claude", &all_pass());
+        rig.reply(
+            "codex",
+            &format!(
+                r#"{{"summary": "Ran it.", "environment": "macOS", "results": [
+                  {{"criterion": "AC-1", "result": "fail", "note": "cd '/tmp/two  spaces' &&  ./open-tab", "evidence": ["e2"]}},
+                  {{"criterion": "AC-2", "result": "pass", "evidence": ["e1"]}},
+                  {{"criterion": "AC-3", "result": "pass", "evidence": ["e1"]}}],
+                  "evidence": [{}, {}]}}"#,
+                cmd("e1", 0, true),
+                cmd("e2", 1, false)
+            ),
+        );
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "failed", "rationale": "codex's test fails", "evidence": ["codex/r1/e2"]},
+              {"criterion": "AC-2", "ruling": "verified", "rationale": "Re-run matched.", "evidence": ["codex/r1/e1"]},
+              {"criterion": "AC-3", "ruling": "verified", "rationale": "Re-run matched.", "evidence": ["claude/r1/e1"]}],
+             "assign": {"claude": ["codex/AC-1"]}}"#,
+        );
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &reply_json(
+                &[],
+                &[cmd("e1", 1, false)],
+                r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "reproduced", "note": "  cd '/tmp/two  spaces'  ", "evidence": ["e1"]}]"#,
+            ),
+        );
+        rig.reply("codex", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude"));
+        let session = rig.engine.session();
+        assert!(
+            session
+                .cross_checks
+                .iter()
+                .any(|c| c.note.contains("cd '/tmp/two  spaces'")),
+            "{:?}",
+            session.cross_checks
+        );
+        let task = fix_task(session, &["AC-1".into()], &[], &BTreeMap::new());
+        let want = "- claude cross-checked codex/AC-1 (R2): reproduced — cd '/tmp/two  spaces'\n";
+        assert!(task.contains(want), "{want:?} in\n{task}");
+        let report = report_markdown(session, None);
+        let ac1 = &report[report.find("### AC-1").unwrap()..report.find("### AC-2").unwrap()];
+        let want = "- codex（R1）: 失敗 — cd '/tmp/two  spaces' &&  ./open-tab\n";
+        assert!(ac1.contains(want), "{want:?} in\n{ac1}");
+        let checks = &report[report.find(SECTIONS[3]).unwrap()..report.find(SECTIONS[4]).unwrap()];
+        let want = "- R2 claude → codex/AC-1: 再現 — cd '/tmp/two  spaces' · 証跡: claude/r2/e1\n";
+        assert!(checks.contains(want), "{want:?} in\n{checks}");
     }
 
     #[test]

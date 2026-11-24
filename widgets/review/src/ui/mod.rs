@@ -30,8 +30,8 @@ use noa_gpui_core::style::{
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SelectionChanged, SplitPane,
-    SplitView, StatusBar, Tag, Toast, Tone,
+    Alert, AlertResponse, AlertStyle, Button, ButtonClicked, Container, ControlSize, Label,
+    ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
@@ -205,6 +205,8 @@ pub struct Review {
     report_stale: bool,
     /// A start was asked for: a refusal shows under the form.
     starting: bool,
+    /// The open alert that asks before the review is ended.
+    close_alert: Option<WidgetId>,
     built: Option<BuiltKey>,
     /// Which agents are installed: unknown until the background check
     /// reports (always "all" in the demo and in stored views, which stay
@@ -356,6 +358,7 @@ impl Review {
             extending: false,
             report_stale: false,
             starting: false,
+            close_alert: None,
             built: None,
             detection: start::Detection::all_installed(),
             installed: None,
@@ -1119,7 +1122,22 @@ impl Review {
                 self.send_cmd(Command::Intervene { to, body });
             }
             Action::Retry => self.send_cmd(Command::Retry),
-            Action::Close => self.send_cmd(Command::Close),
+            // Ending a review before its last round cannot be undone (it
+            // can be neither resumed nor extended), so it is asked first;
+            // Return and Escape keep it running.
+            Action::Close => {
+                self.close_alert = Some(
+                    Alert::new("このレビューを終了しますか？")
+                        .informative_text(
+                            "総合判定なしで終わります。終了したレビューは再開もラウンドの追加もできません。",
+                        )
+                        .style(AlertStyle::Critical)
+                        .button("キャンセル")
+                        .button("レビューを終了")
+                        .cancel_button(0)
+                        .open(&mut self.tree),
+                );
+            }
             Action::NewReview => {
                 self.leave();
                 let form = start::Form::for_kinds(self.start.kinds());
@@ -1192,6 +1210,15 @@ impl Screen for Review {
     }
 
     fn handle(&mut self, message: UiMessage, text: &mut TextStore) {
+        if let Some(answer) = message.downcast_ref::<AlertResponse>()
+            && self.close_alert == Some(message.source)
+        {
+            self.close_alert = None;
+            if answer.button == 1 {
+                self.send_cmd(Command::Close);
+            }
+            return;
+        }
         if message.downcast_ref::<SelectionChanged>().is_some() {
             if message.source == self.start.lead {
                 start::lead_kind_changed(&mut self.tree, &mut self.start, text);

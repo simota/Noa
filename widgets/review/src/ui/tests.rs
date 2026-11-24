@@ -911,3 +911,25 @@ fn a_held_review_does_not_read_as_finished() {
     assert!(tags.contains(&"✓ ラウンド完了".to_owned()), "{tags:?}");
     assert!(!tags.contains(&"✓ 完了".to_owned()), "{tags:?}");
 }
+
+#[test]
+fn ending_a_review_asks_first_and_return_keeps_it_running() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    act(&mut screen, Action::Close);
+    assert!(screen.close_alert.is_some());
+    assert_eq!(commands(&link), vec![]);
+    // Return answers the default button, キャンセル.
+    press(&mut screen, noa_gpui_core::Key::Enter);
+    assert!(screen.close_alert.is_none());
+    assert_eq!(commands(&link), vec![]);
+    // Escape cancels too.
+    act(&mut screen, Action::Close);
+    press(&mut screen, noa_gpui_core::Key::Escape);
+    assert_eq!(commands(&link), vec![]);
+    // レビューを終了, chosen on purpose, ends it.
+    act(&mut screen, Action::Close);
+    press(&mut screen, noa_gpui_core::Key::Tab);
+    press(&mut screen, noa_gpui_core::Key::Space);
+    assert!(screen.close_alert.is_none());
+    assert_eq!(commands(&link), vec![Command::Close]);
+}

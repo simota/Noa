@@ -212,7 +212,7 @@ Window title 「Noa · 多角レビュー」 (Japanese locale) / "Noa · Multi-A
      - **マトリクス**: lens × severity counts of live findings (rows: the session's lenses, その他, and built-in lenses nobody holds, greyed 「担当なし」; columns 致命的…情報 and 計). A click on a cell opens 指摘 filtered to it. Below, file coverage: per target file, +/−, findings by severity, reviewers that reported it reviewed, reviewers that skipped it (with reason); a file no reviewer reported reviewing is marked 未レビュー; omitted files are listed greyed with the reason.
      - **レポート**: the report of L1-6 as it stands (headed 暫定 until a verdict), with コピー and 保存.
    - Right, **指摘スレッド** for the selected finding: id, claim, severity / lens / status / confidence, location (opens the snapshot file), the lead's rationale and fix; 出典: each raw finding (reviewer, round, proposed severity, claim, evidence, fix); スタンス: per reviewer, by round (支持 / 反論 / 補足 / 不明 / 取り下げ, note, evidence, proposed severity); 履歴: status and severity changes by round. With nothing selected: the lead's latest summary and the verdict.
-   - Bottom: composer (宛先 全員 / each reviewer / リード; 送信) and ラウンド後に停止, 次のラウンドへ (while held), +1, +3, 再試行 (when something is retryable), 終了.
+   - Bottom: composer (宛先 全員 / each reviewer / リード; 送信) and ラウンド後に停止, 次のラウンドへ (while held), +1, +3, 再試行 (when something is retryable), 終了 (asks first: an alert whose default, キャンセル, answers Return and Escape, since a review ended before its last round can be neither resumed nor extended).
    - A read-only stored review has no composer and no round controls, except +1 / +3 when extendable (they resume it) and 再開 when unfinished.
 
 ### L1-6. Report

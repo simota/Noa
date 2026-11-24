@@ -69,6 +69,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::OpenDiscussion
         | AppCommand::OpenCompetition
         | AppCommand::OpenReview
+        | AppCommand::OpenVerify
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
         | AppCommand::ToggleAutoApprove

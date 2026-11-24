@@ -414,6 +414,7 @@ impl MacosMenu {
                     None,
                 ),
                 &MenuItem::with_id(AppCommand::OpenReview.menu_id(), "Review", true, None),
+                &MenuItem::with_id(AppCommand::OpenVerify.menu_id(), "Verify", true, None),
                 &auto_approve,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(

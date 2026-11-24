@@ -247,6 +247,7 @@ impl App {
                 self.open_helper_program(crate::helper_program::COMPETITION)
             }
             AppCommand::OpenReview => self.open_helper_program(crate::helper_program::REVIEW),
+            AppCommand::OpenVerify => self.open_helper_program(crate::helper_program::VERIFY),
             AppCommand::Spawn(command) => crate::commands::spawn_in_background(
                 command,
                 self.focused_pane_cwd().as_deref().map(std::path::Path::new),

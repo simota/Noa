@@ -1,9 +1,10 @@
 //! Start a noa-gpui widget program (`widgets/<crate>`, with its own event
 //! loop) beside Noa: the agent dashboard (`agent-dashboard.open`), the repo
 //! browser (`repo-browser.open`), the discussion (`discussion.open`), the
-//! competition (`competition.open`) and the review (`review.open`). They
-//! read Noa's panes through the control server, so each runs as a process of
-//! its own. Only the review gets an argument: the focused pane's directory.
+//! competition (`competition.open`), the review (`review.open`) and the verify
+//! (`verify.open`). They read Noa's panes through the control server, so each
+//! runs as a process of its own. Only the review and the verify get an
+//! argument: the focused pane's directory.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -54,13 +55,23 @@ pub(crate) const REVIEW: HelperProgram = HelperProgram {
     crate_name: "review",
 };
 
+pub(crate) const VERIFY: HelperProgram = HelperProgram {
+    title: "Verify",
+    bundled: "Noa Verify",
+    crate_name: "verify",
+};
+
 /// What `helper` is started with, given the working directory of the
 /// focused pane (local, an existing directory, as `App::focused_pane_cwd`
-/// gives it): the review takes it as `--repo=`, the place its start view
-/// offers first; every other program starts with no argument.
+/// gives it): the review and the verify take it as `--repo=`, the place their
+/// start views offer first; every other program starts with no argument.
 pub(crate) fn launch_args(helper: HelperProgram, focused_cwd: Option<&str>) -> Vec<String> {
     match focused_cwd {
-        Some(cwd) if helper.crate_name == REVIEW.crate_name && Path::new(cwd).is_absolute() => {
+        Some(cwd)
+            if (helper.crate_name == REVIEW.crate_name
+                || helper.crate_name == VERIFY.crate_name)
+                && Path::new(cwd).is_absolute() =>
+        {
             vec![format!("--repo={cwd}")]
         }
         _ => Vec::new(),
@@ -284,6 +295,19 @@ mod tests {
     }
 
     #[test]
+    fn the_verify_dev_build_dirs_are_its_crate_target_dirs() {
+        // #TODO(agent): once widgets/verify exists (unit U1), fold VERIFY into
+        // the list above, which also checks that the crate's Cargo.toml is there.
+        let dirs = dev_build_dirs(VERIFY);
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs[0].ends_with("widgets/verify/target/debug"), "{dirs:?}");
+        assert!(
+            dirs[1].ends_with("widgets/verify/target/release"),
+            "{dirs:?}"
+        );
+    }
+
+    #[test]
     fn repo_browser_is_found_by_its_own_binary_name() {
         let exe_dir = scratch_dir("browser-exe");
         let dev = scratch_dir("browser-dev");
@@ -367,7 +391,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_review_is_given_the_focused_panes_directory() {
+    fn only_the_review_and_the_verify_are_given_the_focused_panes_directory() {
+        assert_eq!(
+            launch_args(VERIFY, Some("/Users/me/src/noa")),
+            ["--repo=/Users/me/src/noa"]
+        );
+        assert!(launch_args(VERIFY, None).is_empty());
+        assert!(launch_args(VERIFY, Some("relative/dir")).is_empty());
         assert_eq!(
             launch_args(REVIEW, Some("/Users/me/src/noa")),
             ["--repo=/Users/me/src/noa"]

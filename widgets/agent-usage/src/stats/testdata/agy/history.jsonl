@@ -1,0 +1,7 @@
+{"display":"SYNTHETIC-PROMPT one","timestamp":1795410000000,"workspace":"/home/synthetic/work/gamma","conversationId":"00000000-0000-4000-8000-0000000a9001"}
+{"display":"/usage","timestamp":1795410060000,"workspace":"/home/synthetic/work/gamma","conversationId":"00000000-0000-4000-8000-0000000a9001","type":"slash_command"}
+{"display":"SYNTHETIC-PROMPT two","timestamp":1795410120000,"workspace":"/home/synthetic/work/gamma","conversationId":"00000000-0000-4000-8000-0000000a9001"}
+{"display":"SYNTHETIC-PROMPT broken","timestamp":
+{"display":"SYNTHETIC-PROMPT three","timestamp":1795482000000,"workspace":"/home/synthetic/work/delta"}
+{"display":"SYNTHETIC-PROMPT four","timestamp":1795482060000,"workspace":"/home/synthetic/work/gamma","conversationId":"00000000-0000-4000-8000-0000000a9002"}
+{"display":"/help","timestamp":1795482120000,"workspace":"/home/synthetic/work/delta","type":"slash_command"}

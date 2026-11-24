@@ -1,0 +1,10 @@
+{"ev":"spawn","ts":1795395660,"argv":["claude","--model","synthetic"],"tier":"standard","worktree":null,"label":"w1","pane":1}
+{"ev":"send","ts":1795395661,"pane":1}
+{"ev":"spawn","ts":1795395720,"argv":["/opt/bin/claude"],"tier":"standard","worktree":null,"label":"w2","pane":2}
+{"ev":"spawn","ts":1795395780,"argv":["codex","exec"],"tier":"standard","worktree":null,"label":"w3","pane":3}
+{"ev":"spawn","ts":1795395840,"argv":["agy"],"tier":"standard","worktree":null,"label":"w4","pane":4}
+{"ev":"spawn","ts":1795395900,"argv":["./scripts/verify.sh"],"tier":"standard","worktree":null,"label":"w5","pane":5}
+{"ev":"spawn","ts":1795395960,"argv":["zsh","-lc","true"],"tier":"standard","worktree":null,"label":"w6","pane":6}
+{"ev":"spawn","ts":1795396020,"argv":["claude-helper"],"tier":"standard","worktree":null,"label":"w7","pane":7}
+{"ev":"outcome","ts":1795396100,"pane":3,"result":"ok"}
+{"ev":"close","ts":1795396200,"pane":1}

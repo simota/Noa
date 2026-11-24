@@ -2187,6 +2187,20 @@ fn refilling_replaces_only_the_note_it_wrote() {
         start::Form::from_session(&again).request,
         format!("依頼A\n\n{new_note}\n最後にテストを実行。")
     );
+    // A `- ` line the person added right after the note is theirs.
+    again.request = format!("{old_note}\n- 利用者が追加したテスト条件");
+    assert_eq!(
+        start::Form::from_session(&again).request,
+        format!("{new_note}\n- 利用者が追加したテスト条件")
+    );
+    // A note without its closing line is not taken for the widget's: it
+    // stays, and the new note follows.
+    let unclosed = old_note.replace("\n（前回のレビューの要修正はここまで）", "");
+    again.request = unclosed.clone();
+    assert_eq!(
+        start::Form::from_session(&again).request,
+        format!("{unclosed}\n\n{new_note}")
+    );
     // And with a sentence of the person's that only mentions the mark.
     again.request = "（前回のレビュー の件も見て）".into();
     assert_eq!(
@@ -2409,35 +2423,184 @@ fn session_raw_path(session: &Session, id: &str) -> String {
         .clone()
 }
 
-#[test]
-fn more_past_reviews_read_only_the_next_page_and_ask_the_lock_again() {
-    let root = std::env::temp_dir().join(format!("noa-review-paging-{}", std::process::id()));
+/// `n` stored copies of `log` under a new `root`, `rev-<base + i>`.
+fn stored_many(
+    name: &str,
+    log: &[Vec<review::model::reduce::Event>],
+    base: usize,
+    n: usize,
+) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("noa-review-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let log = crate::demo::held_log();
-    let n = start::PAST_LIMIT + 3;
     for i in 0..n {
-        let dir = root.join(format!("rev-{}", 2_000 + i));
+        let dir = root.join(format!("rev-{}", base + i));
         let mut store = Store::create(&dir, &log[0]).unwrap();
         store.append_all(&log[1..]).unwrap();
     }
-    let (channel, _link) = Channel::fake();
+    root
+}
+
+fn past_screen(root: &Path) -> (Review, crate::live::FakeLink) {
+    let (channel, link) = Channel::fake();
     let mut screen = live_ready(channel);
-    screen.past_root = Some(root.clone());
+    screen.past_root = Some(root.to_owned());
     screen.refresh_past();
     screen.rebuild(&mut TextStore::new(Default::default()));
-    // The first listed log breaks, and another window takes the second.
+    (screen, link)
+}
+
+/// Presses さらに表示 until it is gone (at most `limit` times).
+fn page_to_the_end(screen: &mut Review, limit: usize) {
+    for _ in 0..limit {
+        if !acts(screen).contains(&Action::MorePast) {
+            return;
+        }
+        act(screen, Action::MorePast);
+    }
+    panic!("さらに表示 never went away");
+}
+
+fn listed_dirs(screen: &Review) -> Vec<PathBuf> {
+    screen.past.iter().map(|l| l.dir.clone()).collect()
+}
+
+#[test]
+fn more_past_reviews_rereads_a_changed_log_and_asks_the_lock_again() {
+    let n = start::PAST_LIMIT + 3;
+    let root = stored_many("paging", &crate::demo::held_log(), 2_000, n);
+    let (mut screen, _link) = past_screen(&root);
+    // The first listed (unfinished) review was finished by another
+    // window meanwhile, and another window takes the second.
     let first = screen.past[0].dir.clone();
-    std::fs::write(first.join(store::EVENTS_FILE), "broken\n").unwrap();
+    assert!(!screen.past[0].summary.as_ref().unwrap().closed);
+    std::fs::remove_file(first.join(store::EVENTS_FILE)).unwrap();
+    let done = crate::demo::log();
+    let mut store = Store::create(&first, &done[0]).unwrap();
+    store.append_all(&done[1..]).unwrap();
+    drop(store);
     let (_held, _) = Store::open(&screen.past[1].dir).unwrap();
     act(&mut screen, Action::MorePast);
     assert_eq!(screen.past.len(), n);
-    // Not read again: its summary is the one listed before.
-    assert!(screen.past[0].summary.is_ok());
+    // Read again: finished, so 表示, not 再開.
+    assert!(screen.past[0].summary.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumePast(first.clone())));
     // Asked again: the held one is busy now.
     assert!(screen.past[1].summary.as_ref().unwrap().busy);
     // The oldest page is there, and the unfinished oldest resumes itself.
     let oldest = screen.past.last().unwrap().dir.clone();
     assert!(oldest.ends_with("rev-2000"));
     assert!(acts(&screen).contains(&Action::ResumePast(oldest)));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn past_reviews_added_or_gone_between_pages_end_without_gaps_or_doubles() {
+    let log = crate::demo::log();
+    let n = 2 * start::PAST_LIMIT + 1;
+    // A newer review arrives after the first page.
+    let root = stored_many("paging-new", &log, 3_000, n);
+    let (mut screen, _link) = past_screen(&root);
+    let dir = root.join("rev-9999");
+    let mut store = Store::create(&dir, &log[0]).unwrap();
+    store.append_all(&log[1..]).unwrap();
+    drop(store);
+    page_to_the_end(&mut screen, 5);
+    let dirs = listed_dirs(&screen);
+    assert_eq!(dirs.len(), n + 1);
+    assert_eq!(screen.past_total, n + 1);
+    let unique: std::collections::BTreeSet<_> = dirs.iter().collect();
+    assert_eq!(unique.len(), dirs.len());
+    let _ = std::fs::remove_dir_all(&root);
+
+    // The last review of the first page is taken away.
+    let root = stored_many("paging-gone", &log, 4_000, n);
+    let (mut screen, _link) = past_screen(&root);
+    let last = screen.past.last().unwrap().dir.clone();
+    std::fs::remove_dir_all(&last).unwrap();
+    page_to_the_end(&mut screen, 5);
+    let dirs = listed_dirs(&screen);
+    assert_eq!(dirs.len(), n - 1);
+    assert_eq!(screen.past_total, n - 1);
+    assert!(!dirs.contains(&last));
+    let unique: std::collections::BTreeSet<_> = dirs.iter().collect();
+    assert_eq!(unique.len(), dirs.len());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_noa_older_than_0_9_13_gets_a_reason_instead_of_fix_buttons() {
+    for (version, offered) in [("0.9.12", false), ("0.9.13", true)] {
+        let (mut screen, link) = live_with_dirs(crate::demo::session());
+        link.versions.send(version.to_owned()).unwrap();
+        screen.poll_live(&mut TextStore::new(Default::default()));
+        assert_eq!(!fix_actions(&screen).is_empty(), offered, "{version}");
+        assert_eq!(
+            all_text(&screen).contains("0.9.13 以降が必要"),
+            !offered,
+            "{version}"
+        );
+    }
+}
+
+#[test]
+fn a_finding_a_new_state_hides_lets_the_selection_and_the_fix_scope_go() {
+    let (mut screen, link) = live_with_dirs(crate::demo::held());
+    act(&mut screen, Action::SelectFinding(Some("F2".into())));
+    assert!(
+        fix_actions(&screen)
+            .iter()
+            .any(|(_, s)| *s == FixScope::Finding("F2".into()))
+    );
+    // The lead rejects F2; the default filters hide rejected findings.
+    let mut next = crate::demo::held();
+    let f2 = next.findings.iter_mut().find(|f| f.id == "F2").unwrap();
+    f2.status = FindingStatus::Rejected;
+    next.rev += 1;
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(next)),
+            reply_root: Some(PathBuf::from("/w/.noa/reviews/rev-demo-held")),
+            session_dir: Some(PathBuf::from("/data/noa/reviews/rev-demo-held")),
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert_eq!(screen.selected, None);
+    assert!(
+        fix_actions(&screen)
+            .iter()
+            .all(|(_, s)| *s != FixScope::Finding("F2".into()))
+    );
+    // A request for it, sent before the screen moved on, takes nothing.
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Codex,
+            scope: FixScope::Finding("F2".into()),
+        },
+    );
+    assert!(
+        !commands(&link)
+            .iter()
+            .any(|c| matches!(c, Command::RequestFix(_)))
+    );
+}
+
+#[test]
+fn a_stored_review_another_window_runs_shows_the_running_note_and_follows_its_lock() {
+    let note = "レビュアーは作業ツリーも参照する";
+    let root = std::env::temp_dir().join(format!("noa-review-held-note-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let held = Store::open(&dir).unwrap();
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(screen.read_only);
+    assert!(all_text(&screen).contains(note));
+    // The other window lets go: the note follows at the next look.
+    drop(held);
+    screen.busy_checked = None;
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert!(!all_text(&screen).contains(note));
     let _ = std::fs::remove_dir_all(root);
 }

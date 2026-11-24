@@ -316,11 +316,16 @@ pub(super) const AGAIN_MARK: &str = "（前回のレビュー ";
 /// The line under the note's heading.
 const AGAIN_ASK: &str = "前回は次の指摘を必ず直すものとしました。直っているか、直し方に新しい問題がないかを確かめてください:";
 
-/// Where in `request` a note [`again_note`] wrote lies: its heading alone
-/// on a line (「（前回のレビュー <id> の総合判定: <decision>）」), the line
-/// [`AGAIN_ASK`] right under it and the `- ` finding lines after that, with
-/// the blank line before it. Anything else the person wrote, before, after
-/// or inside a sentence, is not part of it.
+/// The line a note [`again_note`] writes ends with: what the widget wrote
+/// stops there, so a line the person adds after it, `- ` lines too, stays
+/// theirs.
+const AGAIN_END: &str = "（前回のレビューの要修正はここまで）";
+
+/// Where in `request` a note [`again_note`] wrote lies: from its heading
+/// alone on a line (「（前回のレビュー <id> の総合判定: <decision>）」), with
+/// the line [`AGAIN_ASK`] right under it, through the line [`AGAIN_END`],
+/// with the blank line before it. Without that closing line it is not one
+/// (nothing of the person's is taken for it).
 fn again_block(request: &str) -> Option<std::ops::Range<usize>> {
     let mut at = 0;
     let lines: Vec<(usize, &str)> = request
@@ -339,10 +344,10 @@ fn again_block(request: &str) -> Option<std::ops::Range<usize>> {
         {
             continue;
         }
-        let mut end = i + 2;
-        while bare(end).is_some_and(|l| l.starts_with("- ")) {
-            end += 1;
-        }
+        let Some(close) = (i + 2..lines.len()).find(|&j| bare(j) == Some(AGAIN_END)) else {
+            continue;
+        };
+        let end = close + 1;
         let from = match i.checked_sub(1) {
             Some(prev) if lines[prev].1.trim().is_empty() => lines[prev].0,
             _ => *start,
@@ -384,6 +389,8 @@ pub(super) fn again_note(session: &Session) -> Option<String> {
             f.claim
         ));
     }
+    out.push('\n');
+    out.push_str(AGAIN_END);
     Some(out)
 }
 

@@ -25,6 +25,9 @@ pub struct FixRequest {
     pub ids: Vec<String>,
 }
 
+/// Why a fix is refused on a Noa that cannot say a new tab's auto approval.
+pub const NO_TAB_AUTO_APPROVE: &str = "接続先の Noa は新しいタブの自動承認を止められないため、修正を依頼できません（Noa 0.9.13 以降が必要）";
+
 /// The variable the fixing agent's prompt reaches its pane's shell in.
 pub const PROMPT_VAR: &str = "NOA_REVIEW_FIX_PROMPT";
 
@@ -83,6 +86,11 @@ pub fn request<C: Connect>(connector: &mut C, req: &FixRequest) -> Result<String
     let mut conn = connector
         .connect()
         .map_err(|why| format!("Noa に接続できないため、修正を依頼できません: {why}"))?;
+    // An older Noa would give the fix tab the global auto-approve setting:
+    // refused before the task is written.
+    if !conn.sets_tab_auto_approve() {
+        return Err(NO_TAB_AUTO_APPROVE.to_owned());
+    }
     let snapshot = store::target_dir(&store::reply_dir(&req.dir, session));
     let text = export::fix_task(session, &ids, &snapshot);
     let task = store::write_fix_task(&req.dir, session, &text)
@@ -130,6 +138,8 @@ mod tests {
     struct World {
         down: bool,
         refuse: bool,
+        /// A Noa before 0.9.13: `autoApprove` on a new tab is ignored.
+        old: bool,
         spawned: Vec<(Placement, PaneSpec)>,
     }
 
@@ -172,6 +182,9 @@ mod tests {
         }
         fn focus(&mut self, _: u64) -> Result<(), NoaError> {
             Ok(())
+        }
+        fn sets_tab_auto_approve(&self) -> bool {
+            !self.0.borrow().old
         }
     }
 
@@ -325,6 +338,17 @@ mod tests {
 
         assert!(noa.0.borrow().spawned.is_empty());
         assert!(!reply(&req).join("fix-1.md").exists());
+    }
+
+    #[test]
+    fn a_noa_that_cannot_stop_a_tabs_auto_approval_gets_no_task_and_no_tab() {
+        let workdir = temp("old-noa");
+        let noa = FakeNoa::default();
+        noa.0.borrow_mut().old = true;
+        let why = request_with(&noa, &request(&workdir, &["F1"])).unwrap_err();
+        assert_eq!(why, NO_TAB_AUTO_APPROVE);
+        assert!(noa.0.borrow().spawned.is_empty());
+        assert!(!workdir.join(".noa").exists());
     }
 
     #[test]

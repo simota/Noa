@@ -118,6 +118,10 @@ pub trait Noa {
     /// Brings `pane` (and its window and tab) to the front with keyboard
     /// focus (`noa.focusPane`).
     fn focus(&mut self, pane: u64) -> Result<(), NoaError>;
+    /// Whether this Noa takes `autoApprove` on `noa.newTab` (0.9.13 and
+    /// later): an older one ignores it, and its new tab takes the global
+    /// `auto-approve` setting.
+    fn sets_tab_auto_approve(&self) -> bool;
 }
 
 /// Opens connections to Noa; the runner calls it again after a lost one.
@@ -133,35 +137,19 @@ pub struct IpcConnect;
 
 pub struct IpcNoa {
     client: Client,
+    /// `noa.hello`'s `serverVersion`.
+    version: String,
 }
 
 impl Connect for IpcConnect {
     type Conn = IpcNoa;
 
     fn connect(&mut self) -> Result<IpcNoa, String> {
-        let (config, _diagnostics) =
-            noa_config::load_startup_config(noa_config::ConfigOverrides::default())
-                .map_err(|err| format!("設定を読めません: {err:#}"))?;
-        if !config.server_enable {
-            return Err(SERVER_DISABLED.into());
-        }
-        let token = match config.server_token.filter(|token| !token.trim().is_empty()) {
-            Some(token) => token,
-            None => {
-                let path = noa_config::server_token_path()
-                    .ok_or_else(|| "トークンの場所がわかりません".to_owned())?;
-                std::fs::read_to_string(&path)
-                    .map(|token| token.trim().to_owned())
-                    .ok()
-                    .filter(|token| !token.is_empty())
-                    .ok_or_else(|| format!("トークンがありません: {}", path.display()))?
-            }
-        };
-        let url = control_url(&config.server_bind, config.server_port);
+        let (url, token) = endpoint()?;
         // An older Noa ignores `refuseShell` and would type into a shell.
-        if !server_version(&url, &token).is_some_and(|v| honours_refuse_shell(&v)) {
-            return Err(UNSAFE_SEND.to_owned());
-        }
+        let version = server_version(&url, &token)
+            .filter(|v| honours_refuse_shell(v))
+            .ok_or_else(|| UNSAFE_SEND.to_owned())?;
         let scopes = ScopeSet::from_strings(["read", "control", "input"]);
         let mut client = match Client::connect(&url, &token, scopes) {
             Ok(client) => client,
@@ -183,8 +171,38 @@ impl Connect for IpcConnect {
         client
             .subscribe(&[EventKind::StateChanged], None)
             .map_err(|err| format!("購読できません: {err}"))?;
-        Ok(IpcNoa { client })
+        Ok(IpcNoa { client, version })
     }
+}
+
+/// The control server's URL and token, from the config.
+fn endpoint() -> Result<(String, String), String> {
+    let (config, _diagnostics) =
+        noa_config::load_startup_config(noa_config::ConfigOverrides::default())
+            .map_err(|err| format!("設定を読めません: {err:#}"))?;
+    if !config.server_enable {
+        return Err(SERVER_DISABLED.into());
+    }
+    let token = match config.server_token.filter(|token| !token.trim().is_empty()) {
+        Some(token) => token,
+        None => {
+            let path = noa_config::server_token_path()
+                .ok_or_else(|| "トークンの場所がわかりません".to_owned())?;
+            std::fs::read_to_string(&path)
+                .map(|token| token.trim().to_owned())
+                .ok()
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| format!("トークンがありません: {}", path.display()))?
+        }
+    };
+    Ok((control_url(&config.server_bind, config.server_port), token))
+}
+
+/// The running Noa's version (`noa.hello` only, read scope), for what the
+/// window can offer before anything connects; `None` when it cannot tell.
+pub fn probe_version() -> Option<String> {
+    let (url, token) = endpoint().ok()?;
+    server_version(&url, &token)
 }
 
 fn control_url(bind: &str, port: u16) -> String {
@@ -219,15 +237,35 @@ pub(crate) const UNSAFE_SEND: &str =
 /// ignores the field (as `widgets/agent-dashboard` checks it).
 const REFUSE_SHELL_SINCE: (u64, u64, u64) = (0, 9, 12);
 
-/// Whether `version` (`noa.hello`'s `serverVersion`) is
-/// `REFUSE_SHELL_SINCE` or later. A version that does not parse is not.
-fn honours_refuse_shell(version: &str) -> bool {
+/// The first Noa that takes `autoApprove` on `noa.newTab` (the per-tab
+/// setting came with v0.9.13; 0.9.12 reads the request without it).
+const TAB_AUTO_APPROVE_SINCE: (u64, u64, u64) = (0, 9, 13);
+
+/// Why 修正を依頼 is not offered on an older Noa.
+pub(crate) fn no_tab_auto_approve(version: &str) -> String {
+    format!(
+        "この Noa（{version}）は新しいタブの自動承認を止められないため、修正を依頼できません（Noa 0.9.13 以降が必要）"
+    )
+}
+
+/// Whether `version` (`noa.hello`'s `serverVersion`) is `since` or later.
+/// A version that does not parse is not.
+fn at_least(version: &str, since: (u64, u64, u64)) -> bool {
     let core = version.split(['-', '+']).next().unwrap_or("");
     let parts: Vec<u64> = core.split('.').map_while(|n| n.parse().ok()).collect();
     match parts[..] {
-        [major, minor, patch] => (major, minor, patch) >= REFUSE_SHELL_SINCE,
+        [major, minor, patch] => (major, minor, patch) >= since,
         _ => false,
     }
+}
+
+fn honours_refuse_shell(version: &str) -> bool {
+    at_least(version, REFUSE_SHELL_SINCE)
+}
+
+/// Whether a Noa of `version` takes `autoApprove` on `noa.newTab`.
+pub(crate) fn sets_tab_auto_approve(version: &str) -> bool {
+    at_least(version, TAB_AUTO_APPROVE_SINCE)
 }
 
 /// The server's version from a `noa.hello` of our own: `noa_ipc::Client`
@@ -285,6 +323,10 @@ fn noa_error(err: ClientError) -> NoaError {
 }
 
 impl Noa for IpcNoa {
+    fn sets_tab_auto_approve(&self) -> bool {
+        sets_tab_auto_approve(&self.version)
+    }
+
     fn panes(&mut self) -> Result<Vec<PaneView>, NoaError> {
         let panels = self.client.list_panels().map_err(noa_error)?;
         Ok(panels.iter().map(view).collect())
@@ -406,6 +448,22 @@ mod tests {
         ] {
             assert_eq!(honours_refuse_shell(version), ok, "{version}");
         }
+    }
+
+    #[test]
+    fn only_a_noa_from_0_9_13_sets_a_new_tabs_auto_approve() {
+        for (version, ok) in [
+            ("0.9.12", false),
+            ("0.9.12-dev+abc", false),
+            ("0.9.13", true),
+            ("0.9.13-dev", true),
+            ("0.10.0", true),
+            ("1.0.0", true),
+            ("nope", false),
+        ] {
+            assert_eq!(sets_tab_auto_approve(version), ok, "{version}");
+        }
+        assert!(no_tab_auto_approve("0.9.12").contains("0.9.13 以降が必要"));
     }
 
     #[test]

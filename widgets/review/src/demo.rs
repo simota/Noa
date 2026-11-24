@@ -461,6 +461,7 @@ pub fn past() -> Vec<Listed> {
             busy,
             ..Summary::of(&Path::new(DIR).join(id), session)
         }),
+        stamp: None,
     };
     vec![
         row("rev-demo-held", &held, false),
@@ -468,6 +469,7 @@ pub fn past() -> Vec<Listed> {
         Listed {
             dir: Path::new(DIR).join("rev-broken"),
             summary: Err("events.jsonl line 3 is damaged: expected value".into()),
+            stamp: None,
         },
     ]
 }

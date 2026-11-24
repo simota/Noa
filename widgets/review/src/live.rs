@@ -96,6 +96,9 @@ pub struct Channel {
     /// One `()` each time a runner has stopped and let go of its log, so
     /// the list of past reviews is read again.
     pub released: Receiver<()>,
+    /// The running Noa's version, once a look at it at startup could read
+    /// it (what 修正を依頼 can offer depends on it).
+    pub versions: Receiver<String>,
     commands: Sender<(u64, Command)>,
     generation: Arc<AtomicU64>,
 }
@@ -136,8 +139,19 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
     let (released_tx, released) = mpsc::channel();
+    let (version_tx, versions) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let told = Arc::clone(&wake);
+    std::thread::Builder::new()
+        .name("review-version".into())
+        .spawn(move || {
+            if let Some(version) = crate::session::ipc::probe_version() {
+                let _ = version_tx.send(version);
+                told();
+            }
+        })
+        .expect("spawn review-version thread");
     let generation = Arc::new(AtomicU64::new(0));
     let _ = snapshot_tx.send(Snapshot {
         link,
@@ -178,6 +192,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
         snapshots,
         notices,
         released,
+        versions,
         commands,
         generation,
     }
@@ -411,6 +426,7 @@ pub struct FakeLink {
     pub snapshots: Sender<Snapshot>,
     pub notices: Sender<Notice>,
     pub released: Sender<()>,
+    pub versions: Sender<String>,
     pub commands: Receiver<(u64, Command)>,
 }
 
@@ -421,11 +437,13 @@ impl Channel {
         let (snapshot_tx, snapshots) = mpsc::channel();
         let (notice_tx, notices) = mpsc::channel();
         let (released_tx, released) = mpsc::channel();
+        let (version_tx, versions) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let channel = Channel {
             snapshots,
             notices,
             released,
+            versions,
             commands,
             generation: Arc::new(AtomicU64::new(0)),
         };
@@ -433,6 +451,7 @@ impl Channel {
             snapshots: snapshot_tx,
             notices: notice_tx,
             released: released_tx,
+            versions: version_tx,
             commands: command_rx,
         };
         (channel, link)

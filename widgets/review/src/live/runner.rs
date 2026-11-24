@@ -1668,6 +1668,10 @@ mod tests {
             Ok(())
         }
 
+        fn sets_tab_auto_approve(&self) -> bool {
+            true
+        }
+
         fn focus(&mut self, pane: u64) -> Result<(), NoaError> {
             let mut w = self.0.borrow_mut();
             if !w.panes.contains_key(&pane) {

@@ -168,10 +168,20 @@ fn run(cmd: Command, cap: u64) -> Result<Vec<u8>, String> {
     })
 }
 
-fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
+/// One line git prints, its bytes as they are: only the newline git ends
+/// it with is taken off (a path may begin or end with spaces).
+fn git_line(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut cmd = git(dir);
     cmd.args(args);
-    run(cmd, 64 * 1024).map(|out| String::from_utf8_lossy(&out).trim().to_owned())
+    let mut out = run(cmd, 64 * 1024)?;
+    if out.last() == Some(&b'\n') {
+        out.pop();
+    }
+    Ok(out)
+}
+
+fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
+    git_line(dir, args).map(|out| String::from_utf8_lossy(&out).into_owned())
 }
 
 fn commit_of(dir: &Path, rev: &str) -> Option<String> {
@@ -418,8 +428,9 @@ pub fn capture(target: &Target, dest: &Path, now: Millis) -> Result<TargetManife
 
 /// The top level of the work tree holding `path`.
 pub fn repo_root(path: &Path) -> Result<PathBuf, String> {
-    git_text(path, &["rev-parse", "--show-toplevel"])
-        .map(PathBuf::from)
+    use std::os::unix::ffi::OsStringExt;
+    git_line(path, &["rev-parse", "--show-toplevel"])
+        .map(|bytes| PathBuf::from(std::ffi::OsString::from_vec(bytes)))
         .map_err(|_| format!("{} は git の作業ツリーではありません", path.display()))
 }
 
@@ -1269,6 +1280,38 @@ mod tests {
         );
         assert_eq!(manifest.document_name.as_deref(), Some("plan.md"));
         assert_eq!(manifest.files[0].lines, 1);
+    }
+
+    #[test]
+    fn a_repository_whose_name_ends_in_a_space_is_not_taken_for_its_neighbour() {
+        let parent = temp("space");
+        for (name, file) in [("repo", "neighbour.txt"), ("repo ", "mine.txt")] {
+            let dir = parent.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            sh(&dir, &["init", "-q", "-b", "main"]);
+            fs::write(dir.join(file), "x\n").unwrap();
+            sh(&dir, &["add", "."]);
+            sh(&dir, &["commit", "-q", "-m", "c"]);
+            fs::write(dir.join(file), "y\n").unwrap();
+        }
+        let mine = parent.join("repo ");
+        let top = repo_root(&mine).unwrap();
+        assert_eq!(
+            fs::canonicalize(&top).unwrap(),
+            fs::canonicalize(&mine).unwrap()
+        );
+        let target = Target {
+            kind: TargetKind::Git,
+            path: Some(mine.clone()),
+            base: Some("main".into()),
+            head: Head::Worktree,
+            paths: Vec::new(),
+            text: None,
+            workdir: None,
+        };
+        let manifest = capture(&target, &temp("space-out").join("t"), 1).unwrap();
+        let files: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(files, ["mine.txt"]);
     }
 
     #[test]

@@ -61,6 +61,10 @@ pub(crate) const MIN_WINDOW: (f64, f64) = (
     600.0,
 );
 
+/// How often a stored, unfinished review on screen asks again whether
+/// another window's runner holds its log.
+const BUSY_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// The rounds the "+N" buttons add.
 const EXTEND_BY: [RoundNo; 2] = [1, 3];
 
@@ -232,6 +236,9 @@ pub struct Review {
     stored_dir: Option<PathBuf>,
     /// That log is free to write: no runner holds it.
     stored_free: bool,
+    /// When whether a runner holds it was last asked (the view asks again
+    /// every [`BUSY_RECHECK`] while the review is unfinished).
+    busy_checked: Option<std::time::Instant>,
     /// Rounds or a resume were asked for on the read-only review on
     /// screen: it stays shown until the runner's first snapshot of it
     /// arrives, then goes live.
@@ -250,6 +257,8 @@ pub struct Review {
     detection: start::Detection,
     /// Where that check reports, until it has.
     installed: Option<Receiver<Installed>>,
+    /// The running Noa's version, once the look at startup read it.
+    noa_version: Option<String>,
 
     start: start::Parts,
     board: WidgetId,
@@ -438,6 +447,7 @@ impl Review {
             past_total: 0,
             stored_dir: None,
             stored_free: false,
+            busy_checked: None,
             extending: false,
             report_stale: false,
             starting: false,
@@ -445,6 +455,7 @@ impl Review {
             built: None,
             detection: start::Detection::all_installed(),
             installed: None,
+            noa_version: None,
             start,
             board,
             left_host,
@@ -559,10 +570,7 @@ impl Review {
                 (past, total)
             }
             Source::Live(_) | Source::Snapshot => match self.past_root.as_deref() {
-                Some(root) => (
-                    store::list_sessions(root, self.past_limit),
-                    store::count_sessions(root),
-                ),
+                Some(root) => store::page_sessions(root, &self.past, self.past_limit),
                 None => (Vec::new(), 0),
             },
         };
@@ -612,6 +620,7 @@ impl Review {
         self.read_only = true;
         self.stored_dir = Some(dir.to_owned());
         self.stored_free = !store::is_busy(dir);
+        self.busy_checked = Some(std::time::Instant::now());
         self.report_stale = !matches!(self.source, Source::Demo)
             && store::report_is_stale(dir, self.session.as_deref().expect("just set"));
         self.rebuild(text);
@@ -849,16 +858,23 @@ impl Review {
         if let Err(why) = store::fix_workdir(session) {
             return Some(fix::FixOffer::Unavailable(why.to_owned()));
         }
+        // A Noa known to be older than 0.9.13 would let the fix tab take
+        // the global auto-approve setting (the request checks it again).
+        if let Some(version) = self
+            .noa_version
+            .as_deref()
+            .filter(|v| !crate::session::ipc::sets_tab_auto_approve(v))
+        {
+            return Some(fix::FixOffer::Unavailable(
+                crate::session::ipc::no_tab_auto_approve(version),
+            ));
+        }
         let kinds = match self.detection.fix_kinds() {
             Ok(kinds) => kinds,
             Err(why) => return Some(fix::FixOffer::Unavailable(why)),
         };
-        let scopes = match self
-            .selected
-            .as_ref()
-            .filter(|id| session.finding(id).is_some())
-        {
-            Some(id) => vec![(FixScope::Finding(id.clone()), 1)],
+        let scopes = match self.shown_selection() {
+            Some(id) => vec![(FixScope::Finding(id.to_owned()), 1)],
             None => [FixScope::MustFix, FixScope::Shown]
                 .into_iter()
                 .map(|scope| {
@@ -872,7 +888,10 @@ impl Review {
                 .filter(|(_, n)| *n > 0)
                 .collect(),
         };
-        let running = !self.read_only && !session.closed;
+        // Running here, or (a stored view) in another window whose runner
+        // holds the log.
+        let running = !session.closed
+            && (!self.read_only || (self.stored_dir.is_some() && !self.stored_free));
         Some(fix::FixOffer::Offered {
             kinds,
             scopes,
@@ -897,7 +916,11 @@ impl Review {
                 .into_iter()
                 .map(|f| f.id.clone())
                 .collect(),
-            FixScope::Finding(id) => vec![id.clone()],
+            // The selected one, while the board shows it.
+            FixScope::Finding(id) => (self.shown_selection() == Some(id.as_str()))
+                .then(|| id.clone())
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -1104,8 +1127,34 @@ impl Review {
         }
     }
 
+    /// A stored, unfinished review on screen: asks again (at most every
+    /// [`BUSY_RECHECK`]) whether another window holds its log, so what
+    /// depends on it (再開, +N, the running note of 修正を依頼) follows.
+    fn recheck_busy(&mut self) {
+        let Some(dir) = self.stored_dir.clone() else {
+            return;
+        };
+        if !self.read_only
+            || self.session.as_ref().is_none_or(|s| s.closed)
+            || self
+                .busy_checked
+                .is_some_and(|at| at.elapsed() < BUSY_RECHECK)
+        {
+            return;
+        }
+        self.busy_checked = Some(std::time::Instant::now());
+        let free = !store::is_busy(&dir);
+        if free != self.stored_free {
+            self.stored_free = free;
+            self.built = None;
+        }
+    }
+
     fn poll_live(&mut self, text: &mut TextStore) {
         self.poll_installed(text);
+        if matches!(self.source, Source::Live(_)) {
+            self.recheck_busy();
+        }
         let mut latest = None;
         let mut notices = Vec::new();
         let mut released = false;
@@ -1123,6 +1172,10 @@ impl Review {
             }
             while channel.released.try_recv().is_ok() {
                 released = true;
+            }
+            while let Ok(version) = channel.versions.try_recv() {
+                self.noa_version = Some(version);
+                self.built = None;
             }
         }
         let refused_start = self.starting && self.session.is_none() && !notices.is_empty();
@@ -1160,6 +1213,7 @@ impl Review {
                 self.starting = false;
             }
             self.session = snapshot.session;
+            self.drop_hidden_selection();
             if snapshot.reply_root.is_some() {
                 self.reply_root = snapshot.reply_root;
                 self.session_dir = snapshot.session_dir;
@@ -1186,14 +1240,27 @@ impl Review {
     /// Rebuilds after the filters changed: a selected finding they now
     /// hide is let go, so the thread and 修正を依頼 follow what is shown.
     fn refilter(&mut self, text: &mut TextStore) {
-        if let (Some(session), Some(id)) = (&self.session, &self.selected)
-            && session
-                .finding(id)
-                .is_none_or(|f| !board::passes(session, &self.filters, f))
-        {
+        self.drop_hidden_selection();
+        self.rebuild(text);
+    }
+
+    /// The selected finding, while the board shows it (it exists and the
+    /// filters let it through): what the thread and 修正を依頼 go by.
+    fn shown_selection(&self) -> Option<&str> {
+        let (session, id) = (self.session.as_ref()?, self.selected.as_deref()?);
+        session
+            .finding(id)
+            .is_some_and(|f| board::passes(session, &self.filters, f))
+            .then_some(id)
+    }
+
+    /// Lets the selection go once the board no longer shows it: after the
+    /// filters change, or a new state of the review (a finding rejected,
+    /// withdrawn or merged under filters that hide those).
+    fn drop_hidden_selection(&mut self) {
+        if self.selected.is_some() && self.shown_selection().is_none() {
             self.selected = None;
         }
-        self.rebuild(text);
     }
 
     fn toast(&mut self, message: impl Into<String>) {
@@ -1480,23 +1547,15 @@ impl Review {
                     self.rebuild(text);
                 }
             }
-            // Reads only the next page; the listed ones keep their
-            // summaries, and whether another window holds them is asked
-            // again.
+            // One more page, reconciled with the folder as it is now:
+            // unchanged rows are kept (their lock asked again), changed and
+            // new ones read, vanished ones dropped.
             Action::MorePast => {
                 if let (Source::Live(_) | Source::Snapshot, Some(root)) =
                     (&self.source, self.past_root.clone())
                 {
-                    for listed in &mut self.past {
-                        if let Ok(summary) = &mut listed.summary {
-                            summary.busy = store::is_busy(&listed.dir);
-                        }
-                    }
-                    let after = self.past.last().map(|l| l.dir.clone());
-                    let next =
-                        store::list_sessions_after(&root, after.as_deref(), start::PAST_LIMIT);
-                    self.past.extend(next);
-                    self.past_total = store::count_sessions(&root);
+                    let want = self.past.len() + start::PAST_LIMIT;
+                    (self.past, self.past_total) = store::page_sessions(&root, &self.past, want);
                     self.past_limit = self.past.len().max(start::PAST_LIMIT);
                 }
                 self.rebuild(text);
@@ -1535,6 +1594,10 @@ impl Review {
                     return;
                 };
                 let ids = self.fix_ids(&session, &scope);
+                if ids.is_empty() {
+                    self.toast("修正を依頼する指摘が表示されていません");
+                    return;
+                }
                 match (&self.source, self.session_dir.clone()) {
                     (Source::Live(_), Some(dir)) => {
                         self.send_cmd(Command::RequestFix(Box::new(FixRequest {

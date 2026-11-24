@@ -439,36 +439,73 @@ pub struct Summary {
 pub struct Listed {
     pub dir: PathBuf,
     pub summary: Result<Summary, String>,
+    /// The log's modification time and size when it was read: a log whose
+    /// stamp has moved on is read again.
+    pub stamp: Option<LogStamp>,
+}
+
+/// When a log was last written and how long it was then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogStamp {
+    pub modified: std::time::SystemTime,
+    pub len: u64,
+}
+
+/// `dir`'s log stamp, or `None` when it cannot be read.
+pub fn log_stamp(dir: &Path) -> Option<LogStamp> {
+    let meta = fs::metadata(dir.join(EVENTS_FILE)).ok()?;
+    Some(LogStamp {
+        modified: meta.modified().ok()?,
+        len: meta.len(),
+    })
+}
+
+/// `dir` listed: its log read now (stamped first, so a write during the
+/// read shows as a change next time).
+pub fn listed(dir: &Path) -> Listed {
+    let stamp = log_stamp(dir);
+    let summary = read_session(dir)
+        .map(|session| Summary {
+            busy: is_busy(dir),
+            ..Summary::of(dir, &session)
+        })
+        .map_err(|e| e.to_string());
+    Listed {
+        dir: dir.to_owned(),
+        summary,
+        stamp,
+    }
 }
 
 /// The newest `limit` reviews under `root`, newest first. Only the listed
 /// logs are read; a log that cannot be read is listed with why.
 pub fn list_sessions(root: &Path, limit: usize) -> Vec<Listed> {
-    list_sessions_after(root, None, limit)
+    page_sessions(root, &[], limit).0
 }
 
-/// The next `limit` reviews under `root` after the folder `after` (all
-/// from the newest without one), newest first: a page more of
-/// [`list_sessions`] that reads only its own logs.
-pub fn list_sessions_after(root: &Path, after: Option<&Path>, limit: usize) -> Vec<Listed> {
+/// The newest `count` reviews under `root` as the folder holds them now,
+/// and how many it holds: one listing gives both. A row of `shown` whose
+/// log has not changed (same stamp) is kept, only asked again whether
+/// another window holds it; a changed or new one is read; a folder gone
+/// from the listing is gone from the rows, and none comes twice.
+pub fn page_sessions(root: &Path, shown: &[Listed], count: usize) -> (Vec<Listed>, usize) {
     let dirs = session_dirs(root);
-    let start = match after {
-        Some(after) => dirs.iter().position(|d| d == after).map_or(0, |at| at + 1),
-        None => 0,
-    };
-    dirs.into_iter()
-        .skip(start)
-        .take(limit)
-        .map(|dir| {
-            let summary = read_session(&dir)
-                .map(|session| Summary {
-                    busy: is_busy(&dir),
-                    ..Summary::of(&dir, &session)
-                })
-                .map_err(|e| e.to_string());
-            Listed { dir, summary }
+    let total = dirs.len();
+    let rows = dirs
+        .into_iter()
+        .take(count)
+        .map(|dir| match shown.iter().find(|l| l.dir == dir) {
+            Some(old) if old.stamp.is_some() && old.stamp == log_stamp(&dir) => {
+                let mut row = old.clone();
+                if let Ok(summary) = &mut row.summary {
+                    summary.busy = is_busy(&dir);
+                }
+                row
+            }
+            _ => listed(&dir),
         })
-        .collect()
+        .collect();
+    (rows, total)
 }
 
 /// How many reviews `root` holds (no log is read).

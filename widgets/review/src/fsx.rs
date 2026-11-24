@@ -231,13 +231,56 @@ pub fn write_new_at(dir: &OwnedFd, name: &OsStr, bytes: &[u8]) -> io::Result<()>
     }
     // SAFETY: `fd` was just opened and nothing else owns it.
     let mut file = unsafe { File::from_raw_fd(fd) };
-    let written = file.write_all(bytes).and_then(|()| file.sync_all());
-    if written.is_err() {
-        drop(file);
-        // SAFETY: as above.
-        unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
+    let Err(err) = file.write_all(bytes).and_then(|()| file.sync_all()) else {
+        return Ok(());
+    };
+    // The half-written file goes, if its name still holds it; a cleanup
+    // that cannot be done is said, not dropped.
+    match remove_if_same_at(dir, OsStr::from_bytes(name.as_bytes()), &file) {
+        Ok(()) => Err(err),
+        Err(why) => Err(io::Error::new(
+            err.kind(),
+            format!("{err}（書きかけのファイルを消せませんでした: {why}）"),
+        )),
     }
-    written
+}
+
+/// Removes `name` from the directory `dir` only while it is `file` (the
+/// same device and inode, the entry itself not followed): a name taken by
+/// another file or link in the meantime is left alone and said.
+pub fn remove_if_same_at(dir: &OwnedFd, name: &OsStr, file: &File) -> io::Result<()> {
+    let c = c_name(name)?;
+    // SAFETY: `stat` is plain data the calls fill in.
+    let mut ours: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` is open; `ours` is writable.
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut ours) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as above.
+    let mut there: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `dir` is an open directory, `c` a C string, `there` writable.
+    let found = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            c.as_ptr(),
+            &mut there,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if found != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if there.st_dev != ours.st_dev || there.st_ino != ours.st_ino {
+        return Err(io::Error::other(format!(
+            "{} は別のファイルに置き換わっていたため消していません",
+            name.to_string_lossy()
+        )));
+    }
+    // SAFETY: as above.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Writes `bytes` to a new file `path` (under `base`): its directory is
@@ -345,6 +388,28 @@ mod tests {
             &open_dir(&base, &base.join("a/deeper"), true).unwrap_err()
         ));
         assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_cleanup_removes_only_the_file_it_made() {
+        let base = temp("cleanup");
+        let dir = open_dir(&base, &base.join("d"), true).unwrap();
+        write_new_at(&dir, OsStr::new("f"), b"ours").unwrap();
+        let ours = File::open(base.join("d/f")).unwrap();
+        // Its name now holds another file (and a link stands at a third).
+        fs::rename(base.join("d/f"), base.join("d/moved")).unwrap();
+        fs::write(base.join("d/f"), "theirs").unwrap();
+        let other = remove_if_same_at(&dir, OsStr::new("f"), &ours).unwrap_err();
+        assert!(other.to_string().contains("置き換わっていた"), "{other}");
+        assert_eq!(fs::read_to_string(base.join("d/f")).unwrap(), "theirs");
+        symlink(base.join("d/moved"), base.join("d/link")).unwrap();
+        assert!(remove_if_same_at(&dir, OsStr::new("link"), &ours).is_err());
+        assert!(fs::symlink_metadata(base.join("d/link")).is_ok());
+        // Under its own name, it goes.
+        remove_if_same_at(&dir, OsStr::new("moved"), &ours).unwrap();
+        assert!(!base.join("d/moved").exists());
+        // Gone already: said, not ignored.
+        assert!(remove_if_same_at(&dir, OsStr::new("moved"), &ours).is_err());
     }
 
     #[test]

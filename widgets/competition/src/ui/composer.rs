@@ -24,8 +24,7 @@ pub(super) struct Parts {
     built_for: Option<String>,
 }
 
-const NEXT_ROUND_HINT: &str =
-    "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）";
+const NEXT_ROUND_HINT: &str = "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）";
 /// A panel's deciding round before its verdict brief: that brief carries
 /// every intervention of the competition, whatever its addressees, so
 /// nothing stays blind to the lead.

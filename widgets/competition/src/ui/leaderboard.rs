@@ -10,9 +10,7 @@ use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use competition::model::aggregate::{PanelScores, SPREAD_WARN};
-use competition::model::types::{
-    Brief, PartId, Participant, Round, RoundKind, RoundNo, Session,
-};
+use competition::model::types::{Brief, PartId, Participant, Round, RoundKind, RoundNo, Session};
 
 use super::{Action, caption, gap, heading, keep_scroll, scroll_column, spacer, tag};
 

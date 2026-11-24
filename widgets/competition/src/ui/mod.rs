@@ -2953,7 +2953,11 @@ mod tests {
         let mut session = crate::demo::panel_session();
         let last = session.rounds.len() - 1;
         session.rounds[last].verdict_brief = None;
-        for to in [ids(&[]), ids(&["judge"]), ids(&["judge", "judge-2", "judge-3"])] {
+        for to in [
+            ids(&[]),
+            ids(&["judge"]),
+            ids(&["judge", "judge-2", "judge-3"]),
+        ] {
             assert_eq!(composer::hint(&session, &to), verdict, "{to:?}");
         }
         // The verdict brief carries every intervention, whatever its
@@ -2971,8 +2975,14 @@ mod tests {
         // The last round has no next round unless extended: delivery to the
         // lead is stated as certain, to the recipients as conditional.
         for hint in [verdict, verdict_too] {
-            assert!(hint.contains("最終講評のブリーフでリード審判に届きます"), "{hint}");
-            assert!(hint.contains("延長した場合は次のラウンドのブリーフで宛先パネルに届きます"), "{hint}");
+            assert!(
+                hint.contains("最終講評のブリーフでリード審判に届きます"),
+                "{hint}"
+            );
+            assert!(
+                hint.contains("延長した場合は次のラウンドのブリーフで宛先パネルに届きます"),
+                "{hint}"
+            );
         }
 
         // A round before the last: the next round's briefs, until the

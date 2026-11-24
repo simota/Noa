@@ -734,10 +734,14 @@ impl Session {
         }
     }
 
-    /// Whether the lead's accepted scorecard of the current round asks to
-    /// end the competition early (panel only).
+    /// Whether the current round is still being judged and the lead's
+    /// accepted scorecard of it asks to end the competition early (panel
+    /// only). A judged round no longer decides: the last round's card
+    /// always closes, and a held competition extended after its verdict
+    /// keeps that round current.
     fn lead_closes_current_round(&self) -> bool {
         self.current_round()
+            .filter(|round| round.phase == Phase::Judging)
             .and_then(|round| round.scorecards.get(&self.judge.id))
             .is_some_and(|card| card.close)
     }

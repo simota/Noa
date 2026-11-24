@@ -2854,6 +2854,51 @@ mod tests {
     }
 
     #[test]
+    fn a_held_panel_extended_after_its_verdict_extends_again() {
+        let mut l = Logged::panel(Some(1));
+        l.step(Input::UserSetHold { hold: true, at: 3 });
+        l.compete(1);
+        l.score_all(1, [(70, 80), (72, 79), (74, 78)]);
+        l.step(Input::Sent {
+            round: 1,
+            part: seat(0),
+            at: 5_000,
+        });
+        l.write(1, 0, r#"{"winner": "codex", "final_verdict": "codex"}"#);
+        assert!(l.engine.session().closed);
+
+        l.step(Input::UserExtend { by: 1, at: 6_000 });
+        let session = l.engine.session();
+        assert_eq!(session.max_rounds, Some(2));
+        assert!(session.waits_to_continue());
+        // The last round's lead scorecard closes; its round is judged.
+        let r1 = session.current_round().unwrap();
+        assert_eq!(r1.phase, Phase::Closed);
+        assert!(r1.scorecards[&seat(0)].close);
+
+        // Folded from scratch, the second extension replays too.
+        let mut log = l.log.clone();
+        log.push(vec![Event::RoundsExtended {
+            max_rounds: 3,
+            at: 7_000,
+        }]);
+        let replayed = reduce::replay(&log);
+        let extended = l
+            .try_feed(Input::UserExtend { by: 1, at: 7_000 })
+            .map(|_| ());
+        assert!(
+            extended.is_ok() && replayed.is_ok(),
+            "engine: {extended:?}, fold: {replayed:?}"
+        );
+        l.folds();
+        assert_eq!(replayed.unwrap(), *l.engine.session());
+        let session = l.engine.session();
+        assert_eq!(session.max_rounds, Some(3));
+        assert_eq!(session.rounds.len(), 1);
+        assert!(session.waits_to_continue());
+    }
+
+    #[test]
     fn an_intervention_during_judging_reaches_the_verdict_and_next_briefs() {
         let mut l = Logged::panel(Some(2));
         l.compete(1);

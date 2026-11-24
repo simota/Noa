@@ -4,6 +4,7 @@
 
 pub mod capture;
 pub mod engine;
+pub mod fsx;
 pub mod model;
 pub mod store;
 

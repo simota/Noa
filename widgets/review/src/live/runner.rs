@@ -1704,7 +1704,7 @@ mod tests {
         let target = store::target_dir(&dir);
         assert_eq!(
             fs::read_to_string(target.join("document.md")).unwrap(),
-            "# Plan\n\n1. Move the data"
+            "# Plan\n\n1. Move the data\n"
         );
         assert!(target.join("manifest.json").is_file());
         let mut conn = fake.clone();

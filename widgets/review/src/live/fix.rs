@@ -192,6 +192,9 @@ mod tests {
         fn focus(&mut self, _: u64) -> Result<(), NoaError> {
             Ok(())
         }
+        fn close_pane(&mut self, _: u64) -> Result<(), NoaError> {
+            Ok(())
+        }
         fn server_version(&self) -> String {
             self.0
                 .borrow()

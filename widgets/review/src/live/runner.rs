@@ -90,6 +90,10 @@ pub enum Action {
     Extend {
         by: RoundNo,
     },
+    /// Closes every reviewer's and the lead's pane in Noa. Refused until
+    /// the review has ended, so no brief is cut off. A pane opened for a
+    /// fix request is the user's and stays.
+    ClosePanes,
     Stop,
 }
 
@@ -355,6 +359,9 @@ struct Runner<C: Connect, K: Clock> {
     updates: Sender<Update>,
     wake: Rc<dyn Fn()>,
     panes: BTreeMap<PartId, Pane>,
+    /// Panes asked to close whose outcome Noa could not tell (a timeout,
+    /// a lost link): when one closes after all, it goes without a notice.
+    closing: BTreeSet<u64>,
     /// The review tab's panes, column by column (each top to bottom),
     /// as this runner placed them.
     layout: Vec<Vec<u64>>,
@@ -395,6 +402,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             updates,
             wake,
             panes: BTreeMap::new(),
+            closing: BTreeSet::new(),
             layout: Vec::new(),
             sends: Vec::new(),
             watches: Vec::new(),
@@ -559,6 +567,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
         }
         self.panes = alive;
+        // Panes gone while the link was down need no quiet closing.
+        let live: BTreeSet<u64> = self.panes.values().map(|p| p.id).collect();
+        self.closing.retain(|id| live.contains(id));
         let at = self.clock.now();
         for (part, state) in states {
             self.feed(Input::AgentStateChanged { part, state, at })?;
@@ -580,7 +591,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 .map(|(k, _)| k.clone());
             if let Some(part) = part {
                 self.panes.remove(&part);
-                self.notice(format!("{part} のペインが閉じられました"));
+                if !self.closing.remove(&removed) {
+                    self.notice(format!("{part} のペインが閉じられました"));
+                }
             }
         }
         for view in changes.panes {
@@ -638,6 +651,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 Ok(Action::Focus { part }) => {
                     self.focus_pane(conn.as_deref_mut(), &part);
                 }
+                Ok(Action::ClosePanes) => {
+                    self.close_panes(conn.as_deref_mut());
+                }
                 Ok(Action::SetHold { hold }) => {
                     let at = self.clock.now();
                     self.feed_user(Input::UserSetHold { hold, at })?;
@@ -677,6 +693,47 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 self.notice(format!("{part} のペインは閉じられています"));
             }
             Err(e) => self.notice(format!("{part} のペインに移動できません: {e}")),
+        }
+    }
+
+    /// Closes the agents' panes of an ended review. A pane is forgotten
+    /// before Noa reports it gone, so its closing is not told as a pane the
+    /// user closed. Should the review go on (+N), its agents start again in
+    /// a new tab ([`Self::placements`]).
+    fn close_panes(&mut self, conn: Option<&mut C::Conn>) {
+        if !self.engine.session().closed {
+            self.notice("ペインはレビューが終わってから閉じられます");
+            return;
+        }
+        if self.panes.is_empty() {
+            self.notice("閉じるペインはありません");
+            return;
+        }
+        let Some(conn) = conn else {
+            self.notice("Noa に接続されていません");
+            return;
+        };
+        let mut failed = Vec::new();
+        let mut closed = 0;
+        for (part, pane) in std::mem::take(&mut self.panes) {
+            match conn.close_pane(pane.id) {
+                Ok(()) | Err(NoaError::PaneGone) => closed += 1,
+                // Noa may still close it (a timeout says nothing of the
+                // outcome): kept until it is reported gone.
+                Err(err) => {
+                    failed.push(format!("{part}: {err}"));
+                    self.closing.insert(pane.id);
+                    self.panes.insert(part, pane);
+                }
+            }
+        }
+        if failed.is_empty() {
+            self.notice(format!("{closed} 個のペインを閉じました"));
+        } else {
+            self.notice(format!(
+                "{closed} 個のペインを閉じました。閉じたか確かめられなかったもの: {}",
+                failed.join(", ")
+            ));
         }
     }
 
@@ -1494,12 +1551,17 @@ mod tests {
 
     #[derive(Default)]
     struct World {
+        /// `close_pane` closes the pane but answers as Noa does when its
+        /// UI thread is slow (-32009): the outcome is unknown.
+        close_unsure: bool,
         now: Millis,
         next_pane: u64,
         panes: BTreeMap<u64, FakePane>,
         events: VecDeque<Changes>,
         typed: Vec<(u64, String)>,
         focused: Vec<u64>,
+        /// Panes closed through `close_pane`.
+        closed: Vec<u64>,
         spawned: usize,
         /// Each tab's panes, column by column, split as Noa splits them
         /// (at most [`PANES_PER_AXIS`] along a row or a column).
@@ -1687,6 +1749,22 @@ mod tests {
                 return Err(NoaError::PaneGone);
             }
             w.focused.push(pane);
+            Ok(())
+        }
+
+        fn close_pane(&mut self, pane: u64) -> Result<(), NoaError> {
+            let mut w = self.0.borrow_mut();
+            if w.panes.remove(&pane).is_none() {
+                return Err(NoaError::PaneGone);
+            }
+            w.closed.push(pane);
+            w.events.push_back(Changes {
+                removed: vec![pane],
+                ..Changes::default()
+            });
+            if w.close_unsure {
+                return Err(NoaError::Refused("timed out (-32009)".into()));
+            }
             Ok(())
         }
     }
@@ -2371,6 +2449,123 @@ mod tests {
             .unwrap();
         runner.drain_actions(None).unwrap();
         assert!(notices(&updates)[0].contains("接続されていません"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_agents_panes_close_together_once_the_review_has_ended() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, actions, updates) = rig_on(
+            &fake,
+            new_start_on(
+                &root,
+                document("plan"),
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                1,
+            ),
+        );
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        for part in [":claude", ":codex"] {
+            fake.report(fake.pane_of(part), "input", None);
+        }
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        let _ = notices(&updates);
+        actions.send(Action::ClosePanes).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(fake.0.borrow().closed.is_empty(), "refused while running");
+        assert!(notices(&updates)[0].contains("レビューが終わってから"));
+        for part in ["claude", "codex"] {
+            reply(
+                &fake,
+                &mut runner,
+                &mut conn,
+                &PartId::new(part),
+                r#"{"summary": "fine"}"#,
+            );
+        }
+        step(&mut runner, &mut conn);
+        fake.report(fake.pane_of(":lead"), "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        reply(
+            &fake,
+            &mut runner,
+            &mut conn,
+            &PartId::new("lead"),
+            r#"{"summary": "Nothing found.", "verdict": {"decision": "approve", "rationale": "Sound."}}"#,
+        );
+        assert!(runner.engine.session().closed);
+        let spawned = fake.0.borrow().spawned;
+        let _ = notices(&updates);
+        actions.send(Action::ClosePanes).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(
+            fake.0.borrow().closed.len(),
+            3,
+            "the lead and both reviewers"
+        );
+        assert!(fake.0.borrow().panes.is_empty());
+        for _ in 0..3 {
+            step(&mut runner, &mut conn);
+        }
+        let told = notices(&updates);
+        assert_eq!(told, vec!["3 個のペインを閉じました".to_owned()]);
+        assert_eq!(fake.0.borrow().spawned, spawned, "nothing started again");
+        actions.send(Action::ClosePanes).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(
+            notices(&updates),
+            vec!["閉じるペインはありません".to_owned()]
+        );
+        // Given more rounds, the reviewers start again in a tab of their own.
+        actions.send(Action::Extend { by: 1 }).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(!runner.engine.session().closed);
+        for _ in 0..3 {
+            step(&mut runner, &mut conn);
+        }
+        assert!(
+            fake.0.borrow().spawned > spawned,
+            "the reviewers start again"
+        );
+        assert_eq!(fake.0.borrow().tabs.len(), 2, "in a new tab");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_pane_whose_close_timed_out_closes_later_without_a_notice() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, actions, updates) = rig_on(
+            &fake,
+            new_start_on(
+                &root,
+                document("plan"),
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                1,
+            ),
+        );
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        actions.send(Action::Close).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(runner.engine.session().closed);
+        fake.0.borrow_mut().close_unsure = true;
+        let _ = notices(&updates);
+        actions.send(Action::ClosePanes).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        for _ in 0..3 {
+            step(&mut runner, &mut conn);
+        }
+        let told = notices(&updates);
+        assert!(
+            !told.iter().any(|n| n.contains("のペインが閉じられました")),
+            "{told:?}"
+        );
+        assert!(runner.panes.is_empty(), "the closed panes are forgotten");
         let _ = fs::remove_dir_all(root);
     }
 

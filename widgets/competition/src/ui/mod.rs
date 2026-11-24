@@ -102,6 +102,9 @@ pub enum Action {
     /// Gives the stored competition in the directory more rounds and goes
     /// on with it.
     ExtendPast(PathBuf, RoundNo),
+    /// Closes every judge's and contestant's pane of the ended competition
+    /// in Noa.
+    ClosePanes,
 }
 
 /// The rounds the "+N" buttons add.
@@ -750,6 +753,14 @@ impl Competition {
                 );
                 self.actions.push((close, Action::Close));
             }
+            if !self.read_only && session.closed {
+                let close = self.tree.insert(
+                    Some(self.status_trailing),
+                    small("ペインをすべて閉じる")
+                        .tooltip("審判と参加者のペインを Noa でまとめて閉じます"),
+                );
+                self.actions.push((close, Action::ClosePanes));
+            }
         }
     }
 
@@ -1089,6 +1100,7 @@ impl Competition {
                 _ => self.send_cmd(Command::Extend { by }),
             },
             Action::ExtendPast(dir, by) => self.extend_stored(dir, by, text),
+            Action::ClosePanes => self.send_cmd(Command::ClosePanes),
         }
     }
 }
@@ -1585,6 +1597,7 @@ mod tests {
                         | Action::Send
                         | Action::Retry
                         | Action::Close
+                        | Action::ClosePanes
                 ),
                 "{a:?} on a read-only competition"
             );
@@ -2343,6 +2356,52 @@ mod tests {
 
     fn commands(link: &crate::live::FakeLink) -> Vec<Command> {
         link.commands.try_iter().map(|(_, cmd)| cmd).collect()
+    }
+
+    #[test]
+    fn the_panes_close_together_once_the_competition_has_ended() {
+        let (channel, link) = Channel::fake();
+        let mut screen = Competition::live(channel, installed_all());
+        let mut text = TextStore::new(Default::default());
+        let mut session = crate::demo::session();
+        session.closed = false;
+        let send = |session: &Session| {
+            link.snapshots
+                .send(Snapshot {
+                    link: Link::Live,
+                    session: Some(Arc::new(session.clone())),
+                    artifact_root: None,
+                    generation: 0,
+                })
+                .unwrap();
+        };
+        send(&session);
+        screen.poll_live(&mut text);
+        assert!(widget_for(&screen, &Action::ClosePanes).is_none());
+
+        // Ended at its round limit, so "+N" is offered beside it: the whole
+        // status bar still fits the smallest window.
+        session.closed = true;
+        session.max_rounds = Some(session.rounds.len() as RoundNo);
+        session.rev += 1;
+        send(&session);
+        screen.poll_live(&mut text);
+        let (w, h) = MIN_WINDOW;
+        let size = Size::new(w as f32, h as f32);
+        screen.prepare(size, &mut text);
+        assert!(widget_for(&screen, &Action::Extend(3)).is_some());
+        for &child in screen.tree.children(screen.status_trailing) {
+            let origin = screen.tree.window_origin(child).unwrap();
+            let width = screen.tree.layout(child).unwrap().rect.width;
+            assert!(
+                origin.x >= 0.0 && origin.x + width <= size.width + 0.5,
+                "{}+{width}",
+                origin.x
+            );
+        }
+        let close = widget_for(&screen, &Action::ClosePanes).expect("ペインをすべて閉じる");
+        click(&mut screen, close, &mut text);
+        assert_eq!(commands(&link), [Command::ClosePanes]);
     }
 
     #[test]

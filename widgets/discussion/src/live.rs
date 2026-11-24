@@ -96,6 +96,8 @@ pub enum Command {
     /// `UserExtend`: this many more rounds. On a stored discussion shown
     /// read-only, it is resumed first (its agents run again).
     Extend { by: RoundNo },
+    /// Close every participant's pane of the ended discussion.
+    ClosePanes,
 }
 
 pub struct Channel {
@@ -409,6 +411,7 @@ fn action_of(cmd: Command) -> Option<Action> {
         Command::SetHold { hold } => Action::SetHold { hold },
         Command::Continue => Action::Continue,
         Command::Extend { by } => Action::Extend { by },
+        Command::ClosePanes => Action::ClosePanes,
         Command::Start { .. }
         | Command::Open { .. }
         | Command::Resume { .. }

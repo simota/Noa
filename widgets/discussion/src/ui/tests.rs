@@ -1571,6 +1571,43 @@ fn ending_the_discussion_is_one_click_until_it_has_ended() {
     assert!(!has_widget_for(&h.screen, &Action::Close));
 }
 
+#[test]
+fn the_panes_close_together_once_the_discussion_has_ended() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = crate::demo::session();
+    h.deliver(Some(session.clone()));
+    assert!(!has_widget_for(&h.screen, &Action::ClosePanes));
+    session.closed = true;
+    session.rev += 1;
+    h.deliver(Some(session.clone()));
+    let close = widget_for(&h.screen, &Action::ClosePanes);
+    click(&mut h.screen, &mut h.text, close);
+    assert_eq!(h.drain(), vec![Command::ClosePanes]);
+    // A stored discussion has no runner and no panes of its own.
+    h.deliver_with(Link::Stored(demo_dir("disc-demo-1")), Some(session));
+    assert!(!has_widget_for(&h.screen, &Action::ClosePanes));
+}
+
+#[test]
+fn every_status_control_of_an_ended_discussion_fits_the_smallest_window() {
+    let (w, h_) = MIN_WINDOW;
+    let size = Size::new(w as f32, h_ as f32);
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = limited(crate::demo::held(), 4);
+    session.workdir = Some(std::path::PathBuf::from("/repo"));
+    session.closed = true;
+    h.deliver(Some(session));
+    h.screen.prepare(size, &mut h.text);
+    assert!(has_widget_for(&h.screen, &Action::ClosePanes));
+    assert!(has_widget_for(&h.screen, &Action::Extend(3)));
+    for &child in h.screen.tree.children(h.screen.status_trailing) {
+        let [x, _, cw, _] = rect(&h.screen.tree, child);
+        assert!(x >= 0.0 && x + cw <= size.width + 0.5, "{x}+{cw}");
+    }
+}
+
 // ── Results ─────────────────────────────────────────────────────────────────
 
 #[test]

@@ -108,6 +108,8 @@ pub enum Action {
     SetHold(bool),
     Continue,
     Extend(RoundNo),
+    /// Closes the agents' panes of the ended review in Noa.
+    ClosePanes,
     /// Takes up the unfinished stored review on screen (its agents start).
     ResumeShown,
     /// Writes the stored review's report again from its log.
@@ -1104,6 +1106,14 @@ impl Review {
                 .insert(Some(self.status_trailing), small("レビューを終了"));
             self.actions.push((close, Action::Close));
         }
+        if !self.read_only && session.closed {
+            let close = self.tree.insert(
+                Some(self.status_trailing),
+                small("ペインをすべて閉じる")
+                    .tooltip("リードとレビュアーのペインを Noa でまとめて閉じます（修正依頼のタブは残します）"),
+            );
+            self.actions.push((close, Action::ClosePanes));
+        }
     }
 
     /// Takes the installed-agents report, once it has arrived: the menus
@@ -1558,6 +1568,7 @@ impl Review {
             Action::FocusPane(part) => self.send_cmd(Command::Focus { part }),
             Action::SetHold(hold) => self.send_cmd(Command::SetHold { hold }),
             Action::Continue => self.send_cmd(Command::Continue),
+            Action::ClosePanes => self.send_cmd(Command::ClosePanes),
             Action::Extend(by) => match self.stored_dir.clone() {
                 Some(dir) if self.read_only => {
                     if !matches!(self.source, Source::Live(_)) {

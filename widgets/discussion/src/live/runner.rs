@@ -14,7 +14,7 @@
 //! handle, or sending [`Action::Stop`], ends the thread; the agents' panes
 //! stay open.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -145,6 +145,9 @@ pub enum Action {
     Extend {
         by: RoundNo,
     },
+    /// Close every participant's pane in Noa. Refused until the discussion
+    /// has ended, so no brief is cut off and no pane is started again.
+    ClosePanes,
     /// End the runner. The agents' panes stay open.
     Stop,
 }
@@ -529,6 +532,9 @@ pub(crate) struct Runner<C: Connect, K: Clock> {
     /// Every participant's pane was started once (on the first connection).
     spawned_all: bool,
     panes: BTreeMap<PartId, Pane>,
+    /// Panes asked to close whose outcome Noa could not tell (a timeout,
+    /// a lost link): when one closes after all, it goes without a notice.
+    closing: BTreeSet<u64>,
     deliveries: Vec<Delivery>,
     watches: BTreeMap<PathBuf, Watch>,
     next_tick: Millis,
@@ -620,6 +626,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             started: false,
             spawned_all: false,
             panes: BTreeMap::new(),
+            closing: BTreeSet::new(),
             deliveries: Vec::new(),
             watches: BTreeMap::new(),
             next_tick: now + TICK_EVERY,
@@ -707,6 +714,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 self.focus(&part);
                 return Ok(());
             }
+            Action::ClosePanes => {
+                self.close_panes();
+                return Ok(());
+            }
             Action::Stop => return Ok(()),
         };
         if let Some(why) = self.feed(input)? {
@@ -741,6 +752,49 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         if let Err(err) = conn.focus(pane) {
             self.notice(format!("{name} のペインを表示できません: {err}"));
         }
+    }
+
+    /// Closes the participants' panes of an ended discussion. A pane is
+    /// forgotten before Noa reports it gone, so its closing is no agent
+    /// error. The implementation tab is the user's and stays open.
+    fn close_panes(&mut self) {
+        if !self.engine.session().closed {
+            self.notice("ペインは議論が終わってから閉じられます".to_owned());
+            return;
+        }
+        if self.panes.is_empty() {
+            self.notice("閉じるペインはありません".to_owned());
+            return;
+        }
+        let Some(conn) = self.conn.as_mut() else {
+            self.notice(
+                "Noa に接続していません。接続が戻ってから、もう一度押してください".to_owned(),
+            );
+            return;
+        };
+        let mut failed = Vec::new();
+        let mut closed = 0;
+        for (part, pane) in std::mem::take(&mut self.panes) {
+            match conn.close_pane(pane.id) {
+                Ok(()) | Err(NoaError::PaneGone) => closed += 1,
+                // Noa may still close it (a timeout says nothing of the
+                // outcome): kept until it is reported gone.
+                Err(err) => {
+                    failed.push(format!("{part}: {err}"));
+                    self.closing.insert(pane.id);
+                    self.panes.insert(part, pane);
+                }
+            }
+        }
+        let notice = if failed.is_empty() {
+            format!("{closed} 個のペインを閉じました")
+        } else {
+            format!(
+                "{closed} 個のペインを閉じました。閉じたか確かめられなかったもの: {}",
+                failed.join(", ")
+            )
+        };
+        self.notice(notice);
     }
 
     /// Writes the result as a task file under the working directory and
@@ -1027,7 +1081,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     /// `part`'s pane closed. A brief it was working on is sent again (to a
     /// new pane) as for an agent error.
     fn pane_gone(&mut self, part: &PartId) -> Result<(), String> {
-        if self.panes.remove(part).is_none() {
+        let Some(pane) = self.panes.remove(part) else {
+            return Ok(());
+        };
+        if self.closing.remove(&pane.id) {
             return Ok(());
         }
         self.notice(format!("{part} のペインが閉じました"));
@@ -1486,6 +1543,11 @@ mod tests {
         rpc_paste_ready: usize,
         rpc_screen: usize,
         focused: Vec<u64>,
+        /// Panes closed through `close_pane`.
+        closed: Vec<u64>,
+        /// `close_pane` closes the pane but answers as Noa does when its
+        /// UI thread is slow (-32009): the outcome is unknown.
+        close_unsure: bool,
     }
 
     /// A fake Noa, its connector and the clock, sharing one world.
@@ -1699,6 +1761,19 @@ mod tests {
                 return Err(NoaError::PaneGone);
             }
             w.focused.push(pane);
+            Ok(())
+        }
+
+        fn close_pane(&mut self, pane: u64) -> Result<(), NoaError> {
+            self.up()?;
+            if !self.0.borrow().panes.contains_key(&pane) {
+                return Err(NoaError::PaneGone);
+            }
+            self.w().closed.push(pane);
+            Fake::close(self, pane);
+            if self.0.borrow().close_unsure {
+                return Err(NoaError::Refused("timed out (-32009)".into()));
+            }
             Ok(())
         }
     }
@@ -2463,6 +2538,77 @@ mod tests {
         assert_eq!(rig.submitted(101), 1);
         let stored = store::load(&rig.dir()).unwrap();
         assert!(stored.closed, "the end is in the log");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn panes_close_together_only_after_the_discussion_ends() {
+        let root = temp_root("close-panes");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        let _ = rig.notices();
+        rig.actions.send(Action::ClosePanes).unwrap();
+        rig.step();
+        assert!(fake.0.borrow().closed.is_empty(), "refused while running");
+        assert!(
+            rig.notices()
+                .iter()
+                .any(|n| n.contains("議論が終わってから")),
+            "the refusal is told"
+        );
+        rig.actions.send(Action::Close).unwrap();
+        rig.step();
+        let _ = rig.notices();
+        rig.actions.send(Action::ClosePanes).unwrap();
+        rig.step();
+        let mut closed = fake.0.borrow().closed.clone();
+        closed.sort_unstable();
+        assert_eq!(closed, vec![100, 101, 102]);
+        assert!(fake.0.borrow().panes.is_empty());
+        for _ in 0..10 {
+            rig.step();
+        }
+        let notices = rig.notices();
+        assert!(
+            notices.iter().any(|n| n == "3 個のペインを閉じました"),
+            "{notices:?}"
+        );
+        assert!(
+            !notices.iter().any(|n| n.contains("のペインが閉じました")),
+            "closing is no agent error: {notices:?}"
+        );
+        assert_eq!(fake.0.borrow().spawned.len(), 3, "nothing is started again");
+        rig.actions.send(Action::ClosePanes).unwrap();
+        rig.step();
+        assert_eq!(rig.notices(), vec!["閉じるペインはありません".to_owned()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pane_whose_close_timed_out_closes_later_without_an_agent_error() {
+        let root = temp_root("close-panes-unsure");
+        let fake = Fake::new();
+        let mut rig = Rig::new(&fake, &root);
+        rig.until(40, |r| r.submitted(101) == 1);
+        rig.actions.send(Action::Close).unwrap();
+        rig.step();
+        fake.w().close_unsure = true;
+        let _ = rig.notices();
+        rig.actions.send(Action::ClosePanes).unwrap();
+        for _ in 0..10 {
+            rig.step();
+        }
+        let notices = rig.notices();
+        assert!(
+            !notices.iter().any(|n| n.contains("のペインが閉じました")),
+            "its closing is no agent error: {notices:?}"
+        );
+        assert!(
+            rig.runner.panes.is_empty(),
+            "the closed panes are forgotten"
+        );
+        assert_eq!(fake.0.borrow().spawned.len(), 3, "nothing is started again");
         let _ = fs::remove_dir_all(&root);
     }
 

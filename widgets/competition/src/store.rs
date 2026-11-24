@@ -6,6 +6,8 @@
 //!   entries/<part>/...            each contestant's private live output folder
 //!   r<N>/<part>.md                contestant submission report for round N
 //!   r<N>/judge.json               judge evaluation output for round N
+//!   r<N>/judge-2.json, …          a co-judge's scorecard for round N (panel)
+//!   r<N>/verdict.json             the lead judge's verdict (panel, deciding round)
 //!   r<N>/artifacts/<part>/...     round-N snapshot of <part>'s deliverables
 //!   compare.html                  standalone side-by-side comparison viewer
 //! ```
@@ -22,6 +24,8 @@ use crate::model::types::{
 
 pub const EVENTS_FILE: &str = "events.jsonl";
 pub const JUDGE_FILE: &str = "judge.json";
+/// A panel lead's verdict, in a deciding round's directory.
+pub const VERDICT_FILE: &str = "verdict.json";
 pub const VIEWER_FILE: &str = "compare.html";
 /// Beside the log of every competition a lock-taking runner created or
 /// resumed: there, an unlocked log is not running anywhere. Without it the
@@ -124,9 +128,15 @@ pub fn reply_path(dir: &Path, round: RoundNo, part: &PartId) -> PathBuf {
     round_dir(dir, round).join(format!("report-{part}.md"))
 }
 
-/// The file the judge writes its round-`round` JSON to.
-pub fn judge_reply_path(dir: &Path, round: RoundNo) -> PathBuf {
-    round_dir(dir, round).join(JUDGE_FILE)
+/// The file `judge` writes its round-`round` JSON to: `r<N>/<judge>.json`
+/// (`judge.json` for the lead, `judge-2.json`, … for co-judges).
+pub fn judge_reply_path(dir: &Path, round: RoundNo, judge: &PartId) -> PathBuf {
+    round_dir(dir, round).join(format!("{judge}.json"))
+}
+
+/// The file a panel's lead writes its round-`round` verdict to.
+pub fn verdict_reply_path(dir: &Path, round: RoundNo) -> PathBuf {
+    round_dir(dir, round).join(VERDICT_FILE)
 }
 
 pub fn prepare_reply(path: &Path) -> io::Result<()> {
@@ -634,7 +644,7 @@ mod tests {
 
         let dst = artifact_snapshot_dir(&root, 1, &PartId::new("claude"));
         let files = snapshot_artifacts(&src, &dst).unwrap();
-        assert!(!judge_reply_path(&root, 1).exists());
+        assert!(!judge_reply_path(&root, 1, &PartId::new(crate::model::types::JUDGE_ID)).exists());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].rel_path, name);
         assert!(dst.join(name).is_file());
@@ -661,7 +671,7 @@ mod tests {
             max_rounds: Some(3),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Codex.into(),
+            judges: &[AgentKind::Codex.into()],
             panel: &panel,
         };
         let (_, out) = Engine::create_in(id, setup, &dir, Config::default(), 7).unwrap();
@@ -846,5 +856,128 @@ mod tests {
         assert!(summary.closed && !summary.extendable);
         assert_eq!(summary.winner, Some(PartId::new("claude-2")));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn judge_reply_paths_follow_the_judge_id() {
+        use crate::model::types::judge_id;
+        let dir = Path::new("/c");
+        let lead = judge_reply_path(dir, 3, &judge_id(0));
+        // The lead's is the file a single judge has always written.
+        assert_eq!(lead, round_dir(dir, 3).join(JUDGE_FILE));
+        assert_eq!(lead, Path::new("/c/r3/judge.json"));
+        assert_eq!(
+            judge_reply_path(dir, 3, &judge_id(1)),
+            Path::new("/c/r3/judge-2.json")
+        );
+        assert_eq!(
+            judge_reply_path(dir, 3, &judge_id(2)),
+            Path::new("/c/r3/judge-3.json")
+        );
+        assert_eq!(verdict_reply_path(dir, 3), Path::new("/c/r3/verdict.json"));
+        // Contestants (named after kinds) write report-<part>.md beside them.
+        for part in ["claude", "codex", "agy-3"] {
+            let report = reply_path(dir, 3, &PartId::new(part));
+            assert!(report.ends_with(format!("report-{part}.md")));
+        }
+    }
+
+    /// The fixtures were written by the widget as of v0.9.15, before the
+    /// judge panel: a two-round competition of claude and codex judged by
+    /// agy, with a rejected judge reply, an amendment, a hold,
+    /// interventions and a final verdict; and the same log cut after round
+    /// 2's judge brief was sent.
+    #[test]
+    fn a_single_judge_log_from_v0_9_15_folds_and_round_trips() {
+        use crate::model::types::{JUDGE_ID, MsgKind, Phase};
+        const FULL: &str = include_str!("model/testdata/single-judge-v0.9.15.events.jsonl");
+        const JUDGING: &str =
+            include_str!("model/testdata/single-judge-v0.9.15-judging.events.jsonl");
+        // Where the log was written: its reply paths name this directory.
+        let logged_in = Path::new("/tmp/competitions/comp-1790000000000");
+        let claude = PartId::new("claude");
+        let judge = PartId::new(JUDGE_ID);
+
+        for text in [FULL, JUDGING] {
+            // Every line reads and writes back to the same bytes.
+            for line in text.lines() {
+                let batch: Vec<Event> = serde_json::from_str(line).unwrap();
+                assert_eq!(serde_json::to_string(&batch).unwrap(), line);
+            }
+            let root = temp_root("v0.9.15");
+            let dir = root.join("comp-1790000000000");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(EVENTS_FILE), text).unwrap();
+            let session = read_session(&dir).unwrap();
+            assert!(!session.is_panel());
+            assert!(session.hold);
+            assert_eq!(session.rounds.len(), 2);
+            assert_eq!(
+                [
+                    &session.judge.id,
+                    &session.contestants[0].id,
+                    &session.contestants[1].id
+                ]
+                .map(PartId::as_str),
+                ["judge", "claude", "codex"]
+            );
+            assert_eq!(session.judge.pane_id, Some(13));
+            let r1 = session.round(1).unwrap();
+            assert_eq!(r1.phase, Phase::Closed);
+            let receipt = &r1.judge_brief.as_ref().unwrap().receipt;
+            assert_eq!((receipt.retries, receipt.rejected.as_ref()), (1, None));
+            assert_eq!(
+                r1.outcome.as_ref().unwrap().checklist,
+                ["320x568: no horizontal scroll", "Space toggles play/pause"]
+            );
+            let interventions = session
+                .messages
+                .iter()
+                .filter(|m| m.kind == MsgKind::Intervention)
+                .count();
+            assert_eq!(interventions, 2);
+            for round in &session.rounds {
+                assert!(round.co_judge_briefs.is_empty() && round.scorecards.is_empty());
+                assert!(round.verdict_brief.is_none());
+            }
+            assert_eq!(crate::engine::check_resumable(&session, logged_in), Ok(()));
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        let full = reduce::replay(
+            FULL.lines()
+                .map(|l| serde_json::from_str::<Vec<Event>>(l).unwrap()),
+        )
+        .unwrap();
+        assert!(full.closed);
+        assert_eq!(full.winner, Some(claude.clone()));
+        assert_eq!(
+            full.final_verdict(),
+            Some(
+                "claude met every checklist item and answered the feedback; codex's drawer still hides the scrubber."
+            )
+        );
+        let fixed = &full.round(1).unwrap().outcome.as_ref().unwrap().evaluations[&claude];
+        assert_eq!(fixed.score, 76);
+        assert_eq!(
+            fixed.amended.as_ref().map(|n| (n.from, n.by_round)),
+            Some((72, 2))
+        );
+        assert_eq!(full.score_history(&claude), [(1, 76), (2, 88)]);
+        assert_eq!(full.score_label(1, &claude).as_deref(), Some("76"));
+        assert_eq!(full.extendable(), Ok(()));
+
+        let cut = reduce::replay(
+            JUDGING
+                .lines()
+                .map(|l| serde_json::from_str::<Vec<Event>>(l).unwrap()),
+        )
+        .unwrap();
+        assert!(!cut.closed && cut.winner.is_none());
+        let r2 = cut.current_round().unwrap();
+        assert_eq!(r2.phase, Phase::Judging);
+        let brief = r2.brief(&judge).unwrap();
+        assert!(brief.receipt.sent.is_some() && brief.receipt.replied.is_none());
+        assert_eq!(brief.reply_path, logged_in.join("r2").join(JUDGE_FILE));
     }
 }

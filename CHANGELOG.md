@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Competition: the start view seats 1–3 judges (agent, model and effort
+  per row; `judge` leads, `judge-2` and `judge-3` only score), and a
+  rematch fills every judge row. With more than one judge the leaderboard,
+  the judge board, the Markdown report and `compare.html` show each
+  entry's mean, every judge's score and the spread between them; the
+  progress strip has a chip per judge, counts the scorecards in
+  (`採点 2/3`) and adds a `講評 (judge)` chip once the lead's verdict is
+  asked for; the composer can address every judge or one;
+  `competition --demo --judges` shows a canned three-judge competition.
+  Single-judge competitions look and export exactly as before.
+
+### Notes
+
+- A competition with more than one judge is not readable by an earlier
+  version of the widget; downgrading is not supported.
+- A competition trusts its agents: replies are attributed by file name
+  only, so an agent able to write the round directory could write another
+  judge's scorecard or the lead judge's verdict and it would be accepted.
+
 ## [0.9.15] - 2026-11-24
 
 A multi-agent review widget, `+ctl retry`, and resumable, extendable

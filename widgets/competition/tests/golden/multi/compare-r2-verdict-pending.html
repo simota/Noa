@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Noa Competition Viewer</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f1117;
+    --surface: #171a23;
+    --surface-alt: #1f2430;
+    --border: #2c3344;
+    --text: #e6eaf2;
+    --muted: #9aa4b8;
+    --accent: #6aa6ff;
+    --gold: #f5c451;
+    --reveal: #a78bfa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgba(15, 17, 23, 0.94);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 18px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .title-block h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .title-block p {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+    max-width: 720px;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+  select, button {
+    background: var(--surface-alt);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  button.active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .banner {
+    margin: 12px 18px 0;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-right: 6px;
+  }
+  .badge.blind { background: #262d3d; color: var(--muted); }
+  .badge.reveal { background: rgba(167, 139, 250, 0.18); color: var(--reveal); }
+  .badge.winner { background: rgba(245, 196, 81, 0.18); color: var(--gold); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 14px;
+    padding: 14px 18px 32px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .card.winner-card {
+    border-color: var(--gold);
+  }
+  .card-head {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .score {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .file-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 14px;
+    background: var(--surface-alt);
+    border-bottom: 1px solid var(--border);
+  }
+  .preview-box {
+    background: #0b0d12;
+    min-height: 360px;
+    display: flex;
+    /* `safe`: a frame wider than the box scrolls instead of clipping left. */
+    align-items: safe center;
+    justify-content: safe center;
+    overflow: auto;
+    position: relative;
+  }
+  .frame-note {
+    position: absolute;
+    right: 8px;
+    bottom: 6px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .preview-box iframe {
+    /* Keep a fixed viewport's size: a flex item would shrink to the card. */
+    flex: none;
+    border: 0;
+    background: #fff;
+    height: 460px;
+    transition: width 0.15s ease;
+  }
+  .preview-box img {
+    max-width: 100%;
+    max-height: 460px;
+    object-fit: contain;
+    cursor: zoom-in;
+  }
+  .preview-box pre {
+    margin: 0;
+    padding: 12px;
+    width: 100%;
+    max-height: 460px;
+    overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .meta {
+    padding: 12px 14px;
+    font-size: 12px;
+    line-height: 1.55;
+    border-top: 1px solid var(--border);
+  }
+  .meta h4 {
+    margin: 8px 0 4px;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+  }
+  .meta h4:first-child { margin-top: 0; }
+  .report-body {
+    white-space: pre-wrap;
+    max-height: 220px;
+    overflow: auto;
+    background: var(--surface-alt);
+    padding: 8px 10px;
+    border-radius: 6px;
+  }
+  .modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 24px;
+  }
+  .modal.open { display: flex; }
+  .modal img { max-width: 95vw; max-height: 92vh; object-fit: contain; }
+</style>
+</head>
+<body>
+<header>
+  <div class="title-block">
+    <h1 id="title">Noa Competition Viewer</h1>
+    <p id="request"></p>
+  </div>
+  <div class="controls">
+    <label for="roundSelect" style="font-size:12px;color:var(--muted)">ラウンド:</label>
+    <select id="roundSelect"></select>
+    <button data-vp="100%" class="active">幅いっぱい</button>
+    <button data-vp="1440x900">1440×900</button>
+    <button data-vp="768x1024">768×1024</button>
+    <button data-vp="320x568">320×568</button>
+  </div>
+</header>
+<div id="banner" class="banner"></div>
+<main id="grid" class="grid"></main>
+<div id="modal" class="modal"><img id="modalImg" alt="zoom"></div>
+<script>
+const DATA = {"id":"golden-multi","request":"Build a responsive \u003caudio> mixer page & explain the trade-offs","reveal_interval":2,"winner":null,"contestants":["claude","codex","agy"],"judges":[{"id":"judge","agent":"claude · opus","lead":true},{"id":"judge-2","agent":"codex","lead":false},{"id":"judge-3","agent":"agy","lead":false}],"rounds":[{"no":1,"kind":"blind","overview":"R1 (judge): \u003cb>craft\u003c/b> & clarity decided it.","ranking":["codex","claude","agy"],"final_verdict":null,"entries":[{"part":"claude","score":81,"strengths":"judge: claude keeps the layout calm","feedback":"judge: claude should fix 320px overflow","evidence":[],"amended":"R2 で 81 → 訂正: judge-2: R1 was scored without its \u003cstyle>sheet","breakdown":[],"summary":"claude entry for round 1 \u003cwith markup>","report":"Report for r1-claude: 0 axe violations.\n","files":[{"rel_path":"index.html","href":"r1/artifacts/claude/index.html","frame_href":null,"kind":"html","bytes":56,"preview":null},{"rel_path":"notes.md","href":"r1/artifacts/claude/notes.md","frame_href":null,"kind":"markdown","bytes":34,"preview":"# claude R1\n\n- `\u003ctag>` & \"quotes\"\n"}],"panel":{"mean":"81.0","scores":[{"judge":"judge","score":80},{"judge":"judge-2","score":82},{"judge":"judge-3","score":81}],"spread":2,"warn":false}},{"part":"codex","score":84,"strengths":"judge: codex keeps the layout calm","feedback":"judge: codex should fix 320px overflow","evidence":[],"amended":null,"breakdown":[],"summary":"codex entry for round 1 \u003cwith markup>","report":"Report for r1-codex: 0 axe violations.\n","files":[{"rel_path":"index.html","href":"r1/artifacts/codex/index.html","frame_href":null,"kind":"html","bytes":54,"preview":null},{"rel_path":"notes.md","href":"r1/artifacts/codex/notes.md","frame_href":null,"kind":"markdown","bytes":33,"preview":"# codex R1\n\n- `\u003ctag>` & \"quotes\"\n"}],"panel":{"mean":"84.3","scores":[{"judge":"judge","score":85},{"judge":"judge-2","score":80},{"judge":"judge-3","score":88}],"spread":8,"warn":false}},{"part":"agy","score":67,"strengths":"judge: agy keeps the layout calm","feedback":"judge: agy should fix 320px overflow","evidence":[],"amended":null,"breakdown":[],"summary":"agy entry for round 1 \u003cwith markup>","report":"Report for r1-agy: 0 axe violations.\n","files":[{"rel_path":"index.html","href":"r1/artifacts/agy/index.html","frame_href":null,"kind":"html","bytes":50,"preview":null},{"rel_path":"notes.md","href":"r1/artifacts/agy/notes.md","frame_href":null,"kind":"markdown","bytes":31,"preview":"# agy R1\n\n- `\u003ctag>` & \"quotes\"\n"}],"panel":{"mean":"66.7","scores":[{"judge":"judge","score":60},{"judge":"judge-2","score":78},{"judge":"judge-3","score":62}],"spread":18,"warn":true}}]},{"no":2,"kind":"reveal","overview":"R2 (judge): \u003cb>craft\u003c/b> & clarity decided it.","ranking":["claude","codex","agy"],"final_verdict":null,"entries":[{"part":"claude","score":87,"strengths":"judge: claude keeps the layout calm","feedback":"judge: claude should fix 320px overflow","evidence":[],"amended":null,"breakdown":[],"summary":"claude entry for round 2 \u003cwith markup>","report":"Report for r2-claude: 0 axe violations.\n","files":[{"rel_path":"index.html","href":"r2/artifacts/claude/index.html","frame_href":null,"kind":"html","bytes":56,"preview":null},{"rel_path":"notes.md","href":"r2/artifacts/claude/notes.md","frame_href":null,"kind":"markdown","bytes":34,"preview":"# claude R2\n\n- `\u003ctag>` & \"quotes\"\n"}],"panel":{"mean":"87.3","scores":[{"judge":"judge","score":88},{"judge":"judge-2","score":84},{"judge":"judge-3","score":90}],"spread":6,"warn":false}},{"part":"codex","score":87,"strengths":"judge: codex keeps the layout calm","feedback":"judge: codex should fix 320px overflow","evidence":[],"amended":null,"breakdown":[],"summary":"codex entry for round 2 \u003cwith markup>","report":"Report for r2-codex: 0 axe violations.\n","files":[{"rel_path":"index.html","href":"r2/artifacts/codex/index.html","frame_href":null,"kind":"html","bytes":54,"preview":null},{"rel_path":"notes.md","href":"r2/artifacts/codex/notes.md","frame_href":null,"kind":"markdown","bytes":33,"preview":"# codex R2\n\n- `\u003ctag>` & \"quotes\"\n"}],"panel":{"mean":"87.0","scores":[{"judge":"judge","score":86},{"judge":"judge-2","score":90},{"judge":"judge-3","score":85}],"spread":5,"warn":false}},{"part":"agy","score":70,"strengths":"judge: agy keeps the layout calm","feedback":"judge: agy should fix 320px overflow","evidence":[],"amended":null,"breakdown":[],"summary":"agy entry for round 2 \u003cwith markup>","report":"Report for r2-agy: 0 axe violations.\n","files":[{"rel_path":"index.html","href":"r2/artifacts/agy/index.html","frame_href":null,"kind":"html","bytes":50,"preview":null},{"rel_path":"notes.md","href":"r2/artifacts/agy/notes.md","frame_href":null,"kind":"markdown","bytes":31,"preview":"# agy R2\n\n- `\u003ctag>` & \"quotes\"\n"}],"panel":{"mean":"70.3","scores":[{"judge":"judge","score":70},{"judge":"judge-2","score":72},{"judge":"judge-3","score":69}],"spread":3,"warn":false}}]}]};
+let viewportWidth = "100%";
+let viewportHeight = "460px";
+// The sizes the judge's screenshots use: width × height, height = first view.
+function applyViewport(frame) {
+  frame.style.width = viewportWidth;
+  frame.style.height = viewportHeight;
+}
+const selectedFile = {};
+
+const roundSelect = document.getElementById("roundSelect");
+const banner = document.getElementById("banner");
+const grid = document.getElementById("grid");
+const modal = document.getElementById("modal");
+const modalImg = document.getElementById("modalImg");
+modal.addEventListener("click", () => modal.classList.remove("open"));
+
+document.getElementById("request").textContent = DATA.request || "";
+document.querySelectorAll("button[data-vp]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const [w, h] = btn.dataset.vp.split("x");
+    viewportWidth = h ? w + "px" : w;
+    viewportHeight = h ? h + "px" : "460px";
+    document.querySelectorAll("button[data-vp]").forEach(b => b.classList.toggle("active", b === btn));
+    document.querySelectorAll(".preview-box iframe").forEach(applyViewport);
+  });
+});
+
+function init() {
+  roundSelect.innerHTML = "";
+  if (!DATA.rounds.length) {
+    banner.textContent = "まだ提出されたラウンドがありません。";
+    return;
+  }
+  DATA.rounds.forEach((r, idx) => {
+    const opt = document.createElement("option");
+    opt.value = idx;
+    const tag = r.kind === "reveal" ? " [相互閲覧]" : " [ブラインド]";
+    opt.textContent = "Round " + r.no + tag;
+    roundSelect.appendChild(opt);
+  });
+  roundSelect.value = String(DATA.rounds.length - 1);
+  roundSelect.addEventListener("change", () => renderRound(Number(roundSelect.value)));
+  renderRound(DATA.rounds.length - 1);
+}
+
+function pickDefaultFile(entry) {
+  const key = entry.part;
+  if (selectedFile[key] && entry.files.some(f => f.rel_path === selectedFile[key])) {
+    return selectedFile[key];
+  }
+  const visual = entry.files.find(f => f.rel_path === "index.html")
+    || entry.files.find(f => f.kind === "html")
+    || entry.files.find(f => f.kind === "image" || f.kind === "svg")
+    || entry.files[0];
+  return visual ? visual.rel_path : null;
+}
+
+function renderPreview(box, file) {
+  box.innerHTML = "";
+  if (!file) {
+    const p = document.createElement("p");
+    p.style.color = "var(--muted)";
+    p.style.fontSize = "12px";
+    p.textContent = "成果物ファイルなし";
+    box.appendChild(p);
+    return;
+  }
+  if (file.kind === "html") {
+    const iframe = document.createElement("iframe");
+    iframe.src = file.frame_href || file.href;
+    applyViewport(iframe);
+    // No allow-same-origin: with it, an entry's scripts could reach this
+    // page (`parent.document`) and rewrite scores or other entries.
+    iframe.setAttribute("sandbox", "allow-scripts");
+    box.appendChild(iframe);
+    if (file.frame_href) {
+      const note = document.createElement("a");
+      note.className = "frame-note";
+      note.href = file.href;
+      note.target = "_blank";
+      note.textContent = "自動インライン版を表示中 · 元の index.html";
+      box.appendChild(note);
+    }
+  } else if (file.kind === "image" || file.kind === "svg") {
+    const img = document.createElement("img");
+    img.src = file.href;
+    img.alt = file.rel_path;
+    img.addEventListener("click", () => {
+      modalImg.src = file.href;
+      modal.classList.add("open");
+    });
+    box.appendChild(img);
+  } else if (file.preview !== null && file.preview !== undefined) {
+    const pre = document.createElement("pre");
+    pre.textContent = file.preview;
+    box.appendChild(pre);
+  } else {
+    const a = document.createElement("a");
+    a.href = file.href;
+    a.target = "_blank";
+    a.style.color = "var(--accent)";
+    a.textContent = file.rel_path + " を開く";
+    box.appendChild(a);
+  }
+}
+
+function renderRound(idx) {
+  const r = DATA.rounds[idx];
+  if (!r) return;
+  banner.innerHTML = "";
+  const badge = document.createElement("span");
+  badge.className = "badge " + r.kind;
+  badge.textContent = r.kind === "reveal" ? "👁 相互閲覧ラウンド" : "🔒 ブラインドラウンド";
+  banner.appendChild(badge);
+  if (DATA.winner) {
+    const w = document.createElement("span");
+    w.className = "badge winner";
+    w.textContent = "🏆 優勝: " + DATA.winner;
+    banner.appendChild(w);
+  }
+  const txt = document.createElement("span");
+  txt.textContent = r.final_verdict || r.overview || "審判の採点待ちです。";
+  banner.appendChild(txt);
+
+  grid.innerHTML = "";
+  const order = r.ranking.length ? r.ranking : DATA.contestants;
+  order.forEach((part, rankIdx) => {
+    const entry = r.entries.find(e => e.part === part);
+    if (!entry) return;
+    const card = document.createElement("section");
+    card.className = "card" + (DATA.winner === part ? " winner-card" : "");
+
+    const head = document.createElement("div");
+    head.className = "card-head";
+    const left = document.createElement("div");
+    const rankStr = r.ranking.length ? "#" + (rankIdx + 1) + " " : "";
+    left.innerHTML = "<strong>" + rankStr + part + "</strong>";
+    const score = document.createElement("div");
+    score.className = "score";
+    score.textContent = entry.score !== null ? entry.score + " / 100" : "—";
+    head.appendChild(left);
+    head.appendChild(score);
+    card.appendChild(head);
+
+    const tabs = document.createElement("div");
+    tabs.className = "file-tabs";
+    const previewBox = document.createElement("div");
+    previewBox.className = "preview-box";
+    const activeRel = pickDefaultFile(entry);
+    entry.files.forEach(file => {
+      const b = document.createElement("button");
+      b.textContent = file.rel_path;
+      if (file.rel_path === activeRel) b.classList.add("active");
+      b.addEventListener("click", () => {
+        selectedFile[part] = file.rel_path;
+        tabs.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+        renderPreview(previewBox, file);
+      });
+      tabs.appendChild(b);
+    });
+    if (entry.files.length) {
+      const activeFile = entry.files.find(f => f.rel_path === activeRel) || entry.files[0];
+      renderPreview(previewBox, activeFile);
+    } else {
+      renderPreview(previewBox, null);
+    }
+    card.appendChild(tabs);
+    card.appendChild(previewBox);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const addBlock = (label, content, isPre) => {
+      if (!content) return;
+      const h = document.createElement("h4");
+      h.textContent = label;
+      const d = document.createElement("div");
+      if (isPre) d.className = "report-body";
+      d.textContent = content;
+      meta.appendChild(h);
+      meta.appendChild(d);
+    };
+    addBlock("サマリー", entry.summary, false);
+    addBlock("評価された点", entry.strengths, false);
+    addBlock("審判フィードバック", entry.feedback, false);
+    addBlock("観点別の内訳", entry.breakdown.join(" · "), false);
+    addBlock("スコア訂正", entry.amended, false);
+    addBlock("採点の根拠", entry.evidence.join("\n"), true);
+    addBlock("提出レポート", entry.report, true);
+    card.appendChild(meta);
+
+    grid.appendChild(card);
+  });
+}
+
+init();
+</script>
+<style>
+  .panel-scores {
+    padding: 8px 14px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+  }
+  .panel-scores .label { color: var(--muted); }
+  .panel-scores .spread.warn { color: var(--gold); font-weight: 700; }
+  .judges { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+</style>
+<script>
+(function () {
+  const judges = document.createElement("p");
+  judges.className = "judges";
+  judges.textContent = "審判: " + DATA.judges
+    .map(j => j.id + " (" + j.agent + (j.lead ? ", リード" : "") + ")")
+    .join(" · ");
+  document.querySelector(".title-block").appendChild(judges);
+
+  const renderShared = renderRound;
+  renderRound = function (idx) {
+    renderShared(idx);
+    const r = DATA.rounds[idx];
+    if (!r) return;
+    // The cards, in the order the shared script made them.
+    const order = (r.ranking.length ? r.ranking : DATA.contestants)
+      .filter(part => r.entries.some(e => e.part === part));
+    const cards = grid.querySelectorAll("section.card");
+    order.forEach((part, i) => {
+      const entry = r.entries.find(e => e.part === part);
+      const card = cards[i];
+      if (!card || !entry.panel) return;
+      card.querySelector(".score").textContent = entry.panel.mean + " / 100";
+      const block = document.createElement("div");
+      block.className = "panel-scores";
+      const scores = document.createElement("span");
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = "審判別スコア ";
+      scores.appendChild(label);
+      scores.appendChild(document.createTextNode(
+        entry.panel.scores.map(s => s.judge + " " + s.score).join(" · ")));
+      const spread = document.createElement("span");
+      spread.className = "spread" + (entry.panel.warn ? " warn" : "");
+      spread.textContent = "審判間の差 " + entry.panel.spread;
+      block.appendChild(scores);
+      block.appendChild(spread);
+      card.insertBefore(block, card.querySelector(".file-tabs"));
+    });
+  };
+  renderRound(Number(roundSelect.value));
+})();
+</script>
+</body>
+</html>

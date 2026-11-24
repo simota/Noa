@@ -37,7 +37,8 @@ pub enum Command {
         workdir: Option<PathBuf>,
         max_rounds: Option<RoundNo>,
         reveal_interval: RoundNo,
-        judge: AgentChoice,
+        /// The judge panel in seat order, lead first.
+        judges: Vec<AgentChoice>,
         panel: Vec<AgentChoice>,
     },
     Intervene {
@@ -213,7 +214,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     workdir,
                     max_rounds,
                     reveal_interval,
-                    judge,
+                    judges,
                     panel,
                 },
                 None,
@@ -227,7 +228,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     workdir,
                     max_rounds,
                     reveal_interval,
-                    judge,
+                    judges,
                     panel,
                     root,
                 }

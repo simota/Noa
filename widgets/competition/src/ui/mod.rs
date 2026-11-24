@@ -75,6 +75,10 @@ pub enum Action {
     Close,
     AddPanelRow,
     RemovePanelRow(usize),
+    /// Adds a judge row to the start form (up to three judges).
+    AddJudgeRow,
+    /// Removes the start form's co-judge row (0 is `judge-2`).
+    RemoveJudgeRow(usize),
     /// Shows a stored competition read-only (no runner, no agents).
     OpenPast(PathBuf),
     /// Continues a stored, unfinished competition.
@@ -222,6 +226,17 @@ impl Competition {
         let mut session = crate::demo::session();
         session.hold = true;
         Self::build(Source::Demo, Link::Live, Some(Arc::new(session)), None)
+    }
+
+    /// The demo scored by a panel of three judges, waiting for the lead's
+    /// final verdict.
+    pub fn demo_panel() -> Self {
+        Self::build(
+            Source::Demo,
+            Link::Live,
+            Some(Arc::new(crate::demo::panel_session())),
+            None,
+        )
     }
 
     /// The competition logged in `dir`, read-only.
@@ -593,6 +608,7 @@ impl Competition {
             return;
         }
         composer::sync(&mut self.tree, &mut self.composer, session, text);
+        composer::sync_hint(&mut self.tree, &self.composer, session);
         if let Some(pending) = &self.pending_intervention
             && session
                 .messages
@@ -749,7 +765,8 @@ impl Competition {
         self.installed = None;
         let before = start::read(&self.tree, &self.start);
         let pristine = before.panel == start::Form::for_kinds(self.start.kinds()).panel
-            && before.judge == AgentChoice::from(self.start.kinds()[0]);
+            && before.judge == AgentChoice::from(self.start.kinds()[0])
+            && before.co_judges.is_empty();
         self.detection = start::Detection::Done(installed);
         let kinds = self.detection.menu_kinds();
         let form = if pristine {
@@ -910,12 +927,13 @@ impl Competition {
                         return;
                     }
                 };
+                let judges = form.judges();
                 self.send_cmd(Command::Start {
                     request: form.request,
                     workdir,
                     max_rounds: Some(form.max_rounds),
                     reveal_interval: form.reveal_interval,
-                    judge: form.judge,
+                    judges,
                     panel: form.panel,
                 });
             }
@@ -1006,6 +1024,14 @@ impl Competition {
                 start::remove_row(&mut self.tree, &mut self.start, index, text);
                 self.rebuild(text);
             }
+            Action::AddJudgeRow => {
+                start::add_judge_row(&mut self.tree, &mut self.start);
+                self.rebuild(text);
+            }
+            Action::RemoveJudgeRow(index) => {
+                start::remove_judge_row(&mut self.tree, &mut self.start, index, text);
+                self.rebuild(text);
+            }
             Action::OpenPast(dir) => {
                 if let Err(why) = self.show_stored(&dir, text) {
                     self.toast(why);
@@ -1085,6 +1111,14 @@ impl Screen for Competition {
     }
 
     fn handle(&mut self, message: UiMessage, text: &mut TextStore) {
+        if message.source == self.composer.recipients
+            && message.downcast_ref::<SelectionChanged>().is_some()
+        {
+            if let Some(session) = &self.session {
+                composer::sync_hint(&mut self.tree, &self.composer, session);
+            }
+            return;
+        }
         if message.source == self.start.judge
             && message.downcast_ref::<SelectionChanged>().is_some()
         {
@@ -1417,7 +1451,7 @@ mod tests {
             max_rounds: Some(max_rounds),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Codex.into(),
+            judges: &[AgentKind::Codex.into()],
             panel: &panel,
         };
         let (mut engine, out) =
@@ -1589,7 +1623,9 @@ mod tests {
         );
         assert_eq!(form.judge.kind, AgentKind::Codex);
         assert_eq!(form.max_rounds, 3);
-        let (_, contestants) = competition::engine::participants(&form.judge, &form.panel);
+        let contestants =
+            competition::engine::participants(std::slice::from_ref(&form.judge), &form.panel)
+                .contestants;
         let ids: Vec<&str> = contestants.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["claude", "claude-2"]);
         std::fs::remove_dir_all(&root).unwrap();
@@ -1663,7 +1699,7 @@ mod tests {
         let panel = start::read(&screen.tree, &screen.start).panel;
         // A new row takes the last row's kind.
         assert!(panel[3..].iter().all(|c| c.kind == AgentKind::Agy));
-        let (_, contestants) = competition::engine::participants(&panel[0], &panel);
+        let contestants = competition::engine::participants(&panel[..1], &panel).contestants;
         assert_eq!(contestants[5].id.as_str(), "agy-4");
         // The remove buttons are wired to their rows.
         assert_eq!(
@@ -2579,5 +2615,512 @@ mod tests {
             times_us[0],
             times_us[iters - 1]
         );
+    }
+
+    /// Every label and tag text under `root`, depth first.
+    fn texts_under(tree: &UiTree, root: WidgetId) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if let Some(label) = tree.get::<Label>(id) {
+                out.push(label.text().to_owned());
+            }
+            if let Some(tag) = tree.get::<Tag>(id) {
+                out.push(tag.text().to_owned());
+            }
+            stack.extend(tree.children(id).iter().rev());
+        }
+        out
+    }
+
+    fn toasts(screen: &Competition) -> Vec<String> {
+        let tree = &screen.tree;
+        tree.overlays()
+            .flat_map(|stack| tree.children(stack).iter())
+            .filter_map(|&id| tree.get::<noa_gpui_core::widgets::Toast>(id))
+            .map(|toast| toast.message().to_owned())
+            .collect()
+    }
+
+    fn setups(choices: &[AgentChoice]) -> Vec<(AgentKind, Option<&str>)> {
+        choices
+            .iter()
+            .map(|c| (c.kind, c.setup.model.as_deref()))
+            .collect()
+    }
+
+    #[test]
+    fn a_rematch_fills_every_judge_row() {
+        let mut screen = Competition::demo_panel();
+        let mut text = TextStore::new(Default::default());
+        let session = screen.session.clone().unwrap();
+        screen.handle_action(Action::Rematch, &mut text);
+        let form = start::read(&screen.tree, &screen.start);
+        assert_eq!(form, start::Form::of_session(&session));
+        assert_eq!(
+            setups(&form.judges()),
+            [
+                (AgentKind::Claude, Some("opus")),
+                (AgentKind::Codex, Some("gpt-6.2-sol")),
+                (AgentKind::Agy, None),
+            ]
+        );
+        assert_eq!(screen.start.co_judges.len(), 2);
+        // Three judges: the add button is off, both co-judge rows can go.
+        assert!(!screen.tree.is_enabled(screen.start.add_judge));
+        let acts = actions(&screen);
+        assert!(acts.contains(&Action::RemoveJudgeRow(0)));
+        assert!(acts.contains(&Action::RemoveJudgeRow(1)));
+        let seats = competition::engine::participants(&form.judges(), &form.panel);
+        let ids: Vec<&str> = std::iter::once(&seats.judge)
+            .chain(&seats.co_judges)
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(ids, ["judge", "judge-2", "judge-3"]);
+    }
+
+    #[test]
+    fn a_rematch_leaves_out_judges_not_installed() {
+        let mut screen = Competition::demo_panel();
+        let mut text = TextStore::new(Default::default());
+        let kinds = vec![AgentKind::Codex, AgentKind::Agy];
+        screen.detection = start::Detection::Done(Installed::Found(kinds.clone()));
+        let form = start::Form::for_kinds(&kinds);
+        start::apply_kinds(&mut screen.tree, &mut screen.start, kinds, &form, &mut text);
+        screen.handle_action(Action::Rematch, &mut text);
+        // The lead (claude) is not installed: the first co-judge leads.
+        let read = start::read(&screen.tree, &screen.start);
+        assert_eq!(
+            setups(&read.judges()),
+            [
+                (AgentKind::Codex, Some("gpt-6.2-sol")),
+                (AgentKind::Agy, None)
+            ]
+        );
+        assert!(
+            toasts(&screen)
+                .iter()
+                .any(|t| t == "インストールされていないため除外: claude"),
+            "{:?}",
+            toasts(&screen)
+        );
+
+        // With none of the judges installed, one judge stays: the first kind.
+        let mut session = crate::demo::panel_session();
+        for judge in session.co_judges.iter_mut() {
+            judge.kind = AgentKind::Claude;
+        }
+        let form = start::Form::of_session(&session);
+        let left_out = start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+        assert_eq!(left_out, [AgentKind::Claude]);
+        let read = start::read(&screen.tree, &screen.start);
+        assert_eq!(read.judges(), [AgentChoice::from(AgentKind::Codex)]);
+    }
+
+    #[test]
+    fn a_pristine_form_keeps_one_judge_after_the_agent_check() {
+        let (mut screen, _link, tx, mut text) = live_pending();
+        assert!(
+            start::read(&screen.tree, &screen.start)
+                .co_judges
+                .is_empty()
+        );
+        report(
+            &mut screen,
+            &tx,
+            found(&[AgentKind::Codex, AgentKind::Agy]),
+            &mut text,
+        );
+        let form = start::read(&screen.tree, &screen.start);
+        assert_eq!(form.judges(), [AgentChoice::from(AgentKind::Codex)]);
+        assert!(screen.tree.is_enabled(screen.start.add_judge));
+
+        // A judge the user added is the user's form: it is kept.
+        let (mut screen, _link, tx, mut text) = live_pending();
+        screen.handle_action(Action::AddJudgeRow, &mut text);
+        report(&mut screen, &tx, found(&[AgentKind::Claude]), &mut text);
+        let form = start::read(&screen.tree, &screen.start);
+        assert_eq!(
+            kinds_of(&form.judges()),
+            [AgentKind::Claude, AgentKind::Claude]
+        );
+    }
+
+    #[test]
+    fn every_agent_and_every_judge_has_a_pane_button() {
+        let screen = Competition::demo_panel();
+        let focus: Vec<String> = actions(&screen)
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::FocusPane(part) => Some(part.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            focus,
+            ["claude", "agy", "codex", "judge", "judge-2", "judge-3"]
+        );
+    }
+
+    #[test]
+    fn the_leaderboard_shows_each_judges_score_and_the_spread() {
+        let screen = Competition::demo_panel();
+        let texts = texts_under(&screen.tree, screen.left_host);
+        for want in [
+            "93.7 pt",
+            "R1:72.3 → R2:78.3 → R3:82.3 → R4:85.3 → R5:88.3 → R6:93.7",
+            "judge 93 · judge-2 96 · judge-3 92 · 差 4",
+            // codex's spread of 20 is flagged.
+            "judge 91 · judge-2 95 · judge-3 75",
+            "⚠ 差 20",
+            "リード審判 · claude (opus)",
+            "審判 2 · codex (gpt-6.2-sol)",
+            "審判 3 · agy",
+            // The lead's card follows its verdict brief, not yet sent.
+            "R6 待機中",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want:?} in {texts:?}");
+        }
+        // A single judge's leaderboard is as it was.
+        let single = Competition::demo();
+        let texts = texts_under(&single.tree, single.left_host);
+        assert!(texts.iter().any(|t| t == "93 pt"));
+        assert!(texts.iter().any(|t| t == "審判 · claude"));
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains('差') || t.contains("リード"))
+        );
+    }
+
+    #[test]
+    fn the_judge_board_lists_scores_by_judge() {
+        let screen = Competition::demo_panel();
+        let texts = texts_under(&screen.tree, screen.right_host);
+        for want in [
+            "#1 claude(93.7) · #2 agy(88.7) · #3 codex(87.0)",
+            "審判別スコア",
+            "judge-2",
+            "差",
+            "⚠ 差 20",
+            "審判 2 (codex) の総評",
+            "R6: codex の見立て: 操作性と情報設計を重く見ました。",
+            "審判 3 (agy) の総評",
+            "最終講評を待っています（judge）",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want:?} in {texts:?}");
+        }
+        // Only the round still waiting says so.
+        let waiting = texts
+            .iter()
+            .filter(|t| t.starts_with("最終講評を待って"))
+            .count();
+        assert_eq!(waiting, 1);
+        let single = Competition::demo();
+        let texts = texts_under(&single.tree, single.right_host);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "#1 claude(93) · #2 codex(91) · #3 agy(89)")
+        );
+        assert!(!texts.iter().any(|t| t == "審判別スコア"));
+    }
+
+    #[test]
+    fn the_progress_strip_has_a_chip_per_judge_and_the_verdict() {
+        let screen = Competition::demo_panel();
+        let texts = texts_under(&screen.tree, screen.progress_host);
+        for want in [
+            "● 採点 3/3",
+            "審判 (judge)",
+            "審判 (judge-2)",
+            "審判 (judge-3)",
+            "講評 (judge)",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want:?} in {texts:?}");
+        }
+
+        // Mid-scoring: judge-2 failed, judge-3 is still out.
+        let mut session = crate::demo::panel_session();
+        let last = session.rounds.len() - 1;
+        let round = &mut session.rounds[last];
+        round.verdict_brief = None;
+        round.outcome = None;
+        round
+            .scorecards
+            .retain(|judge, _| judge.as_str() == JUDGE_ID);
+        round.co_judge_briefs[0].receipt.replied = None;
+        round.co_judge_briefs[0].receipt.failed = Some("返答がありません".into());
+        round.co_judge_briefs[1].receipt.replied = None;
+        let screen = Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        let texts = texts_under(&screen.tree, screen.progress_host);
+        for want in ["● 採点 1/3", "✗ judge-2: 返答がありません"] {
+            assert!(texts.iter().any(|t| t == want), "{want:?} in {texts:?}");
+        }
+        assert!(!texts.iter().any(|t| t == "講評 (judge)"));
+        // The retry button is offered for the failed judge.
+        assert!(actions(&screen).contains(&Action::Retry));
+
+        let single = Competition::demo();
+        let texts = texts_under(&single.tree, single.progress_host);
+        let judges: Vec<&String> = texts.iter().filter(|t| t.contains("(judge")).collect();
+        assert_eq!(judges, ["審判 (judge)"]);
+    }
+
+    #[test]
+    fn a_tie_the_verdict_breaks_shows_its_winner_first() {
+        use competition::model::aggregate;
+        use competition::model::reduce::{Event, apply};
+        // Every judge scores claude and agy 90 in the last round, ranking
+        // claude first; the lead's verdict names agy.
+        let mut session = crate::demo::panel_session();
+        let last = session.rounds.len();
+        for card in session.rounds[last - 1].scorecards.values_mut() {
+            for (part, ev) in &mut card.evaluations {
+                ev.score = if part.as_str() == "codex" { 80 } else { 90 };
+            }
+            card.ranking = ["claude", "agy", "codex"].map(PartId::new).to_vec();
+        }
+        let cards = &session.rounds[last - 1].scorecards;
+        let combined = aggregate::combine(&session, last as RoundNo, cards);
+        assert_eq!(combined.ranking[0].as_str(), "claude");
+        session.rounds[last - 1].outcome = Some(combined);
+        apply(
+            &mut session,
+            &[Event::VerdictAccepted {
+                round: last as RoundNo,
+                winner: PartId::new("agy"),
+                final_verdict: "agy breaks the tie.".into(),
+            }],
+        )
+        .unwrap();
+        let outcome = session.rounds[last - 1].outcome.as_ref().unwrap();
+        assert_eq!(outcome.ranking, ["agy", "claude", "codex"].map(PartId::new));
+
+        let report = export::result_markdown(&session);
+        assert!(report.contains("1. **agy** 🏆"), "{report}");
+        assert!(report.contains("2. **claude** — "), "{report}");
+        let screen = Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        let texts = texts_under(&screen.tree, screen.left_host);
+        for want in ["🏆 #1 agy", "#2 claude", "#3 codex"] {
+            assert!(texts.iter().any(|t| t == want), "{want:?} in {texts:?}");
+        }
+    }
+
+    #[test]
+    fn a_verdict_the_competition_ended_without_is_not_awaited() {
+        use competition::model::reduce::{Event, apply};
+        let winner = PartId::new("claude");
+        for (how, batch) in [
+            ("終了", vec![Event::SessionClosed]),
+            (
+                "a winner chosen by hand",
+                vec![Event::WinnerSelected { winner }, Event::SessionClosed],
+            ),
+        ] {
+            // Every judge scored, the verdict asked of the lead, then ended.
+            let mut session = crate::demo::panel_session();
+            apply(&mut session, &batch).unwrap();
+            let screen =
+                Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+            let right = texts_under(&screen.tree, screen.right_host);
+            assert!(
+                !right.iter().any(|t| t.starts_with("最終講評を待って")),
+                "{how}: {right:?}"
+            );
+            // The lead's card shows its scorecard, not the verdict it
+            // will not write.
+            let left = texts_under(&screen.tree, screen.left_host);
+            assert!(left.iter().any(|t| t == "R6 提出済"), "{how}: {left:?}");
+            assert!(!left.iter().any(|t| t == "R6 待機中"), "{how}: {left:?}");
+            let progress = texts_under(&screen.tree, screen.progress_host);
+            assert!(
+                !progress.iter().any(|t| t == "講評 (judge)"),
+                "{how}: {progress:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_intervention_in_a_deciding_round_reaches_the_leads_verdict_brief() {
+        let ids = |v: &[&str]| v.iter().map(|x| PartId::new(*x)).collect::<Vec<_>>();
+        let next = "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）";
+        let verdict = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます。延長した場合は次のラウンドのブリーフで宛先パネルに届きます";
+        let verdict_too = "追加指示は宛先にリード審判がいなくても、このラウンドでこのあと出る最終講評のブリーフでリード審判に届きます。延長した場合は次のラウンドのブリーフで宛先パネルに届きます";
+        let early_close =
+            "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます";
+        // The last round, being scored, its verdict brief not issued yet.
+        let mut session = crate::demo::panel_session();
+        let last = session.rounds.len() - 1;
+        session.rounds[last].verdict_brief = None;
+        for to in [
+            ids(&[]),
+            ids(&["judge"]),
+            ids(&["judge", "judge-2", "judge-3"]),
+        ] {
+            assert_eq!(composer::hint(&session, &to), verdict, "{to:?}");
+        }
+        // The verdict brief carries every intervention, whatever its
+        // addressees: one to co-judges or contestants reaches them next
+        // round, and the lead now. Nothing claims blindness.
+        for to in [
+            ids(&["judge-2"]),
+            ids(&["judge-2", "judge-3"]),
+            ids(&["claude"]),
+            ids(&["claude", "judge-3"]),
+        ] {
+            assert_eq!(composer::hint(&session, &to), verdict_too, "{to:?}");
+        }
+        assert!(!verdict.contains("ブラインド") && !verdict_too.contains("ブラインド"));
+        // The last round has no next round unless extended: delivery to the
+        // lead is stated as certain, to the recipients as conditional.
+        for hint in [verdict, verdict_too] {
+            assert!(
+                hint.contains("最終講評のブリーフでリード審判に届きます"),
+                "{hint}"
+            );
+            assert!(
+                hint.contains("延長した場合は次のラウンドのブリーフで宛先パネルに届きます"),
+                "{hint}"
+            );
+        }
+
+        // A round before the last: the next round's briefs, until the
+        // lead's scorecard closes the competition. Closed early, it cannot
+        // be extended: there is no next round, so whoever it is addressed
+        // to, it reaches only the lead's verdict brief.
+        let mut early = session.clone();
+        early.max_rounds = Some(last as RoundNo + 3);
+        assert_eq!(composer::hint(&early, &ids(&["judge"])), next);
+        assert_eq!(composer::hint(&early, &ids(&["judge-2"])), next);
+        early.rounds[last]
+            .scorecards
+            .get_mut(&PartId::new(JUDGE_ID))
+            .unwrap()
+            .close = true;
+        let every = [
+            ids(&[]),
+            ids(&["judge"]),
+            ids(&["judge", "judge-2", "judge-3"]),
+            ids(&["judge-2"]),
+            ids(&["claude"]),
+            ids(&["claude", "judge-3"]),
+        ];
+        for to in &every {
+            assert_eq!(composer::hint(&early, to), early_close, "{to:?}");
+        }
+        // Without a round limit, the lead's close is the only end either.
+        let mut unlimited = early.clone();
+        unlimited.max_rounds = None;
+        for to in &every {
+            assert_eq!(composer::hint(&unlimited, to), early_close, "{to:?}");
+        }
+        assert!(!early_close.contains("次のラウンド"));
+
+        // Before judging, and once the verdict brief is out, it is not.
+        let mut competing = session.clone();
+        competing.rounds[last].phase = Phase::Competing;
+        assert_eq!(composer::hint(&competing, &[]), next);
+        assert_eq!(composer::hint(&crate::demo::panel_session(), &[]), next);
+
+        // A single judge's hint is as it was, in its deciding round too.
+        let mut single = crate::demo::session();
+        let last_single = single.rounds.len() - 1;
+        single.max_rounds = Some(single.rounds.len() as RoundNo);
+        single.rounds[last_single].phase = Phase::Judging;
+        assert_eq!(composer::hint(&single, &[]), next);
+        assert_eq!(composer::hint(&single, &ids(&["judge"])), next);
+        assert_eq!(composer::hint(&single, &ids(&["claude"])), next);
+
+        // On screen, the hint follows the chosen recipients.
+        let mut text = TextStore::new(Default::default());
+        let mut screen =
+            Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        screen.prepare(VIEW, &mut text);
+        let hint = |screen: &Competition| {
+            screen
+                .tree
+                .get::<Label>(screen.composer.hint)
+                .unwrap()
+                .text()
+                .to_owned()
+        };
+        assert_eq!(hint(&screen), verdict, "全員");
+        let popup = screen.composer.recipients;
+        for want in [verdict, verdict, verdict_too] {
+            // 審判全員, 審判 (Judge), then judge-2.
+            press_down(&mut screen, popup, &mut text);
+            assert_eq!(hint(&screen), want);
+        }
+    }
+
+    #[test]
+    fn interventions_go_to_one_judge_or_every_judge() {
+        let ids = |to: &[PartId]| to.iter().map(PartId::to_string).collect::<Vec<_>>();
+        let panel = crate::demo::panel_session();
+        let choices: Vec<(String, Vec<String>)> = composer::choices(&panel)
+            .into_iter()
+            .map(|(label, to)| (label, ids(&to)))
+            .collect();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            choices,
+            [
+                ("全員".to_owned(), s(&[])),
+                ("審判全員".to_owned(), s(&["judge", "judge-2", "judge-3"])),
+                ("審判 (Judge)".to_owned(), s(&["judge"])),
+                ("審判 2 (judge-2)".to_owned(), s(&["judge-2"])),
+                ("審判 3 (judge-3)".to_owned(), s(&["judge-3"])),
+                ("claude".to_owned(), s(&["claude"])),
+                ("codex".to_owned(), s(&["codex"])),
+                ("agy".to_owned(), s(&["agy"])),
+            ]
+        );
+        // A single judge's choices are as they were.
+        let single: Vec<String> = composer::choices(&crate::demo::session())
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        assert_eq!(single, ["全員", "審判 (Judge)", "claude", "codex", "agy"]);
+
+        // Sent from the composer, to every judge and then to judge-2.
+        let (channel, link) = Channel::fake();
+        let mut screen = Competition::live(channel, installed_all());
+        let mut text = TextStore::new(Default::default());
+        link.snapshots
+            .send(Snapshot {
+                link: Link::Live,
+                session: Some(Arc::new(panel)),
+                artifact_root: None,
+                generation: 0,
+            })
+            .unwrap();
+        screen.poll_live(&mut text);
+        for (index, want) in [
+            (1, vec!["judge", "judge-2", "judge-3"]),
+            (3, vec!["judge-2"]),
+        ] {
+            let popup = screen.composer.recipients;
+            screen
+                .tree
+                .update::<noa_gpui_core::widgets::PopUpButton, _>(popup, |p, cx| {
+                    p.set_selected(cx, index)
+                });
+            let area = screen.composer.area;
+            screen
+                .tree
+                .update::<noa_gpui_core::widgets::TextArea, _>(area, |a, cx| {
+                    a.set_text(cx, "採点基準を揃えてください")
+                });
+            screen.handle_action(Action::Send, &mut text);
+            let sent: Vec<Vec<String>> = commands(&link)
+                .into_iter()
+                .filter_map(|cmd| match cmd {
+                    Command::Intervene { to, .. } => Some(ids(&to)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sent, [s(&want)]);
+        }
     }
 }

@@ -1,15 +1,18 @@
 //! A canned multi-round competition (`--demo`) showing 5 blind rounds followed
-//! by a Round 6 peer-reveal showcase with visual design artifacts and scores.
+//! by a Round 6 peer-reveal showcase with visual design artifacts and scores;
+//! with `--judges`, the same competition scored by a panel of three judges,
+//! waiting for the lead's final verdict.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use competition::store::{Listed, Summary};
 
+use competition::model::aggregate;
 use competition::model::types::{
     AgentChoice, AgentKind, AgentSetup, ArtifactFile, ArtifactKind, Author, Brief, EntryEvaluation,
     JUDGE_ID, JudgeOutput, Message, MessageId, Millis, MsgKind, PartId, Participant, Phase,
-    Receipt, Role, Round, RoundKind, Session, SessionId, Submission,
+    Receipt, Role, Round, RoundKind, RoundNo, Session, SessionId, Submission, judge_id,
 };
 
 /// The start view's demo panel: the same CLI on two models, and codex.
@@ -310,6 +313,9 @@ pub fn session() -> Session {
             ],
             submissions,
             judge_brief: Some(make_brief(&judge, t + 20)),
+            co_judge_briefs: Vec::new(),
+            scorecards: BTreeMap::new(),
+            verdict_brief: None,
             outcome: Some(JudgeOutput {
                 overview,
                 evaluations,
@@ -332,6 +338,7 @@ pub fn session() -> Session {
         rev: 24,
         created_at: 1,
         judge: p(JUDGE_ID, AgentKind::Claude, Role::Judge),
+        co_judges: Vec::new(),
         contestants: vec![
             p("claude", AgentKind::Claude, Role::Contestant),
             p("codex", AgentKind::Codex, Role::Contestant),
@@ -343,4 +350,80 @@ pub fn session() -> Session {
         closed: false,
         hold: false,
     }
+}
+
+/// [`session`] scored by three judges: claude on opus leads, codex and agy
+/// score too. Each round's outcome is the panel's combined judgment; the
+/// last round is the final one, scored and waiting for the lead's verdict.
+pub fn panel_session() -> Session {
+    let mut session = session();
+    let judge = |seat: usize, kind, model: Option<&str>| Participant {
+        id: judge_id(seat),
+        kind,
+        role: Role::Judge,
+        pane_id: None,
+        setup: AgentSetup {
+            model: model.map(Into::into),
+            effort: None,
+        },
+    };
+    session.judge = judge(0, AgentKind::Claude, Some("opus"));
+    session.co_judges = vec![
+        judge(1, AgentKind::Codex, Some("gpt-6.2-sol")),
+        judge(2, AgentKind::Agy, None),
+    ];
+    let last = session.rounds.len() as RoundNo;
+    session.max_rounds = Some(last);
+    // How far each co-judge's score is from the lead's, per entry in the
+    // evaluations' order (agy, claude, codex). codex's last round splits
+    // the panel widely.
+    let offsets = |no: RoundNo| -> [[i16; 3]; 2] {
+        if no == last {
+            [[-2, 3, 4], [1, -1, -16]]
+        } else {
+            [[2, -1, 3], [-1, 2, 1]]
+        }
+    };
+    let overviews = [
+        "codex の見立て: 操作性と情報設計を重く見ました。",
+        "agy の見立て: ストーリーと構成の一貫性を重く見ました。",
+    ];
+    for round in &mut session.rounds {
+        let Some(lead) = round.outcome.clone() else {
+            continue;
+        };
+        let mut cards = BTreeMap::from([(judge_id(0), lead.clone())]);
+        for (k, offset) in offsets(round.no).into_iter().enumerate() {
+            let mut card = lead.clone();
+            card.overview = format!("R{}: {}", round.no, overviews[k]);
+            card.checklist = Vec::new();
+            for (ev, delta) in card.evaluations.values_mut().zip(offset) {
+                ev.score = (i16::from(ev.score) + delta).clamp(0, 100) as u8;
+            }
+            cards.insert(judge_id(k + 1), card);
+        }
+        let mut brief = round.judge_brief.clone().expect("a judged round");
+        round.co_judge_briefs = (1..=2)
+            .map(|seat| {
+                brief.to = judge_id(seat);
+                brief.reply_path = PathBuf::from(format!("r/{}.json", brief.to));
+                brief.clone()
+            })
+            .collect();
+        round.scorecards = cards;
+    }
+    for no in 1..=last {
+        let round = &session.rounds[no as usize - 1];
+        let combined = aggregate::combine(&session, no, &round.scorecards);
+        session.rounds[no as usize - 1].outcome = Some(combined);
+    }
+    // The final round: scored, the verdict asked of the lead (not sent
+    // yet, so no clock runs in a canned view).
+    let final_round = session.rounds.last_mut().expect("rounds");
+    final_round.phase = Phase::Judging;
+    let mut verdict = final_round.judge_brief.clone().expect("a judged round");
+    verdict.reply_path = PathBuf::from("r/verdict.json");
+    verdict.receipt = Receipt::default();
+    final_round.verdict_brief = Some(verdict);
+    session
 }

@@ -107,9 +107,11 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
         .background(Role::SurfaceAlt),
     );
 
+    // Wraps, so the steps move under the round label in a narrow pane
+    // instead of running past its edge.
     let top = tree.insert(
         Some(strip),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::wrapping_row(8.0, 6.0).align_items(AlignItems::CENTER),
     );
     let (done, max) = rounds_done(session);
     let current = session.current_round();

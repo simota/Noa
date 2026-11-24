@@ -752,3 +752,40 @@ fn a_shown_review_whose_agent_is_gone_is_not_resumed_or_extended() {
     assert_eq!(commands(&link), [Command::Resume { dir }]);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// The smallest window the app allows, in logical pixels.
+const SMALLEST: (f32, f32) = (MIN_WINDOW.0 as f32, MIN_WINDOW.1 as f32);
+
+/// Lays `screen` out in a window of `size`, as `--snapshot` does.
+fn lay_out(screen: &mut Review, size: (f32, f32)) {
+    let mut text = TextStore::new(Default::default());
+    let viewport = noa_gpui_scene::Size::new(size.0, size.1);
+    noa_gpui_platform::Screen::prepare(screen, viewport, &mut text);
+}
+
+/// What under `host` reaches past its right edge: cut off where the pane
+/// ends.
+fn cut_off(screen: &Review, host: WidgetId) -> Vec<WidgetId> {
+    let edge = screen.tree.window_rect(host).unwrap().right();
+    let mut out = Vec::new();
+    let mut stack = screen.tree.children(host).to_vec();
+    while let Some(id) = stack.pop() {
+        if screen
+            .tree
+            .window_rect(id)
+            .is_some_and(|r| r.right() > edge + 0.5)
+        {
+            out.push(id);
+        }
+        stack.extend_from_slice(screen.tree.children(id));
+    }
+    out
+}
+
+#[test]
+fn the_progress_strip_fits_the_smallest_window() {
+    for mut screen in [Review::demo(), Review::demo_held()] {
+        lay_out(&mut screen, SMALLEST);
+        assert_eq!(cut_off(&screen, screen.progress_host), vec![]);
+    }
+}

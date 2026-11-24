@@ -1,5 +1,20 @@
 use super::*;
 
+use std::cell::RefCell;
+
+thread_local! {
+    /// Run once right after a stored view read its log, before it goes on
+    /// (a test's stand-in for another window writing at that moment).
+    static AFTER_STORED_READ: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+/// Called by `show_stored` after its read (tests only).
+pub(super) fn after_stored_read() {
+    if let Some(hook) = AFTER_STORED_READ.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+}
+
 use review::model::types::{AgentKind, LensChoice, MIN_PANEL, ReviewerChoice, TargetKind};
 
 use crate::installed::Installed;
@@ -2547,7 +2562,7 @@ fn past_reviews_added_or_gone_between_pages_end_without_gaps_or_doubles() {
 fn a_noa_older_than_0_9_13_gets_a_reason_instead_of_fix_buttons() {
     for (version, offered) in [("0.9.12", false), ("0.9.13", true)] {
         let (mut screen, link) = live_with_dirs(crate::demo::session());
-        link.versions.send(version.to_owned()).unwrap();
+        link.versions.send((1, version.to_owned())).unwrap();
         screen.poll_live(&mut TextStore::new(Default::default()));
         assert_eq!(!fix_actions(&screen).is_empty(), offered, "{version}");
         assert_eq!(
@@ -2700,9 +2715,88 @@ fn a_stored_review_extended_elsewhere_shows_the_running_note_with_its_fix_button
 #[test]
 fn the_fix_card_follows_the_version_of_each_noa_connected() {
     let (mut screen, link) = live_with_dirs(crate::demo::session());
-    for (version, offered) in [("0.9.12", false), ("0.9.13", true), ("0.9.12", false)] {
-        link.versions.send(version.to_owned()).unwrap();
+    for (seq, (version, offered)) in [("0.9.12", false), ("0.9.13", true), ("0.9.12", false)]
+        .into_iter()
+        .enumerate()
+    {
+        link.versions
+            .send((seq as u64 + 1, version.to_owned()))
+            .unwrap();
         screen.poll_live(&mut TextStore::new(Default::default()));
         assert_eq!(!fix_actions(&screen).is_empty(), offered, "{version}");
     }
+}
+
+#[test]
+fn a_stored_review_finished_while_it_was_being_shown_is_caught_at_the_next_look() {
+    let root = std::env::temp_dir().join(format!("noa-review-mid-show-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let finished = dir.clone();
+    // Another window finishes it right after the view read the log.
+    AFTER_STORED_READ.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            rewrite_log(&finished, &crate::demo::log())
+        }));
+    });
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(!screen.session.as_ref().unwrap().closed);
+    look_again(&mut screen);
+    assert!(screen.session.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumeShown));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_change_that_could_not_be_read_is_read_at_a_later_look() {
+    use std::os::unix::fs::PermissionsExt;
+    let root =
+        std::env::temp_dir().join(format!("noa-review-unread-change-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    rewrite_log(&dir, &crate::demo::log());
+    let log = dir.join(store::EVENTS_FILE);
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    look_again(&mut screen);
+    assert!(!screen.session.as_ref().unwrap().closed);
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    look_again(&mut screen);
+    assert!(screen.session.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumeShown));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_report_written_before_the_writer_let_go_is_no_longer_offered_again() {
+    let root = std::env::temp_dir().join(format!("noa-review-late-report-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    // The writer holds the log, and has not written its report yet.
+    let (held, session) = Store::open(&dir).unwrap();
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(screen.report_stale);
+    store::write_report(&dir, &export::report_markdown(&session)).unwrap();
+    drop(held);
+    look_again(&mut screen);
+    assert!(screen.stored_free);
+    assert!(!acts(&screen).contains(&Action::RegenerateReport));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_older_connections_version_arriving_late_does_not_win() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    // The runner reconnected to a 0.9.12 (hello 2); a fix request's report
+    // from an earlier connection (hello 1, 0.9.13) arrives after it.
+    for report in [(2, "0.9.12"), (1, "0.9.13")] {
+        link.versions.send((report.0, report.1.to_owned())).unwrap();
+        screen.poll_live(&mut TextStore::new(Default::default()));
+    }
+    assert!(fix_actions(&screen).is_empty());
+    assert!(all_text(&screen).contains("0.9.13 以降が必要"));
+    // A newer connection to a 0.9.13 does.
+    link.versions.send((3, "0.9.13".to_owned())).unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert!(!fix_actions(&screen).is_empty());
 }

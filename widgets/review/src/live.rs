@@ -98,7 +98,7 @@ pub struct Channel {
     pub released: Receiver<()>,
     /// The running Noa's version, once a look at it at startup could read
     /// it (what 修正を依頼 can offer depends on it).
-    pub versions: Receiver<String>,
+    pub versions: Receiver<(u64, String)>,
     commands: Sender<(u64, Command)>,
     generation: Arc<AtomicU64>,
 }
@@ -206,8 +206,9 @@ struct Outlets {
     snapshots: Sender<Snapshot>,
     notices: Sender<Notice>,
     released: Sender<()>,
-    /// The version of each Noa a runner or a fix request connected to.
-    versions: Sender<String>,
+    /// The version of each Noa a runner or a fix request connected to,
+    /// with the number of that connection's hello.
+    versions: Sender<(u64, String)>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -403,8 +404,8 @@ fn forward_updates(
                     .is_ok()
             }
             Update::Notice(text) => notices.send((generation, text)).is_ok(),
-            Update::Version(version) => {
-                let _ = versions.send(version);
+            Update::Version(seq, version) => {
+                let _ = versions.send((seq, version));
                 true
             }
             Update::Ended(Ok(())) => break,
@@ -439,7 +440,7 @@ pub struct FakeLink {
     pub snapshots: Sender<Snapshot>,
     pub notices: Sender<Notice>,
     pub released: Sender<()>,
-    pub versions: Sender<String>,
+    pub versions: Sender<(u64, String)>,
     pub commands: Receiver<(u64, Command)>,
 }
 

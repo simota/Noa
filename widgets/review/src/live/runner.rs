@@ -110,8 +110,9 @@ pub enum Update {
     Link(Link),
     Notice(String),
     /// The version of the Noa this runner just connected to (each
-    /// connection, so a reconnect to another Noa shows).
-    Version(String),
+    /// connection, so a reconnect to another Noa shows), with the number
+    /// of that connection's hello.
+    Version(u64, String),
     Ended(Result<(), String>),
 }
 
@@ -499,7 +500,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     /// On each connection: takes up the panes; on the first, starts (or
     /// resumes) the review.
     fn begin(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
-        self.emit(Update::Version(conn.server_version()));
+        self.emit(Update::Version(conn.hello_seq(), conn.server_version()));
         self.sync_panes(conn)?;
         if !self.started {
             self.started = true;
@@ -1676,6 +1677,10 @@ mod tests {
             "0.9.13".into()
         }
 
+        fn hello_seq(&self) -> u64 {
+            1
+        }
+
         fn focus(&mut self, pane: u64) -> Result<(), NoaError> {
             let mut w = self.0.borrow_mut();
             if !w.panes.contains_key(&pane) {
@@ -1801,7 +1806,7 @@ mod tests {
         let versions: Vec<String> = updates
             .try_iter()
             .filter_map(|u| match u {
-                Update::Version(v) => Some(v),
+                Update::Version(_, v) => Some(v),
                 _ => None,
             })
             .collect();

@@ -260,8 +260,10 @@ pub struct Review {
     detection: start::Detection,
     /// Where that check reports, until it has.
     installed: Option<Receiver<Installed>>,
-    /// The running Noa's version, once the look at startup read it.
-    noa_version: Option<String>,
+    /// The version of the newest Noa connection that reported (its number
+    /// in hello order, and the version): a report from an older connection
+    /// that arrives later is not applied.
+    noa_version: Option<(u64, String)>,
 
     start: start::Parts,
     board: WidgetId,
@@ -614,7 +616,12 @@ impl Review {
     }
 
     fn show_stored(&mut self, dir: &Path, text: &mut TextStore) -> Result<(), String> {
+        // Taken just before the read, so it goes with the session read: a
+        // write that lands after it shows as a change at the next look.
+        let stamp = store::log_stamp(dir);
         let session = self.load_stored(dir)?;
+        #[cfg(test)]
+        tests::after_stored_read();
         self.leave();
         if !matches!(self.source, Source::Demo) {
             self.reply_root = Some(store::reply_dir(dir, &session));
@@ -624,7 +631,7 @@ impl Review {
         self.read_only = true;
         self.stored_dir = Some(dir.to_owned());
         self.stored_free = !store::is_busy(dir);
-        self.stored_stamp = store::log_stamp(dir);
+        self.stored_stamp = stamp;
         self.busy_checked = Some(std::time::Instant::now());
         self.report_stale = !matches!(self.source, Source::Demo)
             && store::report_is_stale(dir, self.session.as_deref().expect("just set"));
@@ -867,7 +874,8 @@ impl Review {
         // the global auto-approve setting (the request checks it again).
         if let Some(version) = self
             .noa_version
-            .as_deref()
+            .as_ref()
+            .map(|(_, v)| v.as_str())
             .filter(|v| !crate::session::ipc::sets_tab_auto_approve(v))
         {
             return Some(fix::FixOffer::Unavailable(
@@ -1151,18 +1159,25 @@ impl Review {
         }
         self.busy_checked = Some(std::time::Instant::now());
         let stamp = store::log_stamp(&dir);
-        if stamp != self.stored_stamp {
+        // The stamp is kept only with a read that worked: a log that could
+        // not be read is tried again at the next look.
+        if stamp != self.stored_stamp
+            && let Ok(session) = store::read_session(&dir)
+        {
             self.stored_stamp = stamp;
-            if let Ok(session) = store::read_session(&dir) {
-                self.report_stale = store::report_is_stale(&dir, &session);
-                self.session = Some(Arc::new(session));
-                self.drop_hidden_selection();
-                self.built = None;
-            }
+            self.report_stale = store::report_is_stale(&dir, &session);
+            self.session = Some(Arc::new(session));
+            self.drop_hidden_selection();
+            self.built = None;
         }
         let free = !store::is_busy(&dir);
         if free != self.stored_free {
             self.stored_free = free;
+            // A writer that let go has written its report by then (it
+            // writes the report after the log, before it releases it).
+            if free && let Some(session) = &self.session {
+                self.report_stale = store::report_is_stale(&dir, session);
+            }
             self.built = None;
         }
     }
@@ -1191,7 +1206,13 @@ impl Review {
                 released = true;
             }
             while let Ok(version) = channel.versions.try_recv() {
-                self.noa_version = Some(version);
+                if self
+                    .noa_version
+                    .as_ref()
+                    .is_none_or(|(newest, _)| version.0 > *newest)
+                {
+                    self.noa_version = Some(version);
+                }
                 self.built = None;
             }
         }

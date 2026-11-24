@@ -121,6 +121,10 @@ pub trait Noa {
     /// The version this connection's `noa.hello` gave (`serverVersion`):
     /// what a request needs of Noa is judged on the server that takes it.
     fn server_version(&self) -> String;
+    /// This connection's place among every hello the window completed
+    /// ([`next_hello`]): a later one is newer, whatever order the reports
+    /// of them arrive in.
+    fn hello_seq(&self) -> u64;
 }
 
 /// Opens connections to Noa; the runner calls it again after a lost one.
@@ -138,6 +142,17 @@ pub struct IpcNoa {
     client: Client,
     /// `noa.hello`'s `serverVersion`.
     version: String,
+    /// When its hello completed ([`next_hello`]).
+    seq: u64,
+}
+
+/// Numbers every `noa.hello` the window completes, in the order they
+/// complete, so the version of the newest connection wins on screen.
+static HELLOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The next hello's number (starting at 1).
+pub(crate) fn next_hello() -> u64 {
+    HELLOS.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
 }
 
 impl Connect for IpcConnect {
@@ -160,6 +175,7 @@ impl Connect for IpcConnect {
         // through: an older Noa ignores `refuseShell` and would type into a
         // shell.
         let version = client.server_version().to_owned();
+        let seq = next_hello();
         if !honours_refuse_shell(&version) {
             return Err(UNSAFE_SEND.to_owned());
         }
@@ -173,7 +189,11 @@ impl Connect for IpcConnect {
         client
             .subscribe(&[EventKind::StateChanged], None)
             .map_err(|err| format!("購読できません: {err}"))?;
-        Ok(IpcNoa { client, version })
+        Ok(IpcNoa {
+            client,
+            version,
+            seq,
+        })
     }
 }
 
@@ -204,9 +224,10 @@ fn endpoint() -> Result<(String, String), String> {
 /// window shows before any review connects; `None` when it cannot tell.
 /// Only for display: what a request may do is judged on its own
 /// connection ([`Noa::server_version`]).
-pub fn probe_version() -> Option<String> {
+pub fn probe_version() -> Option<(u64, String)> {
     let (url, token) = endpoint().ok()?;
-    server_version(&url, &token)
+    let version = server_version(&url, &token)?;
+    Some((next_hello(), version))
 }
 
 fn control_url(bind: &str, port: u16) -> String {
@@ -363,6 +384,10 @@ fn noa_error(err: ClientError) -> NoaError {
 impl Noa for IpcNoa {
     fn server_version(&self) -> String {
         self.version.clone()
+    }
+
+    fn hello_seq(&self) -> u64 {
+        self.seq
     }
 
     fn panes(&mut self) -> Result<Vec<PaneView>, NoaError> {

@@ -75,7 +75,7 @@ fn named(ids: &[String]) -> String {
 pub fn request<C: Connect>(
     connector: &mut C,
     req: &FixRequest,
-    seen: &mut Option<String>,
+    seen: &mut Option<(u64, String)>,
 ) -> Result<String, String> {
     let session = &*req.session;
     let workdir = store::fix_workdir(session)?.to_path_buf();
@@ -96,7 +96,7 @@ pub fn request<C: Connect>(
     // an older Noa would give the fix tab the global auto-approve setting.
     // Refused before the task is written.
     let version = conn.server_version();
-    *seen = Some(version.clone());
+    *seen = Some((conn.hello_seq(), version.clone()));
     if !super::ipc::sets_tab_auto_approve(&version) {
         return Err(NO_TAB_AUTO_APPROVE.to_owned());
     }
@@ -198,6 +198,9 @@ mod tests {
                 .version
                 .clone()
                 .unwrap_or_else(|| "0.9.13".into())
+        }
+        fn hello_seq(&self) -> u64 {
+            7
         }
     }
 
@@ -365,7 +368,7 @@ mod tests {
             let why = super::request(&mut noa.clone(), &request(&workdir, &["F1"]), &mut seen)
                 .unwrap_err();
             assert_eq!(why, NO_TAB_AUTO_APPROVE);
-            assert_eq!(seen.as_deref(), Some(version));
+            assert_eq!(seen, Some((7, version.to_owned())));
         }
         assert!(noa.0.borrow().spawned.is_empty());
         assert!(!workdir.join(".noa").exists());

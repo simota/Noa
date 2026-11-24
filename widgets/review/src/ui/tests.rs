@@ -789,3 +789,68 @@ fn the_progress_strip_fits_the_smallest_window() {
         assert_eq!(cut_off(&screen, screen.progress_host), vec![]);
     }
 }
+
+fn press(screen: &mut Review, key: noa_gpui_core::Key) {
+    let mut text = TextStore::new(Default::default());
+    noa_gpui_platform::Screen::dispatch(
+        screen,
+        noa_gpui_core::Event::KeyDown {
+            key,
+            modifiers: Default::default(),
+        },
+        &mut text,
+    );
+}
+
+fn is_selected(screen: &Review, action: &Action) -> bool {
+    let id = widget_for(screen, action).unwrap();
+    screen
+        .tree
+        .get::<noa_gpui_core::widgets::Button>(id)
+        .unwrap()
+        .is_selected()
+}
+
+#[test]
+fn return_on_a_held_review_goes_to_the_next_round() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    press(&mut screen, noa_gpui_core::Key::Enter);
+    assert_eq!(commands(&link), vec![Command::Continue]);
+}
+
+#[test]
+fn return_on_a_running_review_sends_the_draft() {
+    let mut running = crate::demo::held();
+    running.hold = false;
+    let (mut screen, link) = live_with(running);
+    screen
+        .tree
+        .update::<noa_gpui_core::widgets::TextArea, _>(screen.composer.area, |a, cx| {
+            a.set_text(cx, "認可も見てください")
+        });
+    press(&mut screen, noa_gpui_core::Key::Enter);
+    assert!(matches!(
+        commands(&link).as_slice(),
+        [Command::Intervene { body, .. }] if body == "認可も見てください"
+    ));
+}
+
+#[test]
+fn the_shown_tab_and_the_filters_on_are_selected_buttons() {
+    let mut screen = Review::demo();
+    assert!(is_selected(&screen, &Action::ShowTab(CenterTab::Findings)));
+    assert!(!is_selected(&screen, &Action::ShowTab(CenterTab::Matrix)));
+    assert!(is_selected(
+        &screen,
+        &Action::ToggleStatus(FindingStatus::Agreed)
+    ));
+    assert!(!is_selected(
+        &screen,
+        &Action::ToggleSeverity(Severity::Critical)
+    ));
+    act(&mut screen, Action::ToggleSeverity(Severity::Critical));
+    assert!(is_selected(
+        &screen,
+        &Action::ToggleSeverity(Severity::Critical)
+    ));
+}

@@ -47,7 +47,7 @@ fn chip(
         Some(parent),
         Button::new(label)
             .control_size(ControlSize::Small)
-            .default_button(on),
+            .selected(on),
     );
     actions.push((id, action));
 }

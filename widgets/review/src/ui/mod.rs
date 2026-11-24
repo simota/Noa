@@ -613,7 +613,7 @@ impl Review {
                 Some(tabs),
                 Button::new(label)
                     .control_size(ControlSize::Small)
-                    .default_button(self.tab == tab),
+                    .selected(self.tab == tab),
             );
             self.actions.push((btn, Action::ShowTab(tab)));
         }
@@ -669,6 +669,12 @@ impl Review {
             return;
         }
         composer::sync(&mut self.tree, &mut self.composer, session, text);
+        composer::set_send_default(
+            &mut self.tree,
+            &mut self.composer,
+            !session.waits_to_continue(),
+            text,
+        );
         if let Some(pending) = &self.pending_intervention
             && session
                 .messages

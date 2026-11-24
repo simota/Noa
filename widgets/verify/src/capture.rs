@@ -1020,6 +1020,41 @@ fn run_fed(mut cmd: Command, input: &[u8]) -> Result<(), String> {
     }
 }
 
+/// The work-tree patch as the parts it is applied in, each a run of `git
+/// apply` (L1-3), the empty ones left out: first every section that
+/// deletes a file, then the rest, each in its order. `git apply` checks
+/// every section before it writes any, so on a case-insensitive volume
+/// (macOS's default) a file added under a name that differs from a
+/// deleted one only in case (`git mv readme README`) is refused as already
+/// there; applied after the deletions, it is not.
+pub(crate) fn patch_parts(patch: &[u8]) -> Vec<Vec<u8>> {
+    let (mut deletions, mut rest) = (Vec::new(), Vec::new());
+    let mut section: Vec<&[u8]> = Vec::new();
+    // No line of a section but its first starts with `diff --git ` and
+    // none but its header starts with `deleted file mode `: a hunk's line
+    // starts with ` `, `+`, `-` or `\`, a binary one holds no space.
+    let mut flush = |section: &mut Vec<&[u8]>| {
+        let deletes = section
+            .iter()
+            .any(|line| line.starts_with(b"deleted file mode "));
+        let to = if deletes { &mut deletions } else { &mut rest };
+        for line in section.drain(..) {
+            to.extend_from_slice(line);
+        }
+    };
+    for line in patch.split_inclusive(|&b| b == b'\n') {
+        if line.starts_with(b"diff --git ") {
+            flush(&mut section);
+        }
+        section.push(line);
+    }
+    flush(&mut section);
+    [deletions, rest]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
 /// Whether two open files hold the same bytes, read a part at a time.
 fn same_content(mut a: fs::File, mut b: fs::File) -> io::Result<bool> {
     // As much of `file` as fills `buf`, or all that is left.
@@ -1058,7 +1093,8 @@ fn same_content(mut a: fs::File, mut b: fs::File) -> io::Result<bool> {
 /// as [`crate::worktree::add`] builds a worktree: the head's
 /// `.gitattributes` files and every file the patch changes or deletes
 /// checked out from the head (into a private index, never the person's),
-/// then the patch applied with `git apply`; no filter driver runs (a
+/// then the patch applied with `git apply`, its deletions first
+/// ([`patch_parts`]); no filter driver runs (a
 /// verifier's checkout runs its own, L1-1). The untracked files are
 /// copied as they are, so need no check.
 fn check_rebuild(repo: &Path, head_sha: &str, view: &RecipeView) -> Result<(), String> {
@@ -1115,10 +1151,12 @@ fn check_rebuild(repo: &Path, head_sha: &str, view: &RecipeView) -> Result<(), S
     cmd.args(["checkout-index", "-f", "-z", "--stdin"]);
     run_fed(cmd, &input).map_err(cannot)?;
     // As `worktree::add` applies it.
-    let mut cmd = in_tree();
-    cmd.args(["apply", "--binary", "--whitespace=nowarn", "-"]);
-    run_fed(cmd, &view.patch)
-        .map_err(|e| format!("{WORKTREE_PATCH} を検証者の worktree に当てられません: {e}"))?;
+    for part in patch_parts(&view.patch) {
+        let mut cmd = in_tree();
+        cmd.args(["apply", "--binary", "--whitespace=nowarn", "-"]);
+        run_fed(cmd, &part)
+            .map_err(|e| format!("{WORKTREE_PATCH} を検証者の worktree に当てられません: {e}"))?;
+    }
 
     let differ: Vec<&str> = written
         .into_iter()
@@ -1768,6 +1806,16 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Whether the volume of `dir` finds a file by a name that differs
+    /// from its own only in case (macOS's default volume does).
+    pub(crate) fn case_insensitive(dir: &Path) -> bool {
+        let probe = dir.join(".case-probe");
+        fs::write(&probe, b"").unwrap();
+        let found = dir.join(".CASE-PROBE").exists();
+        fs::remove_file(&probe).unwrap();
+        found
     }
 
     /// A repository on `main` with two files, and a branch `feat` (checked
@@ -2660,6 +2708,58 @@ pub(crate) mod tests {
                 .unwrap_err()
                 .contains("ありません")
         );
+    }
+
+    #[test]
+    fn ac01_an_uncommitted_rename_that_changes_only_case_is_captured() {
+        let repo = temp("case-rename");
+        if !case_insensitive(&repo) {
+            eprintln!(
+                "skipped: {} is on a case-sensitive volume; the test needs one that is not",
+                repo.display()
+            );
+            return;
+        }
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("readme"), "hello\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        sh(&repo, &["mv", "readme", "README"]);
+        for kind in [TargetKind::Diff, TargetKind::State] {
+            let dest = temp("case-rename-snap").join("target");
+            let target = Target {
+                kind,
+                ..diff_target(&repo, Head::Worktree)
+            };
+            let c = capture(&target, &dest, 0).unwrap();
+            assert!(c.rebuild.worktree_patch.is_some());
+            verify(&dest, &c.manifest, &c.rebuild, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_worktree_patch_is_applied_deletions_first_each_section_whole() {
+        let patch = b"diff --git a/README b/README\nnew file mode 100644\n\
+index 0000000..ce01362\n--- /dev/null\n+++ b/README\n@@ -0,0 +1 @@\n+deleted file mode 1\n\
+diff --git a/a.txt b/a.txt\nindex 1..2 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n\
+diff --git a/e b/e\ndeleted file mode 100644\nindex e69de29..0000000\n\
+diff --git a/readme b/readme\ndeleted file mode 100644\nindex ce01362..0000000\n\
+--- a/readme\n+++ /dev/null\n@@ -1 +0,0 @@\n-hello\n";
+        let text = |part: &[u8]| String::from_utf8(part.to_vec()).unwrap();
+        let parts = patch_parts(patch);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            text(&parts[0]),
+            "diff --git a/e b/e\ndeleted file mode 100644\nindex e69de29..0000000\n\
+diff --git a/readme b/readme\ndeleted file mode 100644\nindex ce01362..0000000\n\
+--- a/readme\n+++ /dev/null\n@@ -1 +0,0 @@\n-hello\n"
+        );
+        assert!(text(&parts[1]).starts_with("diff --git a/README b/README\n"));
+        assert!(text(&parts[1]).ends_with("-x\n+y\n"));
+        assert_eq!(parts.concat().len(), patch.len());
+        // A patch of no deletion is one part, an empty one none.
+        assert_eq!(patch_parts(&parts[1]), [parts[1].clone()]);
+        assert!(patch_parts(b"").is_empty());
     }
 
     #[test]

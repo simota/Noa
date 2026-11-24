@@ -139,7 +139,9 @@ fn relative(path: &str) -> Option<PathBuf> {
 }
 
 /// Makes a detached worktree of `repo` at `path` on `rebuild.head_sha`
-/// (`git worktree add --detach`), applies `target/worktree.patch` and
+/// (`git worktree add --detach`, sparse checkout off: every file of the
+/// head, whatever the person's sparse-checkout setting), applies
+/// `target/worktree.patch` (its deletions first) and
 /// copies `target/untracked/` from the snapshot `target_dir`, then checks
 /// every manifest file and untracked file against its digest. A mismatch
 /// is an error naming the files. No branch is created.
@@ -207,6 +209,10 @@ pub fn add(
 
     let stale = !path.exists() && entry_at(repo, path)?.is_some();
     let mut cmd = git(repo);
+    // Sparse checkout off for the add and the checkout it runs (L1-3):
+    // the worktree gets every file of the head, and none of the person's
+    // sparse-checkout patterns is copied into it.
+    cmd.args(["-c", "core.sparseCheckout=false"]);
     cmd.args(["worktree", "add", "--detach", "--quiet"]);
     if stale {
         // Only overrides "missing but already registered" for this path:
@@ -216,8 +222,9 @@ pub fn add(
     cmd.arg(path).arg(&rebuild.head_sha);
     run(cmd, b"").map_err(|e| format!("worktree を作れません: {e}"))?;
 
-    let built =
-        fill(path, &patch, &untracked).and_then(|()| check_files(path, manifest, &untracked));
+    let built = not_sparse(path)
+        .and_then(|()| fill(path, &patch, &untracked))
+        .and_then(|()| check_files(path, manifest, &untracked));
     if let Err(why) = built {
         let mut cmd = git(repo);
         cmd.args(["worktree", "remove", "--force"]).arg(path);
@@ -227,6 +234,34 @@ pub fn add(
         });
     }
     Ok(())
+}
+
+/// Keeps sparse checkout off in the fresh worktree `path`, so a later
+/// checkout in it (a verifier's own) does not take files away again. Where
+/// the repository keeps settings per worktree, `git worktree add` copied
+/// the person's `config.worktree` (`core.sparseCheckout = true` among
+/// them) into the new one; it is set off there, a file of that worktree
+/// only. Otherwise the setting comes from a file every worktree shares,
+/// which is left as it is: the new worktree has no sparse-checkout
+/// patterns ([`add`] copied none), and git checks out every file without
+/// them.
+fn not_sparse(path: &Path) -> Result<(), String> {
+    let cannot = |e: String| format!("worktree の sparse checkout を切れません: {e}");
+    let mut cmd = git(path);
+    cmd.args([
+        "config",
+        "--local",
+        "--type=bool",
+        "--default=false",
+        "--get",
+        "extensions.worktreeConfig",
+    ]);
+    if run(cmd, b"").map_err(cannot)?.trim_ascii() != b"true" {
+        return Ok(());
+    }
+    let mut cmd = git(path);
+    cmd.args(["config", "--worktree", "core.sparseCheckout", "false"]);
+    run(cmd, b"").map(|_| ()).map_err(cannot)
 }
 
 /// One untracked file of the snapshot, read and checked, to copy into a
@@ -243,10 +278,11 @@ struct Untracked<'a> {
 /// Applies the work-tree patch and copies the untracked files into the
 /// fresh worktree `path`, an executable one made executable.
 fn fill(path: &Path, patch: &[u8], untracked: &[Untracked]) -> Result<(), String> {
-    if !patch.is_empty() {
+    // Its deletions first ([`capture::patch_parts`]).
+    for part in capture::patch_parts(patch) {
         let mut cmd = git(path);
         cmd.args(["apply", "--binary", "--whitespace=nowarn", "-"]);
-        run(cmd, patch).map_err(|e| format!("{WORKTREE_PATCH} を当てられません: {e}"))?;
+        run(cmd, &part).map_err(|e| format!("{WORKTREE_PATCH} を当てられません: {e}"))?;
     }
     for file in untracked {
         let rel = &file.rel;
@@ -302,9 +338,9 @@ fn check_files(
     for file in &manifest.files {
         let ok = if file.status == FileStatus::Deleted {
             // Gone, or now a directory (not a link to one) of added files.
-            relative(&file.path).is_some_and(|rel| match fs::symlink_metadata(path.join(rel)) {
-                Err(_) => true,
-                Ok(meta) => meta.is_dir() && adds_below(&file.path),
+            relative(&file.path).is_some_and(|rel| match named_exactly(path, &rel) {
+                None => true,
+                Some(meta) => meta.is_dir() && adds_below(&file.path),
             })
         } else {
             read(&file.path).map(|(digest, _)| digest) == Some(file.digest)
@@ -327,6 +363,27 @@ fn check_files(
             differ.join(", ")
         ))
     }
+}
+
+/// What is at `rel` below `root` (not followed if a link), when each of
+/// its components is there under exactly its own name: a case-insensitive
+/// volume (macOS's default) also finds `README` by the name `readme`, and
+/// that is another file of the tree, not the one asked for.
+fn named_exactly(root: &Path, rel: &Path) -> Option<fs::Metadata> {
+    let meta = fs::symlink_metadata(root.join(rel)).ok()?;
+    let mut dir = root.to_owned();
+    for part in rel.components() {
+        let name = part.as_os_str();
+        let listed = fs::read_dir(&dir)
+            .ok()?
+            .flatten()
+            .any(|entry| entry.file_name() == name);
+        if !listed {
+            return None;
+        }
+        dir.push(name);
+    }
+    Some(meta)
 }
 
 /// Why `path` is not a detached worktree of `repo` at `head_sha` (named in
@@ -780,6 +837,116 @@ mod tests {
             .collect();
         let link = check_files(&path, &c.manifest, &built).unwrap_err();
         assert!(link.contains("一致しません: a"), "{link}");
+    }
+
+    /// The names in the folder `dir`, as stored.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != ".git")
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A repository on `main` holding `readme`, on a case-insensitive
+    /// volume; `None`, the reason printed, on a case-sensitive one.
+    fn case_repo() -> Option<PathBuf> {
+        let repo = temp("case");
+        if !capture::tests::case_insensitive(&repo) {
+            eprintln!(
+                "skipped: {} is on a case-sensitive volume; the test needs one that is not",
+                repo.display()
+            );
+            return None;
+        }
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("readme"), "hello\n").unwrap();
+        fs::write(repo.join("z.txt"), "z\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        Some(repo)
+    }
+
+    #[test]
+    fn ac03_an_uncommitted_rename_that_changes_only_case_is_rebuilt() {
+        let Some(repo) = case_repo() else { return };
+        sh(&repo, &["mv", "readme", "README"]);
+        let (c, target_dir, path) = setup(&repo, Head::Worktree);
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        assert_eq!(names(&path), ["README", "z.txt"]);
+        assert_eq!(fs::read_to_string(path.join("README")).unwrap(), "hello\n");
+        assert_eq!(names(&repo), ["README", "z.txt"]);
+    }
+
+    #[test]
+    fn ac03_a_committed_rename_that_changes_case_and_every_line_is_rebuilt() {
+        let Some(repo) = case_repo() else { return };
+        sh(&repo, &["checkout", "-q", "-b", "feat"]);
+        sh(&repo, &["mv", "readme", "README"]);
+        fs::write(repo.join("README"), "nothing\nof the old\nfile\n").unwrap();
+        sh(&repo, &["commit", "-q", "-am", "rewritten"]);
+        let (c, target_dir, path) = setup(&repo, Head::Ref("feat".into()));
+        assert_eq!(
+            c.manifest.file("readme").unwrap().status,
+            FileStatus::Deleted
+        );
+        assert_eq!(c.manifest.file("README").unwrap().status, FileStatus::Added);
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        assert_eq!(names(&path), ["README", "z.txt"]);
+
+        // A file still there under the deleted name is still refused.
+        fs::remove_file(path.join("README")).unwrap();
+        fs::write(path.join("readme"), "nothing\nof the old\nfile\n").unwrap();
+        let err = check_files(&path, &c.manifest, &[]).unwrap_err();
+        assert!(err.contains("readme"), "{err}");
+    }
+
+    #[test]
+    fn ac03_a_ref_is_rebuilt_whole_whatever_the_persons_sparse_checkout() {
+        // Sparse checkout of the person's worktree, per worktree (`git
+        // sparse-checkout set`, cone mode), then in the settings every
+        // worktree shares, with patterns of its own.
+        for per_worktree in [true, false] {
+            let repo = temp("sparse");
+            sh(&repo, &["init", "-q", "-b", "main"]);
+            fs::create_dir_all(repo.join("svc")).unwrap();
+            fs::create_dir_all(repo.join("docs")).unwrap();
+            fs::write(repo.join("svc/a"), "a\n").unwrap();
+            fs::write(repo.join("docs/x"), "x\n").unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-q", "-m", "base"]);
+            sh(&repo, &["checkout", "-q", "-b", "feat"]);
+            fs::write(repo.join("docs/x"), "x changed\n").unwrap();
+            sh(&repo, &["commit", "-q", "-am", "docs"]);
+            if per_worktree {
+                sh(&repo, &["sparse-checkout", "set", "svc"]);
+            } else {
+                sh(&repo, &["config", "core.sparseCheckout", "true"]);
+                fs::write(repo.join(".git/info/sparse-checkout"), "/svc/\n").unwrap();
+                sh(&repo, &["read-tree", "-mu", "HEAD"]);
+            }
+            assert!(!repo.join("docs").exists());
+            let config = |dir: &Path| fs::read(dir.join(".git/config")).unwrap();
+            let before = config(&repo);
+
+            let (c, target_dir, path) = setup(&repo, Head::Ref("feat".into()));
+            assert!(c.manifest.file("docs/x").is_some());
+            add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+            assert_eq!(
+                fs::read_to_string(path.join("docs/x")).unwrap(),
+                "x changed\n"
+            );
+            // It stays whole through a checkout of its own.
+            sh(&path, &["checkout", "-q", "--detach", "HEAD~1"]);
+            assert_eq!(fs::read_to_string(path.join("docs/x")).unwrap(), "x\n");
+            // The person's checkout and settings are as they were.
+            assert!(!repo.join("docs").exists());
+            assert_eq!(config(&repo), before);
+            sh(&repo, &["read-tree", "-mu", "HEAD"]);
+            assert!(!repo.join("docs").exists());
+        }
     }
 
     #[test]

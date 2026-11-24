@@ -4,6 +4,10 @@
 //! `conversationId`s plus the `conversations/<uuid>.db` files the history
 //! never names (those are only stat'ed, see `index::merged_sessions`).
 //!
+//! Active time links the turns of one `conversationId`. A turn without one
+//! belongs to no session and has no neighbour: it adds no active time (turns
+//! of different conversations or workspaces are never joined).
+//!
 //! The `display` field (the prompt text) is not a field of the decoded
 //! struct, so it is never read into any structure. Tokens, models and tool
 //! calls are not available.
@@ -46,7 +50,9 @@ pub(crate) fn line(bytes: &[u8], sink: &mut Sink<'_>) -> bool {
         return true;
     }
     sink.counters(ts, 0, project).turns += 1;
-    sink.event(ts, session, 0, project);
+    if session != 0 {
+        sink.event(ts, session, 0, project);
+    }
     true
 }
 
@@ -108,5 +114,38 @@ mod tests {
         assert!(history.contains("SYNTHETIC-PROMPT"));
         assert!(!saved.contains("SYNTHETIC-PROMPT"));
         assert!(!format!("{:?}", ix.index()).contains("SYNTHETIC-PROMPT"));
+    }
+
+    #[test]
+    fn turns_without_a_conversation_add_no_active_time() {
+        let t = Tree::new();
+        let history = t.agy_history();
+        let turn = |ms: i64, workspace: &str, conversation: Option<&str>| {
+            let conversation =
+                conversation.map_or(String::new(), |c| format!(r#","conversationId":"{c}""#));
+            format!(
+                r#"{{"display":"SYNTHETIC-PROMPT","timestamp":{ms},"workspace":"/home/synthetic/work/{workspace}"{conversation}}}"#
+            )
+        };
+        const T0: i64 = 1_795_410_000_000;
+        const CONV: &str = "00000000-0000-4000-8000-0000000a9001";
+        write(
+            &history,
+            &jsonl(&[
+                // No conversation: 60 s apart in different workspaces, then
+                // in the same one. None of them is joined.
+                turn(T0, "a", None),
+                turn(T0 + 60_000, "b", None),
+                turn(T0 + 120_000, "b", None),
+                // A conversation's turns are linked.
+                turn(T0 + 600_000, "a", Some(CONV)),
+                turn(T0 + 690_000, "a", Some(CONV)),
+            ]),
+        );
+        let mut ix = t.indexer();
+        ix.pass(&mut |_| {});
+        let c = sum_agent(ix.index(), Agent::Agy);
+        assert_eq!((c.turns, c.active_secs), (5, 90));
+        assert_eq!(merged_sessions(ix.index()).len(), 1);
     }
 }

@@ -1,17 +1,25 @@
 //! The on-disk, incrementally updated index of every parsed log file.
 //!
 //! Per file the index keeps its length, mtime, a hash of its head (first
-//! 4 KiB), the offset of the first byte not yet consumed, per-session last
-//! event times and the parser's tail state, plus everything parsed from it
-//! (hour buckets, tool counts, session spans, workers). A grown file with the
-//! same head resumes at `offset`; a shrunk file or a changed head is parsed
-//! again from 0, which drops its earlier contribution because that lives in
-//! the file's own entry. Only complete lines advance `offset`.
+//! 4 KiB), the offset of the first byte not yet consumed and the parser's tail
+//! state, plus everything parsed from it (hour buckets, tool counts, session
+//! spans, per-session event times, workers). A grown file with the same head
+//! resumes at `offset`; a shrunk file or a changed head is parsed again from
+//! 0, which drops its earlier contribution because that lives in the file's
+//! own entry. Only complete lines advance `offset`.
+//!
+//! Entries are keyed by path, except that a Codex rollout is identified by its
+//! rollout id: moved between `sessions/` and `archived_sessions/`, it takes
+//! over its old entry instead of being counted again. An entry whose file is
+//! gone (Claude Code deletes old transcripts) is kept, so totals keep it.
+//!
+//! Active time is computed over each session's events from all of its files
+//! (`active_buckets`), not per file.
 //!
 //! Every log root is opened read-only; the only file written is
 //! `<own_dir>/index-v1.json` (temp file + rename).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -26,7 +34,9 @@ use super::{agy, claude, codex, journal};
 use crate::model::{Agent, Unix};
 use crate::paths::{self, Roots};
 
-pub(crate) const VERSION: u32 = 1;
+/// 2: per-session event times replace the per-file last event time, Codex
+/// fresh input no longer subtracts cache writes.
+pub(crate) const VERSION: u32 = 2;
 /// Lines longer than this (without the `\n`) are skipped and counted.
 pub(crate) const MAX_LINE: usize = 8 << 20;
 const HEAD_LEN: u64 = 4096;
@@ -108,10 +118,24 @@ pub(crate) struct FileData {
     pub tools: Vec<ToolCount>,
     pub sessions: Vec<SessionSpan>,
     pub workers: Vec<Worker>,
-    /// Last event time per session key (0 = no session), for active time.
-    pub last_event: BTreeMap<u64, Unix>,
+    /// Event times per session key, for active time.
+    pub activity: Vec<Activity>,
     pub lines_bad: u64,
     pub lines_skipped: u64,
+}
+
+/// An event's `(time, model, project)`.
+pub(crate) type EventAt = (Unix, u32, u32);
+
+/// One session's events in one file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Activity {
+    /// Session key; 0 holds the file's events that name no session, which are
+    /// linked only to each other.
+    pub key: u64,
+    /// `(time, model, project)` per event, ascending, one per second (the
+    /// first event of a second is kept).
+    pub events: Vec<EventAt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,6 +281,7 @@ pub(crate) struct Sink<'a> {
     fallback: HashMap<(Unix, u32, u32), usize>,
     tools: HashMap<(Unix, u32), usize>,
     sessions: HashMap<u64, usize>,
+    activity: HashMap<u64, usize>,
     events: Vec<Event>,
 }
 
@@ -286,6 +311,7 @@ impl<'a> Sink<'a> {
         let f = &data.fallback;
         let t = &data.tools;
         let s = &data.sessions;
+        let a = &data.activity;
         Sink {
             agent,
             home,
@@ -293,6 +319,7 @@ impl<'a> Sink<'a> {
             fallback: positions(f, |i| (f[i].hour, f[i].model, f[i].project)),
             tools: positions(t, |i| (t[i].hour, t[i].name)),
             sessions: positions(s, |i| s[i].key),
+            activity: positions(a, |i| a[i].key),
             strings,
             lookup,
             data,
@@ -420,24 +447,32 @@ impl<'a> Sink<'a> {
         self.data.lines_skipped += 1;
     }
 
-    /// Active time: per session, events in time order; a gap of at most
-    /// `ACTIVE_GAP` adds to the hour bucket of the later event.
+    /// Files the pass's events under their sessions: the session's hours and
+    /// its event times (active time is computed from those, across files).
     fn finish(mut self) {
         let mut events = std::mem::take(&mut self.events);
         events.sort_by_key(|e| (e.session, e.ts));
         for e in events {
-            let prev = self.data.last_event.get(&e.session).copied();
-            if let Some(prev) = prev {
-                let gap = e.ts - prev;
-                if gap > 0 && gap <= ACTIVE_GAP {
-                    self.counters(e.ts, e.model, e.project).active_secs += gap as u64;
-                }
-            }
-            if prev.is_none_or(|p| e.ts > p) {
-                self.data.last_event.insert(e.session, e.ts);
-            }
             if e.session != 0 {
                 self.session_hour(e.session, e.project, e.ts);
+            }
+            let data = &mut *self.data;
+            let i = *self.activity.entry(e.session).or_insert_with(|| {
+                data.activity.push(Activity {
+                    key: e.session,
+                    events: Vec::new(),
+                });
+                data.activity.len() - 1
+            });
+            let list = &mut data.activity[i].events;
+            let event = (e.ts, e.model, e.project);
+            match list.last() {
+                Some(last) if last.0 >= e.ts => {
+                    if let Err(at) = list.binary_search_by_key(&e.ts, |x| x.0) {
+                        list.insert(at, event);
+                    }
+                }
+                _ => list.push(event),
             }
         }
     }
@@ -646,6 +681,7 @@ impl Indexer {
     /// progress snapshots (at the start, every `PUBLISH_EVERY`, at the end).
     pub fn pass(&mut self, publish: &mut dyn FnMut(Index)) -> PassStats {
         let (files, present) = enumerate(&self.roots);
+        let copies = self.follow_moved_rollouts(&files);
         let total = files.len() as u64;
         self.index.roots_present = present;
         self.index.coverage = summed_coverage(&self.index, total, 0, true);
@@ -655,6 +691,9 @@ impl Indexer {
         for (done, (path, kind)) in files.iter().enumerate() {
             if self.stopped() {
                 break;
+            }
+            if copies.contains(path) {
+                continue;
             }
             match self.process(path, *kind) {
                 Ok(Some((read, reparsed))) => {
@@ -684,6 +723,43 @@ impl Indexer {
         }
         publish(self.snapshot());
         stats
+    }
+
+    /// Codex entries go by rollout id, not path: a listed rollout whose id
+    /// belongs to an entry whose path is no longer listed (moved between
+    /// `sessions/` and `archived_sessions/`) takes over that entry; a listed
+    /// rollout whose id another listed path already has is a second copy.
+    /// Returns the copies, which the pass skips.
+    fn follow_moved_rollouts(&mut self, files: &[(PathBuf, Kind)]) -> HashSet<PathBuf> {
+        let listed: HashSet<&Path> = files.iter().map(|(p, _)| p.as_path()).collect();
+        let mut owner: HashMap<String, PathBuf> = self
+            .index
+            .files
+            .iter()
+            .filter(|(_, e)| e.kind == Kind::Codex)
+            .filter_map(|(p, _)| Some((rollout_id(p)?.to_owned(), p.clone())))
+            .collect();
+        let mut copies = HashSet::new();
+        for (path, kind) in files {
+            if *kind != Kind::Codex || self.index.files.contains_key(path) {
+                continue;
+            }
+            let Some(id) = rollout_id(path) else { continue };
+            match owner.insert(id.to_owned(), path.clone()) {
+                Some(old) if listed.contains(old.as_path()) => {
+                    owner.insert(id.to_owned(), old);
+                    copies.insert(path.clone());
+                }
+                Some(old) => {
+                    if let Some(entry) = self.index.files.remove(&old) {
+                        self.index.files.insert(path.clone(), entry);
+                        self.dirty = true;
+                    }
+                }
+                None => {}
+            }
+        }
+        copies
     }
 
     fn save(&mut self) {
@@ -789,13 +865,57 @@ pub(crate) fn agy_db_key(path: &Path) -> u64 {
         .unwrap_or_default())
 }
 
+/// The rollout id of a Codex log: the uuid that ends its file name
+/// (`rollout-<ts>-<uuid>.jsonl`), which is also its `session_meta.id`. A file
+/// named otherwise has none and is identified by its path.
+fn rollout_id(path: &Path) -> Option<&str> {
+    let stem = path.file_stem()?.to_str()?;
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    let uuid = id.bytes().enumerate().all(|(i, b)| match i {
+        8 | 13 | 18 | 23 => b == b'-',
+        _ => b.is_ascii_hexdigit(),
+    });
+    uuid.then_some(id)
+}
+
+/// Codex sub-thread → its parent thread, from every rollout's `session_meta`.
+fn codex_parents(index: &Index) -> HashMap<u64, u64> {
+    index
+        .files
+        .values()
+        .filter_map(|e| match &e.tail {
+            Tail::Codex(t) if t.sub_thread && t.thread != 0 => Some((t.thread, t.session)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The session a key counts toward: for Codex the root of its thread's
+/// parent chain (a sub-thread of a sub-thread counts toward the root), else
+/// the key itself.
+fn session_root(parents: &HashMap<u64, u64>, agent: Agent, key: u64) -> u64 {
+    let mut k = key;
+    if agent == Agent::Codex {
+        // Bounded, so that a cycle in damaged logs ends.
+        for _ in 0..parents.len() {
+            match parents.get(&k) {
+                Some(&p) if p != k => k = p,
+                _ => break,
+            }
+        }
+    }
+    k
+}
+
 /// Every distinct `(agent, session key)` with its project and merged hours.
 pub(crate) fn merged_sessions(index: &Index) -> BTreeMap<(Agent, u64), (u32, BTreeSet<Unix>)> {
+    let parents = codex_parents(index);
     let mut out: BTreeMap<(Agent, u64), (u32, BTreeSet<Unix>)> = BTreeMap::new();
     for e in index.files.values() {
         for s in &e.data.sessions {
+            let key = session_root(&parents, s.agent, s.key);
             let slot = out
-                .entry((s.agent, s.key))
+                .entry((s.agent, key))
                 .or_insert_with(|| (s.project, BTreeSet::new()));
             if slot.0 == 0 {
                 slot.0 = s.project;
@@ -813,6 +933,57 @@ pub(crate) fn merged_sessions(index: &Index) -> BTreeMap<(Agent, u64), (u32, BTr
         }
     }
     out
+}
+
+/// Active time as buckets holding only `active_secs`: per session, the
+/// events of all of its files (parent and subagent logs, Codex sub-threads)
+/// merged in time order, one per second, so overlapping files count once; a
+/// gap of at most `ACTIVE_GAP` adds to the bucket of the later event. Events
+/// that name no session are linked only within their file.
+pub(crate) fn active_buckets(index: &Index) -> Vec<Bucket> {
+    type Key = (Unix, Agent, u32, u32);
+    fn add_gaps(agent: Agent, events: &[EventAt], out: &mut BTreeMap<Key, u64>) {
+        for w in events.windows(2) {
+            let ((prev, ..), (ts, model, project)) = (w[0], w[1]);
+            let gap = ts - prev;
+            if gap > 0 && gap <= ACTIVE_GAP {
+                *out.entry((hour_of(ts), agent, model, project)).or_default() += gap as u64;
+            }
+        }
+    }
+    let parents = codex_parents(index);
+    let mut sessions: BTreeMap<(Agent, u64), Vec<EventAt>> = BTreeMap::new();
+    let mut secs: BTreeMap<Key, u64> = BTreeMap::new();
+    for e in index.files.values() {
+        let agent = e.kind.agent();
+        for a in &e.data.activity {
+            if a.key == 0 {
+                add_gaps(agent, &a.events, &mut secs);
+            } else {
+                sessions
+                    .entry((agent, session_root(&parents, agent, a.key)))
+                    .or_default()
+                    .extend_from_slice(&a.events);
+            }
+        }
+    }
+    for ((agent, _), mut events) in sessions {
+        // Stable: of one second in several files, the first file's event.
+        events.sort_by_key(|e| e.0);
+        add_gaps(agent, &events, &mut secs);
+    }
+    secs.into_iter()
+        .map(|((hour, agent, model, project), s)| Bucket {
+            hour,
+            agent,
+            model,
+            project,
+            c: Counters {
+                active_secs: s,
+                ..Counters::default()
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -958,7 +1129,10 @@ pub(crate) mod tests {
 
         // Another version and a damaged file are ignored and rebuilt.
         let text = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, text.replacen("\"version\":1", "\"version\":2", 1)).unwrap();
+        let current = format!("\"version\":{VERSION}");
+        let other = format!("\"version\":{}", VERSION + 1);
+        assert!(text.contains(&current));
+        std::fs::write(&path, text.replacen(&current, &other, 1)).unwrap();
         assert!(load(&path).is_none());
         let mut rebuilt = t.indexer();
         assert!(rebuilt.index().files.is_empty());
@@ -991,5 +1165,62 @@ pub(crate) mod tests {
             .filter(|p| p.starts_with(&own_prefix))
             .collect();
         assert_eq!(own, vec![&own_prefix.join("index-v1.json")]);
+    }
+
+    #[test]
+    fn archived_rollout_takes_over_its_entry_and_deleted_logs_stay_counted() {
+        const ROLLOUT: &str = "codex/sessions/2026/11/21/rollout-2026-11-21T09-00-00-00000000-0000-4000-8000-00000000c0de.jsonl";
+        const TRANSCRIPT: &str =
+            "claude/projects/-synthetic-alpha/0b1c2d3e-0000-4000-8000-000000000001.jsonl";
+        let codex_paths = |ix: &Indexer| -> Vec<PathBuf> {
+            ix.index()
+                .files
+                .iter()
+                .filter(|(_, e)| e.kind == Kind::Codex)
+                .map(|(p, _)| p.clone())
+                .collect()
+        };
+        let t = Tree::new();
+        t.copy_fixture(ROLLOUT);
+        t.copy_fixture(TRANSCRIPT);
+        let mut ix = t.indexer();
+        ix.pass(&mut |_| {});
+        let before = sum(ix.index());
+        let sessions = merged_sessions(ix.index()).len();
+        assert_eq!(sessions, 2);
+
+        // Archived (moved), then a restart from the saved index: the entry
+        // follows the file and nothing is read or counted again.
+        let live = t.fixture_path(ROLLOUT);
+        let archived = t
+            .root
+            .join("home/.codex/archived_sessions/2026/11/21")
+            .join(live.file_name().unwrap());
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::rename(&live, &archived).unwrap();
+        let mut ix = t.indexer();
+        assert_eq!(ix.pass(&mut |_| {}).parsed, 0);
+        assert_eq!(codex_paths(&ix), vec![archived.clone()]);
+        assert_eq!(sum(ix.index()), before);
+        assert_eq!(merged_sessions(ix.index()).len(), sessions);
+        let saved = load(&paths::index_path(&t.own)).unwrap();
+        assert!(saved.files.contains_key(&archived) && !saved.files.contains_key(&live));
+
+        // A second copy is skipped while the indexed one is there, and takes
+        // the entry over once it is gone.
+        std::fs::copy(&archived, &live).unwrap();
+        ix.pass(&mut |_| {});
+        assert_eq!(codex_paths(&ix), vec![archived.clone()]);
+        assert_eq!(sum(ix.index()), before);
+        std::fs::remove_file(&archived).unwrap();
+        ix.pass(&mut |_| {});
+        assert_eq!(codex_paths(&ix), vec![live.clone()]);
+        assert_eq!(sum(ix.index()), before);
+
+        // A log deleted without a replacement keeps counting.
+        std::fs::remove_file(t.fixture_path(TRANSCRIPT)).unwrap();
+        ix.pass(&mut |_| {});
+        assert_eq!(sum(ix.index()), before);
+        assert_eq!(merged_sessions(ix.index()).len(), sessions);
     }
 }

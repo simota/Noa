@@ -4,19 +4,40 @@
 
 use std::path::Path;
 
+use std::fmt;
+
 use serde::Deserialize;
+use serde::de::{Deserializer, IgnoredAny, SeqAccess, Visitor};
 
 use super::index::Sink;
 use crate::model::Agent;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct Event {
     #[serde(default)]
     ev: Option<String>,
     #[serde(default)]
     ts: Option<i64>,
-    #[serde(default)]
-    argv: Vec<String>,
+    /// `argv[0]` only: the arguments after it (a prompt, say) are skipped
+    /// without being read into any structure.
+    #[serde(rename = "argv", default, deserialize_with = "first_arg")]
+    argv0: Option<String>,
+}
+
+fn first_arg<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Option<String>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a command line")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Option<String>, A::Error> {
+            let first = seq.next_element::<String>()?;
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(first)
+        }
+    }
+    d.deserialize_seq(V)
 }
 
 /// The agent a command line starts, if any.
@@ -36,7 +57,7 @@ pub(crate) fn line(bytes: &[u8], sink: &mut Sink<'_>) -> bool {
     let Some(ts) = ev.ts else {
         return false;
     };
-    if let Some(agent) = ev.argv.first().and_then(|a| agent_of(a)) {
+    if let Some(agent) = ev.argv0.as_deref().and_then(agent_of) {
         sink.worker(ts, agent);
     }
     true
@@ -65,5 +86,30 @@ mod tests {
             workers,
             vec![Agent::Claude, Agent::Claude, Agent::Codex, Agent::Agy]
         );
+    }
+
+    #[test]
+    fn only_argv0_is_decoded() {
+        let line = r#"{"ev":"spawn","ts":1795395840,"argv":["agy","-p","SYNTHETIC-PROMPT",{"x":1}],"tier":"standard","pane":4}"#;
+        let ev: super::Event = serde_json::from_str(line).unwrap();
+        assert_eq!(ev.argv0.as_deref(), Some("agy"));
+        assert!(!format!("{ev:?}").contains("SYNTHETIC-PROMPT"));
+        // Indexed: the worker counts, and the prompt is nowhere in the index.
+        let t = Tree::new();
+        let journal = t.root.join("data/noa/ctl/2026-11-23.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        write(&journal, &jsonl(&[line.to_owned()]));
+        let mut ix = t.indexer();
+        ix.pass(&mut |_| {});
+        let workers: Vec<_> = ix.index().files[&journal]
+            .data
+            .workers
+            .iter()
+            .map(|w| w.agent)
+            .collect();
+        assert_eq!(workers, vec![Agent::Agy]);
+        let saved = std::fs::read_to_string(crate::paths::index_path(&t.own)).unwrap();
+        assert!(!saved.contains("SYNTHETIC-PROMPT"));
+        assert!(!format!("{:?}", ix.index()).contains("SYNTHETIC-PROMPT"));
     }
 }

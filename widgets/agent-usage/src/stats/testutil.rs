@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::aggregate::file_agent;
-use super::index::{Index, Indexer, fnv};
+use super::index::{Index, Indexer, active_buckets, fnv};
 use super::types::Counters;
 use crate::model::{Agent, Unix};
 use crate::paths::Roots;
@@ -24,7 +24,7 @@ pub const DB_MTIME: Unix = 1_795_348_800;
 /// Tokens in the Claude fixtures (main session and subagent).
 pub const CLAUDE_FIXTURE_TOKENS: u64 = 1550 + 2050 + 16 + 16;
 /// Tokens in the Codex fixtures (main thread and the file without records).
-pub const CODEX_FIXTURE_TOKENS: u64 = 2015 + 1295;
+pub const CODEX_FIXTURE_TOKENS: u64 = 2065 + 1295;
 
 const BASE: &str = "2026-11-20T00:00:00Z";
 
@@ -94,8 +94,13 @@ impl Tree {
         t
     }
 
+    /// Where the fixture `rel` (a path under `testdata/`) is copied to.
+    pub fn fixture_path(&self, rel: &str) -> PathBuf {
+        self.root.join(mapped(rel))
+    }
+
     pub fn copy_fixture(&self, rel: &str) {
-        let to = self.root.join(mapped(rel));
+        let to = self.fixture_path(rel);
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
         let bytes = std::fs::read(testdata().join(rel)).unwrap();
         if rel.ends_with(".db") {
@@ -111,7 +116,10 @@ impl Tree {
         Roots {
             claude_projects: Some(home.join(".claude/projects")),
             claude_credentials: Some(home.join(".claude/.credentials.json")),
-            codex_sessions: vec![home.join(".codex/sessions")],
+            codex_sessions: vec![
+                home.join(".codex/sessions"),
+                home.join(".codex/archived_sessions"),
+            ],
             agy_dir: Some(home.join(".gemini/antigravity-cli")),
             ctl_dir: Some(self.root.join("data/noa/ctl")),
             own_dir: Some(self.own.clone()),
@@ -126,11 +134,30 @@ impl Tree {
         )
     }
 
-    /// A Claude log path (its directories created).
+    /// A Claude log path (its directories created); `name` may hold
+    /// directories (`<session>/subagents/agent-x.jsonl`).
     pub fn claude_file(&self, project_dir: &str, name: &str) -> PathBuf {
-        let dir = self.root.join("home/.claude/projects").join(project_dir);
+        let path = self
+            .root
+            .join("home/.claude/projects")
+            .join(project_dir)
+            .join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        path
+    }
+
+    /// A Codex rollout path under `sessions/` (its directories created).
+    pub fn codex_file(&self, name: &str) -> PathBuf {
+        let dir = self.root.join("home/.codex/sessions/2026/11/21");
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
+    }
+
+    /// The agy history path (its directories created).
+    pub fn agy_history(&self) -> PathBuf {
+        let dir = self.root.join("home/.gemini/antigravity-cli");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("history.jsonl")
     }
 }
 
@@ -224,7 +251,8 @@ fn add(a: &mut Counters, b: &Counters) {
     a.tokens.add(&b.tokens);
 }
 
-/// Counters summed over every file and bucket the report would use.
+/// Counters summed over every file and bucket the report would use, active
+/// time included.
 pub fn sum(ix: &Index) -> Counters {
     sum_where(ix, |_| true)
 }
@@ -247,7 +275,20 @@ fn sum_where(ix: &Index, keep: impl Fn(Agent) -> bool) -> Counters {
             }
         }
     }
+    for b in active_buckets(ix) {
+        if keep(b.agent) {
+            add(&mut c, &b.c);
+        }
+    }
     c
+}
+
+/// Lines of JSON, each followed by `\n`.
+pub fn jsonl(lines: &[String]) -> Vec<u8> {
+    lines
+        .iter()
+        .flat_map(|l| format!("{l}\n").into_bytes())
+        .collect()
 }
 
 /// Tool counts, most used first, then by name.

@@ -71,10 +71,10 @@ impl History {
         let Some(ts) = source.last_updated else {
             return Ok(());
         };
-        let mut lines = Vec::new();
+        let mut due = Vec::new();
         for w in &source.windows {
             let key = (source.agent, w.id.clone());
-            let due = match self.last.get(&key) {
+            let is_due = match self.last.get(&key) {
                 None => true,
                 Some((last_ts, last_used)) => {
                     ts > *last_ts
@@ -82,7 +82,7 @@ impl History {
                             || (w.used_percent - last_used).abs() >= SAMPLE_DELTA)
                 }
             };
-            if !due {
+            if !is_due {
                 continue;
             }
             let sample = LimitSample {
@@ -96,12 +96,9 @@ impl History {
             };
             let mut line = serde_json::to_vec(&sample).map_err(io::Error::other)?;
             line.push(b'\n');
-            lines.push(line);
-            self.last.insert(key, (ts, w.used_percent));
-            let at = self.samples.partition_point(|s| s.ts <= ts);
-            self.samples.insert(at, sample);
+            due.push((key, sample, line));
         }
-        if lines.is_empty() {
+        if due.is_empty() {
             return Ok(());
         }
         if let Some(dir) = self.path.parent() {
@@ -111,12 +108,17 @@ impl History {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        for line in lines {
+        // A sample is saved (and throttles the next) only once its line is
+        // written: after a failure it and the windows after it stay due.
+        for (key, sample, line) in due {
             // One `write` per line: O_APPEND puts each at the end atomically.
             let n = f.write(&line)?;
             if n != line.len() {
                 f.write_all(&line[n..])?;
             }
+            self.last.insert(key, (ts, sample.used_percent));
+            let at = self.samples.partition_point(|s| s.ts <= ts);
+            self.samples.insert(at, sample);
         }
         Ok(())
     }
@@ -413,5 +415,44 @@ mod tests {
             assert_eq!(ts.len(), 200);
             assert!(ts.windows(2).all(|w| w[0] < w[1]));
         }
+    }
+
+    #[test]
+    fn failed_save_is_not_marked_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the directory should be: the history cannot be opened.
+        let blocker = dir.path().join("own");
+        std::fs::write(&blocker, b"").unwrap();
+        let path = blocker.join("limits.jsonl");
+        let mut h = History::open_at(path.clone(), T0);
+        let src = source(
+            Agent::Claude,
+            T0,
+            &[("claude-5h", 10.0), ("claude-7d", 40.0)],
+        );
+        assert!(h.offer(&src, T0).is_err());
+        assert!(h.samples(0).is_empty());
+        // Once the path works again the same samples are written.
+        std::fs::remove_file(&blocker).unwrap();
+        h.offer(&src, T0).unwrap();
+        assert_eq!(file_lines(&path).len(), 2);
+        assert_eq!(h.samples(0).len(), 2);
+    }
+
+    /// `/dev/full` opens, but every write fails.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_write_is_not_marked_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limits.jsonl");
+        let mut h = History::open_at(path.clone(), T0);
+        h.path = PathBuf::from("/dev/full");
+        let src = source(Agent::Codex, T0, &[("codex-5h", 10.0), ("codex-7d", 40.0)]);
+        assert!(h.offer(&src, T0).is_err());
+        assert!(h.samples(0).is_empty());
+        h.path = path.clone();
+        h.offer(&src, T0).unwrap();
+        assert_eq!(file_lines(&path).len(), 2);
+        assert_eq!(h.samples(0).len(), 2);
     }
 }

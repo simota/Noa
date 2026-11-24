@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::index::{Index, Kind, merged_sessions};
+use super::index::{Index, Kind, active_buckets, merged_sessions};
 use super::prices;
 use super::types::{
     AgentFilter, Availability, Bucket, Counters, Counts, KeyRow, ModelRow, Period, StatsReport,
@@ -19,6 +19,8 @@ use crate::time::{LocalDate, Tz, add_days, day_start, local};
 pub(crate) const TOP_PROJECTS: usize = 15;
 /// For 全期間 longer than this many days, one slot per ISO week.
 pub(crate) const MAX_DAY_SLOTS: usize = 92;
+/// The per-model row of an agent's tokens whose model the log does not name.
+pub(crate) const UNKNOWN_MODEL: &str = "(unknown)";
 
 fn add_counters(a: &mut Counters, b: &Counters) {
     a.turns += b.turns;
@@ -176,11 +178,12 @@ pub fn report(
     tz: &dyn Tz,
 ) -> StatsReport {
     let today = local(now, tz).date;
+    let active = active_buckets(index);
     let first = match period {
         Period::Today => today,
         Period::Days7 => add_days(today, -6),
         Period::Days30 => add_days(today, -29),
-        Period::All => earliest(index, filter, now)
+        Period::All => earliest(index, &active, filter, now)
             .map_or(today, |at| local(at, tz).date)
             .min(today),
     };
@@ -197,28 +200,27 @@ pub fn report(
     let mut days = vec![[0u64; 3]; slots.len()];
     let mut heatmap = [[0u64; 24]; 7];
 
-    for e in index.files.values() {
-        for b in buckets_of(e) {
-            if !filter.matches(b.agent) || !in_range(b.hour) {
-                continue;
-            }
-            let model = index.string(b.model);
-            agents[b.agent.index()].add(&b.c, model);
-            if b.model != 0 {
-                models
-                    .entry((b.agent, b.model))
-                    .or_default()
-                    .add(&b.c, model);
-            }
-            if b.project != 0 {
-                projects.entry(b.project).or_default().add(&b.c, model);
-            }
-            if let Some(slot) = slots.slot(b.hour, tz) {
-                days[slot][b.agent.index()] += b.c.tokens.total();
-            }
-            let t = local(b.hour, tz);
-            heatmap[usize::from(t.weekday)][usize::from(t.hour)] += b.c.turns + b.c.messages;
+    let buckets = index.files.values().flat_map(|e| buckets_of(e));
+    for b in buckets.chain(&active) {
+        if !filter.matches(b.agent) || !in_range(b.hour) {
+            continue;
         }
+        let model = index.string(b.model);
+        agents[b.agent.index()].add(&b.c, model);
+        models
+            .entry((b.agent, b.model))
+            .or_default()
+            .add(&b.c, model);
+        if b.project != 0 {
+            projects.entry(b.project).or_default().add(&b.c, model);
+        }
+        if let Some(slot) = slots.slot(b.hour, tz) {
+            days[slot][b.agent.index()] += b.c.tokens.total();
+        }
+        let t = local(b.hour, tz);
+        heatmap[usize::from(t.weekday)][usize::from(t.hour)] += b.c.turns + b.c.messages;
+    }
+    for e in index.files.values() {
         let agent = file_agent(e.kind);
         if agent.is_some_and(|a| filter.matches(a)) {
             for t in e.data.tools.iter().filter(|t| in_range(t.hour)) {
@@ -254,11 +256,17 @@ pub fn report(
         per_agent.push((agent, a.counts(), availability(index, agent)));
     }
 
+    // Model 0 is the log naming no model: a row when it holds tokens, so the
+    // rows add up to the total (agy, which has no tokens, gets none).
     let mut per_model: Vec<ModelRow> = models
         .iter()
+        .filter(|((_, model), acc)| *model != 0 || acc.c.tokens.total() > 0)
         .map(|((agent, model), acc)| ModelRow {
             agent: *agent,
-            model: index.string(*model).to_owned(),
+            model: match *model {
+                0 => UNKNOWN_MODEL.to_owned(),
+                m => index.string(m).to_owned(),
+            },
             counts: acc.counts(),
         })
         .collect();
@@ -322,17 +330,18 @@ pub fn report(
 }
 
 /// The first hour with data for the filter, up to `now`.
-fn earliest(index: &Index, filter: AgentFilter, now: Unix) -> Option<Unix> {
+fn earliest(index: &Index, active: &[Bucket], filter: AgentFilter, now: Unix) -> Option<Unix> {
     let mut first: Option<Unix> = None;
     let mut see = |at: Unix| {
         if at <= now && first.is_none_or(|f| at < f) {
             first = Some(at);
         }
     };
+    let buckets = index.files.values().flat_map(|e| buckets_of(e));
+    for b in buckets.chain(active).filter(|b| filter.matches(b.agent)) {
+        see(b.hour);
+    }
     for e in index.files.values() {
-        for b in buckets_of(e).filter(|b| filter.matches(b.agent)) {
-            see(b.hour);
-        }
         for w in e.data.workers.iter().filter(|w| filter.matches(w.agent)) {
             see(w.ts);
         }
@@ -421,7 +430,7 @@ mod tests {
                 (Agent::Codex, "gpt-6.2-sol", 1100 + 540),
                 (Agent::Claude, "claude-opus-5-5", 1550 + 16 + 16),
                 (Agent::Codex, "gpt-6.2-astra", 1295),
-                (Agent::Codex, "gpt-6.1-sol", 360),
+                (Agent::Codex, "gpt-6.1-sol", 410),
                 (Agent::Codex, "codex-auto-review", 15),
             ]
         );
@@ -433,7 +442,7 @@ mod tests {
         assert_eq!(
             projects,
             vec![
-                ("~/work/alpha", CLAUDE_FIXTURE_TOKENS + 1640 + 360 + 15, 2),
+                ("~/work/alpha", CLAUDE_FIXTURE_TOKENS + 1640 + 410 + 15, 2),
                 ("/srv/beta", 1295, 1),
                 ("~/work/gamma", 0, 2),
                 // Its only prompt names no conversation.
@@ -621,5 +630,84 @@ mod tests {
             &tz,
         );
         assert_eq!(short.days.len(), 92);
+    }
+
+    #[test]
+    fn active_time_spans_the_files_of_a_session_once() {
+        let t = Tree::new();
+        let parent = t.claude_file("-synthetic-gaps", "sess-gen.jsonl");
+        let sub = t.claude_file("-synthetic-gaps", "sess-gen/subagents/agent-x.jsonl");
+        // One event in each file of the session, 2 min apart.
+        write(&parent, &claude_turn_at(0));
+        write(&sub, &claude_turn_at(120));
+        let mut ix = t.indexer();
+        ix.pass(&mut |_| {});
+        assert_eq!(merged_sessions(ix.index()).len(), 1);
+        assert_eq!(sum(ix.index()).active_secs, 120);
+        // Overlapping files count once: parent 0, 60, 240 and subagent 90,
+        // 120, 180 are 0 … 240 (per file they would add 240 + 90). Another
+        // session's event in between is not linked to them.
+        append(&parent, &claude_turn_at(60));
+        append(&parent, &claude_turn_at(240));
+        append(&sub, &claude_turn_at(90));
+        append(&sub, &claude_turn_at(180));
+        let other = t.claude_file("-synthetic-gaps", "sess-other.jsonl");
+        let line = String::from_utf8(claude_turn_at(150)).unwrap();
+        write(&other, line.replace("sess-gen", "sess-other").as_bytes());
+        ix.pass(&mut |_| {});
+        assert_eq!(merged_sessions(ix.index()).len(), 2);
+        assert_eq!(sum(ix.index()).active_secs, 240);
+        let r = report(
+            ix.index(),
+            Period::All,
+            AgentFilter::All,
+            at("2026-11-21T00:00:00Z"),
+            &FixedTz(0),
+        );
+        assert_eq!(r.total.c.active_secs, 240);
+        assert_eq!(r.total.sessions, 2);
+    }
+
+    #[test]
+    fn tokens_of_an_unknown_model_have_a_row() {
+        let t = Tree::new();
+        t.copy_fixture(
+            "codex/sessions/2026/11/21/rollout-2026-11-21T09-00-00-00000000-0000-4000-8000-00000000c0de.jsonl",
+        );
+        // An old rollout: no `turn_context.model`, tokens from `token_count`.
+        let id = "00000000-0000-4000-8000-0000000000b1";
+        write(
+            &t.codex_file(&format!("rollout-2026-11-21T09-10-00-{id}.jsonl")),
+            &jsonl(&[
+                format!(
+                    r#"{{"timestamp":"2026-11-21T00:10:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/home/synthetic/work/alpha"}}}}"#
+                ),
+                r#"{"timestamp":"2026-11-21T00:10:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100},"total_token_usage":{"input_tokens":100}}}}"#.to_owned(),
+            ]),
+        );
+        // A Claude prompt before any reply has no model and no tokens: no row.
+        write(
+            &t.claude_file("-synthetic-gaps", "s.jsonl"),
+            &claude_turn_at(0),
+        );
+        let mut ix = t.indexer();
+        ix.pass(&mut |_| {});
+        let r = report(
+            ix.index(),
+            Period::All,
+            AgentFilter::All,
+            at("2026-11-24T12:00:00Z"),
+            &FixedTz(0),
+        );
+        let unknown: Vec<_> = r
+            .per_model
+            .iter()
+            .filter(|m| m.model == UNKNOWN_MODEL)
+            .map(|m| (m.agent, m.counts.c.tokens.total(), m.counts.unpriced_tokens))
+            .collect();
+        assert_eq!(unknown, vec![(Agent::Codex, 100, 100)]);
+        let rows: u64 = r.per_model.iter().map(|m| m.counts.c.tokens.total()).sum();
+        assert_eq!(rows, r.total.c.tokens.total());
+        assert_eq!(rows, 2065 + 100);
     }
 }

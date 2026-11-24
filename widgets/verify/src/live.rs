@@ -301,15 +301,45 @@ impl Outlets {
 }
 
 fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
-    let mut handle: Option<(Sender<Action>, Arc<AtomicBool>, Option<PathBuf>)> = None;
+    let mut dispatch = Dispatch {
+        handle: None,
+        outlets,
+    };
     for (generation, cmd) in commands {
-        if handle
+        dispatch.handle(generation, cmd);
+    }
+    if let Some(held) = dispatch.handle {
+        let _ = held.actions.send(Action::Stop);
+    }
+}
+
+/// The runner the command thread holds: where its actions go, whether it
+/// has ended, and the stored verification it was started on (a resume or
+/// an extension; `None` for a new one).
+struct Held {
+    actions: Sender<Action>,
+    ended: Arc<AtomicBool>,
+    dir: Option<PathBuf>,
+}
+
+/// What the command thread keeps between commands.
+struct Dispatch {
+    handle: Option<Held>,
+    outlets: Outlets,
+}
+
+impl Dispatch {
+    /// Carries out one command of the screen's, sent in `generation`.
+    fn handle(&mut self, generation: u64, cmd: Command) {
+        let outlets = &self.outlets;
+        if self
+            .handle
             .as_ref()
-            .is_some_and(|(_, ended, _)| ended.load(Ordering::Acquire))
+            .is_some_and(|held| held.ended.load(Ordering::Acquire))
         {
-            handle = None;
+            self.handle = None;
         }
-        let start = match (cmd, &handle) {
+        let start = match (cmd, &self.handle) {
             // A fix needs no runner: it is one request to Noa, on a link of
             // its own, so a stored verification asks for one as a running
             // one does.
@@ -322,7 +352,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     }
                     Some(text)
                 });
-                continue;
+                return;
             }
             (Command::ProbePanes { dir }, _) => {
                 outlets.detached("verify-panes", generation, move |outlets| {
@@ -336,11 +366,11 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     }
                     None
                 });
-                continue;
+                return;
             }
             (Command::Leave, _) => {
-                if let Some((actions, _, _)) = handle.take() {
-                    let _ = actions.send(Action::Stop);
+                if let Some(held) = self.handle.take() {
+                    let _ = held.actions.send(Action::Stop);
                 }
                 let _ = outlets.snapshots.send(Snapshot {
                     link: Link::Connecting,
@@ -350,14 +380,14 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     generation,
                 });
                 (outlets.wake)();
-                continue;
+                return;
             }
             (Command::ClosePanesStored { dir }, None) => {
                 outlets.detached("verify-close-panes", generation, move |_| {
                     let (Ok(text) | Err(text)) = runner::close_stored_panes(&mut IpcConnect, &dir);
                     Some(text)
                 });
-                continue;
+                return;
             }
             (Command::RemoveWorktrees { dir }, None) => {
                 outlets.detached("verify-worktrees", generation, move |outlets| {
@@ -366,17 +396,15 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     let _ = outlets.released.send(());
                     Some(text)
                 });
-                continue;
+                return;
             }
-            (Command::RemoveWorktrees { dir }, Some((actions, _, held)))
-                if held.as_ref() == Some(&dir) =>
-            {
-                let _ = actions.send(Action::RemoveWorktrees);
-                continue;
+            (Command::RemoveWorktrees { dir }, Some(held)) if held.dir.as_ref() == Some(&dir) => {
+                let _ = held.actions.send(Action::RemoveWorktrees);
+                return;
             }
             (Command::RemoveWorktrees { .. } | Command::ClosePanesStored { .. }, Some(_)) => {
                 outlets.notify(generation, "検証の実行中は使えません");
-                continue;
+                return;
             }
             (
                 Command::Start {
@@ -397,7 +425,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                         generation,
                         "保存先（Noa のデータディレクトリ）が見つかりません",
                     );
-                    continue;
+                    return;
                 };
                 runner::Start::New(Box::new(runner::NewVerification {
                     request,
@@ -417,37 +445,38 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                 Some(_),
             ) => {
                 outlets.notify(generation, "検証はすでに始まっています");
-                continue;
+                return;
             }
             (cmd, None) => match stored_start(cmd) {
                 Some(start) => start,
                 None => {
                     outlets.notify(generation, "検証が始まっていません");
-                    continue;
+                    return;
                 }
             },
-            (cmd, Some((actions, _, _))) => {
+            (cmd, Some(held)) => {
                 if let Some(action) = forwarded(cmd) {
-                    let _ = actions.send(action);
+                    let _ = held.actions.send(action);
                 }
-                continue;
+                return;
             }
         };
-        let held = match &start {
+        let dir = match &start {
             runner::Start::Resume { dir } | runner::Start::Extend { dir, .. } => Some(dir.clone()),
             runner::Start::New(_) => None,
         };
         let started = runner::spawn_session(start, || {});
         let ended = Arc::new(AtomicBool::new(false));
-        handle = Some((started.actions(), ended.clone(), held));
+        self.handle = Some(Held {
+            actions: started.actions(),
+            ended: ended.clone(),
+            dir,
+        });
         let outlets = outlets.clone();
         std::thread::Builder::new()
             .name("verify-updates".into())
             .spawn(move || forward_updates(started, ended, outlets, generation))
             .expect("spawn verify-updates thread");
-    }
-    if let Some((actions, _, _)) = handle {
-        let _ = actions.send(Action::Stop);
     }
 }
 
@@ -611,5 +640,286 @@ impl Channel {
             commands: command_rx,
         };
         (channel, link)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+
+    const WAIT: Duration = Duration::from_secs(5);
+    /// How long a request that should say nothing is given to say it.
+    const QUIET: Duration = Duration::from_millis(300);
+
+    /// Outlets whose far ends a test reads.
+    struct Ends {
+        snapshots: Receiver<Snapshot>,
+        notices: Receiver<Notice>,
+        released: Receiver<()>,
+        panes: Receiver<OpenPanes>,
+    }
+
+    fn outlets() -> (Outlets, Ends) {
+        let (snapshots, snapshot_rx) = mpsc::channel();
+        let (notices, notice_rx) = mpsc::channel();
+        let (released, released_rx) = mpsc::channel();
+        let (panes, panes_rx) = mpsc::channel();
+        let outlets = Outlets {
+            snapshots,
+            notices,
+            released,
+            versions: mpsc::channel().0,
+            panes,
+            wake: Arc::new(|| {}),
+        };
+        let ends = Ends {
+            snapshots: snapshot_rx,
+            notices: notice_rx,
+            released: released_rx,
+            panes: panes_rx,
+        };
+        (outlets, ends)
+    }
+
+    /// A directory no verification is stored in.
+    fn missing(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("noa-verify-no-such-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn leaving_sends_the_start_view_in_a_new_generation() {
+        let channel = start(|| {}, Link::Connecting);
+        let first = channel.snapshots.recv_timeout(WAIT).unwrap();
+        assert_eq!(first.generation, 0);
+        channel.leave();
+        assert_eq!(channel.generation(), 1);
+        let next = channel.snapshots.recv_timeout(WAIT).unwrap();
+        assert_eq!(next.generation, 1);
+        assert!(next.session.is_none());
+    }
+
+    #[test]
+    fn a_command_for_a_verification_that_is_not_running_says_so() {
+        let channel = start(|| {}, Link::Connecting);
+        for cmd in [
+            Command::Focus {
+                part: PartId::new("claude"),
+            },
+            Command::ClosePanes,
+            Command::StartVerify,
+        ] {
+            channel.send(cmd);
+            let (generation, notice) = channel.notices.recv_timeout(WAIT).unwrap();
+            assert_eq!(generation, 0);
+            assert!(notice.contains("始まっていません"), "{notice}");
+        }
+    }
+
+    #[test]
+    fn round_and_criteria_control_goes_to_the_running_verification() {
+        assert_eq!(
+            forwarded(Command::SetHold { hold: true }),
+            Some(Action::SetHold { hold: true })
+        );
+        assert_eq!(forwarded(Command::Continue), Some(Action::Continue));
+        assert_eq!(
+            forwarded(Command::Extend { by: 3 }),
+            Some(Action::Extend { by: 3 })
+        );
+        assert_eq!(forwarded(Command::StartVerify), Some(Action::StartVerify));
+        assert_eq!(forwarded(Command::ClosePanes), Some(Action::ClosePanes));
+        let edit = verify::model::types::CriteriaEdit::Remove { id: "AC-2".into() };
+        assert_eq!(
+            forwarded(Command::EditCriteria { edit: edit.clone() }),
+            Some(Action::EditCriteria { edit })
+        );
+        let attachment = Box::new(Attachment {
+            source: PathBuf::from("/x/shot.png"),
+            caption: "c".into(),
+            marks: Vec::new(),
+            shows: vec!["AC-1".into()],
+        });
+        assert_eq!(
+            forwarded(Command::Attach(attachment.clone())),
+            Some(Action::Attach(attachment))
+        );
+        // What concerns a stored verification is never the runner's action.
+        let dir = PathBuf::from("/x");
+        for cmd in [
+            Command::ExtendStored {
+                dir: dir.clone(),
+                by: 1,
+            },
+            Command::ClosePanesStored { dir: dir.clone() },
+            Command::ProbePanes { dir: dir.clone() },
+            Command::RemoveWorktrees { dir },
+        ] {
+            assert_eq!(forwarded(cmd), None);
+        }
+    }
+
+    /// What each command on a stored verification starts (the runner's
+    /// tests cover what `Start::Extend` and `Start::Resume` then do).
+    #[test]
+    fn a_stored_verification_is_extended_by_an_extending_start() {
+        let dir = PathBuf::from("/x/ver-1");
+        assert_eq!(
+            stored_start(Command::ExtendStored {
+                dir: dir.clone(),
+                by: 3
+            }),
+            Some(runner::Start::Extend {
+                dir: dir.clone(),
+                by: 3
+            })
+        );
+        assert_eq!(
+            stored_start(Command::Resume { dir: dir.clone() }),
+            Some(runner::Start::Resume { dir })
+        );
+        assert_eq!(stored_start(Command::Continue), None);
+    }
+
+    /// Extending a stored verification starts a runner on it, whose
+    /// refusal comes back as a notice of the command's generation.
+    #[test]
+    fn extending_a_stored_verification_starts_a_runner_on_it() {
+        let (outlets, ends) = outlets();
+        let (commands, command_rx) = mpsc::channel();
+        commands
+            .send((
+                2,
+                Command::ExtendStored {
+                    dir: missing("stored"),
+                    by: 1,
+                },
+            ))
+            .unwrap();
+        drop(commands);
+        run_commands(command_rx, outlets);
+        let (generation, notice) = ends.notices.recv_timeout(WAIT).unwrap();
+        assert_eq!(generation, 2);
+        assert!(notice.contains("を開けません"), "{notice}");
+        ends.released.recv_timeout(WAIT).unwrap();
+    }
+
+    /// A runner started by a command is stamped with the generation the
+    /// command was sent in, even when the screen has moved on since.
+    #[test]
+    fn a_runner_keeps_the_generation_of_the_command_that_started_it() {
+        let (outlets, ends) = outlets();
+        let (commands, command_rx) = mpsc::channel();
+        // Sent in generation 0, handled after the screen left (generation 1).
+        commands
+            .send((
+                0,
+                Command::Resume {
+                    dir: missing("log"),
+                },
+            ))
+            .unwrap();
+        drop(commands);
+        run_commands(command_rx, outlets);
+        let (generation, notice) = ends.notices.recv_timeout(WAIT).unwrap();
+        assert_eq!(generation, 0);
+        assert!(notice.contains("続けられません"), "{notice}");
+        let last = ends.snapshots.recv_timeout(WAIT).unwrap();
+        assert_eq!(last.generation, 0);
+        ends.released.recv_timeout(WAIT).unwrap();
+    }
+
+    /// The command thread holding a runner started on `dir`, and that
+    /// runner's far end.
+    fn holding(dir: &Path) -> (Dispatch, Ends, Receiver<Action>) {
+        let (outlets, ends) = outlets();
+        let (actions, action_rx) = mpsc::channel();
+        let dispatch = Dispatch {
+            handle: Some(Held {
+                actions,
+                ended: Arc::new(AtomicBool::new(false)),
+                dir: Some(dir.to_owned()),
+            }),
+            outlets,
+        };
+        (dispatch, ends, action_rx)
+    }
+
+    #[test]
+    fn removing_the_worktrees_of_the_verification_a_runner_holds_goes_through_it() {
+        let dir = missing("held");
+        let (mut dispatch, ends, actions) = holding(&dir);
+        dispatch.handle(4, Command::RemoveWorktrees { dir: dir.clone() });
+        assert_eq!(actions.try_recv(), Ok(Action::RemoveWorktrees));
+        assert_eq!(
+            ends.notices.recv_timeout(QUIET),
+            Err(RecvTimeoutError::Timeout)
+        );
+        // Another stored verification, or its panes, while one runs.
+        for cmd in [
+            Command::RemoveWorktrees {
+                dir: missing("other"),
+            },
+            Command::ClosePanesStored { dir: dir.clone() },
+        ] {
+            dispatch.handle(4, cmd);
+            let (generation, notice) = ends.notices.recv_timeout(WAIT).unwrap();
+            assert_eq!(generation, 4);
+            assert_eq!(notice, "検証の実行中は使えません");
+        }
+        assert!(actions.try_recv().is_err(), "the runner was asked");
+    }
+
+    #[test]
+    fn removing_the_worktrees_of_a_stored_verification_needs_no_runner() {
+        let (outlets, ends) = outlets();
+        let mut dispatch = Dispatch {
+            handle: None,
+            outlets,
+        };
+        dispatch.handle(
+            3,
+            Command::RemoveWorktrees {
+                dir: missing("worktrees"),
+            },
+        );
+        let (generation, notice) = ends.notices.recv_timeout(WAIT).unwrap();
+        assert_eq!(generation, 3);
+        assert!(notice.contains("を開けません"), "{notice}");
+        // The list is read again: the log may have changed.
+        ends.released.recv_timeout(WAIT).unwrap();
+    }
+
+    #[test]
+    fn the_panes_of_a_stored_verification_are_closed_and_counted_without_a_runner() {
+        let (outlets, ends) = outlets();
+        let mut dispatch = Dispatch {
+            handle: None,
+            outlets,
+        };
+        dispatch.handle(
+            5,
+            Command::ClosePanesStored {
+                dir: missing("panes"),
+            },
+        );
+        let (generation, notice) = ends.notices.recv_timeout(WAIT).unwrap();
+        assert_eq!(generation, 5);
+        assert!(notice.contains("を開けません"), "{notice}");
+        // A count that cannot be made is not answered, and says nothing.
+        dispatch.handle(
+            5,
+            Command::ProbePanes {
+                dir: missing("probe"),
+            },
+        );
+        assert_eq!(
+            ends.notices.recv_timeout(QUIET),
+            Err(RecvTimeoutError::Timeout)
+        );
+        assert_eq!(ends.panes.try_recv(), Err(mpsc::TryRecvError::Empty));
+        assert!(dispatch.handle.is_none(), "a runner was started");
     }
 }

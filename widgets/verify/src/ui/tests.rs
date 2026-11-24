@@ -737,6 +737,39 @@ fn ac22_the_matrix_shows_the_latest_result_per_cell_with_rerun_and_cross_check_m
 }
 
 #[test]
+fn ac22_a_cross_check_on_an_earlier_result_marks_not_the_latest_one() {
+    use verify::model::types::{CriterionResult, CrossCheck, CrossOutcome, Outcome, Subject};
+    let mut session = crate::demo::session();
+    let (claude, codex) = (PartId::new("claude"), PartId::new("codex"));
+    let result = |round, outcome| CriterionResult {
+        round,
+        part: claude.clone(),
+        criterion: "AC-1".into(),
+        outcome,
+        note: String::new(),
+        evidence: Vec::new(),
+    };
+    // claude failed AC-1 in R1 and passed it in R2; codex's R2 check is
+    // about the R1 fail, the result its brief named.
+    session.results = vec![result(1, Outcome::Fail), result(2, Outcome::Pass)];
+    session.cross_checks = vec![CrossCheck {
+        round: 2,
+        by: codex,
+        subject: Subject::Result {
+            part: claude.clone(),
+            criterion: "AC-1".into(),
+        },
+        outcome: CrossOutcome::Reproduced,
+        note: String::new(),
+        evidence: Vec::new(),
+    }];
+    assert_eq!(matrix::cell(&session, &claude, "AC-1").text(), "✓");
+    // A check of R3 is about the R2 pass, the result the cell shows.
+    session.cross_checks[0].round = 3;
+    assert_eq!(matrix::cell(&session, &claude, "AC-1").text(), "✓ ⇄");
+}
+
+#[test]
 fn the_matrix_and_the_criteria_tab_fit_the_smallest_window() {
     for mut screen in [Verify::demo(), Verify::demo_held(), Verify::demo_criteria()] {
         lay_out(&mut screen, SMALLEST);
@@ -968,6 +1001,39 @@ fn ac32_media_show_as_placeholder_cards_without_a_picture_or_a_thumbnail() {
         [Open::File(reply.join("evidence/user/1.png"))]
     );
     let _ = std::fs::remove_dir_all(workdir);
+}
+
+#[test]
+fn a_criterions_thread_leaves_out_media_whose_shows_names_another_criterion() {
+    let mut session = crate::demo::session();
+    let video = key("claude/r1/v1");
+    let caption = "cd /tmp、⌘T、新しいタブで pwd";
+    // The video shows AC-1 only; claude's AC-2 result cites it too.
+    let item = session
+        .evidence
+        .iter_mut()
+        .find(|e| e.key == video)
+        .unwrap();
+    let EvidenceBody::File { shows, .. } = &mut item.body else {
+        panic!("{:?}", item.body);
+    };
+    *shows = vec!["AC-1".into()];
+    session
+        .results
+        .iter_mut()
+        .find(|r| r.part == PartId::new("claude") && r.criterion == "AC-2")
+        .unwrap()
+        .evidence
+        .push(video.clone());
+    let item = session.evidence_item(&video).unwrap();
+    assert!(!evidence::relates(&session, item, "AC-2"));
+    let (mut screen, _link) = live_with(session);
+    act(&mut screen, Action::SelectCriterion(Some("AC-2".into())));
+    let thread = all_text(&screen);
+    assert!(thread.contains("基準 AC-2"), "{thread}");
+    assert!(!thread.contains(caption), "{thread}");
+    act(&mut screen, Action::SelectCriterion(Some("AC-1".into())));
+    assert!(all_text(&screen).contains(caption));
 }
 
 #[test]
@@ -1718,6 +1784,38 @@ fn a_criterion_being_typed_survives_a_new_state_until_the_log_has_it() {
     link.snapshots.send(snapshot(next, None, 0)).unwrap();
     screen.poll_live(&mut TextStore::new(Default::default()));
     assert!(!screen.editor.drafts.contains_key("AC-5"));
+}
+
+#[test]
+fn the_add_row_keeps_the_priority_chosen_across_a_tab_change() {
+    let (mut screen, link) = live_with(crate::demo::criteria_held());
+    let mut text = TextStore::new(Default::default());
+    let add = screen.editor.add.as_ref().unwrap();
+    let (s, h, p) = (add.statement, add.how, add.priority);
+    screen
+        .tree
+        .update::<TextField, _>(s, |f, cx| f.set_text(cx, "閉じたタブは復元できる"));
+    screen
+        .tree
+        .update::<TextArea, _>(h, |a, cx| a.set_text(cx, "⇧⌘T で戻す"));
+    press_down(&mut screen, p, &mut text);
+    assert_eq!(screen.tree.get::<PopUpButton>(p).unwrap().selected(), 1);
+    assert!(commands(&link).is_empty());
+    act(&mut screen, Action::ShowTab(CenterTab::Evidence));
+    act(&mut screen, Action::ShowTab(CenterTab::Criteria));
+    let p = screen.editor.add.as_ref().unwrap().priority;
+    assert_eq!(screen.tree.get::<PopUpButton>(p).unwrap().selected(), 1);
+    act(&mut screen, Action::AddCriterion);
+    assert_eq!(
+        commands(&link),
+        [Command::EditCriteria {
+            edit: CriteriaEdit::Add {
+                statement: "閉じたタブは復元できる".into(),
+                how: "⇧⌘T で戻す".into(),
+                priority: Priority::Should,
+            }
+        }]
+    );
 }
 
 #[test]

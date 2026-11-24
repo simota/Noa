@@ -71,17 +71,21 @@ pub(super) fn insert(
 }
 
 /// The evidence `keys` cite: a line per item (with its re-run outcome and
-/// 開く), then the media among them as a strip of placeholder cards.
+/// 開く), then the media among them as a strip of placeholder cards. In a
+/// criterion's thread (`criterion`), media whose `shows` leaves it out is
+/// not shown, as the gallery leaves it out for that criterion.
 fn cited(
     tree: &mut UiTree,
     parent: WidgetId,
     session: &Session,
     keys: &[EvidenceKey],
+    criterion: Option<&str>,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let items: Vec<&Evidence> = keys
         .iter()
         .filter_map(|k| session.evidence_item(k))
+        .filter(|item| criterion.is_none_or(|c| evidence::shows_allow(item, c)))
         .collect();
     let mut media = Vec::new();
     for item in &items {
@@ -199,7 +203,7 @@ fn criterion(
             if !r.note.is_empty() {
                 body(tree, box_, r.note.clone());
             }
-            cited(tree, box_, session, &r.evidence, actions);
+            cited(tree, box_, session, &r.evidence, Some(id), actions);
         }
     }
     if !any {
@@ -266,7 +270,7 @@ fn criterion(
         if !ch.note.is_empty() {
             body(tree, box_, ch.note.clone());
         }
-        cited(tree, box_, session, &ch.evidence, actions);
+        cited(tree, box_, session, &ch.evidence, Some(id), actions);
     }
 
     caption(tree, list, "判定の履歴");
@@ -379,7 +383,7 @@ fn defect(
         tag(tree, top, raw.severity.label(), severity_tone(raw.severity));
         body(tree, c, raw.claim.clone());
         caption(tree, c, format!("再現手順: {}", raw.repro));
-        cited(tree, c, session, &raw.evidence, actions);
+        cited(tree, c, session, &raw.evidence, None, actions);
     }
     caption(tree, list, "追試");
     let checks: Vec<_> = session
@@ -410,7 +414,7 @@ fn defect(
         if !ch.note.is_empty() {
             body(tree, c, ch.note.clone());
         }
-        cited(tree, c, session, &ch.evidence, actions);
+        cited(tree, c, session, &ch.evidence, None, actions);
     }
     caption(tree, list, "履歴");
     for (round, status, severity) in &d.history {

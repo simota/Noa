@@ -22,9 +22,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use verify::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Output, Setup};
 use verify::evidence::{self, IngestItem};
 use verify::model::types::{
-    AgentChoice, AgentKind, AgentSetup, BriefKind, CRITERIA_ROUND, CriteriaEdit, EvidenceBody,
-    EvidenceKey, Head, Isolation, JUDGE_TAIL_LINES, MAX_LOG_BYTES, Millis, PartId, Phase,
-    RERUN_TIMEOUT, Rerun, RerunRequest, RoundNo, Session, SessionId, Target, VerifierChoice,
+    AgentChoice, AgentKind, AgentSetup, BriefKind, CRITERIA_ROUND, CriteriaEdit, Event,
+    EvidenceBody, EvidenceKey, Head, Isolation, JUDGE_TAIL_LINES, MAX_LOG_BYTES, Millis, PartId,
+    Phase, RERUN_TIMEOUT, Rerun, RerunRequest, RoundNo, Session, SessionId, Target, VerifierChoice,
     WorktreeState, short_id,
 };
 use verify::model::validate;
@@ -340,6 +340,11 @@ struct Pane {
     seq: u64,
     state: Option<String>,
     blocked: Option<String>,
+    /// `Panel.agent.kind`, and whether the pane ever showed one.
+    kind: Option<String>,
+    had_agent: bool,
+    /// The pane's child exited and Noa holds the pane open.
+    exited: bool,
     quiet: Option<(String, Millis)>,
     told_held: bool,
     briefed: bool,
@@ -353,6 +358,9 @@ impl Pane {
             seq: 0,
             state: None,
             blocked: None,
+            kind: None,
+            had_agent: false,
+            exited: false,
             quiet: None,
             told_held: false,
             briefed: false,
@@ -361,11 +369,26 @@ impl Pane {
 
     fn from_view(view: &PaneView) -> Self {
         let mut pane = Self::new(view.pane_id);
-        pane.seq = view.agent_seq;
-        pane.state.clone_from(&view.agent_state);
-        pane.blocked.clone_from(&view.agent_blocked);
+        pane.take(view);
         pane.ready = pane.reports_ready();
         pane
+    }
+
+    /// What Noa now says of the pane.
+    fn take(&mut self, view: &PaneView) {
+        self.seq = view.agent_seq;
+        self.state.clone_from(&view.agent_state);
+        self.blocked.clone_from(&view.agent_blocked);
+        self.kind.clone_from(&view.agent_kind);
+        self.had_agent |= view.agent_kind.is_some();
+        self.exited = view.exited;
+    }
+
+    /// Whether Noa reports the agent gone from the pane: its child exited,
+    /// or the agent it showed has left its card empty (`agentLeft`, as
+    /// `noa +ctl wait` reads it, crates/noa-app/src/ctl.rs).
+    fn left(&self) -> bool {
+        self.exited || (self.had_agent && self.kind.is_none() && self.state.is_none())
     }
 
     fn reports_ready(&self) -> bool {
@@ -400,10 +423,15 @@ struct PendingSend {
     body: String,
     queued_at: Millis,
     spawns: u8,
-    /// Since when every write of it to its pane is refused because the
-    /// pane is back at its shell (the agent exited): past the start
-    /// timeout the pane counts as lost.
+    /// Since when every write of it to its pane is refused while Noa
+    /// reports the agent gone (the pane back at its shell, `agentLeft`, or
+    /// its child exited): past the start timeout the pane counts as lost.
     at_shell: Option<Millis>,
+    /// Since when its paste is refused for another reason (the pane has
+    /// not enabled bracketed paste): it stays queued, and past the start
+    /// timeout a notice says so, once.
+    refused: Option<Millis>,
+    told_refused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -461,11 +489,16 @@ struct Runner<C: Connect, K: Clock> {
     /// Opened from a log: agents whose panes are gone are briefed again
     /// once the first connection shows which are.
     resumed: bool,
-    /// Verifiers whose worktree this open rebuilt at the same path: a pane
-    /// of theirs still open runs in the folder that was removed, so it is
-    /// closed and the agent started again in the new worktree, as for a
-    /// lost pane, until a new pane of theirs is started.
+    /// Verifiers whose worktree was made again after their pane was
+    /// started, as the log's order of `WorktreeMade` and `PaneAssigned`
+    /// says ([`note_rebuilt`]): a pane of theirs still open runs in the
+    /// folder that was removed, so it is closed and the agent started again
+    /// in the new worktree, as for a lost pane, until a new pane of theirs
+    /// is started. A resume, an extension and a +N in this window all come
+    /// here.
     rebuilt: BTreeSet<PartId>,
+    /// Panes of [`Self::rebuilt`] verifiers waiting to be closed.
+    stale: Vec<(PartId, u64)>,
     link_state: Link,
 }
 
@@ -481,13 +514,15 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     ) -> Result<Self, String> {
         let now = clock.now();
         let resumed = matches!(start, Start::Resume { .. } | Start::Extend { .. });
-        let (engine, store, rebuilt) = match start {
-            Start::New(new) => {
-                let (engine, store) = new_verification(*new, config, now)?;
-                (engine, store, BTreeSet::new())
-            }
+        let (engine, store) = match start {
+            Start::New(new) => new_verification(*new, config, now)?,
             Start::Resume { dir } => open_log(dir, None, config, now)?,
             Start::Extend { dir, by } => open_log(dir, Some(by), config, now)?,
+        };
+        let rebuilt = if resumed {
+            rebuilt_in_log(store.dir())?
+        } else {
+            BTreeSet::new()
         };
         let runner = Self {
             engine,
@@ -509,6 +544,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             started: false,
             resumed,
             rebuilt,
+            stale: Vec::new(),
             link_state: Link::Connecting,
         };
         runner.emit_session();
@@ -662,9 +698,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     states.push((part.clone(), state));
                 }
                 let mut pane = known.cloned().unwrap_or_else(|| Pane::from_view(view));
-                pane.seq = view.agent_seq;
-                pane.state.clone_from(&view.agent_state);
-                pane.blocked.clone_from(&view.agent_blocked);
+                pane.take(view);
                 if pane.reports_ready() {
                     pane.ready = true;
                 }
@@ -675,17 +709,37 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         // Panes gone while the link was down need no quiet closing.
         let live: BTreeSet<u64> = self.panes.values().map(|p| p.id).collect();
         self.closing.retain(|id| live.contains(id));
-        // Started in a worktree that was removed and made again: the agent
-        // starts anew in the new one, in a new pane, with its next brief.
-        for (part, pane) in stale {
+        self.stale.extend(stale);
+        self.close_stale(conn)?;
+        let at = self.clock.now();
+        for (part, state) in states {
+            self.feed(Input::AgentStateChanged { part, state, at })?;
+        }
+        Ok(())
+    }
+
+    /// Takes the panes of [`Self::rebuilt`] verifiers out of play: each is
+    /// closed by [`Self::close_stale`] once there is a connection.
+    fn retire_rebuilt(&mut self) {
+        for part in &self.rebuilt {
+            if let Some(pane) = self.panes.remove(part) {
+                self.stale.push((part.clone(), pane.id));
+            }
+        }
+    }
+
+    /// Started in a worktree that was removed and made again: the agent
+    /// starts anew in the new one, in a new pane, with its next brief.
+    fn close_stale(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
+        let mut closed = BTreeSet::new();
+        for (part, pane) in std::mem::take(&mut self.stale) {
+            if !closed.insert(pane) {
+                continue;
+            }
             self.notice(format!(
                 "{part} のワークツリーを作り直したため、エージェントを新しいペインで起動し直します"
             ));
             close_quietly(conn, pane)?;
-        }
-        let at = self.clock.now();
-        for (part, state) in states {
-            self.feed(Input::AgentStateChanged { part, state, at })?;
         }
         Ok(())
     }
@@ -721,9 +775,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             let mut changed_state = None;
             if let Some(pane) = self.panes.get_mut(&part) {
                 let state_changed = pane.seq != view.agent_seq || pane.state != view.agent_state;
-                pane.seq = view.agent_seq;
-                pane.state.clone_from(&view.agent_state);
-                pane.blocked.clone_from(&view.agent_blocked);
+                pane.take(&view);
                 if pane.reports_ready() {
                     pane.ready = true;
                     pane.told_held = false;
@@ -780,7 +832,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     /// 証跡を追加: copies the person's file into the judge's reply dir
-    /// (`evidence::attach`), then has the engine log it. A copy the engine
+    /// (`evidence::attach`), then has the engine log it and lists it in
+    /// the manifest of the round it is attached in. A copy the engine
     /// turns down is taken away again, so nothing unlogged stays.
     fn attach(&mut self, attachment: Attachment, at: Millis) -> Result<(), String> {
         let session = self.engine.session();
@@ -788,10 +841,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             self.notice("検証は終了しています");
             return Ok(());
         }
-        if session.current_round().is_none() {
+        let Some(round) = session.current_round().map(|r| r.no) else {
             self.notice("証跡は検証の開始後に追加できます");
             return Ok(());
-        }
+        };
         let reply_dir = self.engine.reply_dir();
         let attached =
             match evidence::attach(&self.engine.reply_base(), &reply_dir, &attachment.source) {
@@ -820,7 +873,11 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             at,
         };
         match self.engine.handle(input) {
-            Ok(out) => self.apply_output(out),
+            Ok(out) => {
+                self.apply_output(out)?;
+                self.write_manifest(round);
+                Ok(())
+            }
             Err(EngineError::Rejected(why)) => {
                 // Made by `attach` just now, exclusively.
                 let _ = fs::remove_file(reply_dir.join(&attached.stored.path));
@@ -1068,15 +1125,21 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         self.feed_user(input).map_err(Fail::Fatal)
     }
 
-    /// Logs `output`'s batches and carries out its effects. What an effect
-    /// gives back (a worktree made, evidence ingested, a re-run script
-    /// written, a send that cannot go) is fed to the engine after every
-    /// effect of `output` has been carried out, in order.
+    /// Logs `output`'s batches and carries out its effects. Each worktree
+    /// made or removed is logged before the next is touched, so a stop
+    /// halfway leaves the log saying what is on disk (L1-3). What any
+    /// other effect gives back (evidence ingested, a re-run script written,
+    /// a send that cannot go) is fed to the engine after every effect of
+    /// `output` has been carried out, in order.
     fn apply_output(&mut self, output: Output) -> Result<(), String> {
         if !output.batches.is_empty() {
             self.store
                 .append_all(&output.batches)
                 .map_err(|e| format!("write log: {e}"))?;
+            for batch in &output.batches {
+                note_rebuilt(&mut self.rebuilt, batch);
+            }
+            self.retire_rebuilt();
             self.emit_session();
         }
         let now = self.clock.now();
@@ -1100,6 +1163,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                             queued_at: now,
                             spawns: 0,
                             at_shell: None,
+                            refused: None,
+                            told_refused: false,
                         }),
                         Err(error) => follow.push(Input::SendFailed {
                             round,
@@ -1129,10 +1194,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     self.watches.retain(|w| w.path != path);
                 }
                 Effect::WriteReport => self.write_report(),
-                Effect::MakeWorktrees => follow.extend(self.make_worktrees()),
+                Effect::MakeWorktrees => self.make_worktrees()?,
                 Effect::Ingest { round } => follow.extend(self.ingest(round)),
                 Effect::Rerun { round, part } => follow.extend(self.write_rerun(round, &part, now)),
-                Effect::RemoveWorktrees => follow.extend(self.remove_worktrees()),
+                Effect::RemoveWorktrees => self.remove_worktrees()?,
             }
         }
         let mut manifests = BTreeSet::new();
@@ -1171,38 +1236,32 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     /// Builds and checks every verifier's worktree not yet made (L1-3),
-    /// each with its `.noa/.gitignore`. The first that cannot be made
-    /// stops the others: the round is refused until 再試行.
-    fn make_worktrees(&self) -> Vec<Input> {
-        let session = self.engine.session();
+    /// each with its `.noa/.gitignore`, and logs each before the next is
+    /// built: a stop halfway leaves the ones made on record, and the next
+    /// start goes on from them. The first that cannot be made stops the
+    /// others: the round is refused until 再試行.
+    fn make_worktrees(&mut self) -> Result<(), String> {
         let target = store::target_dir(&self.engine.reply_dir());
-        let mut out = Vec::new();
-        for part in session.verifier_ids() {
-            let path = worktree::path_for(&session.main_worktree, &session.id, part);
+        let parts: Vec<PartId> = self.engine.session().verifier_ids().cloned().collect();
+        for part in parts {
+            let session = self.engine.session();
+            let path = worktree::path_for(&session.main_worktree, &session.id, &part);
             let made = session
                 .worktrees
-                .get(part)
+                .get(&part)
                 .is_some_and(|t| t.state == WorktreeState::Made);
             if made && path.exists() {
                 continue;
             }
             match build_worktree(session, &target, &path) {
-                Ok(()) => out.push(Input::WorktreeMade {
-                    part: part.clone(),
-                    path,
-                }),
+                Ok(()) => self.feed_user(Input::WorktreeMade { part, path })?,
                 Err(error) => {
                     self.notice(format!("{part} のワークツリーを作れません: {error}"));
-                    out.push(Input::WorktreeFailed {
-                        part: part.clone(),
-                        path,
-                        error,
-                    });
-                    break;
+                    return self.feed_user(Input::WorktreeFailed { part, path, error });
                 }
             }
         }
-        out
+        Ok(())
     }
 
     /// Copies and hashes the evidence of every verifier that replied in
@@ -1288,13 +1347,19 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     /// Rewrites round `round`'s `evidence/r<N>/manifest.md` from what is
-    /// stored now.
+    /// stored now: every item of the round, what the verifiers reported
+    /// (its round in its key) and what the person attached in it.
     fn write_manifest(&self, round: RoundNo) {
         let session = self.engine.session();
         let items: Vec<&verify::model::types::Evidence> = session
             .evidence
             .iter()
-            .filter(|e| e.key.split().is_some_and(|(_, r, _)| r == round))
+            .filter(|e| {
+                e.attached
+                    .map(|a| a.round)
+                    .or_else(|| e.key.split().map(|(_, r, _)| r))
+                    == Some(round)
+            })
             .collect();
         if items.is_empty() {
             return;
@@ -1354,18 +1419,18 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         }
     }
 
-    /// Removes every worktree the log records as made (L1-3); one that is
-    /// not this verification's detached worktree any more is left and
-    /// named.
-    fn remove_worktrees(&self) -> Vec<Input> {
-        let (removed, left) = remove_recorded(self.engine.session());
-        if !removed.is_empty() || !left.is_empty() {
-            self.notice(removal_notice(removed.len(), &left));
+    /// Removes every worktree the log records as made (L1-3), logging each
+    /// as it goes; one that is not this verification's detached worktree
+    /// any more is left and named.
+    fn remove_worktrees(&mut self) -> Result<(), String> {
+        let session = self.engine.session().clone();
+        let (removed, left) = remove_recorded(&session, |part| {
+            self.feed_user(Input::WorktreeRemoved { part: part.clone() })
+        })?;
+        if removed > 0 || !left.is_empty() {
+            self.notice(removal_notice(removed, &left));
         }
-        removed
-            .into_iter()
-            .map(|part| Input::WorktreeRemoved { part })
-            .collect()
+        Ok(())
     }
 
     /// A watch for every re-run request of the round being ingested whose
@@ -1574,6 +1639,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     fn deliver_sends(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
+        self.close_stale(conn)?;
         let mut idx = 0;
         while idx < self.sends.len() {
             let round = self.sends[idx].round;
@@ -1705,7 +1771,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                             // The agent left between the paste and the
                             // Enter (its input went with it): the brief
                             // waits for it to come back and goes again.
-                            NoaError::NotReady => {
+                            NoaError::AtShell => {
                                 let part = self.sends[idx].part.clone();
                                 if let Some(p) = self.panes.get_mut(&part) {
                                     p.ready = false;
@@ -1733,22 +1799,33 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                         at,
                     })?;
                 }
-                // Back at its shell (or never taking a paste): past the start
-                // timeout the pane counts as lost, and the next pass starts
-                // the agent again in a new pane (L1-4).
-                Err(NoaError::NotReady) => {
+                // Back at its shell: past the start timeout the pane counts
+                // as lost, and the next pass starts the agent again in a new
+                // pane (L1-4).
+                Err(NoaError::AtShell) => {
                     let part = self.sends[idx].part.clone();
                     if let Some(p) = self.panes.get_mut(&part) {
                         p.ready = false;
                     }
-                    let since = *self.sends[idx].at_shell.get_or_insert(now);
-                    if now.saturating_sub(since) >= self.config.start_timeout {
-                        self.sends[idx].at_shell = None;
-                        if let Some(pane) = self.panes.remove(&part) {
+                    self.agent_gone(conn, idx, now)?;
+                    idx += 1;
+                }
+                // Not taking a paste: lost only when Noa also reports the
+                // agent gone. An agent still there keeps its pane and its
+                // brief, which goes once it takes pastes.
+                Err(NoaError::NotReady) => {
+                    let part = self.sends[idx].part.clone();
+                    if self.panes.get(&part).is_some_and(Pane::left) {
+                        self.agent_gone(conn, idx, now)?;
+                    } else {
+                        let since = *self.sends[idx].refused.get_or_insert(now);
+                        if !self.sends[idx].told_refused
+                            && now.saturating_sub(since) >= self.config.start_timeout
+                        {
+                            self.sends[idx].told_refused = true;
                             self.notice(format!(
-                                "{part} のエージェントが終了したままのため、ペインを閉じて起動し直します"
+                                "{part} にブリーフを貼り付けられません（ペーストを受け付けていません）。ペインはそのままにして、受け付けるまで送り直します"
                             ));
-                            close_quietly(conn, pane.id)?;
                         }
                     }
                     idx += 1;
@@ -1767,6 +1844,24 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     })?;
                 }
                 Err(other) => return Err(link(other)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Noa reports the agent of `self.sends[idx]`'s pane gone: once that
+    /// has lasted the start timeout, the pane counts as lost (closed, so
+    /// the next pass starts the agent again in a new one).
+    fn agent_gone(&mut self, conn: &mut C::Conn, idx: usize, now: Millis) -> Result<(), Fail> {
+        let part = self.sends[idx].part.clone();
+        let since = *self.sends[idx].at_shell.get_or_insert(now);
+        if now.saturating_sub(since) >= self.config.start_timeout {
+            self.sends[idx].at_shell = None;
+            if let Some(pane) = self.panes.remove(&part) {
+                self.notice(format!(
+                    "{part} のエージェントが終了したままのため、ペインを閉じて起動し直します"
+                ));
+                close_quietly(conn, pane.id)?;
             }
         }
         Ok(())
@@ -1838,7 +1933,6 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 Ok(pane_id) => {
                     self.place(placement, pane_id);
                     self.panes.insert(part.clone(), Pane::new(pane_id));
-                    self.rebuilt.remove(part);
                     return self.feed(Input::PaneSpawned {
                         part: part.clone(),
                         pane_id,
@@ -2096,13 +2190,20 @@ fn close_quietly<N: Noa>(conn: &mut N, pane: u64) -> Result<(), Fail> {
     }
 }
 
-/// Removes every worktree `session` records as made: the parts removed,
-/// and each one left with why. Only the path the store gives each
-/// verifier (`worktree::path_for` from the main worktree) is ever
-/// removed: a logged path that differs (another worktree of the same
-/// repository, say, with the person's changes in it) is left and named.
-fn remove_recorded(session: &Session) -> (Vec<PartId>, Vec<String>) {
-    let mut removed = Vec::new();
+/// Removes every worktree `session` records as made, handing each part to
+/// `removed` (which logs it) as soon as its worktree is gone, before the
+/// next is touched: how many went, and each one left with why. Only the
+/// path the store gives each verifier (`worktree::path_for` from the main
+/// worktree) is ever removed: a logged path that differs (another worktree
+/// of the same repository, say, with the person's changes in it) is left
+/// and named. One git no longer registers is gone already (a removal cut
+/// short before it was logged) and is logged as removed; a folder still at
+/// its path is left as it is, and named.
+fn remove_recorded(
+    session: &Session,
+    mut removed: impl FnMut(&PartId) -> Result<(), String>,
+) -> Result<(usize, Vec<String>), String> {
+    let mut count = 0;
     let mut left = Vec::new();
     for (part, tree) in &session.worktrees {
         if tree.state != WorktreeState::Made {
@@ -2117,12 +2218,84 @@ fn remove_recorded(session: &Session) -> (Vec<PartId>, Vec<String>) {
             ));
             continue;
         }
-        match worktree::remove(&session.main_worktree, &path) {
-            Ok(()) => removed.push(part.clone()),
+        match registered(&session.main_worktree, &path) {
+            Ok(true) => match worktree::remove(&session.main_worktree, &path) {
+                Ok(()) => {
+                    removed(part)?;
+                    count += 1;
+                }
+                Err(why) => left.push(format!("{part}: {why}")),
+            },
+            Ok(false) => {
+                removed(part)?;
+                if fs::symlink_metadata(&path).is_ok() {
+                    left.push(format!(
+                        "{part}: {} は Git の worktree ではなくなっているため、削除済みとして記録しました（フォルダは残しています）",
+                        path.display()
+                    ));
+                } else {
+                    count += 1;
+                }
+            }
             Err(why) => left.push(format!("{part}: {why}")),
         }
     }
-    (removed, left)
+    Ok((count, left))
+}
+
+/// Whether git lists a worktree of `main`'s repository at `path`, compared
+/// as `worktree::remove` compares them: the folders resolved, the last
+/// component as it is.
+fn registered(main: &Path, path: &Path) -> Result<bool, String> {
+    let want = resolved(path);
+    Ok(worktree::list(main)?
+        .iter()
+        .any(|entry| entry.path == path || resolved(&entry.path) == want))
+}
+
+/// `path` with its folders resolved (`/var` → `/private/var` on macOS) and
+/// its last component kept, never followed.
+fn resolved(path: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => fs::canonicalize(parent)
+            .unwrap_or_else(|_| resolved(parent))
+            .join(name),
+        _ => path.to_owned(),
+    }
+}
+
+/// Folds `batch` into `rebuilt`, the verifiers whose worktree was made
+/// after their pane was started: a `WorktreeMade` puts its verifier in, a
+/// `PaneAssigned` (a new pane, in the worktree as it is now) takes it out.
+fn note_rebuilt(rebuilt: &mut BTreeSet<PartId>, batch: &[Event]) {
+    for event in batch {
+        match event {
+            Event::WorktreeMade { part, .. } => {
+                rebuilt.insert(part.clone());
+            }
+            Event::PaneAssigned { part, .. } => {
+                rebuilt.remove(part);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// [`note_rebuilt`] over the whole log in `dir`, in order: a rebuild a
+/// refused resume logged counts as much as one this open made.
+fn rebuilt_in_log(dir: &Path) -> Result<BTreeSet<PartId>, String> {
+    let path = dir.join(store::EVENTS_FILE);
+    let text = fs::read(&path).map_err(|e| format!("{} を読めません: {e}", path.display()))?;
+    let mut rebuilt = BTreeSet::new();
+    for line in text.split(|&b| b == b'\n') {
+        if line.trim_ascii().is_empty() {
+            continue;
+        }
+        let batch: Vec<Event> = serde_json::from_slice(line)
+            .map_err(|e| format!("{} を読めません: {e}", path.display()))?;
+        note_rebuilt(&mut rebuilt, &batch);
+    }
+    Ok(rebuilt)
 }
 
 fn removal_notice(removed: usize, left: &[String]) -> String {
@@ -2144,7 +2317,7 @@ fn open_log(
     extend_by: Option<RoundNo>,
     config: Config,
     now: Millis,
-) -> Result<(Engine, Store, BTreeSet<PartId>), String> {
+) -> Result<(Engine, Store), String> {
     let (mut store, session) =
         Store::open(&dir).map_err(|e| format!("{} を開けません: {e}", dir.display()))?;
     // Checked under the lock: a list shown earlier may be stale.
@@ -2157,6 +2330,7 @@ fn open_log(
     verify::engine::check_resumable(&session, &dir)
         .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
     let mut engine = Engine::resume(session, &dir, config);
+    let forgotten = forget_unregistered(&mut engine)?;
     // Refused before anything is written, in the log or the workdir.
     let extension = match extend_by {
         None => None,
@@ -2170,6 +2344,9 @@ fn open_log(
     };
     let workdir = engine.session().workdir.clone();
     store::prepare_workdir(&workdir).map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
+    store
+        .append_all(&forgotten)
+        .map_err(|e| format!("write log: {e}"))?;
     if let Some(out) = extension {
         // Stored before anything starts; the round it opens is briefed by
         // the start that follows the first connection.
@@ -2177,14 +2354,44 @@ fn open_log(
             .append_all(&out.batches)
             .map_err(|e| format!("write log: {e}"))?;
     }
-    let rebuilt = rebuild_worktrees(&mut engine, &mut store)?;
+    rebuild_worktrees(&mut engine, &mut store)?;
     // The report follows the log: a stop between the two writes (the log
     // took a judge output, the report did not) is repaired here.
     let session = engine.session();
     if store::report_is_stale(&dir, session) {
         let _ = store::write_report(&dir, &store::report_text(session));
     }
-    Ok((engine, store, rebuilt))
+    Ok((engine, store))
+}
+
+/// On a resume or an extension: a worktree the log records as made that
+/// git no longer registers (a removal cut short before it was logged) is
+/// taken as removed, so the extension's check and the rebuild below see
+/// what is on disk. Its batches, for the log once nothing refuses the
+/// open. (One whose folder is still there was refused already, by
+/// `check_resumable`.)
+fn forget_unregistered(engine: &mut Engine) -> Result<Vec<Vec<Event>>, String> {
+    let session = engine.session();
+    if session.isolation != Isolation::Worktree {
+        return Ok(Vec::new());
+    }
+    let mut gone = Vec::new();
+    for (part, tree) in &session.worktrees {
+        if tree.state == WorktreeState::Made
+            && !registered(&session.main_worktree, &tree.path)
+                .map_err(|e| format!("{part} のワークツリーを確かめられません: {e}"))?
+        {
+            gone.push(part.clone());
+        }
+    }
+    let mut batches = Vec::new();
+    for part in gone {
+        let out = engine
+            .handle(Input::WorktreeRemoved { part })
+            .map_err(|e| e.to_string())?;
+        batches.extend(out.batches);
+    }
+    Ok(batches)
 }
 
 /// On a resume (L1-10, AC-19): a worktree the log records as made whose
@@ -2196,12 +2403,12 @@ fn open_log(
 /// refuses the resume; one that failed before is left to 再試行. Each one
 /// rebuilt is logged before the next is made, so a resume refused halfway
 /// (a full disk) keeps those it made, and the next one does not make them
-/// again. Returns the verifiers rebuilt.
-fn rebuild_worktrees(engine: &mut Engine, store: &mut Store) -> Result<BTreeSet<PartId>, String> {
+/// again; the log's order then tells which verifiers' panes run in a
+/// folder that was removed ([`rebuilt_in_log`]).
+fn rebuild_worktrees(engine: &mut Engine, store: &mut Store) -> Result<(), String> {
     let session = engine.session();
-    let mut rebuilt = BTreeSet::new();
     if session.closed || session.isolation != Isolation::Worktree || session.frozen_at.is_none() {
-        return Ok(rebuilt);
+        return Ok(());
     }
     let target = store::target_dir(&engine.reply_dir());
     let parts: Vec<PartId> = session.verifier_ids().cloned().collect();
@@ -2227,9 +2434,8 @@ fn rebuild_worktrees(engine: &mut Engine, store: &mut Store) -> Result<BTreeSet<
         store
             .append_all(&out.batches)
             .map_err(|e| format!("write log: {e}"))?;
-        rebuilt.insert(part);
     }
-    Ok(rebuilt)
+    Ok(())
 }
 
 /// How many ids of one millisecond a start tries before it gives up.
@@ -2523,17 +2729,16 @@ pub fn remove_stored_worktrees(dir: &Path) -> Result<String, String> {
     {
         return Ok(NO_WORKTREES.to_owned());
     }
-    let (removed, left) = remove_recorded(&session);
-    let mut engine = Engine::resume(session, dir, Config::default());
-    for part in &removed {
+    let mut engine = Engine::resume(session.clone(), dir, Config::default());
+    let (removed, left) = remove_recorded(&session, |part| {
         let out = engine
             .handle(Input::WorktreeRemoved { part: part.clone() })
             .map_err(|e| e.to_string())?;
         store
             .append_all(&out.batches)
-            .map_err(|e| format!("write log: {e}"))?;
-    }
-    Ok(removal_notice(removed.len(), &left))
+            .map_err(|e| format!("write log: {e}"))
+    })?;
+    Ok(removal_notice(removed, &left))
 }
 
 #[cfg(test)]
@@ -2545,10 +2750,12 @@ pub(crate) mod tests {
     use verify::model::reduce::Event;
     use verify::model::types::{BuiltinStrategy, MAX_MAX_ROUNDS, StrategyChoice, TargetKind};
 
+    #[derive(Default)]
     struct FakePane {
         label: Option<String>,
         state: Option<String>,
         blocked: Option<String>,
+        kind: Option<String>,
         seq: u64,
         cwd: PathBuf,
     }
@@ -2575,6 +2782,9 @@ pub(crate) mod tests {
         /// Panes back at their shell: Noa refuses every write
         /// (`refuseShell`) and writes nothing.
         shell: BTreeSet<u64>,
+        /// Panes whose program has not enabled bracketed paste: a paste
+        /// holding a control character is refused (`requirePasteMode`).
+        no_paste_mode: BTreeSet<u64>,
         /// The agent exits right after the next paste into this pane.
         exits_after_paste: Option<u64>,
     }
@@ -2592,6 +2802,8 @@ pub(crate) mod tests {
                 agent_seq: pane.seq,
                 agent_blocked: pane.blocked.clone(),
                 agent_detail: None,
+                agent_kind: pane.kind.clone(),
+                exited: false,
             }
         }
 
@@ -2601,6 +2813,28 @@ pub(crate) mod tests {
             p.seq += 1;
             p.state = Some(state.to_owned());
             p.blocked = blocked.map(str::to_owned);
+            let view = Fake::view(pane, p);
+            w.events.push_back(Changes {
+                panes: vec![view],
+                ..Changes::default()
+            });
+        }
+
+        /// The agent in `pane` reports `state`, Noa naming it `kind` (from
+        /// its process name).
+        fn report_as(&self, pane: u64, kind: &str, state: &str) {
+            self.0.borrow_mut().panes.get_mut(&pane).unwrap().kind = Some(kind.to_owned());
+            self.report(pane, state, None);
+        }
+
+        /// The agent in `pane` quits: Noa empties its card (`agentLeft`).
+        fn agent_quits(&self, pane: u64) {
+            let mut w = self.0.borrow_mut();
+            let p = w.panes.get_mut(&pane).unwrap();
+            p.seq += 1;
+            p.state = None;
+            p.kind = None;
+            p.blocked = None;
             let view = Fake::view(pane, p);
             w.events.push_back(Changes {
                 panes: vec![view],
@@ -2626,10 +2860,7 @@ pub(crate) mod tests {
                 id,
                 FakePane {
                     label: Some(label.to_owned()),
-                    state: None,
-                    blocked: None,
-                    seq: 0,
-                    cwd: PathBuf::new(),
+                    ..FakePane::default()
                 },
             );
             id
@@ -2727,10 +2958,8 @@ pub(crate) mod tests {
                 id,
                 FakePane {
                     label: Some(spec.label.clone()),
-                    state: None,
-                    blocked: None,
-                    seq: 0,
                     cwd: spec.cwd.clone(),
+                    ..FakePane::default()
                 },
             );
             Ok(id)
@@ -2749,9 +2978,12 @@ pub(crate) mod tests {
             Ok("> ".to_owned())
         }
 
-        fn type_text(&mut self, pane: u64, text: &str, _paste: bool) -> Result<(), NoaError> {
+        fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), NoaError> {
             let mut w = self.0.borrow_mut();
             if w.shell.contains(&pane) {
+                return Err(NoaError::AtShell);
+            }
+            if paste && text.chars().any(char::is_control) && w.no_paste_mode.contains(&pane) {
                 return Err(NoaError::NotReady);
             }
             w.typed.push((pane, text.to_owned()));
@@ -3078,13 +3310,20 @@ pub(crate) mod tests {
 
     /// The same, run against `fake`, whose panes stay open.
     fn finished_with_a_failure_on(fake: &Fake, root: &Path) -> PathBuf {
+        let (runner, _actions, _updates) = run_to_a_failure(fake, root, |_| {});
+        stop(runner)
+    }
+
+    /// The same, its runner still holding it; `before_ruling` runs on the
+    /// session once the round is ingested, before the judge rules.
+    fn run_to_a_failure(fake: &Fake, root: &Path, before_ruling: impl FnOnce(&Session)) -> Wired {
         let fake = fake.clone();
         let repo = repo(root);
         let mut start = new_start(root, state_of(&repo), Isolation::Worktree, false);
         if let Start::New(new) = &mut start {
             new.max_rounds = 1;
         }
-        let (mut runner, _actions, _updates) = rig_on(&fake, start);
+        let (mut runner, actions, updates) = rig_on(&fake, start);
         let mut conn = fake.clone();
         round_one_briefed(&fake, &mut runner, &mut conn);
         verifier_reply(&runner, "codex", &passing(false));
@@ -3101,6 +3340,7 @@ pub(crate) mod tests {
             Phase::Ruling
         );
         step(&mut runner, &mut conn);
+        before_ruling(runner.engine.session());
         fs::write(
             store::judge_reply_path(&runner.engine.reply_dir(), 1),
             JUDGE_FAILED,
@@ -3113,7 +3353,7 @@ pub(crate) mod tests {
             "{:?}",
             s.round(1).unwrap().judge_brief.as_ref().map(|b| &b.receipt)
         );
-        stop(runner)
+        (runner, actions, updates)
     }
 
     /// claude's round-1 reply: AC-1 fails on `cargo build` (exit 101),
@@ -4670,6 +4910,405 @@ pub(crate) mod tests {
                 .sent
                 .is_some()
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn verifier_panes(fake: &Fake) -> Vec<u64> {
+        ["claude", "codex"]
+            .iter()
+            .map(|p| fake.pane_of(&format!(":{p}")))
+            .collect()
+    }
+
+    /// Each verifier's old pane closed and a new one started in its
+    /// worktree, which round `round`'s brief goes to and the old one never
+    /// gets.
+    fn started_again_in_new_panes(
+        fake: &Fake,
+        runner: &mut Runner<Fake, Fake>,
+        conn: &mut Fake,
+        old: &[u64],
+    ) {
+        let s = runner.engine.session().clone();
+        for (part, old) in ["claude", "codex"].iter().zip(old) {
+            assert!(
+                fake.0.borrow().closed.contains(old),
+                "{part}'s old pane stayed"
+            );
+            let pane = fake.pane_of(&format!(":{part}"));
+            assert_ne!(pane, *old, "{part} was not started again");
+            assert_eq!(
+                fake.cwd(pane),
+                store::verifier_root(&s, &PartId::new(*part))
+            );
+            fake.report(pane, "input", None);
+        }
+        step(runner, conn);
+        step(runner, conn);
+        for (part, old) in ["claude", "codex"].iter().zip(old) {
+            assert_eq!(fake.pasted(*old), 1, "{part}: only the first brief");
+            assert_eq!(fake.pasted(fake.pane_of(&format!(":{part}"))), 1, "{part}");
+        }
+    }
+
+    #[test]
+    fn a_plus_one_in_the_same_window_starts_the_verifiers_again_in_their_rebuilt_worktrees() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, actions, _updates) = run_to_a_failure(&fake, &root, |_| {});
+        let mut conn = fake.clone();
+        assert!(
+            runner
+                .engine
+                .session()
+                .worktrees
+                .values()
+                .all(|t| t.state == WorktreeState::Removed),
+            "removed at close"
+        );
+        // Their panes stayed open after the verdict, in the worktrees the
+        // close removed; +1 on the board makes the worktrees again.
+        let old = verifier_panes(&fake);
+        actions.send(Action::Extend { by: 1 }).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        step(&mut runner, &mut conn);
+        assert_eq!(runner.engine.session().rounds.len(), 2, "round 2 started");
+        step(&mut runner, &mut conn);
+        started_again_in_new_panes(&fake, &mut runner, &mut conn, &old);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resume_after_one_refused_halfway_takes_up_no_pane_whose_worktree_was_rebuilt() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_round_one_briefs(&fake, &root);
+        let old = verifier_panes(&fake);
+        assert_eq!(
+            remove_stored_worktrees(&dir),
+            Ok("2 個のワークツリーを削除しました".into())
+        );
+        let s = store::read_session(&dir).unwrap();
+        // claude's rebuild goes through, codex's fails (its place taken).
+        let blocked = worktree::path_for(&s.main_worktree, &s.id, &PartId::new("codex"));
+        fs::write(&blocked, "in the way").unwrap();
+        let err = open_wired(&fake, Start::Resume { dir: dir.clone() })
+            .err()
+            .unwrap();
+        assert!(err.contains("codex"), "{err}");
+        wait_unlocked(&dir);
+        fs::remove_file(&blocked).unwrap();
+        // The next resume: claude's worktree is there, made after its pane.
+        let (mut runner, _, _) = rig_on(&fake, Start::Resume { dir });
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        started_again_in_new_panes(&fake, &mut runner, &mut conn, &old);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resume_after_a_stop_between_two_checkouts_goes_on_from_the_worktree_made() {
+        let fake = fake();
+        let root = temp_root();
+        let repo = repo(&root);
+        // The repository's smudge filter runs in each checkout into a
+        // verifier's worktree: it keeps a copy of the log as it is then,
+        // what a widget that ended during that checkout leaves behind.
+        let snaps = root.join("snaps");
+        fs::create_dir_all(&snaps).unwrap();
+        let probe = root.join("probe.sh");
+        fs::write(
+            &probe,
+            format!(
+                "n=$(ls '{snaps}' | wc -l | tr -d ' ')\ncp '{store}'/*/{log} '{snaps}'/$n\ncat\n",
+                snaps = snaps.display(),
+                store = root.join("store").display(),
+                log = store::EVENTS_FILE,
+            ),
+        )
+        .unwrap();
+        fs::write(repo.join(".gitattributes"), "src/lib.rs filter=probe\n").unwrap();
+        let smudge = format!("sh '{}'", probe.display());
+        git(&repo, &["config", "filter.probe.smudge", &smudge]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "probe"]);
+        let (mut runner, _, _) = rig_on(
+            &fake,
+            new_start(&root, state_of(&repo), Isolation::Worktree, false),
+        );
+        let mut conn = fake.clone();
+        criteria(&fake, &mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(runner.engine.session().rounds.len(), 1, "round 1 started");
+        let s = runner.engine.session().clone();
+        let dir = stop(runner);
+        // Ended during codex's checkout (the second): the log as it was
+        // then, and no worktree of codex's (git takes away one whose add it
+        // did not finish).
+        fs::copy(snaps.join("1"), dir.join(store::EVENTS_FILE)).unwrap();
+        let codex = worktree::path_for(&s.main_worktree, &s.id, &PartId::new("codex"));
+        git(
+            &repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &codex.display().to_string(),
+            ],
+        );
+        let (mut runner, _, updates) = rig_on(&fake, Start::Resume { dir });
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let s = runner.engine.session();
+        assert_eq!(
+            s.rounds.len(),
+            1,
+            "{:?} {:?}",
+            s.worktrees,
+            notices(&updates)
+        );
+        for part in ["claude", "codex"] {
+            let tree = &s.worktrees[&PartId::new(part)];
+            assert_eq!(tree.state, WorktreeState::Made, "{part}");
+            assert!(tree.path.join("src/lib.rs").is_file(), "{part}");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_paste_a_live_agent_refuses_keeps_its_pane_and_its_brief() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, _actions, updates) = rig(&fake, &root, true);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let judge = fake.pane_of(":judge");
+        // The agent waits for input but has not enabled bracketed paste:
+        // Noa refuses the brief (-32010, as for a pane at its shell).
+        fake.0.borrow_mut().no_paste_mode.insert(judge);
+        fake.report(judge, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        let _ = notices(&updates);
+        fake.advance(CONFIG.start_timeout - 1);
+        step(&mut runner, &mut conn);
+        assert_eq!(notices(&updates), Vec::<String>::new());
+        fake.advance(1);
+        step(&mut runner, &mut conn);
+        let told = notices(&updates);
+        assert!(
+            told.len() == 1 && told[0].starts_with("judge にブリーフを貼り付けられません"),
+            "{told:?}"
+        );
+        fake.advance(90_000);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert!(fake.0.borrow().closed.is_empty(), "the agent's pane closed");
+        assert_eq!(fake.pane_of(":judge"), judge);
+        assert_eq!(notices(&updates), Vec::<String>::new(), "told once");
+        let receipt = |runner: &Runner<Fake, Fake>| {
+            runner
+                .engine
+                .session()
+                .criteria_brief
+                .as_ref()
+                .unwrap()
+                .receipt
+                .clone()
+        };
+        let pending = receipt(&runner);
+        assert!(pending.sent.is_none() && pending.failed.is_none());
+        // Taking pastes now: the brief goes into the same pane.
+        fake.0.borrow_mut().no_paste_mode.remove(&judge);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(judge), 1);
+        assert!(receipt(&runner).sent.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_rerun_a_live_agent_refuses_waits_in_its_pane() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, _actions, _updates) = rig(&fake, &root, false);
+        let mut conn = fake.clone();
+        round_one_briefed(&fake, &mut runner, &mut conn);
+        let claude = fake.pane_of(":claude");
+        fake.0.borrow_mut().no_paste_mode.insert(claude);
+        replied(&fake, &mut runner, &mut conn);
+        // Its re-run brief, queued at the ingest, refused from now on.
+        step(&mut runner, &mut conn);
+        assert_eq!(rerun_pastes(&fake, claude), 0);
+        fake.advance(CONFIG.start_timeout + 30_000);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert!(
+            !fake.0.borrow().closed.contains(&claude),
+            "the verifier's pane closed"
+        );
+        assert_eq!(rerun_outcomes(&runner, "claude"), [None]);
+        fake.0.borrow_mut().no_paste_mode.remove(&claude);
+        step(&mut runner, &mut conn);
+        assert_eq!(rerun_pastes(&fake, claude), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_refused_paste_counts_the_pane_lost_once_its_agent_has_left() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, _actions, _updates) = rig(&fake, &root, true);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let old = fake.pane_of(":judge");
+        fake.0.borrow_mut().no_paste_mode.insert(old);
+        fake.report_as(old, "claude", "input");
+        step(&mut runner, &mut conn);
+        fake.agent_quits(old);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert!(fake.0.borrow().closed.is_empty(), "lost at once");
+        fake.advance(CONFIG.start_timeout);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.0.borrow().closed, [old]);
+        step(&mut runner, &mut conn);
+        let new = fake.pane_of(":judge");
+        assert_ne!(new, old, "the agent was not started again");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A one-round verification that ended with both worktrees left at
+    /// the close (each had a branch out), both put back at a detached HEAD
+    /// since; returns its directory and the two worktrees.
+    fn ended_with_its_worktrees_left(fake: &Fake, root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let (runner, _actions, _updates) = run_to_a_failure(fake, root, |s| {
+            for (part, tree) in &s.worktrees {
+                git(
+                    &tree.path,
+                    &["checkout", "-q", "-b", &format!("keep-{part}")],
+                );
+            }
+        });
+        let s = runner.engine.session().clone();
+        assert!(
+            s.worktrees.values().all(|t| t.state == WorktreeState::Made),
+            "{:?}",
+            s.worktrees
+        );
+        let dir = stop(runner);
+        let tree = |part: &str| s.worktrees[&PartId::new(part)].path.clone();
+        let (claude, codex) = (tree("claude"), tree("codex"));
+        for path in [&claude, &codex] {
+            git(path, &["checkout", "-q", "--detach"]);
+        }
+        (dir, claude, codex)
+    }
+
+    #[test]
+    fn a_removal_cut_short_finishes_on_retry_and_the_verification_extends() {
+        let fake = fake();
+        let root = temp_root();
+        let (dir, claude, codex) = ended_with_its_worktrees_left(&fake, &root);
+        // The widget ended after removing claude's, before it was logged.
+        git(
+            &root.join("repo"),
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &claude.display().to_string(),
+            ],
+        );
+        assert_eq!(
+            remove_stored_worktrees(&dir),
+            Ok("2 個のワークツリーを削除しました".into())
+        );
+        assert!(!codex.exists());
+        let stored = store::read_session(&dir).unwrap();
+        assert!(
+            stored
+                .worktrees
+                .values()
+                .all(|t| t.state == WorktreeState::Removed)
+        );
+        let (runner, _, _) =
+            open_wired(&fake, Start::Extend { dir, by: 1 }).unwrap_or_else(|e| panic!("{e}"));
+        assert!(!runner.engine.session().closed);
+        for tree in runner.engine.session().worktrees.values() {
+            assert_eq!(tree.state, WorktreeState::Made);
+            assert!(tree.path.join("src/lib.rs").is_file());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_extension_takes_a_worktree_git_no_longer_registers_as_removed() {
+        let fake = fake();
+        let root = temp_root();
+        let (dir, claude, codex) = ended_with_its_worktrees_left(&fake, &root);
+        // Both removals went through; the widget ended before logging them.
+        for path in [&claude, &codex] {
+            git(
+                &root.join("repo"),
+                &["worktree", "remove", "--force", &path.display().to_string()],
+            );
+        }
+        let (runner, _, _) =
+            open_wired(&fake, Start::Extend { dir, by: 1 }).unwrap_or_else(|e| panic!("{e}"));
+        assert!(!runner.engine.session().closed);
+        for tree in runner.engine.session().worktrees.values() {
+            assert_eq!(tree.state, WorktreeState::Made);
+            assert!(tree.path.join("src/lib.rs").is_file());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_persons_media_is_listed_in_the_manifest_of_its_round() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, actions, _updates) = rig(&fake, &root, false);
+        let mut conn = fake.clone();
+        round_one_briefed(&fake, &mut runner, &mut conn);
+        replied(&fake, &mut runner, &mut conn);
+        let manifest = store::evidence_dir(&runner.engine.reply_dir())
+            .join("r1")
+            .join(evidence::MANIFEST_FILE);
+        assert!(manifest.is_file(), "written at ingest");
+        let shot = root.join("shot.png");
+        fs::write(&shot, PNG).unwrap();
+        actions
+            .send(Action::Attach(Box::new(Attachment {
+                source: shot,
+                caption: "The new tab".into(),
+                marks: Vec::new(),
+                shows: vec!["AC-1".into()],
+            })))
+            .unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        let stored = runner
+            .engine
+            .session()
+            .evidence_item(&EvidenceKey::user(1))
+            .unwrap()
+            .stored
+            .clone()
+            .unwrap();
+        let row = format!(
+            "| user/1 | {} | {} | {:016x} |",
+            stored.path.display(),
+            stored.bytes,
+            stored.digest
+        );
+        let text = fs::read_to_string(&manifest).unwrap();
+        assert!(text.contains(&row), "{row}\n{text}");
+        // Rewritten when a re-run reports: still there.
+        run_rerun_script(&runner, "claude");
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert!(!rerun_outcomes(&runner, "claude").contains(&None));
+        let text = fs::read_to_string(&manifest).unwrap();
+        assert!(text.contains(&row), "{row}\n{text}");
         let _ = fs::remove_dir_all(root);
     }
 }

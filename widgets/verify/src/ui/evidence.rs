@@ -174,6 +174,18 @@ pub(super) fn round_of(item: &Evidence) -> RoundNo {
         .unwrap_or(0)
 }
 
+/// Whether `item` may be shown as evidence for `criterion` where it is
+/// cited: media whose `shows` names criteria is evidence only for those
+/// (L1-5a), whoever cites it.
+pub(super) fn shows_allow(item: &Evidence, criterion: &str) -> bool {
+    match &item.body {
+        EvidenceBody::File { shows, .. } if !shows.is_empty() => {
+            shows.iter().any(|s| s == criterion)
+        }
+        _ => true,
+    }
+}
+
 /// Whether `item` is evidence about `criterion`: media whose `shows` names
 /// it, or (without `shows`) cited by a result on it, a cross-check on a
 /// result on it, or a ruling on it.

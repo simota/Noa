@@ -11,6 +11,7 @@ use noa_gpui_core::style::{
 use noa_gpui_core::widgets::{Container, Label, Pressable, Tone, Truncation};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
+use verify::model::rules::History;
 use verify::model::types::{Outcome, PartId, Rerun, Session, Subject};
 
 use super::{Action, caption, keep_scroll, note, ruling_tone, scroll_column, tag};
@@ -29,7 +30,9 @@ pub(super) struct Cell {
     /// ≠ when a re-run of a command that result cites differed, else ↻
     /// when one matched.
     pub rerun: Option<&'static str>,
-    /// Another verifier cross-checked this verifier's result on it.
+    /// Another verifier cross-checked the result shown: a check is about
+    /// the result its verifier had as of the round before the check (L1-6
+    /// rule 1), so one on an earlier result marks nothing here.
     pub crossed: bool,
 }
 
@@ -60,8 +63,11 @@ pub(super) fn cell(session: &Session, part: &PartId, criterion: &str) -> Cell {
     } else {
         None
     };
-    let crossed = session.cross_checks.iter().any(|c| {
-        matches!(&c.subject, Subject::Result { part: p, criterion: on } if p == part && on == criterion)
+    let crossed = latest.is_some_and(|latest| {
+        History::of(session, criterion).checks.iter().any(|c| {
+            matches!(&c.check.subject, Subject::Result { part: p, .. } if p == part)
+                && c.about.is_some_and(|about| std::ptr::eq(about, latest))
+        })
     });
     Cell {
         outcome: latest.map(|r| r.outcome),

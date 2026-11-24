@@ -29,6 +29,10 @@ pub enum NoaError {
     /// A paste was refused because the pane has not enabled bracketed paste
     /// yet. Nothing was written.
     NotReady,
+    /// A send was refused because the pane's foreground process is a plain
+    /// shell (`refuseShell`: the agent has not started yet, or has left).
+    /// Nothing was written.
+    AtShell,
     /// Noa refused the request; the connection is fine.
     Refused(String),
 }
@@ -39,6 +43,7 @@ impl std::fmt::Display for NoaError {
             NoaError::Link(why) => write!(f, "connection lost: {why}"),
             NoaError::PaneGone => f.write_str("the pane is closed"),
             NoaError::NotReady => f.write_str("the pane has not enabled bracketed paste yet"),
+            NoaError::AtShell => f.write_str("the pane is at its shell"),
             NoaError::Refused(why) => f.write_str(why),
         }
     }
@@ -58,6 +63,11 @@ pub struct PaneView {
     /// What the agent is blocked on (`Panel.agent.blocked`: `permission` or
     /// `question`), such as Claude Code's folder trust prompt.
     pub agent_blocked: Option<String>,
+    /// The agent Noa sees in front (`Panel.agent.kind`: `claude`, `codex`,
+    /// `agy`), from the foreground process name.
+    pub agent_kind: Option<String>,
+    /// The pane's child exited and the pane is held open (`Panel.exit`).
+    pub exited: bool,
     /// The report's detail (`Panel.agent.detail`), e.g. `trust this folder`
     /// or Antigravity's `Sign in required`.
     pub agent_detail: Option<String>,
@@ -112,7 +122,7 @@ pub trait Noa {
     /// Types `text` into `pane`: as one bracketed paste with `paste`
     /// (refused with [`NoaError::NotReady`] while the pane has not enabled
     /// it, when `text` holds a control character), else as raw bytes.
-    /// Refused with [`NoaError::NotReady`], nothing written, while the
+    /// Refused with [`NoaError::AtShell`], nothing written, while the
     /// pane's foreground process is a plain shell (the agent exited).
     fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), NoaError>;
     /// Brings `pane` (and its window and tab) to the front with keyboard
@@ -250,6 +260,8 @@ fn view(panel: &Panel) -> PaneView {
         agent_seq: panel.agent.as_ref().map_or(0, |a| a.seq),
         agent_blocked: panel.agent.as_ref().and_then(|a| a.blocked.clone()),
         agent_detail: panel.agent.as_ref().and_then(|a| a.detail.clone()),
+        agent_kind: panel.agent.as_ref().and_then(|a| a.kind.clone()),
+        exited: panel.exit.is_some(),
     }
 }
 
@@ -383,6 +395,27 @@ fn noa_error(err: ClientError) -> NoaError {
     }
 }
 
+impl IpcNoa {
+    /// Whether `pane`'s foreground process is a plain shell, as
+    /// `refuseShell` judges it now.
+    fn at_shell(&mut self, pane: u64) -> Result<bool, NoaError> {
+        let options = SendTextOptions {
+            paste: false,
+            require_paste_mode: false,
+            refuse_shell: true,
+        };
+        match self
+            .client
+            .send_text_with(pane, "", options)
+            .map_err(noa_error)
+        {
+            Ok(()) => Ok(false),
+            Err(NoaError::NotReady) => Ok(true),
+            Err(other) => Err(other),
+        }
+    }
+}
+
 impl Noa for IpcNoa {
     fn server_version(&self) -> String {
         self.version.clone()
@@ -459,16 +492,29 @@ impl Noa for IpcNoa {
     fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), NoaError> {
         // Without bracketed paste every control character reaches the agent
         // as a key (each newline an Enter), so such a paste is refused.
+        let require_paste_mode = paste && text.chars().any(char::is_control);
         let options = SendTextOptions {
             paste,
-            require_paste_mode: paste && text.chars().any(char::is_control),
+            require_paste_mode,
             // A brief (or its Enter) typed into a shell would run as a
             // command line: Noa probes the foreground process and refuses.
             refuse_shell: true,
         };
-        self.client
+        match self
+            .client
             .send_text_with(pane, text, options)
             .map_err(noa_error)
+        {
+            // Noa answers both refusals with -32010: an empty raw send that
+            // refuses a shell (it writes nothing either way) tells them apart.
+            Err(NoaError::NotReady) if require_paste_mode => match self.at_shell(pane) {
+                Ok(true) => Err(NoaError::AtShell),
+                Ok(false) => Err(NoaError::NotReady),
+                Err(other) => Err(other),
+            },
+            Err(NoaError::NotReady) => Err(NoaError::AtShell),
+            other => other,
+        }
     }
 
     fn focus(&mut self, pane: u64) -> Result<(), NoaError> {

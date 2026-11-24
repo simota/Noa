@@ -60,8 +60,26 @@ pub(super) struct Editor {
     pub(super) add: Option<AddRow>,
     /// Statement and how typed into a criterion's fields and not saved.
     pub(super) drafts: BTreeMap<String, (String, String)>,
-    /// Statement and how typed into the add row.
-    add_draft: (String, String),
+    /// Statement, how and priority chosen in the add row.
+    add_draft: AddDraft,
+}
+
+/// What the add row holds while it is not sent.
+#[derive(Clone)]
+struct AddDraft {
+    statement: String,
+    how: String,
+    priority: Priority,
+}
+
+impl Default for AddDraft {
+    fn default() -> Self {
+        Self {
+            statement: String::new(),
+            how: String::new(),
+            priority: Priority::Must,
+        }
+    }
 }
 
 fn field_text(tree: &UiTree, id: WidgetId) -> String {
@@ -92,7 +110,11 @@ impl Editor {
             }
         }
         if let Some(add) = &self.add {
-            self.add_draft = (field_text(tree, add.statement), area_text(tree, add.how));
+            self.add_draft = AddDraft {
+                statement: field_text(tree, add.statement),
+                how: area_text(tree, add.how),
+                priority: priority_of(tree, add.priority),
+            };
         }
         self.rows.clear();
         self.add = None;
@@ -169,9 +191,10 @@ impl Editor {
         })
     }
 
-    /// Empties the add row once its criterion was sent.
+    /// Empties the add row once its criterion was sent (its priority back
+    /// at must once the row is built again).
     pub(super) fn clear_addition(&mut self, tree: &mut UiTree) {
-        self.add_draft = Default::default();
+        self.add_draft = AddDraft::default();
         if let Some(add) = &self.add {
             tree.update::<TextField, _>(add.statement, |f, cx| f.set_text(cx, ""));
             tree.update::<TextArea, _>(add.how, |a, cx| a.set_text(cx, ""));
@@ -340,20 +363,24 @@ pub(super) fn insert(
     let add = card(tree, list, false);
     caption(tree, add, "基準を追加（出典: あなた）");
     let statement = tree.insert(Some(add), TextField::new("基準の文（1行）", 420.0));
-    let draft = editor.add_draft.clone();
-    tree.update::<TextField, _>(statement, |f, cx| f.set_text(cx, draft.0));
+    let AddDraft {
+        statement: draft_statement,
+        how: draft_how,
+        priority: draft_priority,
+    } = editor.add_draft.clone();
+    tree.update::<TextField, _>(statement, |f, cx| f.set_text(cx, draft_statement));
     tree.set_accessible_label(statement, "追加する基準の文");
     let how = tree.insert(
         Some(add),
         TextArea::new("どう動かして確かめるか").min_lines(2),
     );
-    tree.update::<TextArea, _>(how, |a, cx| a.set_text(cx, draft.1));
+    tree.update::<TextArea, _>(how, |a, cx| a.set_text(cx, draft_how));
     tree.set_accessible_label(how, "追加する基準の確かめ方");
     let foot = tree.insert(
         Some(add),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
     );
-    let priority = priority_menu(tree, foot, Priority::Must);
+    let priority = priority_menu(tree, foot, draft_priority);
     tree.set_accessible_label(priority, "追加する基準の優先度");
     let button = tree.insert(Some(foot), small("追加"));
     tree.set_enabled(button, count < MAX_CRITERIA);

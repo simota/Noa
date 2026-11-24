@@ -1001,6 +1001,10 @@ Earlier rounds on this criterion (the evidence standard reads these too):
   - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 Your ruling so far (R1): failed — codex's symlink test fails and the recording shows $HOME.
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
+  - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
 ### AC-2 [must] A cwd that no longer exists falls back to $HOME
 - (no new result this round)
 Earlier rounds on this criterion (the evidence standard reads these too):
@@ -1014,6 +1018,8 @@ Earlier rounds on this criterion (the evidence standard reads these too):
   - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 Your ruling so far (R1): verified — claude's test re-ran with the same status.
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
 ### AC-3 [should] Opening a tab stays under 50 ms
 - agy: fail — A cold start takes 72 ms.
   - agy/r2/e1: command `./bench open-tab --cold` (cwd bench) exit 1
@@ -1038,6 +1044,13 @@ Earlier rounds on this criterion (the evidence standard reads these too):
   - agy/r1/e2: command `./bench open-tab --long-path` (cwd bench) exit 0
     stored: missing (gone before ingest)
 Your ruling so far (R1): inconclusive — Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
+  - claude/r1/e3: command of 3 lines (cwd bench) exit 0
+    ```
+    for i in $(seq 20); do
+      ./bench open-tab
+    done
+    ```
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
 ### AC-5 [should] Quitting keeps every tab's cwd for the next launch
 - (no new result this round)
 Earlier rounds on this criterion (the evidence standard reads these too):

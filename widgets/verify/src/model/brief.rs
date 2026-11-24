@@ -1119,6 +1119,11 @@ pub fn judge_brief(
                 prev.kind.name(),
                 prev.rationale.trim()
             );
+            // Every key it cites, wherever it came from (a defect's video,
+            // say): a judge in a new pane traces the ruling from here.
+            for key in &prev.evidence {
+                write_item(&mut body, session, key, reply_dir);
+            }
         }
     }
     let attached: Vec<_> = session
@@ -1344,7 +1349,7 @@ pub fn correction_note(to: &PartId, error: &str, reply_path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::model::types::Phase;
-    use crate::testkit::{self, Rig, VERIFIERS, all_pass, reply_json};
+    use crate::testkit::{self, Rig, VERIFIERS, all_pass, cmd, reply_json};
 
     #[test]
     fn ac13_a_ruling_brief_lists_an_earlier_rounds_defect_reproduction_with_its_evidence() {
@@ -1411,6 +1416,76 @@ mod tests {
             "evidence/r2/codex/shots/empty.png (100 bytes, digest ",
         ] {
             assert!(defects.contains(line), "{line:?} in\n{defects}");
+        }
+    }
+
+    #[test]
+    fn ac13_a_ruling_brief_lists_every_key_the_previous_ruling_cites_under_it() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply("claude", &all_pass());
+        // codex fails AC-1 on log e1; only its defect cites the video e2.
+        rig.reply(
+            "codex",
+            &reply_json(
+                &[
+                    ("AC-1", "fail", &["e1"]),
+                    ("AC-2", "pass", &["e3"]),
+                    ("AC-3", "pass", &["e3"]),
+                ],
+                &[
+                    cmd("e1", 1, false),
+                    r#"{"id": "e2", "kind": "file", "path": "video/tab.mov", "caption": "the new tab opens in $HOME",
+                        "marks": [{"t": "00:04", "note": "the tab shows $HOME"}], "shows": ["AC-1"]}"#
+                        .to_owned(),
+                    cmd("e3", 0, true),
+                ],
+                r#", "defects": [{"id": "1", "claim": "New tabs ignore the focused pane's cwd", "severity": "high",
+                   "category": "regression", "confidence": "high", "repro": "1. cd /tmp 2. open a tab", "evidence": ["e2"]}]"#,
+            ),
+        );
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "failed", "rationale": "The log fails and the video shows $HOME.", "evidence": ["codex/r1/e1", "codex/r1/e2"]},
+              {"criterion": "AC-2", "ruling": "verified", "rationale": "Re-run matched.", "evidence": ["claude/r1/e1"]},
+              {"criterion": "AC-3", "ruling": "verified", "rationale": "Re-run matched.", "evidence": ["claude-2/r1/e1"]}],
+             "defect_ops": [{"op": "add", "id": "D1", "from": ["codex/1"], "claim": "New tabs ignore the focused pane's cwd",
+                 "repro": "1. cd /tmp 2. open a tab", "severity": "high", "category": "regression",
+                 "confidence": "high", "status": "open", "rationale": "Seen once."}]}"#,
+        );
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        // R2: claude reproduces codex/AC-1 (assigned round-robin); the
+        // judge starts in a new pane.
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &reply_json(
+                &[],
+                &[cmd("e1", 1, false)],
+                r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "reproduced", "note": "fails here too", "evidence": ["e1"]}]"#,
+            ),
+        );
+        rig.reply("codex", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude"));
+        let brief = rig.brief("judge", BriefKind::Work);
+        let ac1 = &brief[brief.find(RULING_SECTIONS[3]).unwrap()..];
+        let ac1 = &ac1[ac1.find("### AC-1").unwrap()..ac1.find("### AC-2").unwrap()];
+        let ruling = &ac1[ac1.find("Your ruling so far (R1): failed").unwrap()..];
+        for line in [
+            "  - codex/r1/e1: command `cargo test e1` (cwd .) exit 1\n",
+            "evidence/r1/codex/logs/e1.log (100 bytes, digest ",
+            "  - codex/r1/e2: MOV video video/tab.mov — \"the new tab opens in $HOME\" [00:04 the tab shows $HOME]\n",
+            "evidence/r1/codex/video/tab.mov (100 bytes, digest ",
+        ] {
+            assert!(ruling.contains(line), "{line:?} in\n{ruling}");
         }
     }
 }

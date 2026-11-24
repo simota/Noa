@@ -80,6 +80,8 @@ pub enum Action {
     SelectFinding(Option<String>),
     /// Opens a snapshot file (or the snapshot folder) in the OS.
     OpenSnapshot(Option<String>),
+    /// Opens a panel to choose the document file of a document review.
+    PickDocument,
     CopyReport,
     SaveReport,
     Send,
@@ -1113,6 +1115,12 @@ impl Review {
                     }
                 }
             }
+            Action::PickDocument => self.file_dialogs.push(FileDialogRequest {
+                save: false,
+                title: "レビューする文書を選択".into(),
+                file_name: String::new(),
+                filters: Vec::new(),
+            }),
             Action::SaveReport => {
                 if let Some(session) = &self.session {
                     self.file_dialogs.push(FileDialogRequest {
@@ -1275,6 +1283,13 @@ impl Screen for Review {
     }
 
     fn file_dialog_finished(&mut self, result: FileDialogResult, _text: &mut TextStore) {
+        // Only 選択… opens a panel; レポート保存… saves.
+        if let FileDialogResult::Opened(paths) = &result
+            && let Some(path) = paths.first()
+        {
+            start::set_document_file(&mut self.tree, &self.start, path);
+            return;
+        }
         if let FileDialogResult::Saved(path) = result
             && let Some(session) = &self.session
         {

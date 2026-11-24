@@ -1120,3 +1120,29 @@ fn the_agreement_filters_count_live_findings_as_the_severities_do() {
         .sum();
     assert_eq!(total, live.len());
 }
+
+#[test]
+fn the_document_file_can_be_chosen_in_an_open_panel() {
+    use noa_gpui_platform::Screen as _;
+    let mut screen = Review::demo_start();
+    assert!(acts(&screen).contains(&Action::PickDocument));
+    act(&mut screen, Action::PickDocument);
+    let asked = screen.take_file_dialogs();
+    assert_eq!(asked.len(), 1);
+    assert!(!asked[0].save);
+    let mut text = TextStore::new(Default::default());
+    screen.file_dialog_finished(
+        FileDialogResult::Opened(vec![PathBuf::from("/tmp/plan.md")]),
+        &mut text,
+    );
+    assert_eq!(
+        start::read(&screen.tree, &screen.start).document_file,
+        "/tmp/plan.md"
+    );
+    // A cancelled panel leaves the field as it was.
+    screen.file_dialog_finished(FileDialogResult::Cancelled, &mut text);
+    assert_eq!(
+        start::read(&screen.tree, &screen.start).document_file,
+        "/tmp/plan.md"
+    );
+}

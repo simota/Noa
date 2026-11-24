@@ -196,7 +196,7 @@ Rules:
 Window title 「Noa · 多角レビュー」 (Japanese locale) / "Noa · Multi-Agent Review", app name `Noa Review`. Minimum window as competition's (left 280 + center 520 + right 310 + dividers, 600 high).
 
 1. **開始ビュー** (no session yet):
-   - 対象: a segmented control 「Git 差分 | ファイル / フォルダ | 文書・計画」 and the fields of L1-1 (repository / root / document file with 選択…; base ref with placeholder 「自動（origin の既定ブランチ）」; head 「作業ツリー（未コミットを含む）」 or a ref; path filter; document text area; context working directory).
+   - 対象: a segmented control 「Git 差分 | ファイル / フォルダ | 文書・計画」 and the fields of L1-1 (repository / root / document file; the document file has 選択…, an open panel (the platform's panel has no folder mode, so the repository and root are typed); base ref with placeholder 「自動（origin の既定ブランチ）」; head 「作業ツリー（未コミットを含む）」 or a ref; path filter; document text area; context working directory).
    - 依頼・重点 (optional text area): what the reviewers should know or look at first.
    - リード: agent / model / effort.
    - レビュアー: 2–6 rows of agent / model / effort / 観点 (pop-up of the six built-ins and カスタム) / custom lens text (shown for カスタム), with 追加 and a remove button per row.

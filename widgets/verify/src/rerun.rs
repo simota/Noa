@@ -281,6 +281,13 @@ fn quote(text: &str) -> String {
 /// starts the next command (or writes `done`) only once nothing of the
 /// group is left, so two commands never run at once. A group id in use is
 /// never given to a new process, so the group signalled is the command's.
+///
+/// bash takes the shell options in an exported `SHELLOPTS` (errexit, say)
+/// from the pane's environment. The script leaves them as they are, so the
+/// command's shell sees them as the pane gives them, and no line of it
+/// stops on a failing command: the command's status, a `wait` on a
+/// subshell that failed or was killed, and a signal to a group that has
+/// just gone are each taken with `||`.
 pub fn script(nonce: &str, dir: &Path, worktree: &Path, items: &[(u32, &str)]) -> String {
     let mut out = String::from(
         "#!/bin/sh\n\
@@ -297,7 +304,7 @@ pub fn script(nonce: &str, dir: &Path, worktree: &Path, items: &[(u32, &str)]) -
             out,
             "( cd \"$w\"/{cwd} || {{ echo \"$?\" > \"$d/{n}.nocwd.tmp\" && \
              mv -f \"$d/{n}.nocwd.tmp\" \"$d/{n}.nocwd\"; exit 1; }}; \
-             \"${{SHELL:-/bin/sh}}\" \"$d/{n}.cmd\"; s=$?; \
+             s=0; \"${{SHELL:-/bin/sh}}\" \"$d/{n}.cmd\" || s=$?; \
              echo \"$s\" > \"$d/{n}.exit.tmp\" && mv -f \"$d/{n}.exit.tmp\" \"$d/{n}.exit\" ) \
              < /dev/null > \"$d/{n}.log\" 2>&1 &",
             cwd = quote(cwd)
@@ -307,12 +314,12 @@ pub fn script(nonce: &str, dir: &Path, worktree: &Path, items: &[(u32, &str)]) -
             out,
             "echo \"$p $$\" > \"$d/{n}.pid.tmp\" && mv -f \"$d/{n}.pid.tmp\" \"$d/{n}.pid\""
         );
-        let _ = writeln!(out, "wait \"$p\"");
+        let _ = writeln!(out, "wait \"$p\" || :");
         let _ = writeln!(
             out,
             "i=0; while kill -0 -- \"-$p\" 2>/dev/null; do \
-             if [ \"$i\" -eq 0 ]; then kill -TERM -- \"-$p\" 2>/dev/null; fi; \
-             if [ \"$i\" -ge {grace} ]; then kill -KILL -- \"-$p\" 2>/dev/null; fi; \
+             if [ \"$i\" -eq 0 ]; then kill -TERM -- \"-$p\" 2>/dev/null || :; fi; \
+             if [ \"$i\" -ge {grace} ]; then kill -KILL -- \"-$p\" 2>/dev/null || :; fi; \
              i=$((i + 1)); sleep 0.1; done",
             grace = RERUN_KILL_GRACE / 100
         );
@@ -1315,6 +1322,51 @@ mod tests {
     }
 
     #[test]
+    fn ac10_shell_options_from_the_environment_neither_stop_the_script_nor_change() {
+        // bash takes `SHELLOPTS` from the environment: errexit stops
+        // neither the script nor a command's subshell before its status is
+        // written, and the command sees it as the pane gives it.
+        let (worktree, dir) = layout("errexit");
+        let commands = [
+            command("e1", "false; echo after", "."),
+            command("e2", "exit 0", "missing"),
+            command("e3", "kill -TERM \"$PPID\"; sleep 5", "."),
+            command("e4", "exit 0", "."),
+        ];
+        let request = write_request(&worktree, &dir, &worktree, &commands).unwrap();
+        let mut child = std::process::Command::new("sh")
+            .arg(dir.join(SCRIPT_FILE))
+            .env("SHELL", "/bin/bash")
+            .env("SHELLOPTS", "errexit")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = watch_all(&dir, &request, LIMITS, |_| {});
+        child.wait().unwrap();
+        let ends: Vec<End> = status
+            .items
+            .iter()
+            .map(|i| i.end.clone().unwrap())
+            .collect();
+        assert_eq!(
+            ends,
+            [
+                End::Exited(1),
+                End::NotRun(NO_CWD.into()),
+                End::NotRun(STOPPED.into()),
+                End::Exited(0)
+            ]
+        );
+        assert_eq!(fs::read_to_string(dir.join("1.log")).unwrap(), "");
+        let done = poll(&dir, &request, &mut Watch::new(LIMITS), 0)
+            .unwrap()
+            .done;
+        assert_eq!(done.as_deref(), Some(request.nonce.as_str()));
+    }
+
+    #[test]
     fn ac10_the_timeout_kill_works_whatever_sh_starts_the_script() {
         // macOS's `/bin/sh` (bash), dash, which turns job control off
         // without a terminal, and zsh as `sh`, which refuses `set -m`.
@@ -1700,7 +1752,7 @@ mod tests {
         assert!(text.contains("\n[ -n \"${BASH_VERSION-}\" ] || exec /bin/bash \"$0\"\nset -m\n"));
         assert!(text.contains("echo \"$p $$\" > \"$d/2.pid.tmp\""), "{text}");
         assert!(
-            text.contains("wait \"$p\"\ni=0; while kill -0 -- \"-$p\" 2>/dev/null; do "),
+            text.contains("wait \"$p\" || :\ni=0; while kill -0 -- \"-$p\" 2>/dev/null; do "),
             "{text}"
         );
         assert!(

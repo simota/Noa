@@ -1228,7 +1228,22 @@ impl Screen for Review {
                 .find(|(id, _)| *id == message.source)
                 .cloned()
         {
+            let had_focus = self.tree.focused() == Some(message.source);
+            let again = pressed_again(
+                &action,
+                self.selected.as_deref(),
+                self.filters.reviewer.as_ref(),
+            );
             self.handle_action(action, text);
+            // The rebuild replaced the pressed widget and focus went with it:
+            // give it to the widget that took its place.
+            if had_focus
+                && self.tree.focused().is_none()
+                && let Some((id, _)) =
+                    again.and_then(|again| self.actions.iter().find(|(_, a)| *a == again))
+            {
+                self.tree.set_focus(Some(*id));
+            }
         }
     }
 
@@ -1246,6 +1261,26 @@ impl Screen for Review {
                 Err(e) => self.toast(format!("保存できませんでした: {e}")),
             }
         }
+    }
+}
+
+/// The action the widget pressed with `action` carries once the screen is
+/// rebuilt. A finding's row and a card's 指摘を絞り込む toggle: pressed on,
+/// they carry the clearing action; pressed off, the one for what was on
+/// before (`selected`, `reviewer`).
+fn pressed_again(
+    action: &Action,
+    selected: Option<&str>,
+    reviewer: Option<&PartId>,
+) -> Option<Action> {
+    match action {
+        Action::SelectFinding(Some(_)) => Some(Action::SelectFinding(None)),
+        Action::SelectFinding(None) => {
+            selected.map(|id| Action::SelectFinding(Some(id.to_owned())))
+        }
+        Action::FilterReviewer(Some(_)) => Some(Action::FilterReviewer(None)),
+        Action::FilterReviewer(None) => reviewer.map(|p| Action::FilterReviewer(Some(p.clone()))),
+        other => Some(other.clone()),
     }
 }
 

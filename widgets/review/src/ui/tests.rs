@@ -854,3 +854,39 @@ fn the_shown_tab_and_the_filters_on_are_selected_buttons() {
         &Action::ToggleSeverity(Severity::Critical)
     ));
 }
+
+/// Presses the focused widget with Space and returns the action the widget
+/// focused afterwards carries.
+fn press_focused(screen: &mut Review, action: &Action) -> Option<Action> {
+    let id = widget_for(screen, action).unwrap();
+    screen.tree.set_focus(Some(id));
+    press(screen, noa_gpui_core::Key::Space);
+    let focused = screen.tree.focused()?;
+    screen
+        .actions
+        .iter()
+        .find(|(id, _)| *id == focused)
+        .map(|(_, a)| a.clone())
+}
+
+#[test]
+fn keyboard_focus_stays_on_what_was_pressed() {
+    let mut screen = Review::demo();
+    let critical = Action::ToggleSeverity(Severity::Critical);
+    assert_eq!(
+        press_focused(&mut screen, &critical),
+        Some(critical.clone())
+    );
+    assert!(screen.filters.severities.contains(&Severity::Critical));
+    let matrix = Action::ShowTab(CenterTab::Matrix);
+    assert_eq!(press_focused(&mut screen, &matrix), Some(matrix));
+    let findings = Action::ShowTab(CenterTab::Findings);
+    assert_eq!(press_focused(&mut screen, &findings), Some(findings));
+    // A finding's row: selecting and clearing keep focus on that row.
+    let f2 = Action::SelectFinding(Some("F2".into()));
+    let selected = Action::SelectFinding(None);
+    assert_eq!(press_focused(&mut screen, &f2), Some(selected.clone()));
+    assert_eq!(screen.selected.as_deref(), Some("F2"));
+    assert_eq!(press_focused(&mut screen, &selected), Some(f2));
+    assert_eq!(screen.selected, None);
+}

@@ -764,7 +764,7 @@ fn ac13_each_evidence_standard_rule_is_its_own_problem_line() {
         ),
         (
             with(0, ruling("AC-1", "verified", "matched", &["claude/r1/e1"])),
-            "AC-1: verified despite codex's fail, which no not_reproduced cross-check has answered",
+            "AC-1: verified despite codex's R1 fail, which no not_reproduced cross-check has answered",
         ),
         (
             with(1, ruling("AC-2", "verified", "seen", &["claude/r1/o1"])),
@@ -871,7 +871,9 @@ fn ac13_a_same_ruling_carries_the_previous_one_over_and_is_held_to_the_standard_
     let problems = judge_problems(&rig, &text);
     assert_eq!(
         problems,
-        ["AC-3: verified despite claude's fail, which no not_reproduced cross-check has answered"]
+        [
+            "AC-3: verified despite claude's R2 fail, which no not_reproduced cross-check has answered"
+        ]
     );
     let text = text.replace(
         &same("AC-3"),
@@ -1440,12 +1442,118 @@ fn ac13_a_not_reproduced_whose_evidence_was_not_stored_answers_no_fail() {
     assert_eq!(
         judge_problems(&rig, &text),
         [
-            "AC-1: verified despite codex's fail, which no not_reproduced cross-check has answered; claude-2/r2/e1 was not stored (gone before ingest) and counts for nothing"
+            "AC-1: verified despite codex's R1 fail, which no not_reproduced cross-check has answered; claude-2/r2/e1 was not stored (gone before ingest) and counts for nothing"
         ]
     );
     // Stored, the same answer lets AC-1 be verified.
     let rig = fail_answered_with(&[]);
     assert_eq!(judge_problems(&rig, &text), Vec::<String>::new());
+}
+
+/// [`ruled_round`] ruled once with claude-2 assigned codex's AC-1 fail,
+/// then round 2 with `codex` and `claude_2` as those verifiers' replies
+/// (claude has nothing assigned), everything stored.
+fn second_round(codex: &str, claude_2: &str) -> Rig {
+    let mut rig = ruled_round(3);
+    rig.judge(&judge_json(
+        &good_rulings(),
+        "open",
+        r#", "assign": {"claude-2": ["codex/AC-1"]}"#,
+    ));
+    assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+    rig.deliver();
+    rig.reply("claude", r#"{"summary": "Nothing assigned."}"#);
+    rig.reply("codex", codex);
+    rig.reply("claude-2", claude_2);
+    rig.ingest();
+    rig.rerun_all_matched();
+    assert_eq!(
+        rig.phase(),
+        Phase::Ruling,
+        "codex: {:?}, claude-2: {:?}",
+        rig.rejected("codex"),
+        rig.rejected("claude-2")
+    );
+    rig
+}
+
+/// Round 2's ruling: AC-1 verified on claude's matched re-run, the others
+/// carried over.
+fn ac1_verified_on_claudes_rerun() -> String {
+    let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+    format!(
+        r#"{{"summary": "s", "rulings": [{}, {}, {}]}}"#,
+        ruling("AC-1", "verified", "matched", &["claude/r1/e1"]),
+        same("AC-2"),
+        same("AC-3")
+    )
+}
+
+#[test]
+fn ac13_a_not_reproduced_on_media_for_another_criterion_answers_no_fail() {
+    let answer = |shows: &str| {
+        reply_json(
+            &[],
+            &[format!(
+                r#"{{"id": "f1", "kind": "file", "path": "shots/store.png", "caption": "the store after reopen", "shows": ["{shows}"]}}"#
+            )],
+            r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "not_reproduced", "note": "passes here", "evidence": ["f1"]}]"#,
+        )
+    };
+    let nothing = r#"{"summary": "Nothing assigned."}"#;
+    // The picture is stored but shows AC-2 only: it is no evidence for
+    // AC-1, so codex's AC-1 fail stays open.
+    let rig = second_round(nothing, &answer("AC-2"));
+    assert_eq!(
+        judge_problems(&rig, &ac1_verified_on_claudes_rerun()),
+        [
+            "AC-1: verified despite codex's R1 fail, which no not_reproduced cross-check has answered; claude-2/r2/f1 is not evidence for AC-1 (its shows leaves AC-1 out)"
+        ]
+    );
+    // Showing AC-1, the same answer lets AC-1 be verified.
+    let rig = second_round(nothing, &answer("AC-1"));
+    assert_eq!(
+        judge_problems(&rig, &ac1_verified_on_claudes_rerun()),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn ac13_a_later_blocked_result_of_the_same_verifier_answers_no_fail() {
+    // codex turns its AC-1 fail into blocked; claude-2 only disputes it.
+    let rig = second_round(
+        r#"{"summary": "s", "results": [{"criterion": "AC-1", "result": "blocked", "note": "the tool is not available"}]}"#,
+        r#"{"summary": "s", "cross_checks": [{"subject": "codex/AC-1", "outcome": "disputed", "note": "not looked at"}]}"#,
+    );
+    assert_eq!(
+        judge_problems(&rig, &ac1_verified_on_claudes_rerun()),
+        [
+            "AC-1: verified despite codex's R1 fail, which no not_reproduced cross-check has answered"
+        ]
+    );
+}
+
+#[test]
+fn ac13_passes_of_every_round_whose_evidence_is_stored_count() {
+    // Round 1 verified AC-3 on claude's and codex's passes; codex passes it
+    // again on another log in round 2. The round-1 passes still count.
+    let rig = second_round(
+        &reply_json(&[("AC-3", "pass", &["e1"])], &[cmd("e1", 0, false)], ""),
+        r#"{"summary": "s", "cross_checks": [{"subject": "codex/AC-1", "outcome": "disputed", "note": "not looked at"}]}"#,
+    );
+    let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+    let text = format!(
+        r#"{{"summary": "s", "rulings": [{}, {}, {}]}}"#,
+        same("AC-1"),
+        same("AC-2"),
+        same("AC-3")
+    );
+    assert_eq!(judge_problems(&rig, &text), Vec::<String>::new());
+    let out = parse_judge(&text, rig.engine.session(), 2).unwrap();
+    assert_eq!(
+        out.rulings["AC-3"].evidence,
+        [testkit::key("claude/r1/e2"), testkit::key("codex/r1/e2")]
+    );
 }
 
 #[test]

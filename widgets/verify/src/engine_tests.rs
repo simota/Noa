@@ -1371,3 +1371,100 @@ fn the_ruling_brief_lists_the_media_only_a_defect_cites() {
         "{defects}"
     );
 }
+
+#[test]
+fn a_corrected_brief_redelivered_to_a_new_pane_goes_out_in_full() {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    // claude's reply is turned down and cleared; the correction goes out,
+    // then the verification stops.
+    rig.reply("claude", r#"{"summary": "", "results": []}"#);
+    let at = rig.tick();
+    rig.feed(Input::Sent {
+        round: 1,
+        part: p("claude"),
+        kind: BriefKind::Work,
+        at,
+    });
+    // Resumed with claude's pane gone: a new pane gets the brief again.
+    let mut engine = Engine::resume(
+        reduce::replay(&rig.log).unwrap(),
+        Path::new("/data/verifications/ver-1"),
+        Config::default(),
+    );
+    engine.handle(Input::Start { now: 5_000 }).unwrap();
+    engine
+        .handle(Input::PaneSpawned {
+            part: p("claude"),
+            pane_id: 9,
+        })
+        .unwrap();
+    let out = engine
+        .handle(Input::Redeliver {
+            round: 1,
+            part: p("claude"),
+            kind: BriefKind::Work,
+        })
+        .unwrap();
+    let brief = engine
+        .session()
+        .current_round()
+        .unwrap()
+        .brief(&p("claude"), BriefKind::Work)
+        .unwrap();
+    assert!(brief.receipt.rejected.is_some());
+    assert_eq!(
+        out.effects,
+        [Effect::SendBrief {
+            round: 1,
+            part: p("claude"),
+            kind: BriefKind::Work,
+            body: brief.body.clone(),
+        }]
+    );
+    for want in ["Tabs inherit the focused pane's cwd", "## "] {
+        assert!(brief.body.contains(want), "{want:?} in\n{}", brief.body);
+    }
+}
+
+#[test]
+fn a_worktree_made_after_the_verification_closed_is_recorded_and_removed() {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    let at = rig.tick();
+    rig.feed(Input::UserStartVerify { at });
+    assert!(rig.asked(&Effect::MakeWorktrees));
+    // 終了 before the runner reports any worktree: none is recorded yet.
+    let out = rig.feed(Input::UserClose);
+    assert_eq!(out.effects, [Effect::WriteReport]);
+    let session = rig.engine.session().clone();
+    for part in session.verifier_ids() {
+        let path = crate::worktree::path_for(&session.main_worktree, &session.id, part);
+        let out = rig.feed(Input::WorktreeMade {
+            part: part.clone(),
+            path: path.clone(),
+        });
+        assert_eq!(out.effects, [Effect::RemoveWorktrees]);
+        assert_eq!(
+            rig.engine
+                .session()
+                .worktrees
+                .get(part)
+                .map(|t| (&t.path, &t.state)),
+            Some((&path, &WorktreeState::Made))
+        );
+    }
+    for part in VERIFIERS {
+        rig.feed(Input::WorktreeRemoved { part: p(part) });
+    }
+    assert!(
+        rig.engine
+            .session()
+            .worktrees
+            .values()
+            .all(|t| t.state == WorktreeState::Removed)
+    );
+    assert_eq!(rig.round(), 0, "no round started");
+}

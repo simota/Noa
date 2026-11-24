@@ -72,7 +72,7 @@ pub const EVIDENCE_STANDARD: [&str; 9] = [
     "Every criterion gets one ruling per round; \"ruling\": \"same\" carries the previous one over unchanged.",
     "Evidence cited for verified or failed belongs to that criterion: cited by a result on it, by a cross-check whose subject is a result on it, or media whose shows names it.",
     "Evidence whose file was not stored (missing at ingest) counts for nothing.",
-    "verified needs at least one cited command evidence whose re-run matched, or pass results from two different verifiers each citing command or file evidence (cite one item of each); and no unanswered fail result or reproduced refutation on that criterion.",
+    "verified needs at least one cited command evidence whose re-run matched, or pass results from two different verifiers each citing command or file evidence (cite one item of each; a pass of any round counts while that evidence is stored); and no unanswered fail result or reproduced refutation on that criterion. A fail result of any round stays open until a later not_reproduced cross-check on it cites evidence that counts for that same criterion (media whose shows leaves the criterion out does not); a later blocked, not_tested or pass result of the same verifier does not answer it.",
     "failed needs at least one cited fail result, or evidence of a reproduced cross-check that reproduced a fail result on it (or a defect); a reproduced pass backs no failure.",
     "inconclusive and not_applicable need a rationale.",
     "Cited evidence keys exist; an observation alone never satisfies verified.",

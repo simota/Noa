@@ -61,19 +61,31 @@ fn belongs(session: &Session, criterion: &str, key: &EvidenceKey) -> bool {
         })
 }
 
+/// Whether `key` counts for `criterion`: it counts at all (stored, or an
+/// observation) and is evidence for that criterion, so a media item whose
+/// `shows` leaves the criterion out counts for nothing there (L1-6).
+fn counts_for(session: &Session, criterion: &str, key: &EvidenceKey) -> bool {
+    session.evidence_item(key).is_some_and(counts) && belongs(session, criterion, key)
+}
+
 /// The independent sources behind `criterion` being met that the ruling
-/// cites in `cited`: each verifier whose latest result on it is `pass` and
-/// whose stored command or file evidence for that result is cited, and the
-/// person, when `cited` holds media they attached showing it (it counts
-/// only beside a verifier's pass, since one source is never enough).
+/// cites in `cited`: each verifier with a `pass` on it in any round whose
+/// stored command or file evidence for that pass is cited (L1-6: a pass
+/// counts while its evidence is stored, also after a later report), and
+/// the person, when `cited` holds media they attached showing it (it
+/// counts only beside a verifier's pass, since one source is never
+/// enough).
 fn independent_passes(
     session: &Session,
     criterion: &str,
     cited: &[EvidenceKey],
 ) -> BTreeSet<String> {
     let mut sources: BTreeSet<String> = session
-        .latest_with(criterion, Outcome::Pass)
-        .into_iter()
+        .results
+        .iter()
+        .filter(|r| {
+            r.criterion == criterion && r.outcome == Outcome::Pass && session.is_verifier(&r.part)
+        })
         .filter(|r| {
             r.evidence
                 .iter()
@@ -93,35 +105,60 @@ fn independent_passes(
     sources
 }
 
-/// The first verifier whose latest result on `criterion` is `fail` with no
-/// later `not_reproduced` cross-check on it citing evidence that counts,
-/// with the evidence of such checks that was not stored (a check whose
-/// evidence all went before ingest answers nothing, L1-6).
-fn unanswered_fail<'a>(
-    session: &'a Session,
-    criterion: &str,
-) -> Option<(&'a PartId, Vec<&'a EvidenceKey>)> {
+/// A `fail` on a criterion that nothing has answered, and why the
+/// `not_reproduced` checks on it did not.
+struct OpenFail<'a> {
+    part: &'a PartId,
+    round: RoundNo,
+    /// Cited by those checks, but not stored (gone before ingest).
+    unstored: Vec<&'a EvidenceKey>,
+    /// Cited by those checks, but media whose `shows` leaves the
+    /// criterion out.
+    elsewhere: Vec<&'a EvidenceKey>,
+}
+
+/// The first `fail` result on `criterion`, from any round, that no later
+/// `not_reproduced` cross-check on it answers (L1-6). A check answers it
+/// when it cites evidence that counts for that same criterion
+/// ([`counts_for`]); a later result of the same verifier, whatever it is,
+/// answers nothing.
+fn unanswered_fail<'a>(session: &'a Session, criterion: &str) -> Option<OpenFail<'a>> {
     session
-        .latest_with(criterion, Outcome::Fail)
-        .into_iter()
+        .results
+        .iter()
+        .filter(|r| r.criterion == criterion && r.outcome == Outcome::Fail)
         .find_map(|fail| {
-            let mut unstored = Vec::new();
+            let mut open = OpenFail {
+                part: &fail.part,
+                round: fail.round,
+                unstored: Vec::new(),
+                elsewhere: Vec::new(),
+            };
             for check in session.cross_checks.iter().filter(|c| {
                 c.round > fail.round
                     && c.outcome == CrossOutcome::NotReproduced
                     && matches!(&c.subject, Subject::Result { part, criterion: on }
                         if *part == fail.part && on == criterion)
             }) {
-                let (kept, gone): (Vec<&EvidenceKey>, Vec<&EvidenceKey>) = check
+                if check
                     .evidence
                     .iter()
-                    .partition(|k| session.evidence_item(k).is_some_and(counts));
-                if !kept.is_empty() {
+                    .any(|k| counts_for(session, criterion, k))
+                {
                     return None;
                 }
-                unstored.extend(gone);
+                for key in &check.evidence {
+                    let list = if session.evidence_item(key).is_some_and(counts) {
+                        &mut open.elsewhere
+                    } else {
+                        &mut open.unstored
+                    };
+                    if !list.contains(&key) {
+                        list.push(key);
+                    }
+                }
             }
-            Some((&fail.part, unstored))
+            Some(open)
         })
 }
 
@@ -202,15 +239,27 @@ pub fn check_ruling(
                     "{criterion}: an observation alone never makes a criterion verified; cite a command or a file"
                 ));
             }
-            if let Some((part, unstored)) = unanswered_fail(session, criterion) {
+            if let Some(open) = unanswered_fail(session, criterion) {
+                let keys = |list: &[&EvidenceKey]| -> String {
+                    list.iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
                 let mut why = format!(
-                    "{criterion}: verified despite {part}'s fail, which no not_reproduced cross-check has answered"
+                    "{criterion}: verified despite {}'s R{} fail, which no not_reproduced cross-check has answered",
+                    open.part, open.round
                 );
-                if !unstored.is_empty() {
-                    let keys: Vec<&str> = unstored.iter().map(|k| k.as_str()).collect();
+                if !open.unstored.is_empty() {
                     why.push_str(&format!(
                         "; {} was not stored (gone before ingest) and counts for nothing",
-                        keys.join(", ")
+                        keys(&open.unstored)
+                    ));
+                }
+                if !open.elsewhere.is_empty() {
+                    why.push_str(&format!(
+                        "; {} is not evidence for {criterion} (its shows leaves {criterion} out)",
+                        keys(&open.elsewhere)
                     ));
                 }
                 return Err(why);

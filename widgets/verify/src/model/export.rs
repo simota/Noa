@@ -110,7 +110,7 @@ pub fn report_markdown(session: &Session, base: Option<&Path>) -> String {
     write_head(&mut out, session);
     write_verdict(&mut out, session);
     write_criteria(&mut out, session, base);
-    write_defects(&mut out, session);
+    write_defects(&mut out, session, base);
     write_cross_checks(&mut out, session);
     write_evidence(&mut out, session);
     write_changes(&mut out, session);
@@ -316,6 +316,46 @@ fn media_for<'a>(session: &'a Session, criterion: &str) -> Vec<&'a Evidence> {
         .collect()
 }
 
+/// The media shown under defect `defect`: those its raw defects and the
+/// cross-checks on it cite, stored, each once, in evidence order. A
+/// defect's evidence is its own whatever criteria a `shows` names.
+fn media_for_defect<'a>(session: &'a Session, defect: &Defect) -> Vec<&'a Evidence> {
+    let mut cited: Vec<&EvidenceKey> = defect
+        .sources
+        .iter()
+        .filter_map(|k| session.raw_defect(k))
+        .flat_map(|r| &r.evidence)
+        .collect();
+    cited.extend(
+        session
+            .cross_checks
+            .iter()
+            .filter(|c| matches!(&c.subject, Subject::Defect { id } if *id == defect.id))
+            .flat_map(|c| &c.evidence),
+    );
+    session
+        .evidence
+        .iter()
+        .filter(|e| e.media().is_some() && e.stored.is_some() && cited.contains(&&e.key))
+        .collect()
+}
+
+/// `media` as a nested `- スクショ・動画:` list (images embedded, videos
+/// linked with their marks).
+fn write_media_list(out: &mut String, media: &[&Evidence], base: Option<&Path>) {
+    if media.is_empty() {
+        return;
+    }
+    out.push_str("- スクショ・動画:\n");
+    let mut nested = String::new();
+    for item in media {
+        write_media(&mut nested, item, base);
+    }
+    for line in nested.lines() {
+        let _ = writeln!(out, "  {line}");
+    }
+}
+
 /// One evidence item on one line: what it is, its exit status and re-run,
 /// digest, size and stored path.
 fn item_line(item: &Evidence) -> String {
@@ -478,22 +518,12 @@ fn write_criteria(out: &mut String, session: &Session, base: Option<&Path>) {
                 out.push('\n');
             }
         }
-        let media = media_for(session, &c.id);
-        if !media.is_empty() {
-            out.push_str("- スクショ・動画:\n");
-            let mut nested = String::new();
-            for item in media {
-                write_media(&mut nested, item, base);
-            }
-            for line in nested.lines() {
-                let _ = writeln!(out, "  {line}");
-            }
-        }
+        write_media_list(out, &media_for(session, &c.id), base);
         out.push('\n');
     }
 }
 
-fn write_defects(out: &mut String, session: &Session) {
+fn write_defects(out: &mut String, session: &Session, base: Option<&Path>) {
     let _ = writeln!(out, "{}\n", SECTIONS[2]);
     let live: Vec<&Defect> = session
         .ranked()
@@ -542,6 +572,7 @@ fn write_defects(out: &mut String, session: &Session) {
         }) {
             let _ = writeln!(out, "- 修正案: {}", one_line(fix));
         }
+        write_media_list(out, &media_for_defect(session, d), base);
         out.push('\n');
     }
 }
@@ -580,15 +611,31 @@ fn write_evidence(out: &mut String, session: &Session) {
             Some(Rerun::Differed { .. } | Rerun::TimedOut { .. })
         )
     };
-    // Where the re-runs below ran, said once (L1-5 Trust).
-    let reruns = session
+    // Where the re-runs below ran, said once (L1-5 Trust), and only for
+    // re-runs that did run: an item marked for one may have none yet, or
+    // never get one.
+    let marked: Vec<&Evidence> = session
         .evidence
         .iter()
-        .any(|e| matches!(e.body, EvidenceBody::Command { rerun: true, .. }));
-    if reruns {
+        .filter(|e| matches!(e.body, EvidenceBody::Command { rerun: true, .. }))
+        .collect();
+    let ran = marked.iter().any(|e| {
+        matches!(
+            e.rerun,
+            Some(Rerun::Matched { .. } | Rerun::Differed { .. } | Rerun::TimedOut { .. })
+        )
+    });
+    let pending = !session.closed && marked.iter().any(|e| e.rerun.is_none());
+    if !marked.is_empty() {
         out.push_str(match session.isolation {
-            Isolation::Worktree => {
+            Isolation::Worktree if ran => {
                 "再実行は各検証者自身のペインで、その検証者のエージェントがウィジェットの書いたスクリプトを起動して行いました。同じ環境で同じ終了コードが出るかの確認で、別の検証者による独立した追試ではありません（追試は「## 追試」）。\n\n"
+            }
+            Isolation::Worktree if pending => {
+                "再実行はまだ一つも行われていません（各検証者自身のペインで、その検証者のエージェントが起動します）。\n\n"
+            }
+            Isolation::Worktree => {
+                "再実行は一つも行われませんでした（`rerun: true` の項目はすべて未実行、理由は「## 検証の欠落」）。\n\n"
             }
             Isolation::Shared => {
                 "共有（読み取りのみ）モードのため、再実行は一つも行っていません（`rerun: true` の項目はすべて未実行）。\n\n"
@@ -743,6 +790,18 @@ fn write_gaps(out: &mut String, session: &Session) {
                 "- 再実行されなかったコマンド: `{}` — {}",
                 item.key,
                 one_line(why)
+            );
+        }
+        // Marked for a re-run that the close came before.
+        if session.closed
+            && item.rerun.is_none()
+            && matches!(item.body, EvidenceBody::Command { rerun: true, .. })
+        {
+            gaps = true;
+            let _ = writeln!(
+                out,
+                "- 再実行されなかったコマンド: `{}` — 再実行の前に検証が終了しました",
+                item.key
             );
         }
         if item.stored.is_none()
@@ -1261,5 +1320,101 @@ mod tests {
             report.contains("- AC-3 を claude が実行できませんでした（R1）: 画面がない"),
             "{report}"
         );
+    }
+
+    /// The `## 検証の欠落` section of `report`.
+    fn gaps_section(report: &str) -> &str {
+        let at = report.find(SECTIONS[6]).unwrap();
+        let rest = &report[at..];
+        &rest[..rest.find(SECTIONS[7]).unwrap()]
+    }
+
+    #[test]
+    fn a_report_closed_before_any_rerun_says_none_ran_and_lists_them() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        // claude's reply marks e1 for a re-run; the person ends the
+        // verification while the others are still working.
+        rig.reply("claude", &all_pass());
+        let item = rig
+            .engine
+            .session()
+            .evidence_item(&testkit::key("claude/r1/e1"))
+            .cloned()
+            .unwrap();
+        assert!(item.rerun.is_none(), "{item:?}");
+        let pending = report_markdown(rig.engine.session(), None);
+        let pane = "再実行は各検証者自身のペインで、その検証者のエージェントがウィジェットの書いたスクリプトを起動して行いました。";
+        assert!(!pending.contains(pane), "{pending}");
+        assert!(
+            evidence_section(&pending).contains("再実行はまだ一つも行われていません"),
+            "{pending}"
+        );
+        rig.feed(crate::engine::Input::UserClose);
+        let report = report_markdown(rig.engine.session(), None);
+        assert!(!report.contains(pane), "{report}");
+        assert!(
+            evidence_section(&report).contains(
+                "再実行は一つも行われませんでした（`rerun: true` の項目はすべて未実行、理由は「## 検証の欠落」）。"
+            ),
+            "{report}"
+        );
+        assert!(
+            gaps_section(&report).contains(
+                "- 再実行されなかったコマンド: `claude/r1/e1` — 再実行の前に検証が終了しました"
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn ac33_a_video_only_a_defect_cites_is_linked_with_its_marks_under_the_defect() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply("claude", &all_pass());
+        rig.reply("codex", &all_pass());
+        rig.reply(
+            "claude-2",
+            &reply_json(
+                &[
+                    ("AC-1", "pass", &["e1"]),
+                    ("AC-2", "pass", &["e1"]),
+                    ("AC-3", "pass", &["e1"]),
+                ],
+                &[
+                    cmd("e1", 0, true),
+                    r#"{"id": "v1", "kind": "file", "path": "video/defect.mov", "caption": "kill -9, reopen",
+                        "marks": [{"t": "00:05", "note": "the last line is gone"}]}"#
+                        .to_owned(),
+                ],
+                r#", "defects": [{"id": "1", "claim": "The store loses the last line", "severity": "high", "category": "regression",
+                   "confidence": "high", "location": {"path": "src/store.rs", "line": 11}, "repro": "1. kill -9 2. reopen", "evidence": ["v1"]}]"#,
+            ),
+        );
+        rig.ingest();
+        rig.rerun_all_matched();
+        let judge = testkit::JUDGE_R1
+            .trim_end()
+            .trim_end_matches('}')
+            .to_owned()
+            + r#", "defect_ops": [{"op": "add", "id": "D1", "from": ["claude-2/1"],
+                 "claim": "The store loses the last line", "repro": "1. kill -9 2. reopen", "severity": "high", "category": "regression",
+                 "confidence": "high", "status": "open", "rationale": "Seen once."}]}"#;
+        rig.judge(&judge);
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        let report = report_markdown(rig.engine.session(), None);
+        let defects = &report[report.find(SECTIONS[2]).unwrap()..report.find(SECTIONS[3]).unwrap()];
+        let d1 = &defects[defects.find("### D1").unwrap()..];
+        for line in [
+            "- スクショ・動画:\n",
+            "  - ▶ [kill -9, reopen](evidence/r1/claude-2/video/defect.mov)\n",
+            "    - 00:05 the last line is gone\n",
+        ] {
+            assert!(d1.contains(line), "{line:?} in\n{d1}");
+        }
     }
 }

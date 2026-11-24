@@ -197,7 +197,8 @@ pub enum Input {
         at: Millis,
     },
     /// The agent's pane was lost while the verification was stopped: its
-    /// open brief goes out again as it was, without counting a retry.
+    /// open brief goes out again in full, without counting a retry (the
+    /// new pane never saw what a pending correction would refer to).
     Redeliver {
         round: RoundNo,
         part: PartId,
@@ -670,6 +671,16 @@ impl Engine {
                     self.worktree_removed(&mut out, &part)?;
                     Ok(out)
                 }
+                // One the runner was still making when the verification
+                // closed: logged, so it is on record, and removed (L1-3).
+                Input::WorktreeMade { part, path } => {
+                    if !self.session.is_verifier(&part) {
+                        return rejected(format!("no verifier {part}"));
+                    }
+                    self.commit(&mut out, vec![Event::WorktreeMade { part, path }])?;
+                    out.effects.push(Effect::RemoveWorktrees);
+                    Ok(out)
+                }
                 Input::UserIntervention { .. }
                 | Input::UserRetry
                 | Input::UserClose
@@ -879,7 +890,15 @@ impl Engine {
                     && brief.receipt.sent.is_some()
                     && !Self::script_started(brief)
                 {
-                    Self::send(&mut out, round, brief);
+                    // The whole brief, not a correction: the agent in the
+                    // new pane never saw the brief or the rejected reply
+                    // (it was cleared), as a retry sends it.
+                    out.effects.push(Effect::SendBrief {
+                        round,
+                        part: brief.to.clone(),
+                        kind: brief.kind,
+                        body: brief.body.clone(),
+                    });
                 }
             }
             Input::UserClose => self.close(&mut out)?,

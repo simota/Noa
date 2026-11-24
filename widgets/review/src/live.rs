@@ -7,6 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use review::model::types::{AgentChoice, PartId, ReviewerChoice, RoundNo, Session, Target};
 
+use crate::session::fix::{self, FixRequest};
+use crate::session::ipc::IpcConnect;
 use crate::session::runner::{self, Action, SessionHandle, Update};
 
 /// How often the screen is woken to refresh elapsed times.
@@ -76,6 +78,9 @@ pub enum Command {
     /// one can be resumed from the list) and the start view comes back.
     /// Sent by [`Channel::leave`].
     Leave,
+    /// Starts an agent on fixing findings of the review on screen, in a
+    /// new tab of its own (running or stored, whatever its runner does).
+    RequestFix(Box<FixRequest>),
 }
 
 /// A notice for the screen, in the [`Channel::generation`] of the command
@@ -200,6 +205,20 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
         {
             handle = None;
         }
+        // A fix needs no runner: it is one request to Noa, on a link of
+        // its own, so a stored review asks for one as a running one does.
+        if let Command::RequestFix(req) = cmd {
+            let outlets = outlets.clone();
+            std::thread::Builder::new()
+                .name("review-fix".into())
+                .spawn(move || {
+                    let (Ok(text) | Err(text)) = fix::request(&mut IpcConnect, &req);
+                    let _ = outlets.notices.send((generation, text));
+                    (outlets.wake)();
+                })
+                .expect("spawn review-fix thread");
+            continue;
+        }
         let start = match (cmd, &handle) {
             (Command::Leave, _) => {
                 if let Some((actions, _)) = handle.take() {
@@ -295,6 +314,7 @@ fn forwarded(cmd: Command) -> Option<Action> {
         Command::Start { .. }
         | Command::Resume { .. }
         | Command::ExtendStored { .. }
+        | Command::RequestFix(_)
         | Command::Leave => return None,
     })
 }

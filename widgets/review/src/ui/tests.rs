@@ -1385,5 +1385,222 @@ fn a_rebuild_ranks_the_findings_at_most_once() {
         board::RANKINGS.with(|n| n.set(0));
         screen.rebuild_center(&mut text);
         assert!(board::RANKINGS.with(|n| n.get()) <= 1);
+        // The whole screen too, with 修正を依頼 counting the shown scope.
+        assert!(screen.session.as_ref().unwrap().workdir.is_some());
+        board::RANKINGS.with(|n| n.set(0));
+        screen.rebuild(&mut text);
+        assert!(
+            fix_actions(&screen)
+                .iter()
+                .any(|(_, s)| *s == FixScope::Shown)
+                != nothing_shown
+        );
+        assert!(board::RANKINGS.with(|n| n.get()) <= 1);
     }
+}
+
+// ---- 修正を依頼 ----
+
+/// Feeds `session` to a live screen with its store and reply dirs, as a
+/// runner's snapshot carries them.
+fn live_with_dirs(session: Session) -> (Review, crate::live::FakeLink) {
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(session)),
+            reply_root: Some(PathBuf::from("/w/.noa/reviews/rev-demo")),
+            session_dir: Some(PathBuf::from("/data/noa/reviews/rev-demo")),
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    (screen, link)
+}
+
+/// Every label of the right pane, joined.
+fn all_text(screen: &Review) -> String {
+    labels_under(&screen.tree, screen.right_host).join("\n")
+}
+
+fn fix_actions(screen: &Review) -> Vec<(AgentKind, FixScope)> {
+    acts(screen)
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::RequestFix { agent, scope } => Some((agent, scope)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_verdict_offers_a_fix_of_its_must_fix_and_of_the_shown_findings_by_every_agent() {
+    let (screen, _link) = live_with_dirs(crate::demo::session());
+    let offered = fix_actions(&screen);
+    for scope in [FixScope::MustFix, FixScope::Shown] {
+        for kind in AgentKind::ALL {
+            assert!(
+                offered.contains(&(kind, scope.clone())),
+                "{kind:?} {scope:?}"
+            );
+        }
+    }
+    assert_eq!(offered.len(), 2 * AgentKind::ALL.len());
+    // Each button says what it does to a screen reader.
+    let codex = widget_for(
+        &screen,
+        &Action::RequestFix {
+            agent: AgentKind::Codex,
+            scope: FixScope::MustFix,
+        },
+    )
+    .unwrap();
+    let label = screen.tree.accessible_label(codex).unwrap_or_default();
+    assert!(label.starts_with("codex に要修正"), "{label}");
+}
+
+#[test]
+fn a_fix_request_carries_the_must_fix_findings_and_the_reviews_store() {
+    let session = crate::demo::session();
+    let must_fix = session.verdict().unwrap().must_fix.clone();
+    assert!(!must_fix.is_empty());
+    let (mut screen, link) = live_with_dirs(session);
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Codex,
+            scope: FixScope::MustFix,
+        },
+    );
+    let sent = commands(&link);
+    let [Command::RequestFix(req)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(req.agent, AgentKind::Codex);
+    assert_eq!(req.ids, must_fix);
+    assert_eq!(req.dir, PathBuf::from("/data/noa/reviews/rev-demo"));
+}
+
+#[test]
+fn the_shown_scope_follows_the_board_filters() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    act(&mut screen, Action::ToggleSeverity(Severity::Critical));
+    let shown: Vec<String> = board::shown(screen.session.as_ref().unwrap(), &screen.filters)
+        .into_iter()
+        .map(|f| f.id.clone())
+        .collect();
+    assert!(!shown.is_empty());
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Claude,
+            scope: FixScope::Shown,
+        },
+    );
+    let sent = commands(&link);
+    let [Command::RequestFix(req)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(req.ids, shown);
+}
+
+#[test]
+fn a_selected_finding_offers_a_fix_of_itself_only() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    act(&mut screen, Action::SelectFinding(Some("F2".into())));
+    let offered = fix_actions(&screen);
+    assert_eq!(offered.len(), AgentKind::ALL.len());
+    assert!(
+        offered
+            .iter()
+            .all(|(_, scope)| *scope == FixScope::Finding("F2".into()))
+    );
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Agy,
+            scope: FixScope::Finding("F2".into()),
+        },
+    );
+    let sent = commands(&link);
+    let [Command::RequestFix(req)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(req.ids, ["F2"]);
+}
+
+#[test]
+fn only_installed_agents_are_offered_a_fix() {
+    let (mut screen, _link, tx, mut text) = live_pending();
+    report(
+        &mut screen,
+        &tx,
+        Installed::Found(vec![AgentKind::Codex]),
+        &mut text,
+    );
+    screen.session = Some(Arc::new(crate::demo::session()));
+    screen.rebuild(&mut text);
+    let offered = fix_actions(&screen);
+    assert!(!offered.is_empty());
+    assert!(offered.iter().all(|(k, _)| *k == AgentKind::Codex));
+}
+
+#[test]
+fn no_fix_is_offered_while_the_agent_check_runs_or_without_a_tree_to_fix() {
+    // The check has not reported.
+    let (mut screen, _link, _tx, mut text) = live_pending();
+    screen.session = Some(Arc::new(crate::demo::session()));
+    screen.rebuild(&mut text);
+    assert!(fix_actions(&screen).is_empty());
+    assert!(all_text(&screen).contains("インストール済みのエージェントを確認しています"));
+
+    // A document review has no work tree to fix.
+    let mut document = crate::demo::session();
+    document.target.kind = TargetKind::Document;
+    let (screen, _link) = live_with_dirs(document);
+    assert!(fix_actions(&screen).is_empty());
+    assert!(all_text(&screen).contains("文書のレビューでは修正を依頼できません"));
+
+    // Nor does a review without a workdir.
+    let mut nowhere = crate::demo::session();
+    nowhere.workdir = None;
+    let (screen, _link) = live_with_dirs(nowhere);
+    assert!(fix_actions(&screen).is_empty());
+    assert!(all_text(&screen).contains("作業ディレクトリのあるレビューが必要です"));
+}
+
+#[test]
+fn a_headless_stored_view_shows_no_fix_card() {
+    let root = std::env::temp_dir().join(format!("noa-review-ui-fix-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    let screen = Review::stored(&dir).unwrap();
+    assert!(fix_actions(&screen).is_empty());
+    assert!(!all_text(&screen).contains("修正を依頼"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_stored_review_in_the_live_window_can_be_fixed() {
+    let root = std::env::temp_dir().join(format!("noa-review-ui-fix-live-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    let (channel, link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Claude,
+            scope: FixScope::MustFix,
+        },
+    );
+    // (Showing it left whatever was on screen first.)
+    let sent: Vec<Command> = commands(&link)
+        .into_iter()
+        .filter(|c| *c != Command::Leave)
+        .collect();
+    let [Command::RequestFix(req)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(req.dir, dir);
+    let _ = std::fs::remove_dir_all(root);
 }

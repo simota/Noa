@@ -147,6 +147,25 @@ pub fn write_replace(base: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Writes `bytes` to a new file `path` (under `base`), refusing links on
+/// the way: an existing file or link at `path` fails with `AlreadyExists`
+/// and is left as it was.
+pub fn write_new(base: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    check_no_links(base, path.parent().unwrap_or(base))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    if written.is_err() {
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+    written
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +217,27 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[test]
+    fn a_new_file_is_never_written_over_a_file_or_through_a_link() {
+        let base = temp("new");
+        let victim = temp("new-victim").join("victim");
+        fs::write(&victim, "keep").unwrap();
+        symlink(&victim, base.join("link.md")).unwrap();
+        fs::write(base.join("old.md"), "old").unwrap();
+        let link = write_new(&base, &base.join("link.md"), b"x").unwrap_err();
+        assert_eq!(link.kind(), io::ErrorKind::AlreadyExists);
+        let old = write_new(&base, &base.join("old.md"), b"x").unwrap_err();
+        assert_eq!(old.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(base.join("old.md")).unwrap(), "old");
+        write_new(&base, &base.join("new.md"), b"new").unwrap();
+        assert_eq!(fs::read_to_string(base.join("new.md")).unwrap(), "new");
+        symlink(temp("new-dir-victim"), base.join("d")).unwrap();
+        assert!(is_link_error(
+            &write_new(&base, &base.join("d/f.md"), b"x").unwrap_err()
+        ));
     }
 
     #[test]

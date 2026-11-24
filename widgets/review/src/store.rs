@@ -9,6 +9,7 @@
 //!   target/               the snapshot (manifest.json, diff.patch, files/, document.md)
 //!   r<N>/<reviewer>.json  reviewer replies
 //!   r<N>/lead.json        the lead's output
+//!   fix-<n>.md            a fix request's task (修正を依頼)
 //! ```
 
 use std::fmt;
@@ -138,6 +139,43 @@ pub fn rewrite_report(dir: &Path) -> Result<(), StoreError> {
     write_report(dir, &export::report_markdown(&session))?;
     drop(store);
     Ok(())
+}
+
+/// Where an agent asked to fix `session`'s findings works: the workdir of
+/// a git or files review (the tree the findings point into). A document
+/// review has no tree to fix, and one without a workdir nowhere to work.
+pub fn fix_workdir(session: &Session) -> Result<&Path, &'static str> {
+    if session.target.kind == TargetKind::Document {
+        return Err("文書のレビューでは修正を依頼できません（直す作業ツリーがありません）");
+    }
+    session
+        .workdir
+        .as_deref()
+        .ok_or("修正の依頼には、作業ディレクトリのあるレビューが必要です")
+}
+
+/// The most fix requests one review keeps (`fix-1.md` … `fix-999.md`).
+pub const MAX_FIX_TASKS: u32 = 999;
+
+/// Writes `text` as the next free `fix-<n>.md` in `session`'s reply dir
+/// (`dir` is its store directory) and returns its path. Nothing is written
+/// over an earlier request, or through a link.
+pub fn write_fix_task(dir: &Path, session: &Session, text: &str) -> io::Result<PathBuf> {
+    let base = reply_base(dir, session);
+    let reply = reply_dir(dir, session);
+    fsx::create_dirs(&base, &reply)?;
+    for n in 1..=MAX_FIX_TASKS {
+        let path = reply.join(format!("fix-{n}.md"));
+        match fsx::write_new(&base, &path, text.as_bytes()) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other(format!(
+        "{} に修正の依頼が {MAX_FIX_TASKS} 件あります",
+        reply.display()
+    )))
 }
 
 /// Makes the folder a reply goes to, below `base` ([`reply_base`]).

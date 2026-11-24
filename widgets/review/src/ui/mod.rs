@@ -10,6 +10,7 @@
 mod board;
 mod cards;
 mod composer;
+mod fix;
 mod matrix;
 mod progress;
 mod report;
@@ -39,13 +40,16 @@ use noa_gpui_text::TextStore;
 
 use review::model::export;
 use review::model::types::{
-    Agreement, Decision, FindingStatus, Millis, PartId, Phase, RoundNo, Session, Severity,
+    AgentKind, Agreement, Decision, FindingStatus, Millis, PartId, Phase, RoundNo, Session,
+    Severity,
 };
 use review::store::{self, Listed};
 
 use crate::installed::Installed;
 use crate::live::{Channel, Command, Link, Snapshot};
+use crate::session::fix::FixRequest;
 
+pub(crate) use fix::FixScope;
 pub(crate) use start::Form as StartForm;
 
 const LEFT_WIDTH: f32 = 280.0;
@@ -96,6 +100,11 @@ pub enum Action {
     ResumeShown,
     /// Writes the stored review's report again from its log.
     RegenerateReport,
+    /// Starts `agent` on fixing the findings of `scope` in a new tab.
+    RequestFix {
+        agent: AgentKind,
+        scope: FixScope,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -704,14 +713,73 @@ impl Review {
         let Some(session) = &self.session else {
             return;
         };
+        let offer = self.fix_offer(session);
         thread::insert(
             &mut self.tree,
             self.right_host,
             session,
             self.selected.as_deref(),
             self.reply_root.is_some(),
+            offer.as_ref(),
             &mut self.actions,
         );
+    }
+
+    /// What 修正を依頼 offers for `session`: nothing in a headless stored
+    /// view (no Noa to start an agent in), else the installed agents and
+    /// the scopes that hold findings, or why it cannot.
+    fn fix_offer(&self, session: &Session) -> Option<fix::FixOffer> {
+        if let Source::Snapshot = self.source {
+            return None;
+        }
+        if let Err(why) = store::fix_workdir(session) {
+            return Some(fix::FixOffer::Unavailable(why.to_owned()));
+        }
+        let kinds = match self.detection.fix_kinds() {
+            Ok(kinds) => kinds,
+            Err(why) => return Some(fix::FixOffer::Unavailable(why)),
+        };
+        let scopes = match self
+            .selected
+            .as_ref()
+            .filter(|id| session.finding(id).is_some())
+        {
+            Some(id) => vec![(FixScope::Finding(id.clone()), 1)],
+            None => [FixScope::MustFix, FixScope::Shown]
+                .into_iter()
+                .map(|scope| {
+                    // Counted unranked: a rebuild ranks once, for the board.
+                    let n = match scope {
+                        FixScope::Shown => board::count(session, &self.filters),
+                        _ => self.fix_ids(session, &scope).len(),
+                    };
+                    (scope, n)
+                })
+                .filter(|(_, n)| *n > 0)
+                .collect(),
+        };
+        Some(fix::FixOffer::Offered { kinds, scopes })
+    }
+
+    /// The findings a fix request of `scope` takes.
+    fn fix_ids(&self, session: &Session, scope: &FixScope) -> Vec<String> {
+        match scope {
+            FixScope::MustFix => session
+                .verdict()
+                .map(|v| {
+                    v.must_fix
+                        .iter()
+                        .filter(|id| session.finding(id).is_some_and(|f| f.status.is_live()))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
+            FixScope::Shown => board::shown(session, &self.filters)
+                .into_iter()
+                .map(|f| f.id.clone())
+                .collect(),
+            FixScope::Finding(id) => vec![id.clone()],
+        }
     }
 
     fn rebuild_composer(&mut self, text: &mut TextStore) {
@@ -1249,6 +1317,29 @@ impl Review {
                     self.extending = true;
                     self.send_cmd(Command::Resume { dir });
                     self.rebuild(text);
+                }
+            }
+            Action::RequestFix { agent, scope } => {
+                let Some(session) = self.session.clone() else {
+                    return;
+                };
+                let ids = self.fix_ids(&session, &scope);
+                match (&self.source, self.session_dir.clone()) {
+                    (Source::Live(_), Some(dir)) => {
+                        self.send_cmd(Command::RequestFix(Box::new(FixRequest {
+                            session,
+                            dir,
+                            agent,
+                            ids,
+                        })));
+                        self.toast(format!("{} に修正を依頼しています…", agent.command()));
+                    }
+                    (Source::Live(_), None) => {
+                        self.toast("このレビューの保存先が分からないため、修正を依頼できません");
+                    }
+                    (Source::Demo | Source::Snapshot, _) => {
+                        self.toast("デモ表示では操作を送信できません");
+                    }
                 }
             }
             Action::RegenerateReport => {

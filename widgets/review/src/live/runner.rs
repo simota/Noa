@@ -1082,6 +1082,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             argv: agent_argv(participant.kind, &participant.setup),
             cwd,
             label: self.pane_label(part),
+            attended: false,
         };
         let mut refused = String::new();
         for placement in self.placements() {

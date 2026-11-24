@@ -123,6 +123,16 @@ impl Detection {
         }
     }
 
+    /// The agents a fix can be asked of: the installed ones (all of them
+    /// when the check could not tell), or why none can be yet.
+    pub(super) fn fix_kinds(&self) -> Result<Vec<AgentKind>, String> {
+        match self {
+            Self::Done(Installed::Found(kinds)) if !kinds.is_empty() => Ok(kinds.clone()),
+            Self::Done(Installed::Unknown(_)) => Ok(AgentKind::ALL.to_vec()),
+            _ => Err(self.note().unwrap_or_default()),
+        }
+    }
+
     pub(super) fn blocked_reason(&self) -> String {
         self.note().unwrap_or_default()
     }

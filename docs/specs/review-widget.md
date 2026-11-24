@@ -247,6 +247,7 @@ It is written to `<session dir>/report.md` (temporary file + rename) after every
     target/document.md    document targets
     r<N>/<reviewer>.json  reviewer replies
     r<N>/lead.json        lead output
+    fix-<n>.md            a fix request's task (L1-9)
   ```
 
   The reply dir sits in the workdir for the same reason as competition's: agents sandboxed to their workspace can read the snapshot and write replies there. A files target rooted at the workdir never captures `.noa/` (hidden, and ignored by git).
@@ -274,6 +275,17 @@ As competition was added (`git show --stat db77229b`):
 | `AGENTS.md` | `widgets/review` in the Verification list |
 | `docs/FEATURES.md` | a **Review** entry after Competition, in the style of the two above |
 | `widgets/review/` | `Cargo.toml` (same dependencies as competition, no new crate), `Cargo.lock`, `.gitignore` (`/target`, `*.png`) |
+
+### L1-9. Fix requests (修正を依頼)
+
+Added after v1 (the first version left starting an agent on the findings out of scope): a review's findings can be handed to a coding agent that fixes them, as the discussion widget hands its result to an implementing agent.
+
+- Where: a 修正を依頼 card in the right pane. With nothing selected it sits under the verdict and offers two scopes, each with a button per installed agent (claude / codex / agy): 要修正 n 件 (the verdict's `must_fix` findings that are live) and 表示中の n 件 (the findings the board shows with its filters, ranked); a scope with no finding is not offered. With a finding selected it offers that finding alone (`F2 のみ`). Each button's accessible label says what it does (`codex に要修正 2 件の修正を依頼`).
+- When: in the live window, for a running, finished or stored (read-only) review alike; not in a headless `--session` view (no Noa). The card says why instead of offering buttons for a document review (no work tree to fix), a review without a workdir, and while the installed-agents check has not reported (or found no agent).
+- What it does: writes the task, `fix-<n>.md` (the next free `n`, 1–999, never over an earlier one, created exclusively and never through a link), in the reply dir (`<workdir>/.noa/reviews/<id>/`), then opens a new Noa tab in the workdir running the agent through the login shell on a one-line prompt that points at the file. The tab opens with keyboard focus and **without** auto approval (the agent edits the work tree, so the person answers its prompts); the review's own tab is unchanged. The pane's label is `fix · <id> · fix-<n>`.
+- The task (English, as the briefs): what was reviewed (git: base and merge base, the head ref and SHA, and for a ref "stop and ask if this working tree is not on that commit"; work tree mode: "it may have changed since"; files: the file count), that line numbers refer to the snapshot, how to work (only these findings; check a disputed or open one first and leave it with a reason if it does not hold; follow AGENTS.md / CLAUDE.md; run the checks; no push, publish or pull request; end with a per-finding report), the verdict and must-fix list, and per finding (ranked): id, severity, claim, lens, status, confidence, supporters and disputers, location (outside the target / the diff marked), the lead's rationale, every source's evidence, the suggested fix, and each disputer's note.
+- Refusals (a notice, nothing written or started): no finding of the review in the scope, a document review, no workdir, Noa unreachable, the reply dir behind a link or not writable. A tab Noa refuses to open leaves the task written and the notice names it.
+- Nothing is written to `events.jsonl` or `report.md`; the log format is unchanged.
 
 ## L2: Detail
 
@@ -425,13 +437,17 @@ Unit tests live beside the modules; golden tests in `tests/`; headless snapshots
 31. AC-31 (manual) A git review of a real branch with three reviewers runs three rounds in one Noa tab with auto approval, ends in a verdict, and writes `report.md`.
 32. AC-32 (manual) ペインを開く on every card brings that pane forward; 再開 after quitting the widget mid-round takes the panes back.
 33. AC-33 (manual) ラウンド後に停止 / 次のラウンドへ / +1 / 終了 / an intervention to one reviewer behave as AC-17/18 describe, on a live review.
+34. AC-34 The card offers 要修正 and 表示中 per installed agent with nothing selected, the selected finding alone with one selected; the shown scope follows the board's filters; a request carries the scope's findings and the review's store directory, for a running and a stored review (UI tests).
+35. AC-35 No buttons, and a reason, for a document review, a review without a workdir and while the agent check runs; no card in a headless stored view (UI tests).
+36. AC-36 A request writes `fix-1.md`, then `fix-2.md`, with the findings ranked and the guard lines, and opens exactly one tab: new tab, the workdir, focus, no auto approval; refusals write and start nothing; a reply dir behind a link is refused; the prompt survives a quote in the path (tests against a fake Noa, `live/fix.rs`).
+37. AC-37 (manual) In a real Noa, 修正を依頼 opens a focused tab in which the agent reads the task and starts on the findings.
 
 ## Scope
 
-In scope: L1-1 … L1-8 above.
+In scope: L1-1 … L1-9 above.
 
 Out of scope:
-- Starting an agent to fix the findings (discussion's implementation task, competition's adopt). The report is plain Markdown and can be handed over by hand.
+- Applying fixes inside the widget, or tracking whether a fix request was carried out: 修正を依頼 (L1-9) starts the agent and hands it the findings; the agent works in its own tab.
 - Debates (discussion's pro/con rounds); the cross-examination rounds take their place.
 - Scores and a leaderboard of reviewers; a browser viewer (`compare.html`).
 - Posting findings to GitHub or any other service.

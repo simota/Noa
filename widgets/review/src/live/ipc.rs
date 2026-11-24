@@ -80,6 +80,9 @@ pub struct PaneSpec {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub label: String,
+    /// The person works with this pane (a fix request): it opens with
+    /// keyboard focus and without auto approval, whatever its placement.
+    pub attended: bool,
 }
 
 /// Where a new pane goes.
@@ -373,11 +376,12 @@ fn spawn_params(placement: Placement, spec: &PaneSpec) -> SpawnParams {
             ..SpawnConfig::default()
         }),
         label: Some(spec.label.clone()),
-        focus: Some(false),
+        focus: Some(spec.attended),
         // Reviewers and the lead run unattended in their own tab, so
         // its agent prompts are answered without the user (the later
-        // splits share the tab's setting).
-        auto_approve: matches!(placement, Placement::NewTab).then_some(true),
+        // splits share the tab's setting). A fix edits the work tree:
+        // its pane asks the person, as any pane does.
+        auto_approve: (matches!(placement, Placement::NewTab) && !spec.attended).then_some(true),
         ..SpawnParams::default()
     }
 }
@@ -406,13 +410,30 @@ mod tests {
             argv: vec!["codex".into()],
             cwd: PathBuf::from("/tmp"),
             label: "codex".into(),
+            attended: false,
         };
         assert_eq!(
             spawn_params(Placement::NewTab, &spec).auto_approve,
             Some(true)
         );
+        assert_eq!(spawn_params(Placement::NewTab, &spec).focus, Some(false));
         for split in [Placement::Right(7), Placement::Below(7)] {
             assert_eq!(spawn_params(split, &spec).auto_approve, None);
+        }
+    }
+
+    #[test]
+    fn an_attended_pane_takes_focus_and_never_auto_approves() {
+        let spec = PaneSpec {
+            argv: vec!["codex".into()],
+            cwd: PathBuf::from("/tmp"),
+            label: "fix · rev-1".into(),
+            attended: true,
+        };
+        for placement in [Placement::NewTab, Placement::Right(7), Placement::Below(7)] {
+            let params = spawn_params(placement, &spec);
+            assert_eq!(params.auto_approve, None, "{placement:?}");
+            assert_eq!(params.focus, Some(true), "{placement:?}");
         }
     }
 

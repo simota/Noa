@@ -5,9 +5,11 @@ mod demo;
 mod installed;
 mod live;
 /// The live session runner (`src/live/`): `ipc` is the Noa port and its
-/// `noa-ipc` implementation, `runner` drives one review against it.
+/// `noa-ipc` implementation, `runner` drives one review against it, `fix`
+/// starts an agent on fixing a review's findings.
 #[path = "live"]
 mod session {
+    pub mod fix;
     pub mod ipc;
     pub mod runner;
 }

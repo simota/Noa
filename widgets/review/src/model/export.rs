@@ -411,6 +411,149 @@ fn write_rounds(out: &mut String, session: &Session) {
     }
 }
 
+/// The findings of `ids` that `session` has, ranked (L2-4); ids it does
+/// not know are left out.
+pub fn fix_findings<'a>(session: &'a Session, ids: &[String]) -> Vec<&'a Finding> {
+    session
+        .ranked()
+        .into_iter()
+        .filter(|f| ids.contains(&f.id))
+        .collect()
+}
+
+/// What an agent asked to fix findings is given: how to work, what was
+/// reviewed, then each finding of `ids` (ranked) with its location,
+/// evidence, the suggested fix and any dispute. `snapshot` is where the
+/// reviewed copy of the target lies.
+pub fn fix_task(session: &Session, ids: &[String], snapshot: &std::path::Path) -> String {
+    let findings = fix_findings(session, ids);
+    let m = &session.manifest;
+    let mut out = String::with_capacity(4096);
+    let _ = writeln!(
+        out,
+        "# Fix request from review {}\n\n\
+         A panel of coding agents reviewed this repository ({}), and a lead \
+         consolidated their findings. Fix the {} finding{} below in this \
+         working tree.\n",
+        session.id,
+        m.label,
+        findings.len(),
+        if findings.len() == 1 { "" } else { "s" },
+    );
+    out.push_str("## What was reviewed\n\n");
+    if session.target.kind == TargetKind::Git {
+        let short = |s: &Option<String>| {
+            s.as_deref()
+                .map_or_else(|| "?".to_owned(), |s| short_id(s, 10))
+        };
+        let _ = writeln!(
+            out,
+            "- The diff from {} `{}` (merge base `{}`) to {}.",
+            m.base_ref.as_deref().unwrap_or("?"),
+            short(&m.base_sha),
+            short(&m.merge_base),
+            match &m.head_ref {
+                Some(head) => format!("{head} `{}`", short(&m.head_sha)),
+                None => format!(
+                    "the work tree (on `{}`, with its uncommitted and untracked changes)",
+                    short(&m.head_sha)
+                ),
+            },
+        );
+        match &m.head_ref {
+            Some(head) => {
+                let _ = writeln!(
+                    out,
+                    "- The review read {head} at `{}`. If this working tree is not on that \
+                     commit (`git rev-parse HEAD`), stop and ask before changing anything.",
+                    short(&m.head_sha)
+                );
+            }
+            None => out.push_str(
+                "- The review read the work tree as it was when the review started; it may \
+                 have changed since.\n",
+            ),
+        }
+    } else {
+        let _ = writeln!(out, "- {} files of this folder.", m.files.len());
+    }
+    let _ = writeln!(
+        out,
+        "- Line numbers refer to the reviewed copy in {}; check the current file before \
+         you edit.\n",
+        snapshot.display()
+    );
+    out.push_str(
+        "## How to work\n\n\
+         - Fix only the findings listed here.\n\
+         - A finding marked disputed or open may not hold: check it first, and leave it \
+         unfixed if it does not, saying why.\n\
+         - Follow the repository's own rules (AGENTS.md, CLAUDE.md, CONTRIBUTING) and run \
+         the checks that cover what you change.\n\
+         - Do not push, publish, or open pull requests.\n\
+         - End with a report: for each finding id, what you changed, or why you left it.\n\n",
+    );
+    if let Some(v) = session.verdict() {
+        let _ = writeln!(
+            out,
+            "## The lead's verdict: {}\n\n{}\n",
+            v.decision.name(),
+            one_line(&v.rationale)
+        );
+        if !v.must_fix.is_empty() {
+            let _ = writeln!(out, "Must fix: {}\n", v.must_fix.join(", "));
+        }
+    }
+    out.push_str("## Findings\n\n");
+    for f in &findings {
+        let _ = writeln!(out, "### {} [{}] {}\n", f.id, f.severity.name(), f.claim);
+        let tally = session.tally(f);
+        let _ = writeln!(
+            out,
+            "- Lens: {} · status: {} · confidence: {} · supported by {}, disputed by {}",
+            f.category,
+            f.status.name(),
+            f.confidence.name(),
+            tally.supporters.len(),
+            tally.disputers.len(),
+        );
+        let location = match &f.location {
+            Some(loc) if !f.in_target => format!("`{loc}` (outside the reviewed target)"),
+            Some(loc) if f.in_diff == Some(false) => format!("`{loc}` (outside the diff)"),
+            Some(loc) => format!("`{loc}`"),
+            None => "the target as a whole".to_owned(),
+        };
+        let _ = writeln!(out, "- Location: {location}");
+        if !f.rationale.trim().is_empty() {
+            let _ = writeln!(out, "- Lead: {}", one_line(&f.rationale));
+        }
+        for key in &f.sources {
+            if let Some(raw) = session.raw_finding(key) {
+                let _ = writeln!(out, "- Evidence ({key}): {}", one_line(&raw.evidence));
+            }
+        }
+        if let Some(fix) = f.fix.as_deref().or_else(|| {
+            f.sources
+                .iter()
+                .find_map(|k| session.raw_finding(k).and_then(|r| r.fix.as_deref()))
+        }) {
+            let _ = writeln!(out, "- Suggested fix: {}", one_line(fix));
+        }
+        for part in &tally.disputers {
+            if let Some(s) = f.latest_stance(part) {
+                let _ = writeln!(
+                    out,
+                    "- Disputed by {part} (R{}): {}",
+                    s.round,
+                    one_line(&s.note)
+                );
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

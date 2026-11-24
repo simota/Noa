@@ -144,7 +144,8 @@ impl Driver {
                 request: "ストアの書き換えです。ログのロックと再開まわりを重点的に見てください。",
                 target: target(),
                 manifest: manifest(),
-                workdir: None,
+                // As a git review's: the repository's top level.
+                workdir: Some(PathBuf::from("/Users/demo/repos/noa")),
                 max_rounds: 3,
                 lead: AgentChoice {
                     kind: AgentKind::Claude,

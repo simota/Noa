@@ -481,6 +481,8 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             outcome.winner = Some(winner.clone());
             outcome.final_verdict = Some(final_verdict.clone());
             session.winner = Some(winner.clone());
+            // A tie the lead broke ranks its winner first.
+            aggregate::winner_first(session, *round);
         }
         Event::JudgeAccepted { round, output } => {
             for amendment in &output.amendments {
@@ -1108,6 +1110,89 @@ mod tests {
             Some(7)
         );
         assert!(session.closed);
+    }
+
+    #[test]
+    fn a_tie_the_verdict_broke_keeps_its_winner_first_until_an_amendment_breaks_it() {
+        use crate::model::types::Amendment;
+        let claude = PartId::new("claude");
+        let codex = PartId::new("codex");
+        // R1 (the last of 1): a tie at 240, the lead ranking claude first;
+        // the verdict names codex.
+        let tied = || {
+            let mut session = panel_session(Some(1));
+            settle(
+                &mut session,
+                1,
+                &cards(
+                    &[("claude", 80), ("codex", 80)],
+                    &[("codex", 81), ("claude", 79)],
+                    &[("claude", 81), ("codex", 79)],
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                session.round(1).unwrap().outcome.as_ref().unwrap().ranking,
+                [claude.clone(), codex.clone()]
+            );
+            apply(
+                &mut session,
+                &[
+                    Event::VerdictAccepted {
+                        round: 1,
+                        winner: codex.clone(),
+                        final_verdict: "codex breaks the tie.".into(),
+                    },
+                    Event::PhaseChanged {
+                        round: 1,
+                        phase: Phase::Closed,
+                    },
+                    Event::SessionClosed,
+                    Event::RoundsExtended {
+                        max_rounds: 2,
+                        at: 9,
+                    },
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                session.round(1).unwrap().outcome.as_ref().unwrap().ranking,
+                [codex.clone(), claude.clone()]
+            );
+            judge_next(&mut session, 2);
+            session
+        };
+        // R2's judge-2 amends its R1 card; R1's ranking after it.
+        let r1_after = |amend: &[(&PartId, u8)]| {
+            let mut session = tied();
+            let mut r2 = cards(
+                &[("claude", 85), ("codex", 84)],
+                &[("claude", 85), ("codex", 84)],
+                &[("claude", 85), ("codex", 84)],
+            );
+            r2.get_mut(&judge_id(1)).unwrap().amendments = amend
+                .iter()
+                .map(|(part, score)| Amendment {
+                    round: 1,
+                    part: (*part).clone(),
+                    score: *score,
+                    reason: "recount".into(),
+                })
+                .collect();
+            settle(&mut session, 2, &r2).unwrap();
+            let outcome = session.round(1).unwrap().outcome.clone().unwrap();
+            assert_eq!(outcome.winner.as_ref(), Some(&codex), "the verdict stays");
+            outcome.ranking
+        };
+        // Both up by one: still a tie (241 each), so the verdict's winner
+        // stays first though the lead ranked claude first.
+        assert_eq!(
+            r1_after(&[(&codex, 82), (&claude, 80)]),
+            [codex.clone(), claude.clone()]
+        );
+        // An amendment that breaks the tie leaves sum order, either way.
+        assert_eq!(r1_after(&[(&claude, 90)]), [claude.clone(), codex.clone()]);
+        assert_eq!(r1_after(&[(&codex, 90)]), [codex.clone(), claude.clone()]);
     }
 
     #[test]

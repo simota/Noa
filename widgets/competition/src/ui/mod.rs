@@ -2868,6 +2868,46 @@ mod tests {
     }
 
     #[test]
+    fn a_tie_the_verdict_breaks_shows_its_winner_first() {
+        use competition::model::aggregate;
+        use competition::model::reduce::{Event, apply};
+        // Every judge scores claude and agy 90 in the last round, ranking
+        // claude first; the lead's verdict names agy.
+        let mut session = crate::demo::panel_session();
+        let last = session.rounds.len();
+        for card in session.rounds[last - 1].scorecards.values_mut() {
+            for (part, ev) in &mut card.evaluations {
+                ev.score = if part.as_str() == "codex" { 80 } else { 90 };
+            }
+            card.ranking = ["claude", "agy", "codex"].map(PartId::new).to_vec();
+        }
+        let cards = &session.rounds[last - 1].scorecards;
+        let combined = aggregate::combine(&session, last as RoundNo, cards);
+        assert_eq!(combined.ranking[0].as_str(), "claude");
+        session.rounds[last - 1].outcome = Some(combined);
+        apply(
+            &mut session,
+            &[Event::VerdictAccepted {
+                round: last as RoundNo,
+                winner: PartId::new("agy"),
+                final_verdict: "agy breaks the tie.".into(),
+            }],
+        )
+        .unwrap();
+        let outcome = session.rounds[last - 1].outcome.as_ref().unwrap();
+        assert_eq!(outcome.ranking, ["agy", "claude", "codex"].map(PartId::new));
+
+        let report = export::result_markdown(&session);
+        assert!(report.contains("1. **agy** 🏆"), "{report}");
+        assert!(report.contains("2. **claude** — "), "{report}");
+        let screen = Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        let texts = texts_under(&screen.tree, screen.left_host);
+        for want in ["🏆 #1 agy", "#2 claude", "#3 codex"] {
+            assert!(texts.iter().any(|t| t == want), "{want:?} in {texts:?}");
+        }
+    }
+
+    #[test]
     fn a_verdict_the_competition_ended_without_is_not_awaited() {
         use competition::model::reduce::{Event, apply};
         let winner = PartId::new("claude");

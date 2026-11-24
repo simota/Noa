@@ -61,19 +61,25 @@ pub fn missing_scorecards(session: &Session, cards: &BTreeMap<PartId, JudgeOutpu
         .collect()
 }
 
+/// The sum of every judge's score of `part` in `cards`.
+fn panel_sum(session: &Session, cards: &BTreeMap<PartId, JudgeOutput>, part: &PartId) -> u32 {
+    session
+        .judges()
+        .filter_map(|judge| cards.get(&judge.id)?.evaluations.get(part))
+        .map(|ev| u32::from(ev.score))
+        .sum()
+}
+
 /// The lead's ranking re-sorted by the sum of every judge's score, highest
 /// first; ties keep the lead's order. Every judge scores every entry, so
 /// comparing sums compares means exactly.
 fn ranked_sums(session: &Session, cards: &BTreeMap<PartId, JudgeOutput>) -> Vec<(PartId, u32)> {
     let lead = &cards[&session.judge.id];
-    let sum = |part: &PartId| -> u32 {
-        session
-            .judges()
-            .filter_map(|judge| cards.get(&judge.id)?.evaluations.get(part))
-            .map(|ev| u32::from(ev.score))
-            .sum()
-    };
-    let mut ranked: Vec<(PartId, u32)> = lead.ranking.iter().map(|p| (p.clone(), sum(p))).collect();
+    let mut ranked: Vec<(PartId, u32)> = lead
+        .ranking
+        .iter()
+        .map(|p| (p.clone(), panel_sum(session, cards, p)))
+        .collect();
     ranked.sort_by_key(|(_, sum)| std::cmp::Reverse(*sum));
     ranked
 }
@@ -185,6 +191,38 @@ pub fn recombine(
     combined.close = old.close;
     if let Some(r) = session.round_mut(round) {
         r.outcome = Some(combined);
+    }
+    winner_first(session, round);
+}
+
+/// Moves `round`'s verdict winner to the front of the entries whose sum
+/// equals its own, so a tie the lead broke ranks the winner above the
+/// entries it tied with. A no-op without a winner or when no entry ranked
+/// before it shares its sum (an amendment that broke the tie leaves plain
+/// sum order).
+pub fn winner_first(session: &mut Session, round: RoundNo) {
+    let Some(r) = session.round(round) else {
+        return;
+    };
+    let Some(outcome) = r.outcome.as_ref() else {
+        return;
+    };
+    let Some(winner) = outcome.winner.as_ref() else {
+        return;
+    };
+    let Some(at) = outcome.ranking.iter().position(|p| p == winner) else {
+        return;
+    };
+    let sum = panel_sum(session, &r.scorecards, winner);
+    let Some(front) = outcome.ranking[..at]
+        .iter()
+        .position(|p| panel_sum(session, &r.scorecards, p) == sum)
+    else {
+        return;
+    };
+    if let Some(outcome) = session.round_mut(round).and_then(|r| r.outcome.as_mut()) {
+        let winner = outcome.ranking.remove(at);
+        outcome.ranking.insert(front, winner);
     }
 }
 

@@ -890,3 +890,24 @@ fn keyboard_focus_stays_on_what_was_pressed() {
     assert_eq!(press_focused(&mut screen, &selected), Some(f2));
     assert_eq!(screen.selected, None);
 }
+
+/// The tags' texts under `host`, in tree order.
+fn tag_texts(screen: &Review, host: WidgetId) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![host];
+    while let Some(id) = stack.pop() {
+        if let Some(tag) = screen.tree.get::<noa_gpui_core::widgets::Tag>(id) {
+            out.push(tag.text().to_owned());
+        }
+        stack.extend(screen.tree.children(id).iter().rev());
+    }
+    out
+}
+
+#[test]
+fn a_held_review_does_not_read_as_finished() {
+    let screen = Review::demo_held();
+    let tags = tag_texts(&screen, screen.progress_host);
+    assert!(tags.contains(&"✓ ラウンド完了".to_owned()), "{tags:?}");
+    assert!(!tags.contains(&"✓ 完了".to_owned()), "{tags:?}");
+}

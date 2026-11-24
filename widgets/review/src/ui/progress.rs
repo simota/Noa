@@ -18,7 +18,8 @@ const STEPS: [(Phase, &str); 4] = [
     (Phase::Briefing, "配信"),
     (Phase::Reviewing, "レビュー"),
     (Phase::Consolidating, "取りまとめ"),
-    (Phase::Closed, "完了"),
+    // The round's, not the review's: a held review shows it checked.
+    (Phase::Closed, "ラウンド完了"),
 ];
 
 /// How far one brief got, as its badge shows it.

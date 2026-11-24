@@ -78,11 +78,17 @@ pub fn default_base(_repo: &Path) -> Option<String> {
     todo!("U3: default_base")
 }
 
-/// Whether the snapshot in `dir` is still what `manifest` and `rebuild`
-/// describe: the manifest, the diff, every captured file, the worktree
-/// patch and every untracked file hash the same. Nothing is read through a
-/// link.
-pub fn verify(_dir: &Path, _manifest: &TargetManifest, _rebuild: &Rebuild) -> Result<(), String> {
+/// Whether the snapshot in `dir` is still what `manifest`, `rebuild` and
+/// `spec` describe: the manifest, the diff, every captured file, the
+/// worktree patch, every untracked file and `spec.md` (when `spec` is
+/// given; with `None` there must be no `spec.md`) hash the same. Nothing
+/// is read through a link.
+pub fn verify(
+    _dir: &Path,
+    _manifest: &TargetManifest,
+    _rebuild: &Rebuild,
+    _spec: Option<&SpecFile>,
+) -> Result<(), String> {
     todo!("U3: verify")
 }
 

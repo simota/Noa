@@ -7,10 +7,13 @@
 //! logged digests, and ingests each `<n>.log`. [`script`] and [`outcome`]
 //! are pure; the rest does I/O.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
-use crate::model::types::{AgentKind, EvidenceKey, PartId, Rerun, RerunRequest, RoundNo, Stored};
+use crate::model::types::{
+    AgentKind, EvidenceKey, Millis, PartId, Rerun, RerunRequest, RoundNo, Stored,
+};
 
 /// The directory under the verifier's `r<N>/<verifier>/`.
 pub const RERUN_DIR: &str = "rerun";
@@ -40,8 +43,9 @@ pub struct Command {
     pub cwd: String,
 }
 
-/// What one command of a running script shows on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What one command of a running script shows on disk, and what [`poll`]
+/// made of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemStatus {
     /// Counted from 1.
     pub n: u32,
@@ -51,6 +55,9 @@ pub struct ItemStatus {
     pub alive: bool,
     /// From `<n>.exit`, once written.
     pub exit: Option<i32>,
+    /// How it ended, once it has; `None` while it waits for its turn or
+    /// runs (also while its group is being killed past its limit).
+    pub end: Option<End>,
 }
 
 /// A script's state as [`poll`] read it.
@@ -59,6 +66,39 @@ pub struct Status {
     pub items: Vec<ItemStatus>,
     /// What `done` holds, once written.
     pub done: Option<String>,
+}
+
+/// The time limits a script's commands are held to (L1-5 steps 3–4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// How long one command may run, counted from its `.pid` being first
+    /// seen: [`RERUN_TIMEOUT`](crate::model::types::RERUN_TIMEOUT), or less
+    /// for a kind whose re-run brief runs `run.sh` in the foreground (L1-5
+    /// step 3).
+    pub run: Millis,
+    /// How long after one command ended the next one's `.pid` may take;
+    /// past it, that command and every later one are `not_run` ("re-run did
+    /// not finish"): the engine's start timeout.
+    pub next_start: Millis,
+}
+
+/// What [`poll`] keeps between the polls of one script. The runner keeps
+/// one per script it watches, in memory; a resume starts a new one, so a
+/// command still running is timed from the first poll after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Watch {
+    limits: Limits,
+    /// When each command's `.pid` was first seen, by `n`.
+    seen: BTreeMap<u32, Millis>,
+}
+
+impl Watch {
+    pub fn new(limits: Limits) -> Watch {
+        Watch {
+            limits,
+            seen: BTreeMap::new(),
+        }
+    }
 }
 
 /// How a command ended, as the runner saw it.
@@ -102,9 +142,25 @@ pub fn write_request(
     todo!("U3: rerun::write_request (L1-5 step 1)")
 }
 
-/// What `dir` shows of `request`'s commands now.
-pub fn poll(_dir: &Path, _request: &RerunRequest) -> io::Result<Status> {
-    todo!("U3: rerun::poll (L1-5 step 4)")
+/// What `dir` shows of `request`'s commands at `now`, each with its
+/// outcome once it has one (L1-5 steps 3–4), timed by `watch`:
+/// - an `.exit` ends it [`End::Exited`];
+/// - a process gone without an `.exit` ends it [`End::NotRun`] at once
+///   ("the re-run was stopped before it finished; …");
+/// - past `watch`'s run limit, its process group gets SIGTERM, SIGKILL
+///   [`RERUN_KILL_GRACE`](crate::model::types::RERUN_KILL_GRACE) later,
+///   and it ends [`End::TimedOut`];
+/// - no next `.pid` within the next-start limit after one ended ends that
+///   command and every later one [`End::NotRun`] ("re-run did not
+///   finish").
+pub fn poll(
+    _dir: &Path,
+    _request: &RerunRequest,
+    watch: &mut Watch,
+    _now: Millis,
+) -> io::Result<Status> {
+    let _ = (&watch.limits, &watch.seen);
+    todo!("U3: rerun::poll (L1-5 steps 3-4)")
 }
 
 /// Sends `signal` to the process group `pid` leads.
@@ -134,7 +190,8 @@ pub fn ingest_logs(
 }
 
 /// The re-run outcome of a command the verifier reported with exit status
-/// `reported`, given how it ended and its stored log.
+/// `reported`, given how it ended and its stored log (kept also when it
+/// ends `not_run`).
 pub fn outcome(_reported: i32, _end: End, _log: Option<Stored>) -> Rerun {
     todo!("U3: rerun::outcome")
 }

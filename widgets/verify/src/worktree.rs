@@ -22,8 +22,18 @@ pub struct Entry {
     pub prunable: bool,
 }
 
-/// Where verifier `part`'s worktree goes: `<main>-wt/verify-<id>-<part>`,
-/// beside the worktrees `Noa +ctl spawn --worktree` makes.
+/// The repository's main worktree, as seen from `repo` (any directory of
+/// any of its worktrees): the first entry of `git worktree list
+/// --porcelain`, as `main_worktree` in `crates/noa-app/src/ctl/worktree.rs`
+/// picks it. From a linked worktree `/src/app-wt/feature` of `/src/app`,
+/// it is `/src/app`.
+pub fn main_worktree(_repo: &Path) -> Result<PathBuf, String> {
+    todo!("U3: worktree::main_worktree (L1-3)")
+}
+
+/// Where verifier `part`'s worktree goes: `<main>-wt/verify-<id>-<part>`
+/// (`main` from [`main_worktree`]), beside the worktrees `Noa +ctl spawn
+/// --worktree` makes.
 pub fn path_for(main: &Path, id: &SessionId, part: &PartId) -> PathBuf {
     let mut dir: OsString = main.as_os_str().to_owned();
     dir.push("-wt");

@@ -126,11 +126,16 @@ pub enum Input {
         part: PartId,
     },
     /// `part`'s evidence of `round` was copied; an item missing from
-    /// `items` was gone.
+    /// `items` was gone. `tails` holds, for each `command` item whose
+    /// reported exit status is not 0 and whose log was stored, the last
+    /// [`JUDGE_TAIL_LINES`](crate::model::types::JUDGE_TAIL_LINES) lines of
+    /// the stored copy ([`crate::evidence::tail`]); the engine logs them
+    /// with `EvidenceIngested` for the judge's ruling brief.
     Ingested {
         round: RoundNo,
         part: PartId,
         items: Vec<(EvidenceKey, Stored)>,
+        tails: BTreeMap<EvidenceKey, String>,
     },
     /// The runner wrote `part`'s re-run script for `round`
     /// ([`Effect::Rerun`]); the engine logs it and issues the re-run brief
@@ -278,7 +283,8 @@ pub fn check_panel(_judge: &AgentChoice, _panel: &[VerifierChoice]) -> Result<()
 }
 
 /// Why the verification logged in `dir` cannot be resumed from its log:
-/// review's checks, the snapshot ([`crate::capture::verify`]) and each
+/// review's checks, the snapshot and its spec copy against the logged
+/// digests ([`crate::capture::verify`] with `Session::spec`) and each
 /// recorded worktree ([`crate::worktree::check`]).
 pub fn check_resumable(_session: &Session, _dir: &Path) -> Result<(), String> {
     todo!("U2: check_resumable")
@@ -303,8 +309,12 @@ pub struct Setup<'a> {
     pub user_criteria: Vec<String>,
     /// 基準を確認してから検証.
     pub confirm: bool,
-    /// The main worktree's top level.
+    /// The top level of the target's checkout ([`crate::capture::repo_root`]
+    /// of the target's repository): see [`Session::workdir`].
     pub workdir: PathBuf,
+    /// The repository's main worktree ([`crate::worktree::main_worktree`]):
+    /// see [`Session::main_worktree`].
+    pub main_worktree: PathBuf,
     pub max_rounds: RoundNo,
     /// The highest `max_rounds` accepted (review's).
     pub round_cap: RoundNo,

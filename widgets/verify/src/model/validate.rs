@@ -4,11 +4,12 @@
 //! fence is tolerated, unknown fields are refused, and every problem is
 //! its own line of the correction note.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::model::types::{
     CriteriaOutput, CriterionResult, CrossCheck, Evidence, FileFact, JudgeOutput, PartId,
-    RawDefect, RoundNo, Session,
+    RawDefect, RoundNo, Ruling, Session,
 };
 
 /// Why an agent's file was turned down: one problem per line.
@@ -84,7 +85,10 @@ pub fn parse_judge(
     todo!("U2: parse_judge")
 }
 
-/// Whether the judge may close the verification in `round` (L1-4 item 5).
-pub fn may_close(_session: &Session, _round: RoundNo) -> bool {
+/// Whether the judge may close the verification in `round` with
+/// `rulings`, that round's draft rulings on every criterion (`"same"`
+/// resolved), before they are accepted (L1-4 item 5; round 1:
+/// [`crate::model::rules::early_close_allowed`]).
+pub fn may_close(_session: &Session, _round: RoundNo, _rulings: &BTreeMap<String, Ruling>) -> bool {
     todo!("U2: may_close")
 }

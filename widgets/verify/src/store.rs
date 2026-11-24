@@ -87,16 +87,18 @@ pub fn reply_dir(session: &Session) -> PathBuf {
 }
 
 /// What every path below the judge's reply dir is checked against: the
-/// main worktree. Nothing between it and a file may be a link.
+/// target's checkout (`workdir`). Nothing between it and a file may be a
+/// link.
 pub fn reply_base(session: &Session) -> PathBuf {
     session.workdir.clone()
 }
 
-/// Where verifier `part` runs: its worktree, or the main worktree in 共有
-/// mode. Also the base its reply paths are checked against.
+/// Where verifier `part` runs: its worktree, under the main worktree's
+/// `<main>-wt/`, or the target's checkout (`workdir`) in 共有 mode. Also
+/// the base its reply paths are checked against.
 pub fn verifier_root(session: &Session, part: &PartId) -> PathBuf {
     match session.isolation {
-        Isolation::Worktree => crate::worktree::path_for(&session.workdir, &session.id, part),
+        Isolation::Worktree => crate::worktree::path_for(&session.main_worktree, &session.id, part),
         Isolation::Shared => session.workdir.clone(),
     }
 }

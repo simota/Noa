@@ -87,6 +87,10 @@ pub const RERUN_TIMEOUT: Millis = 10 * 60_000;
 /// How long after SIGTERM a timed-out re-run gets SIGKILL (L1-5).
 pub const RERUN_KILL_GRACE: Millis = 5_000;
 
+/// How many trailing lines of a failing command's stored log the judge's
+/// ruling brief shows (L2-4).
+pub const JUDGE_TAIL_LINES: usize = 40;
+
 macro_rules! string_id {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
@@ -311,9 +315,10 @@ impl AgentSetup {
 }
 
 /// An agent picked to take part: its kind and what it runs on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentChoice {
     pub kind: AgentKind,
+    #[serde(default, skip_serializing_if = "AgentSetup::is_default")]
     pub setup: AgentSetup,
 }
 
@@ -404,14 +409,15 @@ pub fn custom_label(text: &str) -> String {
 }
 
 /// What a verifier row in the start view picks as its strategy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StrategyChoice {
     Builtin(BuiltinStrategy),
     Custom(String),
 }
 
 /// One verifier row of the start view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifierChoice {
     pub agent: AgentChoice,
     pub strategy: StrategyChoice,
@@ -1043,8 +1049,13 @@ pub enum Rerun {
     TimedOut {
         log: Stored,
     },
+    /// Not run, or not run to its end: 共有 mode, pane gone, did not start,
+    /// stopped before it finished, script changed (L1-5 step 5). `log` is
+    /// the command's `<n>.log` when one was written and ingested.
     NotRun {
         why: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log: Option<Stored>,
     },
 }
 
@@ -1080,6 +1091,15 @@ pub struct RerunRequest {
     pub script_digest: u64,
 }
 
+/// When the person attached an item (L1-5a): the round that was current
+/// then (the last round started; the judge sees the item in the next
+/// ruling brief), and the time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub round: RoundNo,
+    pub at: Millis,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
     pub key: EvidenceKey,
@@ -1090,6 +1110,10 @@ pub struct Evidence {
     /// A `command` item's re-run, once it has an outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerun: Option<Rerun>,
+    /// When the person attached it; `None` for what a verifier reported
+    /// (its round is in its key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached: Option<Attachment>,
 }
 
 impl Evidence {
@@ -1542,7 +1566,8 @@ pub enum DefectOp {
 }
 
 /// How far the panel agrees on a defect (review L2-4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Agreement {
     Unanimous,
     Majority,
@@ -1570,7 +1595,7 @@ impl Agreement {
 
 /// Who supports, disputes, or has not taken a side on a defect, from its
 /// sources and the cross-checks on it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tally {
     pub supporters: Vec<PartId>,
     pub disputers: Vec<PartId>,
@@ -1889,6 +1914,10 @@ pub struct Round {
     /// The re-run script written for each verifier this round.
     #[serde(default)]
     pub reruns: BTreeMap<PartId, RerunRequest>,
+    /// The log tails `EvidenceIngested` recorded this round, by evidence
+    /// key: what the judge's ruling brief shows of failing commands.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tails: BTreeMap<EvidenceKey, String>,
     /// What each verifier must cross-check this round (round ≥ 2): the
     /// previous judge's `assign`, or the default (L1-4 item 4).
     #[serde(default)]
@@ -1933,9 +1962,16 @@ pub struct Session {
     /// The person's own criteria, one per line as typed (trimmed).
     #[serde(default)]
     pub user_criteria: Vec<String>,
-    /// The main worktree's top level: the judge runs here, and the judge's
-    /// reply dir is `<workdir>/.noa/verify/<id>/`.
+    /// The top level of the target's checkout (`capture::repo_root` of
+    /// `target.repo`; a linked worktree when the target is in one): the
+    /// judge runs here, the judge's reply dir is
+    /// `<workdir>/.noa/verify/<id>/`, verifiers run here in 共有 mode, and
+    /// 修正を依頼 opens its agent here.
     pub workdir: PathBuf,
+    /// The repository's main worktree (`worktree::main_worktree`), whose
+    /// `<main>-wt/` holds the verifiers' worktrees (L1-3). The same as
+    /// `workdir` unless the target is a linked worktree.
+    pub main_worktree: PathBuf,
     pub max_rounds: RoundNo,
     /// Bumped once per applied event batch.
     pub rev: u64,
@@ -2180,6 +2216,7 @@ pub enum Event {
         #[serde(default)]
         user_criteria: Vec<String>,
         workdir: PathBuf,
+        main_worktree: PathBuf,
         max_rounds: RoundNo,
         judge: Participant,
         verifiers: Vec<Participant>,
@@ -2300,11 +2337,16 @@ pub enum Event {
         at: Millis,
     },
     /// A verifier's evidence files were copied into the judge's reply dir.
-    /// A file item of `part`'s reply missing from `items` was gone.
+    /// A file item of `part`'s reply missing from `items` was gone. `tails`
+    /// holds, for each `command` item whose reported exit status is not 0
+    /// and whose log was stored, the last [`JUDGE_TAIL_LINES`] lines of the
+    /// stored copy, for the judge's ruling brief.
     EvidenceIngested {
         round: RoundNo,
         part: PartId,
         items: Vec<(EvidenceKey, Stored)>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        tails: BTreeMap<EvidenceKey, String>,
     },
     /// A re-run script was written for `part` (L1-5 step 1).
     RerunRequested {
@@ -2318,9 +2360,11 @@ pub enum Event {
         key: EvidenceKey,
         rerun: Rerun,
     },
-    /// Media the person attached (L1-5a).
+    /// Media the person attached (L1-5a), while `round` was the current
+    /// round.
     EvidenceAttached {
         key: EvidenceKey,
+        round: RoundNo,
         body: EvidenceBody,
         stored: Stored,
         #[serde(default)]
@@ -2552,7 +2596,8 @@ mod tests {
                     digest: 8,
                 }),
                 user_criteria: vec!["Tabs inherit cwd".into()],
-                workdir: PathBuf::from("/repo"),
+                workdir: PathBuf::from("/src/app-wt/feature"),
+                main_worktree: PathBuf::from("/src/app"),
                 max_rounds: DEFAULT_MAX_ROUNDS,
                 judge: participant(JUDGE_ID, AgentKind::Claude, None),
                 verifiers: vec![
@@ -2717,12 +2762,14 @@ mod tests {
                         },
                         stored: None,
                         rerun: None,
+                        attached: None,
                     },
                     Evidence {
                         key: key("claude/r1/e2"),
                         body: shot.clone(),
                         stored: None,
                         rerun: None,
+                        attached: None,
                     },
                     Evidence {
                         key: key("claude/r1/e3"),
@@ -2731,6 +2778,7 @@ mod tests {
                         },
                         stored: None,
                         rerun: None,
+                        attached: None,
                     },
                 ],
                 defects: vec![RawDefect {
@@ -2767,6 +2815,10 @@ mod tests {
                 round: 1,
                 part: p("claude"),
                 items: vec![(key("claude/r1/e1"), stored("evidence/r1/claude/logs/1.log"))],
+                tails: BTreeMap::from([(
+                    key("claude/r1/e1"),
+                    "test cwd_inherit ... FAILED\n".into(),
+                )]),
             },
             Event::RerunRequested {
                 round: 1,
@@ -2790,10 +2842,19 @@ mod tests {
                 key: key("codex/r1/e1"),
                 rerun: Rerun::NotRun {
                     why: "共有 mode".into(),
+                    log: None,
+                },
+            },
+            Event::RerunFinished {
+                key: key("codex/r1/e2"),
+                rerun: Rerun::NotRun {
+                    why: "re-run script was changed".into(),
+                    log: Some(stored("evidence/r1/codex/rerun-2.log")),
                 },
             },
             Event::EvidenceAttached {
                 key: EvidenceKey::user(1),
+                round: 2,
                 body: shot,
                 stored: stored("evidence/user/1.mov"),
                 shows: vec!["AC-1".into()],
@@ -2826,6 +2887,63 @@ mod tests {
         assert!(line.contains(r#""event":"criteria_accepted""#));
         assert!(line.contains(r#""source":"spec:12""#));
         assert!(line.contains(r#""claude/AC-1""#));
+        // A not-run re-run without a log writes no `log` field.
+        assert!(line.contains(r#""outcome":"not_run","why":"共有 mode"}"#));
+    }
+
+    #[test]
+    fn the_start_views_choices_and_the_tally_survive_a_json_round_trip() {
+        let panel = vec![
+            VerifierChoice {
+                agent: AgentChoice {
+                    kind: AgentKind::Claude,
+                    setup: AgentSetup {
+                        model: Some("opus".into()),
+                        effort: Some("high".into()),
+                    },
+                },
+                strategy: StrategyChoice::Builtin(BuiltinStrategy::Falsify),
+            },
+            VerifierChoice {
+                agent: AgentKind::Codex.into(),
+                strategy: StrategyChoice::Custom("Try odd locales".into()),
+            },
+        ];
+        let json = serde_json::to_value(&panel).unwrap();
+        assert_eq!(
+            json[1],
+            serde_json::json!({
+                "agent": {"kind": "codex"},
+                "strategy": {"custom": "Try odd locales"}
+            })
+        );
+        assert_eq!(
+            json[0]["strategy"],
+            serde_json::json!({"builtin": "falsify"})
+        );
+        let back: Vec<VerifierChoice> = serde_json::from_value(json).unwrap();
+        assert_eq!(back, panel);
+
+        let judge = AgentChoice::from(AgentKind::Agy);
+        let back: AgentChoice =
+            serde_json::from_value(serde_json::to_value(&judge).unwrap()).unwrap();
+        assert_eq!(back, judge);
+
+        for agreement in Agreement::ALL {
+            let tally = Tally {
+                supporters: vec![p("claude"), p("codex")],
+                disputers: vec![p("agy")],
+                silent: vec![p("claude-2")],
+                agreement,
+            };
+            let json = serde_json::to_string(&tally).unwrap();
+            let back: Tally = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, tally);
+        }
+        assert_eq!(
+            serde_json::to_value(Agreement::Unanimous).unwrap(),
+            serde_json::json!("unanimous")
+        );
     }
 
     #[test]
@@ -2840,6 +2958,7 @@ mod tests {
             spec,
             user_criteria,
             workdir,
+            main_worktree,
             max_rounds,
             judge,
             verifiers,
@@ -2882,6 +3001,7 @@ mod tests {
                     script_digest: 2,
                 },
             )]),
+            tails: BTreeMap::from([(key("claude/r1/e1"), "error[E0425]\n".into())]),
             assignments: BTreeMap::new(),
             outcome: Some(judge_output()),
         };
@@ -2895,6 +3015,7 @@ mod tests {
             spec,
             user_criteria,
             workdir,
+            main_worktree,
             max_rounds,
             rev: 9,
             created_at: at,
@@ -2937,21 +3058,37 @@ mod tests {
                 note: String::new(),
                 evidence: vec![key("claude/r1/e1")],
             }],
-            evidence: vec![Evidence {
-                key: key("claude/r1/e1"),
-                body: EvidenceBody::Command {
-                    cmd: "cargo test".into(),
-                    cwd: ".".into(),
-                    exit: 0,
-                    log: "logs/1.log".into(),
-                    rerun: true,
+            evidence: vec![
+                Evidence {
+                    key: key("claude/r1/e1"),
+                    body: EvidenceBody::Command {
+                        cmd: "cargo test".into(),
+                        cwd: ".".into(),
+                        exit: 0,
+                        log: "logs/1.log".into(),
+                        rerun: true,
+                    },
+                    stored: Some(stored("evidence/r1/claude/logs/1.log")),
+                    rerun: Some(Rerun::Matched {
+                        exit: 0,
+                        log: stored("evidence/r1/claude/rerun-1.log"),
+                    }),
+                    attached: None,
                 },
-                stored: Some(stored("evidence/r1/claude/logs/1.log")),
-                rerun: Some(Rerun::Matched {
-                    exit: 0,
-                    log: stored("evidence/r1/claude/rerun-1.log"),
-                }),
-            }],
+                Evidence {
+                    key: EvidenceKey::user(1),
+                    body: EvidenceBody::File {
+                        path: "tab.png".into(),
+                        caption: Some("pwd in the new tab".into()),
+                        media: Some(Media::Png),
+                        marks: Vec::new(),
+                        shows: vec!["AC-1".into()],
+                    },
+                    stored: Some(stored("evidence/user/1.png")),
+                    rerun: None,
+                    attached: Some(Attachment { round: 2, at: 12 }),
+                },
+            ],
             cross_checks: Vec::new(),
             raw_defects: Vec::new(),
             defects: vec![Defect {
@@ -3077,6 +3214,7 @@ mod tests {
             spec: None,
             user_criteria: Vec::new(),
             workdir: PathBuf::from("/repo"),
+            main_worktree: PathBuf::from("/repo"),
             max_rounds: 1,
             rev: 1,
             created_at: 1,

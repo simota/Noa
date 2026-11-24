@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::model::rules::History;
+use crate::model::rules::{Check, History};
 use crate::model::types::{
     CRITERIA_ROUND, CriteriaEdit, CrossOutcome, Defect, Evidence, EvidenceBody, EvidenceKey,
     Isolation, Outcome, Phase, Rerun, RulingKind, Session, Subject, TargetKind, short_id,
@@ -73,7 +73,9 @@ fn mark_text(t_ms: u64) -> String {
     crate::model::brief::mark_text(t_ms)
 }
 
-/// Every brief that gave up: `(round, participant, why)`.
+/// Every brief whose reply never came: `(round, participant, why)`. A
+/// re-run brief that gave up is not one: the verifier's reply stands, and
+/// each of its re-run items ends `not_run` with why (L1-5).
 pub fn failures(session: &Session) -> Vec<(u32, String, String)> {
     let mut out = Vec::new();
     if let Some(brief) = &session.criteria_brief
@@ -82,12 +84,7 @@ pub fn failures(session: &Session) -> Vec<(u32, String, String)> {
         out.push((CRITERIA_ROUND, brief.to.to_string(), why.clone()));
     }
     for round in &session.rounds {
-        for brief in round
-            .briefs
-            .iter()
-            .chain(&round.rerun_briefs)
-            .chain(&round.judge_brief)
-        {
+        for brief in round.briefs.iter().chain(&round.judge_brief) {
             if let (Some(why), None) = (&brief.receipt.failed, brief.receipt.replied) {
                 out.push((round.no, brief.to.to_string(), why.clone()));
             }
@@ -121,7 +118,8 @@ pub fn report_markdown(session: &Session, base: Option<&Path>) -> String {
 }
 
 fn write_head(out: &mut String, session: &Session) {
-    let provisional = session.verdict().is_none() && !session.closed;
+    // Until a verdict (L1-7, L1-8): also when the person ended it without.
+    let provisional = session.verdict().is_none();
     let _ = writeln!(
         out,
         "# 検証結果{}\n",
@@ -431,6 +429,18 @@ fn item_entry(item: &Evidence, indent: &str) -> String {
     out
 }
 
+/// Steps after a list entry's label: one line after a space, several as
+/// a code block inside the entry, as given (a line break may be part of
+/// a command).
+fn steps_entry(text: &str) -> String {
+    let text = text.trim();
+    if text.lines().count() > 1 {
+        crate::model::brief::fenced(text, "  ")
+    } else {
+        format!(" {text}")
+    }
+}
+
 fn rerun_label(rerun: &Rerun) -> String {
     match rerun {
         Rerun::Matched { exit, .. } => format!("一致（{exit}）"),
@@ -576,7 +586,7 @@ fn write_defects(out: &mut String, session: &Session, base: Option<&Path>) {
         let origins: Vec<String> = d.sources.iter().map(|k| k.to_string()).collect();
         let _ = writeln!(out, "- 出典: {}", origins.join(", "));
         let _ = writeln!(out, "- 判断: {}", one_line(&d.rationale));
-        let _ = writeln!(out, "- 再現手順: {}", one_line(&d.repro));
+        let _ = writeln!(out, "- 再現手順:{}", steps_entry(&d.repro));
         let evidence: Vec<&str> = d
             .sources
             .iter()
@@ -1028,8 +1038,14 @@ pub fn fix_task(
             c.priority.name(),
             c.statement
         );
-        if !c.how.trim().is_empty() {
-            let _ = writeln!(out, "- How it is checked: {}", one_line(&c.how));
+        let how = c.how.trim();
+        if how.lines().count() > 1 {
+            // A block indented past the list item's own two spaces: a line
+            // break may be part of a command.
+            let block: Vec<String> = how.lines().map(|l| format!("      {l}")).collect();
+            let _ = writeln!(out, "- How it is checked:\n\n{}\n", block.join("\n"));
+        } else if !how.is_empty() {
+            let _ = writeln!(out, "- How it is checked: {how}");
         }
         if let Some(r) = session.ruling(&c.id) {
             let _ = writeln!(
@@ -1064,9 +1080,7 @@ pub fn fix_task(
                 }
             }
         }
-        for check in session.cross_checks.iter().filter(
-            |x| matches!(&x.subject, Subject::Result { criterion, .. } if *criterion == c.id),
-        ) {
+        for Check { check, about } in History::of(session, &c.id).checks {
             let _ = writeln!(
                 out,
                 "- {} cross-checked {} (R{}): {} — {}",
@@ -1076,6 +1090,17 @@ pub fn fix_task(
                 check.outcome.name(),
                 one_line(&check.note)
             );
+            // A reproduced fail: the checker's own run backs the failure
+            // too (L1-6 rule 6).
+            if check.outcome == CrossOutcome::Reproduced
+                && about.is_some_and(|r| r.outcome == Outcome::Fail)
+            {
+                for key in &check.evidence {
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
         }
         // A defect's reproduction whose evidence backs this failure (L1-6
         // rule 6) gives the steps, also when the defect is not in scope.
@@ -1864,5 +1889,210 @@ mod tests {
         ] {
             assert!(d1.contains(line), "{line:?} in\n{d1}");
         }
+    }
+
+    #[test]
+    fn ac24_a_fail_another_verifier_reproduced_gives_the_task_its_command_and_log_tail() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply("claude", &all_pass());
+        rig.reply(
+            "codex",
+            &reply_json(
+                &[
+                    ("AC-1", "fail", &["e1"]),
+                    ("AC-2", "pass", &["e2"]),
+                    ("AC-3", "pass", &["e2"]),
+                ],
+                &[cmd("e1", 1, true), cmd("e2", 0, true)],
+                "",
+            ),
+        );
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "inconclusive", "rationale": "codex's fail is open"},
+              {"criterion": "AC-2", "ruling": "verified", "rationale": "matched", "evidence": ["claude/r1/e1"]},
+              {"criterion": "AC-3", "ruling": "verified", "rationale": "matched", "evidence": ["claude-2/r1/e1"]}],
+              "assign": {"claude": ["codex/AC-1"]}}"#,
+        );
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        // R2: claude reproduces codex's fail with a command of its own.
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &reply_json(
+                &[],
+                &[r#"{"id": "r1", "kind": "command", "cmd": "./repro-ac1.sh", "cwd": ".", "exit": 1, "log": "logs/r1.log", "rerun": false}"#
+                    .to_owned()],
+                r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "reproduced", "note": "fails here too", "evidence": ["r1"]}]"#,
+            ),
+        );
+        rig.reply("codex", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude"));
+        let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+        rig.judge(&format!(
+            r#"{{"summary": "s", "rulings": [{}, {}, {}]}}"#,
+            same("AC-1"),
+            same("AC-2"),
+            same("AC-3")
+        ));
+        assert_eq!(rig.round(), 3, "{:?}", rig.rejected("judge"));
+        let session = rig.engine.session();
+        let reproduced = testkit::key("claude/r2/r1");
+        assert!(
+            History::of(session, "AC-1").backs_failure(&reproduced),
+            "L1-6 counts it as failing evidence"
+        );
+        let tails = BTreeMap::from([(reproduced, "error: the tab opened in $HOME\n".to_owned())]);
+        let task = fix_task(session, &["AC-1".into()], &[], &tails);
+        let ac1 = &task[task.find("### AC-1").unwrap()..];
+        for line in [
+            "- claude cross-checked codex/AC-1 (R2): reproduced — fails here too\n",
+            "- Evidence claude/r2/r1: exit 1 in `.`:\n\n    ./repro-ac1.sh\n",
+            "  Stored copy: /repo/.noa/verify/ver-1/evidence/r2/claude/logs/r1.log\n",
+            "  Last 80 lines of its log:\n\n```\nerror: the tab opened in $HOME\n```\n",
+        ] {
+            assert!(ac1.contains(line), "{line:?} in\n{ac1}");
+        }
+    }
+
+    #[test]
+    fn a_verifier_whose_rerun_alone_failed_is_not_listed_as_failing_to_reply() {
+        use crate::engine::Input;
+        use crate::model::types::{BriefKind, Rerun, RerunItem, RerunRequest};
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        for part in VERIFIERS {
+            rig.reply(part, &all_pass());
+        }
+        rig.ingest();
+        rig.rerun("claude", |_, exit| Rerun::Matched { exit, log: None });
+        rig.rerun("codex", |_, exit| Rerun::Matched { exit, log: None });
+        // claude-2's re-run brief goes out, but its script never writes
+        // its first pid.
+        let part = testkit::p("claude-2");
+        let reply_dir = crate::store::verifier_reply_dir(rig.engine.session(), &part);
+        rig.feed(Input::RerunWritten {
+            round: 1,
+            part: part.clone(),
+            request: RerunRequest {
+                nonce: "1".repeat(32),
+                items: vec![RerunItem {
+                    key: testkit::key("claude-2/r1/e1"),
+                    n: 1,
+                    cmd_digest: 3,
+                }],
+                script_digest: 4,
+            },
+            script: crate::store::rerun_dir(&reply_dir, 1, &part).join("run.sh"),
+        });
+        let mut now = rig.tick();
+        for _ in 0..3 {
+            rig.feed(Input::Sent {
+                round: 1,
+                part: part.clone(),
+                kind: BriefKind::Rerun,
+                at: now,
+            });
+            now += 90_000;
+            rig.feed(Input::Tick { now });
+        }
+        let session = rig.engine.session();
+        let round = session.current_round().unwrap();
+        assert!(
+            round
+                .brief(&part, BriefKind::Rerun)
+                .unwrap()
+                .receipt
+                .failed
+                .is_some(),
+            "the re-run brief gave up"
+        );
+        assert!(
+            round
+                .brief(&part, BriefKind::Work)
+                .unwrap()
+                .receipt
+                .replied
+                .is_some(),
+            "its reply stands"
+        );
+        let report = report_markdown(session, None);
+        let gaps = gaps_section(&report);
+        assert!(
+            gaps.contains("- 再実行されなかったコマンド: `claude-2/r1/e1` — re-run did not start"),
+            "{gaps}"
+        );
+        assert!(!gaps.contains("返答できませんでした"), "{gaps}");
+    }
+
+    #[test]
+    fn ac24_steps_of_several_lines_keep_their_line_breaks() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        let mut session = rig.engine.session().clone();
+        session.criteria[0].how = "cd app\ncargo test".into();
+        let task = fix_task(&session, &["AC-1".into()], &[], &BTreeMap::new());
+        assert!(
+            task.contains("- How it is checked:\n\n      cd app\n      cargo test\n"),
+            "{task}"
+        );
+        session.criteria[0].how = "cd app && cargo test".into();
+        let task = fix_task(&session, &["AC-1".into()], &[], &BTreeMap::new());
+        assert!(
+            task.contains("- How it is checked: cd app && cargo test\n"),
+            "{task}"
+        );
+        // A defect's repro in the report.
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply("claude", &all_pass());
+        rig.reply("codex", &all_pass());
+        rig.reply(
+            "claude-2",
+            &format!(
+                r#"{}, "defects": [{{"id": "1", "claim": "The tests fail in app", "severity": "high",
+                   "category": "regression", "confidence": "high", "repro": "cd app\ncargo test", "evidence": ["e1"]}}]}}"#,
+                all_pass().trim_end_matches('}')
+            ),
+        );
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(&format!(
+            r#"{}, "defect_ops": [{{"op": "add", "id": "D1", "from": ["claude-2/1"], "claim": "The tests fail in app",
+                 "repro": "cd app\ncargo test", "severity": "high", "category": "regression",
+                 "confidence": "high", "status": "open", "rationale": "Seen once."}}]}}"#,
+            testkit::JUDGE_R1.trim_end().trim_end_matches('}')
+        ));
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        let report = report_markdown(rig.engine.session(), None);
+        assert!(
+            report.contains("- 再現手順:\n  ```\n  cd app\n  cargo test\n  ```\n"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_report_the_person_ended_before_a_verdict_stays_provisional() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.feed(crate::engine::Input::UserClose);
+        let session = rig.engine.session();
+        assert!(session.closed && session.verdict().is_none());
+        let report = report_markdown(session, None);
+        assert!(report.starts_with("# 検証結果（暫定）\n"), "{report}");
+        assert!(report.contains("判定なし（ユーザーが終了）"), "{report}");
     }
 }

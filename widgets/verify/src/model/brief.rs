@@ -373,6 +373,27 @@ fn write_worktree(out: &mut String, session: &Session, worktree: &Path, reply_di
                 "Where you run: {} — the person's own checkout, shared with the other verifiers. Do NOT edit, create or delete any tracked file, and run only commands that do not write tracked files. Re-runs are off in this mode.",
                 worktree.display()
             );
+            // Nothing made this checkout the target: a ref head names a
+            // commit the person may not have out (L1-3).
+            let sha = &session.rebuild.head_sha;
+            match &session.manifest.head_ref {
+                Some(head) => {
+                    let _ = writeln!(
+                        out,
+                        "Its HEAD must be {sha}, the commit of {head} you are verifying; the widget did not record which commit this checkout has out."
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "Its HEAD must be {sha}: the commit it had out when the target was captured, which the target is with the person's uncommitted and untracked changes."
+                    );
+                }
+            }
+            let _ = writeln!(
+                out,
+                "Before anything else, run `git rev-parse HEAD` there. If it does not print {sha}, this checkout is not the target: run nothing else, and report every criterion as blocked with a note naming the commit you saw."
+            );
         }
     }
     let _ = writeln!(

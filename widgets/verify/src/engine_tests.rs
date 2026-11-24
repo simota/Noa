@@ -376,6 +376,54 @@ fn ac11_in_shared_mode_no_rerun_script_or_brief_is_made_and_every_item_is_not_ru
 }
 
 #[test]
+fn a_shared_brief_names_the_checkout_and_the_commit_its_head_must_be() {
+    let mut rig = Rig::build(Options {
+        isolation: Isolation::Shared,
+        ..Options::default()
+    });
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    // The target is the ref feat/cwd: nothing says /repo has it out.
+    let brief = rig.brief("codex", BriefKind::Work);
+    let sha = testkit::HEAD_SHA;
+    for line in [
+        "Where you run: /repo — the person's own checkout".to_owned(),
+        format!(
+            "Its HEAD must be {sha}, the commit of feat/cwd you are verifying; the widget did not record which commit this checkout has out.\n"
+        ),
+        format!(
+            "Before anything else, run `git rev-parse HEAD` there. If it does not print {sha}, this checkout is not the target: run nothing else, and report every criterion as blocked with a note naming the commit you saw.\n"
+        ),
+    ] {
+        assert!(brief.contains(&line), "{line:?} in\n{brief}");
+    }
+    // A work-tree target: the checkout had that commit out at capture.
+    let mut session = rig.engine.session().clone();
+    session.manifest.head_ref = None;
+    session.target.head = crate::model::types::Head::Worktree;
+    let reply_dir = crate::store::verifier_reply_dir(&session, &p("codex"));
+    let brief = crate::model::brief::verifier_brief(
+        &session,
+        &p("codex"),
+        1,
+        &reply_dir,
+        &crate::store::reply_path(&reply_dir, 1, &p("codex")),
+        &session.workdir,
+    )
+    .body;
+    assert!(
+        brief.contains(&format!(
+            "Its HEAD must be {sha}: the commit it had out when the target was captured"
+        )),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("report every criterion as blocked"),
+        "{brief}"
+    );
+}
+
+#[test]
 fn a_rerun_brief_that_never_starts_ends_its_items_not_run() {
     let mut rig = Rig::new(2);
     testkit::accept_default_criteria(&mut rig);

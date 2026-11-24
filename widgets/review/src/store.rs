@@ -484,9 +484,9 @@ pub fn list_sessions(root: &Path, limit: usize) -> Vec<Listed> {
 }
 
 /// The newest `count` reviews under `root` as the folder holds them now,
-/// and how many it holds: one listing gives both. A row of `shown` whose
-/// log has not changed (same stamp) is kept, only asked again whether
-/// another window holds it; a changed or new one is read; a folder gone
+/// and how many it holds: one listing gives both. A row of `shown` read
+/// well whose log has not changed (same stamp) is kept, only asked again
+/// whether another window holds it; a changed, new or unread one is read; a folder gone
 /// from the listing is gone from the rows, and none comes twice.
 pub fn page_sessions(root: &Path, shown: &[Listed], count: usize) -> (Vec<Listed>, usize) {
     let dirs = session_dirs(root);
@@ -495,7 +495,11 @@ pub fn page_sessions(root: &Path, shown: &[Listed], count: usize) -> (Vec<Listed
         .into_iter()
         .take(count)
         .map(|dir| match shown.iter().find(|l| l.dir == dir) {
-            Some(old) if old.stamp.is_some() && old.stamp == log_stamp(&dir) => {
+            // Only a summary that was read is kept; a row that failed is
+            // tried again (a log made readable keeps its stamp).
+            Some(old)
+                if old.summary.is_ok() && old.stamp.is_some() && old.stamp == log_stamp(&dir) =>
+            {
                 let mut row = old.clone();
                 if let Ok(summary) = &mut row.summary {
                     summary.busy = is_busy(&dir);

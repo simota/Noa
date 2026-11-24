@@ -337,14 +337,23 @@ fn again_block(request: &str) -> Option<std::ops::Range<usize>> {
         })
         .collect();
     let bare = |i: usize| lines.get(i).map(|(_, l)| l.trim_end_matches('\n'));
-    for (i, (start, line)) in lines.iter().enumerate() {
-        let head = line.trim_end_matches('\n');
-        if !(head.starts_with(AGAIN_MARK) && head.ends_with('）') && head.contains(" の総合判定: "))
-            || bare(i + 1) != Some(AGAIN_ASK)
-        {
+    // A heading the widget writes: alone on its line, the fixed line under.
+    let heading = |i: usize| {
+        bare(i).is_some_and(|head| {
+            head.starts_with(AGAIN_MARK) && head.ends_with('）') && head.contains(" の総合判定: ")
+        }) && bare(i + 1) == Some(AGAIN_ASK)
+    };
+    for (i, (start, _)) in lines.iter().enumerate() {
+        if !heading(i) {
             continue;
         }
-        let Some(close) = (i + 2..lines.len()).find(|&j| bare(j) == Some(AGAIN_END)) else {
+        // Its closing line, before any next heading: a note left without
+        // one (an older form) is the person's text now, kept as it is, and
+        // a later note is matched from its own heading.
+        let Some(close) = (i + 2..lines.len())
+            .take_while(|&j| !heading(j))
+            .find(|&j| bare(j) == Some(AGAIN_END))
+        else {
             continue;
         };
         let end = close + 1;

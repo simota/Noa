@@ -61,8 +61,9 @@ pub(crate) const MIN_WINDOW: (f64, f64) = (
     600.0,
 );
 
-/// How often a stored, unfinished review on screen asks again whether
-/// another window's runner holds its log.
+/// The shortest time between two looks at a stored review on screen (its
+/// log and its lock). The look is taken when the window wakes: on input,
+/// on a redraw, and at least every `live::CLOCK_TICK` (10 s) when idle.
 const BUSY_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The rounds the "+N" buttons add.
@@ -239,6 +240,8 @@ pub struct Review {
     /// When whether a runner holds it was last asked (the view asks again
     /// every [`BUSY_RECHECK`] while the review is unfinished).
     busy_checked: Option<std::time::Instant>,
+    /// The stored log's stamp when it was last read.
+    stored_stamp: Option<store::LogStamp>,
     /// Rounds or a resume were asked for on the read-only review on
     /// screen: it stays shown until the runner's first snapshot of it
     /// arrives, then goes live.
@@ -448,6 +451,7 @@ impl Review {
             stored_dir: None,
             stored_free: false,
             busy_checked: None,
+            stored_stamp: None,
             extending: false,
             report_stale: false,
             starting: false,
@@ -620,6 +624,7 @@ impl Review {
         self.read_only = true;
         self.stored_dir = Some(dir.to_owned());
         self.stored_free = !store::is_busy(dir);
+        self.stored_stamp = store::log_stamp(dir);
         self.busy_checked = Some(std::time::Instant::now());
         self.report_stale = !matches!(self.source, Source::Demo)
             && store::report_is_stale(dir, self.session.as_deref().expect("just set"));
@@ -1127,15 +1132,17 @@ impl Review {
         }
     }
 
-    /// A stored, unfinished review on screen: asks again (at most every
-    /// [`BUSY_RECHECK`]) whether another window holds its log, so what
-    /// depends on it (再開, +N, the running note of 修正を依頼) follows.
-    fn recheck_busy(&mut self) {
+    /// A stored review on screen, when the window wakes (at most every
+    /// [`BUSY_RECHECK`]): its log read again if it changed (another window
+    /// finished it, or extended a finished one), and whether a runner holds
+    /// it asked again, so its state, 再開, +N and 修正を依頼 with its
+    /// running note follow together.
+    fn recheck_stored(&mut self) {
         let Some(dir) = self.stored_dir.clone() else {
             return;
         };
         if !self.read_only
-            || self.session.as_ref().is_none_or(|s| s.closed)
+            || self.extending
             || self
                 .busy_checked
                 .is_some_and(|at| at.elapsed() < BUSY_RECHECK)
@@ -1143,6 +1150,16 @@ impl Review {
             return;
         }
         self.busy_checked = Some(std::time::Instant::now());
+        let stamp = store::log_stamp(&dir);
+        if stamp != self.stored_stamp {
+            self.stored_stamp = stamp;
+            if let Ok(session) = store::read_session(&dir) {
+                self.report_stale = store::report_is_stale(&dir, &session);
+                self.session = Some(Arc::new(session));
+                self.drop_hidden_selection();
+                self.built = None;
+            }
+        }
         let free = !store::is_busy(&dir);
         if free != self.stored_free {
             self.stored_free = free;
@@ -1153,7 +1170,7 @@ impl Review {
     fn poll_live(&mut self, text: &mut TextStore) {
         self.poll_installed(text);
         if matches!(self.source, Source::Live(_)) {
-            self.recheck_busy();
+            self.recheck_stored();
         }
         let mut latest = None;
         let mut notices = Vec::new();

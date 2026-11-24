@@ -109,6 +109,9 @@ pub enum Update {
     },
     Link(Link),
     Notice(String),
+    /// The version of the Noa this runner just connected to (each
+    /// connection, so a reconnect to another Noa shows).
+    Version(String),
     Ended(Result<(), String>),
 }
 
@@ -496,6 +499,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     /// On each connection: takes up the panes; on the first, starts (or
     /// resumes) the review.
     fn begin(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
+        self.emit(Update::Version(conn.server_version()));
         self.sync_panes(conn)?;
         if !self.started {
             self.started = true;
@@ -1668,8 +1672,8 @@ mod tests {
             Ok(())
         }
 
-        fn sets_tab_auto_approve(&self) -> bool {
-            true
+        fn server_version(&self) -> String {
+            "0.9.13".into()
         }
 
         fn focus(&mut self, pane: u64) -> Result<(), NoaError> {
@@ -1781,6 +1785,27 @@ mod tests {
         let mut conn = fake.clone();
         assert!(runner.begin(&mut conn).is_ok());
         (runner, actions, updates)
+    }
+
+    #[test]
+    fn each_connection_reports_the_version_of_its_noa() {
+        let root = temp_root();
+        let fake = fake();
+        let (_runner, _actions, updates) = rig_on(
+            &fake,
+            new_start(
+                &root,
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+            ),
+        );
+        let versions: Vec<String> = updates
+            .try_iter()
+            .filter_map(|u| match u {
+                Update::Version(v) => Some(v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(versions, ["0.9.13"]);
     }
 
     fn rig(fake: &Fake, root: &Path) -> Runner<Fake, Fake> {

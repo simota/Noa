@@ -143,11 +143,12 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let told = Arc::clone(&wake);
+    let probed = version_tx.clone();
     std::thread::Builder::new()
         .name("review-version".into())
         .spawn(move || {
             if let Some(version) = crate::session::ipc::probe_version() {
-                let _ = version_tx.send(version);
+                let _ = probed.send(version);
                 told();
             }
         })
@@ -183,6 +184,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
                     snapshots: snapshot_tx,
                     notices: notice_tx,
                     released: released_tx,
+                    versions: version_tx,
                     wake,
                 },
             )
@@ -204,6 +206,8 @@ struct Outlets {
     snapshots: Sender<Snapshot>,
     notices: Sender<Notice>,
     released: Sender<()>,
+    /// The version of each Noa a runner or a fix request connected to.
+    versions: Sender<String>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -230,7 +234,11 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
             std::thread::Builder::new()
                 .name("review-fix".into())
                 .spawn(move || {
-                    let (Ok(text) | Err(text)) = fix::request(&mut IpcConnect, &req);
+                    let mut seen = None;
+                    let (Ok(text) | Err(text)) = fix::request(&mut IpcConnect, &req, &mut seen);
+                    if let Some(version) = seen {
+                        let _ = outlets.versions.send(version);
+                    }
                     let _ = outlets.notices.send((generation, text));
                     (outlets.wake)();
                 })
@@ -351,6 +359,7 @@ fn forward_updates(
         snapshots,
         notices,
         released,
+        versions,
         wake,
     } = outlets;
     let mut link = Link::Connecting;
@@ -394,6 +403,10 @@ fn forward_updates(
                     .is_ok()
             }
             Update::Notice(text) => notices.send((generation, text)).is_ok(),
+            Update::Version(version) => {
+                let _ = versions.send(version);
+                true
+            }
             Update::Ended(Ok(())) => break,
             Update::Ended(Err(why)) => {
                 ended.store(true, Ordering::Release);
@@ -548,6 +561,7 @@ mod tests {
                 snapshots: snapshot_tx,
                 notices: notice_tx,
                 released: released_tx,
+                versions: mpsc::channel().0,
                 wake: Arc::new(|| {}),
             },
         );
@@ -576,6 +590,7 @@ mod tests {
                 snapshots: snapshot_tx,
                 notices: notice_tx,
                 released: released_tx,
+                versions: mpsc::channel().0,
                 wake: Arc::new(|| {}),
             },
         );

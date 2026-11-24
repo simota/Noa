@@ -70,7 +70,13 @@ fn named(ids: &[String]) -> String {
 /// `Ok` and `Err` both say what happened, for a notice. Refused, with
 /// nothing written or started, for a review without a tree to fix, with
 /// none of the findings, or without a link to Noa.
-pub fn request<C: Connect>(connector: &mut C, req: &FixRequest) -> Result<String, String> {
+/// `seen` takes the version of the Noa the request reached, so the window
+/// shows what that Noa allows.
+pub fn request<C: Connect>(
+    connector: &mut C,
+    req: &FixRequest,
+    seen: &mut Option<String>,
+) -> Result<String, String> {
     let session = &*req.session;
     let workdir = store::fix_workdir(session)?.to_path_buf();
     // The log must be the folder's, its paths its own, before anything
@@ -86,9 +92,12 @@ pub fn request<C: Connect>(connector: &mut C, req: &FixRequest) -> Result<String
     let mut conn = connector
         .connect()
         .map_err(|why| format!("Noa に接続できないため、修正を依頼できません: {why}"))?;
-    // An older Noa would give the fix tab the global auto-approve setting:
-    // refused before the task is written.
-    if !conn.sets_tab_auto_approve() {
+    // Judged on this connection's own hello (the one that opens the tab):
+    // an older Noa would give the fix tab the global auto-approve setting.
+    // Refused before the task is written.
+    let version = conn.server_version();
+    *seen = Some(version.clone());
+    if !super::ipc::sets_tab_auto_approve(&version) {
         return Err(NO_TAB_AUTO_APPROVE.to_owned());
     }
     let snapshot = store::target_dir(&store::reply_dir(&req.dir, session));
@@ -138,8 +147,8 @@ mod tests {
     struct World {
         down: bool,
         refuse: bool,
-        /// A Noa before 0.9.13: `autoApprove` on a new tab is ignored.
-        old: bool,
+        /// The version the fake Noa's hello gives (0.9.13 when unset).
+        version: Option<String>,
         spawned: Vec<(Placement, PaneSpec)>,
     }
 
@@ -183,8 +192,12 @@ mod tests {
         fn focus(&mut self, _: u64) -> Result<(), NoaError> {
             Ok(())
         }
-        fn sets_tab_auto_approve(&self) -> bool {
-            !self.0.borrow().old
+        fn server_version(&self) -> String {
+            self.0
+                .borrow()
+                .version
+                .clone()
+                .unwrap_or_else(|| "0.9.13".into())
         }
     }
 
@@ -272,7 +285,7 @@ mod tests {
 
     fn request_with(noa: &FakeNoa, req: &FixRequest) -> Result<String, String> {
         let mut connector = noa.clone();
-        super::request(&mut connector, req)
+        super::request(&mut connector, req, &mut None)
     }
 
     #[test]
@@ -344,9 +357,16 @@ mod tests {
     fn a_noa_that_cannot_stop_a_tabs_auto_approval_gets_no_task_and_no_tab() {
         let workdir = temp("old-noa");
         let noa = FakeNoa::default();
-        noa.0.borrow_mut().old = true;
-        let why = request_with(&noa, &request(&workdir, &["F1"])).unwrap_err();
-        assert_eq!(why, NO_TAB_AUTO_APPROVE);
+        // The connection that would open the tab is a 0.9.12 (whatever a
+        // look at startup saw), or names its version loosely.
+        for version in ["0.9.12", "0.9.13.invalid"] {
+            noa.0.borrow_mut().version = Some(version.into());
+            let mut seen = None;
+            let why = super::request(&mut noa.clone(), &request(&workdir, &["F1"]), &mut seen)
+                .unwrap_err();
+            assert_eq!(why, NO_TAB_AUTO_APPROVE);
+            assert_eq!(seen.as_deref(), Some(version));
+        }
         assert!(noa.0.borrow().spawned.is_empty());
         assert!(!workdir.join(".noa").exists());
     }

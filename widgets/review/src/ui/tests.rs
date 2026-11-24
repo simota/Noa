@@ -2201,6 +2201,22 @@ fn refilling_replaces_only_the_note_it_wrote() {
         start::Form::from_session(&again).request,
         format!("{unclosed}\n\n{new_note}")
     );
+    // Two refills from a request with an older, unclosed note and a line
+    // of the person's after it: the line survives both.
+    again.request = format!("依頼A\n\n{unclosed}\n- 手で追加した制約");
+    let once = start::Form::from_session(&again).request;
+    assert_eq!(once, format!("{}\n\n{new_note}", again.request));
+    let mut twice = session.clone();
+    twice.request = once.clone();
+    let twice = start::Form::from_session(&twice).request;
+    assert!(twice.contains("- 手で追加した制約"), "{twice}");
+    assert_eq!(twice, once);
+    assert_eq!(
+        twice
+            .matches("（前回のレビューの要修正はここまで）")
+            .count(),
+        1
+    );
     // And with a sentence of the person's that only mentions the mark.
     again.request = "（前回のレビュー の件も見て）".into();
     assert_eq!(
@@ -2603,4 +2619,90 @@ fn a_stored_review_another_window_runs_shows_the_running_note_and_follows_its_lo
     screen.poll_live(&mut TextStore::new(Default::default()));
     assert!(!all_text(&screen).contains(note));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_past_review_that_could_not_be_read_is_tried_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = stored_many("unreadable", &crate::demo::log(), 5_000, 2);
+    let log = root.join("rev-5001").join(store::EVENTS_FILE);
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (mut screen, _link) = past_screen(&root);
+    let row = |screen: &Review| {
+        screen
+            .past
+            .iter()
+            .find(|l| l.dir.ends_with("rev-5001"))
+            .unwrap()
+            .summary
+            .is_ok()
+    };
+    assert!(!row(&screen));
+    // Readable again, same size and time: the next listing reads it.
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    screen.refresh_past();
+    assert!(row(&screen));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Writes `log` as the log in `dir`, as another window's runner would.
+fn rewrite_log(dir: &Path, log: &[Vec<review::model::reduce::Event>]) {
+    std::fs::remove_file(dir.join(store::EVENTS_FILE)).unwrap();
+    let mut store = Store::create(dir, &log[0]).unwrap();
+    store.append_all(&log[1..]).unwrap();
+}
+
+/// The stored view's next look at its log and lock (its 1 s floor passed).
+fn look_again(screen: &mut Review) {
+    screen.busy_checked = None;
+    screen.poll_live(&mut TextStore::new(Default::default()));
+}
+
+#[test]
+fn a_stored_review_finished_elsewhere_drops_resume_on_the_next_look() {
+    let root = std::env::temp_dir().join(format!("noa-review-finished-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(acts(&screen).contains(&Action::ResumeShown));
+    rewrite_log(&dir, &crate::demo::log());
+    look_again(&mut screen);
+    assert!(screen.session.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumeShown));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_stored_review_extended_elsewhere_shows_the_running_note_with_its_fix_buttons() {
+    let note = "レビュアーは作業ツリーも参照する";
+    let root = std::env::temp_dir().join(format!("noa-review-extended-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(screen.session.as_ref().unwrap().closed);
+    assert!(!all_text(&screen).contains(note));
+    // Another window took it up again (+N) and holds its log.
+    let mut extended = crate::demo::log();
+    extended.push(vec![review::model::reduce::Event::RoundsExtended {
+        max_rounds: 4,
+        at: 9_999_999,
+    }]);
+    rewrite_log(&dir, &extended);
+    let (_held, session) = Store::open(&dir).unwrap();
+    assert!(!session.closed);
+    look_again(&mut screen);
+    assert!(!screen.session.as_ref().unwrap().closed);
+    assert!(all_text(&screen).contains(note));
+    assert!(!fix_actions(&screen).is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_fix_card_follows_the_version_of_each_noa_connected() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    for (version, offered) in [("0.9.12", false), ("0.9.13", true), ("0.9.12", false)] {
+        link.versions.send(version.to_owned()).unwrap();
+        screen.poll_live(&mut TextStore::new(Default::default()));
+        assert_eq!(!fix_actions(&screen).is_empty(), offered, "{version}");
+    }
 }

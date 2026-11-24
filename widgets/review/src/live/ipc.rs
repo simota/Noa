@@ -118,10 +118,9 @@ pub trait Noa {
     /// Brings `pane` (and its window and tab) to the front with keyboard
     /// focus (`noa.focusPane`).
     fn focus(&mut self, pane: u64) -> Result<(), NoaError>;
-    /// Whether this Noa takes `autoApprove` on `noa.newTab` (0.9.13 and
-    /// later): an older one ignores it, and its new tab takes the global
-    /// `auto-approve` setting.
-    fn sets_tab_auto_approve(&self) -> bool;
+    /// The version this connection's `noa.hello` gave (`serverVersion`):
+    /// what a request needs of Noa is judged on the server that takes it.
+    fn server_version(&self) -> String;
 }
 
 /// Opens connections to Noa; the runner calls it again after a lost one.
@@ -146,10 +145,6 @@ impl Connect for IpcConnect {
 
     fn connect(&mut self) -> Result<IpcNoa, String> {
         let (url, token) = endpoint()?;
-        // An older Noa ignores `refuseShell` and would type into a shell.
-        let version = server_version(&url, &token)
-            .filter(|v| honours_refuse_shell(v))
-            .ok_or_else(|| UNSAFE_SEND.to_owned())?;
         let scopes = ScopeSet::from_strings(["read", "control", "input"]);
         let mut client = match Client::connect(&url, &token, scopes) {
             Ok(client) => client,
@@ -161,6 +156,13 @@ impl Connect for IpcConnect {
             }
             Err(other) => return Err(format!("{url} に接続できません: {other}")),
         };
+        // Judged on this connection's own hello, the one every request goes
+        // through: an older Noa ignores `refuseShell` and would type into a
+        // shell.
+        let version = client.server_version().to_owned();
+        if !honours_refuse_shell(&version) {
+            return Err(UNSAFE_SEND.to_owned());
+        }
         let granted = client.granted_scopes();
         if !granted.contains(Scope::Control) || !granted.contains(Scope::Input) {
             return Err(
@@ -199,7 +201,9 @@ fn endpoint() -> Result<(String, String), String> {
 }
 
 /// The running Noa's version (`noa.hello` only, read scope), for what the
-/// window can offer before anything connects; `None` when it cannot tell.
+/// window shows before any review connects; `None` when it cannot tell.
+/// Only for display: what a request may do is judged on its own
+/// connection ([`Noa::server_version`]).
 pub fn probe_version() -> Option<String> {
     let (url, token) = endpoint().ok()?;
     server_version(&url, &token)
@@ -248,15 +252,49 @@ pub(crate) fn no_tab_auto_approve(version: &str) -> String {
     )
 }
 
-/// Whether `version` (`noa.hello`'s `serverVersion`) is `since` or later.
-/// A version that does not parse is not.
-fn at_least(version: &str, since: (u64, u64, u64)) -> bool {
-    let core = version.split(['-', '+']).next().unwrap_or("");
-    let parts: Vec<u64> = core.split('.').map_while(|n| n.parse().ok()).collect();
-    match parts[..] {
-        [major, minor, patch] => (major, minor, patch) >= since,
-        _ => false,
+/// `version` as `MAJOR.MINOR.PATCH`, read strictly: the whole string must
+/// be three decimal numbers, optionally followed by `-<pre-release>` and
+/// `+<build>` of dot-separated `[0-9A-Za-z-]` parts (semver's shape).
+/// Anything else (`v0.9.13`, `0.9.13.1`, `0.9.13.invalid`, `0.9`) is `None`.
+fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
+    let ident = |part: &str| {
+        !part.is_empty()
+            && part
+                .split('.')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    };
+    let (rest, build) = match version.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (version, None),
+    };
+    if build.is_some_and(|b| !ident(b)) {
+        return None;
     }
+    let (core, pre) = match rest.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (rest, None),
+    };
+    if pre.is_some_and(|p| !ident(p)) {
+        return None;
+    }
+    let number = |n: &str| {
+        (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| n.parse().ok())
+            .flatten()
+    };
+    let mut parts = core.split('.');
+    let parsed = (
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+    );
+    parts.next().is_none().then_some(parsed)
+}
+
+/// Whether `version` (`noa.hello`'s `serverVersion`) is `since` or later.
+/// A version that does not parse strictly is not.
+fn at_least(version: &str, since: (u64, u64, u64)) -> bool {
+    parse_version(version).is_some_and(|v| v >= since)
 }
 
 fn honours_refuse_shell(version: &str) -> bool {
@@ -323,8 +361,8 @@ fn noa_error(err: ClientError) -> NoaError {
 }
 
 impl Noa for IpcNoa {
-    fn sets_tab_auto_approve(&self) -> bool {
-        sets_tab_auto_approve(&self.version)
+    fn server_version(&self) -> String {
+        self.version.clone()
     }
 
     fn panes(&mut self) -> Result<Vec<PaneView>, NoaError> {
@@ -457,9 +495,20 @@ mod tests {
             ("0.9.12-dev+abc", false),
             ("0.9.13", true),
             ("0.9.13-dev", true),
+            ("0.9.13-rc.1+build.5", true),
             ("0.10.0", true),
             ("1.0.0", true),
             ("nope", false),
+            // Read strictly: the whole string, not a prefix of it.
+            ("0.9.13.invalid", false),
+            ("0.9.13.1", false),
+            ("v0.9.13", false),
+            ("0.9", false),
+            ("0.9.13-", false),
+            ("0.9.13+", false),
+            ("0.9.13-a..b", false),
+            (" 0.9.13", false),
+            ("0.9.+13", false),
         ] {
             assert_eq!(sets_tab_auto_approve(version), ok, "{version}");
         }

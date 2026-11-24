@@ -2947,6 +2947,8 @@ mod tests {
         let next = "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）";
         let verdict = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届き、次のラウンドのブリーフで宛先パネルに届きます";
         let verdict_too = "追加指示は次のラウンドのブリーフで宛先パネルに届きます。宛先にリード審判がいなくても、このラウンドでこのあと出る最終講評のブリーフでリード審判にも届きます";
+        let early_close =
+            "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます";
         // The last round, being scored, its verdict brief not issued yet.
         let mut session = crate::demo::panel_session();
         let last = session.rounds.len() - 1;
@@ -2968,7 +2970,9 @@ mod tests {
         assert!(!verdict.contains("ブラインド") && !verdict_too.contains("ブラインド"));
 
         // A round before the last: the next round's briefs, until the
-        // lead's scorecard closes the competition.
+        // lead's scorecard closes the competition. Closed early, it cannot
+        // be extended: there is no next round, so whoever it is addressed
+        // to, it reaches only the lead's verdict brief.
         let mut early = session.clone();
         early.max_rounds = Some(last as RoundNo + 3);
         assert_eq!(composer::hint(&early, &ids(&["judge"])), next);
@@ -2978,8 +2982,24 @@ mod tests {
             .get_mut(&PartId::new(JUDGE_ID))
             .unwrap()
             .close = true;
-        assert_eq!(composer::hint(&early, &ids(&["judge"])), verdict);
-        assert_eq!(composer::hint(&early, &ids(&["codex"])), verdict_too);
+        let every = [
+            ids(&[]),
+            ids(&["judge"]),
+            ids(&["judge", "judge-2", "judge-3"]),
+            ids(&["judge-2"]),
+            ids(&["claude"]),
+            ids(&["claude", "judge-3"]),
+        ];
+        for to in &every {
+            assert_eq!(composer::hint(&early, to), early_close, "{to:?}");
+        }
+        // Without a round limit, the lead's close is the only end either.
+        let mut unlimited = early.clone();
+        unlimited.max_rounds = None;
+        for to in &every {
+            assert_eq!(composer::hint(&unlimited, to), early_close, "{to:?}");
+        }
+        assert!(!early_close.contains("次のラウンド"));
 
         // Before judging, and once the verdict brief is out, it is not.
         let mut competing = session.clone();

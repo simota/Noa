@@ -270,17 +270,25 @@ mod tests {
             DISCUSSION,
             COMPETITION,
             REVIEW,
+            VERIFY,
         ] {
             let dirs = dev_build_dirs(helper);
             assert_eq!(dirs.len(), 2);
             let crate_dir = format!("widgets/{}/target", helper.crate_name);
-            for dir in &dirs {
-                assert!(
-                    dir.ends_with(format!("{crate_dir}/debug"))
-                        || dir.ends_with(format!("{crate_dir}/release")),
-                    "{dir:?}"
-                );
-            }
+            // The profile this build was made in comes first.
+            let (first, second) = if cfg!(debug_assertions) {
+                ("debug", "release")
+            } else {
+                ("release", "debug")
+            };
+            assert!(
+                dirs[0].ends_with(format!("{crate_dir}/{first}")),
+                "{dirs:?}"
+            );
+            assert!(
+                dirs[1].ends_with(format!("{crate_dir}/{second}")),
+                "{dirs:?}"
+            );
             assert!(
                 dirs[0]
                     .parent()
@@ -292,27 +300,6 @@ mod tests {
                 "{dirs:?}"
             );
         }
-    }
-
-    #[test]
-    fn the_verify_dev_build_dirs_are_its_crate_target_dirs() {
-        // #TODO(agent): once widgets/verify exists (unit U1), fold VERIFY into
-        // the list above, which also checks that the crate's Cargo.toml is there.
-        let dirs = dev_build_dirs(VERIFY);
-        assert_eq!(dirs.len(), 2);
-        let (first, second) = if cfg!(debug_assertions) {
-            ("debug", "release")
-        } else {
-            ("release", "debug")
-        };
-        assert!(
-            dirs[0].ends_with(format!("widgets/verify/target/{first}")),
-            "{dirs:?}"
-        );
-        assert!(
-            dirs[1].ends_with(format!("widgets/verify/target/{second}")),
-            "{dirs:?}"
-        );
     }
 
     #[test]

@@ -939,8 +939,9 @@ impl Session {
     }
 
     /// `defect`'s id and the ids of every defect merged into it, directly
-    /// or through another merged one.
-    fn merged_ids<'a>(&'a self, defect: &'a Defect) -> BTreeSet<&'a str> {
+    /// or through another merged one: every id a cross-check counted with
+    /// it names.
+    pub(crate) fn merged_ids<'a>(&'a self, defect: &'a Defect) -> BTreeSet<&'a str> {
         let mut ids = BTreeSet::from([defect.id.as_str()]);
         loop {
             let before = ids.len();

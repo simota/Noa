@@ -20,9 +20,9 @@ use crate::model::rules;
 use crate::model::types::{
     AgentChoice, Author, Brief, BriefKind, CRITERIA_ROUND, CriteriaEdit, CriterionSource, Event,
     EvidenceBody, EvidenceKey, FileFact, Isolation, JUDGE_ID, MAX_CAPTION, MAX_CRITERIA,
-    MAX_CUSTOM_STRATEGY, MAX_MAX_ROUNDS, MAX_PANEL, MAX_STATEMENT, MIN_PANEL, Message, Millis,
-    MsgKind, PartId, Participant, Phase, Rebuild, Rerun, RerunRequest, Role, RoundKind, RoundNo,
-    Session, SessionId, SpecFile, Stored, Strategy, StrategyChoice, Target, TargetKind,
+    MAX_CUSTOM_STRATEGY, MAX_MARKS, MAX_MAX_ROUNDS, MAX_PANEL, MAX_STATEMENT, MIN_PANEL, Message,
+    Millis, MsgKind, PartId, Participant, Phase, Rebuild, Rerun, RerunRequest, Role, RoundKind,
+    RoundNo, Session, SessionId, SpecFile, Stored, Strategy, StrategyChoice, Target, TargetKind,
     TargetManifest, VerifierChoice, WorktreeState,
 };
 use crate::model::validate;
@@ -1556,7 +1556,7 @@ impl Engine {
         }
         let EvidenceBody::File {
             caption,
-            media: Some(_),
+            media: Some(media),
             marks,
             ..
         } = &body
@@ -1567,8 +1567,18 @@ impl Engine {
         if caption.is_empty() || caption.chars().count() > MAX_CAPTION {
             return rejected(format!("説明は1〜{MAX_CAPTION}文字で書いてください"));
         }
+        // The marks rules a verifier's reply is held to (L1-5a).
+        if !marks.is_empty() && !media.is_video() {
+            return rejected("マークを付けられるのは動画だけです");
+        }
+        if marks.len() > MAX_MARKS {
+            return rejected(format!("マークは{MAX_MARKS}件までです"));
+        }
         if marks.windows(2).any(|w| w[1].t_ms < w[0].t_ms) {
             return rejected("マークは時刻順に並べてください");
+        }
+        if marks.iter().any(|m| m.note.trim().is_empty()) {
+            return rejected("マークごとに何が見えるかを書いてください");
         }
         if shows.is_empty() {
             return rejected("この証跡が示す基準を選んでください");

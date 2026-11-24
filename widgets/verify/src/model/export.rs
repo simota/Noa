@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::model::rules::History;
 use crate::model::types::{
     CRITERIA_ROUND, CriteriaEdit, Defect, Evidence, EvidenceBody, EvidenceKey, Isolation, Outcome,
     Phase, Rerun, RulingKind, Session, Subject, TargetKind, short_id,
@@ -317,9 +318,12 @@ fn media_for<'a>(session: &'a Session, criterion: &str) -> Vec<&'a Evidence> {
 }
 
 /// The media shown under defect `defect`: those its raw defects and the
-/// cross-checks on it cite, stored, each once, in evidence order. A
-/// defect's evidence is its own whatever criteria a `shows` names.
+/// cross-checks on it or on a defect merged into it cite (a merge moves
+/// the raw defects, and the checks on them count with them, as in
+/// [`Session::tally`]), stored, each once, in evidence order. A defect's
+/// evidence is its own whatever criteria a `shows` names.
 fn media_for_defect<'a>(session: &'a Session, defect: &Defect) -> Vec<&'a Evidence> {
+    let ids = session.merged_ids(defect);
     let mut cited: Vec<&EvidenceKey> = defect
         .sources
         .iter()
@@ -330,7 +334,7 @@ fn media_for_defect<'a>(session: &'a Session, defect: &Defect) -> Vec<&'a Eviden
         session
             .cross_checks
             .iter()
-            .filter(|c| matches!(&c.subject, Subject::Defect { id } if *id == defect.id))
+            .filter(|c| matches!(&c.subject, Subject::Defect { id } if ids.contains(id.as_str())))
             .flat_map(|c| &c.evidence),
     );
     session
@@ -733,15 +737,17 @@ fn write_changes(out: &mut String, session: &Session) {
 fn write_gaps(out: &mut String, session: &Session) {
     let _ = writeln!(out, "{}\n", SECTIONS[6]);
     let mut gaps = false;
+    // Over every round, as the evidence standard reads a criterion (L1-6):
+    // a later blocked or not_tested result leaves an earlier pass or fail
+    // in its history. The matrix above shows only the latest.
     let untested: Vec<&str> = session
         .criteria
         .iter()
         .filter(|c| {
-            !session.verifier_ids().any(|p| {
-                session
-                    .latest_result(p, &c.id)
-                    .is_some_and(|r| matches!(r.outcome, Outcome::Pass | Outcome::Fail))
-            })
+            !History::of(session, &c.id)
+                .results
+                .iter()
+                .any(|r| matches!(r.outcome, Outcome::Pass | Outcome::Fail))
         })
         .map(|c| c.id.as_str())
         .collect();
@@ -949,10 +955,17 @@ pub fn fix_task(
             );
         }
     }
-    out.push_str(
-        "- The verifiers ran in copies of it; the stored logs below are what they saw. The work \
-         tree may have changed since.\n\n",
-    );
+    out.push_str(match session.isolation {
+        Isolation::Worktree => {
+            "- The verifiers ran in copies of it; the stored logs below are what they saw. The \
+             work tree may have changed since.\n\n"
+        }
+        Isolation::Shared => {
+            "- The verifiers all ran in this working tree itself (shared mode: told not to edit \
+             it, which nothing enforced); the stored logs below are what they saw. The work tree \
+             may have changed since.\n\n"
+        }
+    });
     out.push_str(
         "## How to work\n\n\
          - Fix only what is listed here.\n\
@@ -1366,6 +1379,160 @@ mod tests {
                 "- 再実行されなかったコマンド: `claude/r1/e1` — 再実行の前に検証が終了しました"
             ),
             "{report}"
+        );
+    }
+
+    #[test]
+    fn ac33_media_a_cross_check_on_a_merged_defect_cites_stays_under_the_defect_it_went_into() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        let with_defect = |claim: &str| {
+            format!(
+                r#"{}, "defects": [{{"id": "1", "claim": "{claim}", "severity": "high", "category": "regression",
+                   "confidence": "high", "repro": "1. kill -9 2. reopen", "evidence": ["e1"]}}]}}"#,
+                all_pass().trim_end_matches('}')
+            )
+        };
+        rig.reply("claude", &all_pass());
+        rig.reply("codex", &with_defect("The store loses the last line"));
+        rig.reply("claude-2", &with_defect("Reopening drops a line"));
+        rig.ingest();
+        rig.rerun_all_matched();
+        let add = |id: &str, from: &str| {
+            format!(
+                r#"{{"op": "add", "id": "{id}", "from": ["{from}"], "claim": "The store loses a line", "repro": "1. kill -9 2. reopen",
+                    "severity": "high", "category": "regression", "confidence": "high", "status": "open", "rationale": "Seen."}}"#
+            )
+        };
+        rig.judge(&format!(
+            r#"{}, "defect_ops": [{}, {}], "assign": {{"claude": ["D1"]}}}}"#,
+            testkit::JUDGE_R1.trim_end().trim_end_matches('}'),
+            add("D1", "claude-2/1"),
+            add("D2", "codex/1")
+        ));
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        // Only claude's cross-check on D1 cites the picture.
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &reply_json(
+                &[],
+                &[r#"{"id": "p1", "kind": "file", "path": "shots/reopen.png", "caption": "the last line is gone after reopen"}"#
+                    .to_owned()],
+                r#", "cross_checks": [{"subject": "D1", "outcome": "reproduced", "note": "lost here too", "evidence": ["p1"]}]"#,
+            ),
+        );
+        rig.reply("codex", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude"));
+        // Then D1 goes into D2.
+        let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+        rig.judge(&format!(
+            r#"{{"summary": "s", "rulings": [{}, {}, {}], "defect_ops": [{{"op": "merge", "id": "D2", "from": ["D1"]}}]}}"#,
+            same("AC-1"),
+            same("AC-2"),
+            same("AC-3")
+        ));
+        assert_eq!(rig.round(), 3, "{:?}", rig.rejected("judge"));
+        let session = rig.engine.session();
+        let d2 = session.defect("D2").unwrap();
+        assert!(session.tally(d2).supporters.contains(&testkit::p("claude")));
+        let report = report_markdown(session, None);
+        let defects = &report[report.find(SECTIONS[2]).unwrap()..report.find(SECTIONS[3]).unwrap()];
+        assert!(!defects.contains("### D1"), "{defects}");
+        let d2 = &defects[defects.find("### D2").unwrap()..];
+        assert!(
+            d2.contains(
+                "- スクショ・動画:\n  - ![the last line is gone after reopen](evidence/r2/claude/shots/reopen.png)\n"
+            ),
+            "{d2}"
+        );
+    }
+
+    #[test]
+    fn a_criterion_with_a_pass_in_an_earlier_round_is_not_listed_as_lacking_one() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        // R1: everyone passes AC-1 and AC-2; nobody tests AC-3.
+        let r1 = reply_json(
+            &[
+                ("AC-1", "pass", &["e1"]),
+                ("AC-2", "pass", &["e1"]),
+                ("AC-3", "not_tested", &[]),
+            ],
+            &[cmd("e1", 0, true)],
+            "",
+        );
+        for part in VERIFIERS {
+            rig.reply(part, &r1);
+        }
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "verified", "rationale": "matched", "evidence": ["claude/r1/e1"]},
+              {"criterion": "AC-2", "ruling": "verified", "rationale": "matched", "evidence": ["codex/r1/e1"]},
+              {"criterion": "AC-3", "ruling": "inconclusive", "rationale": "untested"}]}"#,
+        );
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        // R2: everyone's latest AC-1 result turns blocked.
+        rig.deliver();
+        for part in VERIFIERS {
+            rig.reply(
+                part,
+                r#"{"summary": "s", "results": [{"criterion": "AC-1", "result": "blocked", "note": "the display is gone"}]}"#,
+            );
+        }
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude"));
+        let report = report_markdown(rig.engine.session(), None);
+        let gaps = gaps_section(&report);
+        assert!(
+            gaps.contains("- 成功・失敗の結果がない基準: AC-3\n"),
+            "AC-1's R1 passes are in its history: {gaps}"
+        );
+        assert!(
+            gaps.contains("- AC-1 を claude が実行できませんでした（R2）: the display is gone"),
+            "{gaps}"
+        );
+    }
+
+    #[test]
+    fn ac24_the_fix_task_says_where_the_verifiers_ran() {
+        let task = |isolation| {
+            let mut rig = Rig::build(Options {
+                isolation,
+                ..Options::default()
+            });
+            testkit::accept_default_criteria(&mut rig);
+            testkit::start_round_one(&mut rig);
+            rig.deliver();
+            for part in VERIFIERS {
+                rig.reply(part, &all_pass());
+            }
+            fix_task(
+                rig.engine.session(),
+                &["AC-1".into()],
+                &[],
+                &BTreeMap::new(),
+            )
+        };
+        let copies = "- The verifiers ran in copies of it;";
+        let here = "- The verifiers all ran in this working tree itself (shared mode: told not to edit it, which nothing enforced);";
+        let worktree = task(Isolation::Worktree);
+        assert!(
+            worktree.contains(copies) && !worktree.contains(here),
+            "{worktree}"
+        );
+        let shared = task(Isolation::Shared);
+        assert!(
+            shared.contains(here) && !shared.contains(copies),
+            "{shared}"
         );
     }
 

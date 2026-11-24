@@ -766,6 +766,56 @@ fn ac31_person_attached_media_is_logged_listed_for_the_judge_and_counts_only_bes
 }
 
 #[test]
+fn ac31_person_attached_marks_are_held_to_the_verifiers_rules() {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    let mark = |t_ms: u64, note: &str| crate::model::types::Mark {
+        t_ms,
+        note: note.into(),
+    };
+    let attach = |rig: &mut Rig, n: u32, media: Media, marks: Vec<crate::model::types::Mark>| {
+        rig.try_feed(Input::AttachEvidence {
+            key: EvidenceKey::user(n),
+            body: EvidenceBody::File {
+                path: format!("clip-{n}.{}", media.extension()),
+                caption: Some("cd /tmp, ⌘T, pwd".into()),
+                media: Some(media),
+                marks,
+                shows: Vec::new(),
+            },
+            stored: Stored {
+                path: PathBuf::from(format!("evidence/user/{n}.{}", media.extension())),
+                bytes: 2048,
+                digest: 7,
+            },
+            shows: vec!["AC-1".into()],
+            at: 70,
+        })
+    };
+    let refused = |result: Result<Output, String>| result.map(|_| ()).unwrap_err();
+    assert_eq!(
+        refused(attach(&mut rig, 1, Media::Png, vec![mark(0, "the tab")])),
+        "マークを付けられるのは動画だけです"
+    );
+    let in_order = |n: u64| (0..n).map(|i| mark(i * 1000, "a moment")).collect();
+    assert_eq!(
+        refused(attach(&mut rig, 1, Media::QuickTime, in_order(21))),
+        "マークは20件までです"
+    );
+    assert_eq!(
+        refused(attach(&mut rig, 1, Media::QuickTime, vec![mark(0, " ")])),
+        "マークごとに何が見えるかを書いてください"
+    );
+    assert!(rig.engine.session().evidence.is_empty(), "nothing logged");
+    attach(&mut rig, 1, Media::QuickTime, in_order(20)).unwrap();
+    let item = rig.engine.session().evidence_item(&EvidenceKey::user(1));
+    assert!(
+        matches!(item.map(|e| &e.body), Some(EvidenceBody::File { marks, .. }) if marks.len() == 20)
+    );
+}
+
+#[test]
 fn a_rejected_reply_is_cleared_corrected_and_fails_after_the_retries() {
     let mut rig = Rig::new(2);
     testkit::accept_default_criteria(&mut rig);

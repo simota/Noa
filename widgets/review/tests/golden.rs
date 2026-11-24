@@ -57,6 +57,7 @@ fn ac21_the_report_matches_the_golden_file() {
 #[test]
 fn ac8_blind_briefs_name_no_peer() {
     let (briefs, _) = scenario::run();
+    let mut checked = Vec::new();
     for section in briefs
         .split("===== ")
         .filter(|s| s.starts_with("R1 brief to "))
@@ -65,6 +66,7 @@ fn ac8_blind_briefs_name_no_peer() {
         if to == "lead" {
             continue;
         }
+        checked.push(to);
         for peer in ["claude", "codex", "agy"].iter().filter(|p| **p != to) {
             assert!(
                 !section.contains(&format!("{peer}/"))
@@ -81,6 +83,38 @@ fn ac8_blind_briefs_name_no_peer() {
             "R1 brief to {to} shows findings"
         );
     }
+    assert_eq!(
+        checked,
+        ["claude", "codex", "agy"],
+        "every blind brief was checked"
+    );
+}
+
+#[test]
+fn ac21_a_reply_breaking_several_rules_gets_one_line_for_each() {
+    let (briefs, _) = scenario::run();
+    let correction = briefs
+        .split("===== ")
+        .find(|s| s.starts_with("R2 correction to codex"))
+        .expect("codex's round-2 reply was turned down");
+    assert!(
+        correction.contains("stances[0].note is required for refine"),
+        "{correction}"
+    );
+    assert!(
+        correction.contains("stances[1].finding \"F9\" is not a finding"),
+        "{correction}"
+    );
+}
+
+#[test]
+fn ac13_a_finding_merged_into_another_shows_in_the_report() {
+    let (_, report) = scenario::run();
+    assert!(report.contains("F4"), "{report}");
+    assert!(
+        report.contains("→ F3"),
+        "the merge names where F4 went: {report}"
+    );
 }
 
 #[test]

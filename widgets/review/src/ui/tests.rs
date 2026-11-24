@@ -380,3 +380,63 @@ fn the_matrix_always_has_its_other_row_and_greys_every_lens_nobody_holds() {
     let tags = shown.iter().filter(|l| *l == "担当なし").count();
     assert_eq!(tags, 6 - 3, "every unheld lens is tagged: {shown:#?}");
 }
+
+#[test]
+fn ac13_the_board_hides_a_merged_finding_until_merged_is_asked_for() {
+    let mut session = crate::demo::held();
+    let id = session.findings[1].id.clone();
+    let into = session.findings[0].id.clone();
+    session.findings[1].status = FindingStatus::Merged;
+    session.findings[1].merged_into = Some(into);
+    let (mut screen, _link) = live_with(session);
+    let shown = |screen: &Review| {
+        acts(screen)
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::SelectFinding(Some(f)) => Some(f),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(&screen), 3);
+    assert!(!shown(&screen).contains(&id));
+    act(&mut screen, Action::ToggleStatus(FindingStatus::Merged));
+    assert!(shown(&screen).contains(&id));
+}
+
+/// Every file under `dir` with its bytes and modification time.
+fn files_with_times(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_owned()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).unwrap().filter_map(Result::ok) {
+            let meta = entry.metadata().unwrap();
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                out.push((entry.path(), bytes, meta.modified().unwrap()));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+#[test]
+fn ac23_viewing_a_stored_review_changes_no_file_in_its_folder() {
+    let root = std::env::temp_dir().join(format!("noa-review-ui-ro-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    // A stale report and a reply left by an agent are kept as they are.
+    std::fs::write(store::report_path(&dir), "old report").unwrap();
+    std::fs::create_dir_all(dir.join("r3")).unwrap();
+    std::fs::write(dir.join("r3/claude.json"), "{}").unwrap();
+    let before = files_with_times(&dir);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = Review::stored(&dir).unwrap();
+    let (channel, _link) = Channel::fake();
+    let screen = Review::live_stored(channel, &dir);
+    assert!(acts(&screen).contains(&Action::RegenerateReport));
+    assert_eq!(files_with_times(&dir), before);
+    let _ = std::fs::remove_dir_all(root);
+}

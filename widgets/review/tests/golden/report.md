@@ -45,7 +45,7 @@ F1 loses data; F3 guards the fix.
 
 - テスト · 合意 · 支持 3（全員一致）· 確信度 高
 - 場所: `src/store.rs:50`
-- 出典: agy/x2
+- 出典: agy/x2, agy/x3
 - 判断: Needed for F1's fix.
 - 根拠: tests have no torn case.
 
@@ -77,6 +77,7 @@ F1 loses data; F3 guards the fix.
 
 ## 却下・取り下げ・統合
 
+- **F4** [統合] The open path has no regression test → F3
 - claude/2（R1 退け）The lock module could be private — A style preference, not a defect.
 
 ## カバレッジの欠落
@@ -89,4 +90,4 @@ F1 loses data; F3 guards the fix.
 
 - R1（独立レビュー）: Two findings; the design nit is dismissed.
 - R2（相互検証）: F1 agreed; F2 disputed; F3 added.
-- R3（相互検証）: Settled.
+- R3（相互検証）: Settled; F4 is the test F3 asks for.

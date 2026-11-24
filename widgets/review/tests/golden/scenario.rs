@@ -1,8 +1,12 @@
 //! A fixed three-round review driven through the public engine: a blind
 //! round with three reviewers and one rejected reply; a consolidation with
 //! add, merge and dismiss; a cross-examination round with a dispute, a
-//! refine, a withdraw and a new finding; and a final round ending in a
-//! verdict with must-fix findings.
+//! refine, a withdraw, two new findings and a reply turned down for its
+//! rules; and a final round that merges one finding into another and ends
+//! in a verdict with must-fix findings.
+//!
+//! After every lead output each raw finding of a consolidated round is in
+//! exactly one finding or dismissal (AC-12).
 //!
 //! Every brief the engine issues, every correction it sends, and the report
 //! at the end are collected in order.
@@ -127,8 +131,33 @@ impl Run {
     }
 
     fn lead(&mut self, content: &str) {
+        let no = self.round();
         self.sent("lead");
         self.reply("lead", content);
+        let s = self.engine.session();
+        let round = s.round(no).unwrap();
+        assert!(
+            round.outcome.is_some(),
+            "the R{no} lead output was turned down: {:?}",
+            round
+                .lead_brief
+                .as_ref()
+                .and_then(|b| b.receipt.rejected.clone())
+        );
+        // AC-12: exactly one place for every raw finding consolidated so far.
+        for raw in s
+            .raw
+            .iter()
+            .filter(|r| s.round(r.round).is_some_and(|r| r.outcome.is_some()))
+        {
+            let places = s
+                .findings
+                .iter()
+                .filter(|f| f.sources.contains(&raw.key))
+                .count()
+                + s.dismissed.iter().filter(|d| d.raw == raw.key).count();
+            assert_eq!(places, 1, "{} is in {places} places", raw.key);
+        }
     }
 }
 
@@ -180,9 +209,18 @@ const R2_CODEX: &str = r#"{"summary": "Withdrawing my part of F1; F2 needs a not
 const R2_AGY: &str = r#"{"summary": "F1 holds; one more.",
  "findings": [
   {"id": "x2", "location": {"path": "src/store.rs", "line": 50}, "severity": "low", "category": "tests", "confidence": "high",
-   "claim": "No test covers the torn line", "evidence": "tests have no torn case."}
+   "claim": "No test covers the torn line", "evidence": "tests have no torn case."},
+  {"id": "x3", "location": {"path": "src/store.rs", "line": 52}, "severity": "low", "category": "tests", "confidence": "medium",
+   "claim": "The open path has no regression test", "evidence": "open() is untested."}
  ],
  "stances": [{"finding": "F1", "stance": "confirm"}]}"#;
+
+/// codex's first round-2 reply: valid JSON that breaks two stance rules.
+const R2_CODEX_BAD: &str = r#"{"summary": "First try.",
+ "stances": [
+  {"finding": "F2", "stance": "refine"},
+  {"finding": "F9", "stance": "confirm"}
+ ]}"#;
 
 const R2_LEAD: &str = r#"{"summary": "F1 agreed; F2 disputed; F3 added.",
  "ops": [
@@ -190,20 +228,26 @@ const R2_LEAD: &str = r#"{"summary": "F1 agreed; F2 disputed; F3 added.",
   {"op": "update", "id": "F2", "status": "disputed", "rationale": "claude and agy disagree on the export."},
   {"op": "add", "id": "F3", "from": ["agy/x2"], "claim": "No test covers the torn line",
    "location": {"path": "src/store.rs", "line": 50}, "severity": "low", "category": "tests",
-   "confidence": "high", "status": "open", "rationale": "Needed for F1's fix."}
+   "confidence": "high", "status": "open", "rationale": "Needed for F1's fix."},
+  {"op": "add", "id": "F4", "from": ["agy/x3"], "claim": "The open path has no regression test",
+   "location": {"path": "src/store.rs", "line": 52}, "severity": "low", "category": "tests",
+   "confidence": "medium", "status": "open", "rationale": "Worth checking separately."}
  ],
  "questions": {"claude": "Does F3 need more than one test?"}}"#;
 
 const R3_CLAUDE: &str = r#"{"summary": "One test is enough.",
- "stances": [{"finding": "F3", "stance": "confirm"}]}"#;
+ "stances": [{"finding": "F3", "stance": "confirm"}, {"finding": "F4", "stance": "confirm", "note": "Same test as F3."}]}"#;
 
 const R3_CODEX: &str = r#"{"summary": "Agree.",
- "stances": [{"finding": "F3", "stance": "confirm"}]}"#;
+ "stances": [{"finding": "F3", "stance": "confirm"}, {"finding": "F4", "stance": "confirm"}]}"#;
 
 const R3_AGY: &str = r#"{"summary": "Nothing more."}"#;
 
-const R3_LEAD: &str = r#"{"summary": "Settled.",
- "ops": [{"op": "update", "id": "F3", "status": "agreed"}],
+const R3_LEAD: &str = r#"{"summary": "Settled; F4 is the test F3 asks for.",
+ "ops": [
+  {"op": "merge", "id": "F3", "from": ["F4"]},
+  {"op": "update", "id": "F3", "status": "agreed"}
+ ],
  "verdict": {"decision": "request_changes", "rationale": "F1 loses data; F3 guards the fix.", "must_fix": ["F1", "F3"]}}"#;
 
 /// Runs the scenario and returns every brief and correction sent, then
@@ -277,6 +321,8 @@ pub fn run() -> (String, String) {
     // Round 2: cross-examination.
     run.deliver();
     run.reply("claude", R2_CLAUDE);
+    run.reply("codex", R2_CODEX_BAD);
+    run.sent("codex");
     run.reply("codex", R2_CODEX);
     run.reply("agy", R2_AGY);
     run.lead(R2_LEAD);
@@ -290,13 +336,6 @@ pub fn run() -> (String, String) {
 
     let session = run.engine.session();
     assert!(session.closed, "the scenario ends in a verdict");
-    // AC-12: every raw finding is placed or dismissed.
-    for raw in &session.raw {
-        assert!(
-            session.placement(&raw.key).is_some(),
-            "{} unplaced",
-            raw.key
-        );
-    }
+    assert!(session.unplaced().is_empty());
     (run.out, export::report_markdown(session))
 }

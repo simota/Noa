@@ -548,6 +548,13 @@ Rules:
 - claim: one line, at most 300 characters; evidence: required; fix: optional
 - stance: confirm, dispute, refine or unsure on findings you did not raise; refine or withdraw on your own; note required for dispute and refine; severity is an optional proposal
 - coverage (optional): what you reviewed and what you skipped, as files, directories ending in '/', or "*"
+===== R2 correction to codex =====
+Your review JSON could not be used:
+- stances[0].note is required for refine
+- stances[1].finding "F9" is not a finding; findings: F1, F2
+
+Fix it and write the whole file again at:
+/golden/reviews/rev-golden/r2/codex.json
 ===== R2 brief to lead =====
 ## 1. Review request and round
 You are: the lead (you consolidate; you write no findings of your own)
@@ -589,6 +596,10 @@ Left out of the snapshot (not reviewable here):
 ### agy/x2 · low · tests · high · src/store.rs:50
 Claim: No test covers the torn line
 Evidence: tests have no torn case.
+
+### agy/x3 · low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Evidence: open() is untested.
 
 ## 5. Findings so far
 ### F1 [open] high · correctness · high · src/store.rs:44-48
@@ -716,6 +727,14 @@ Sources:
   Evidence: tests have no torn case.
 Stances: (none yet)
 
+### F4 [open] low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Lead's rationale: Worth checking separately.
+Sources:
+- agy/x3 (R2, low, medium): The open path has no regression test
+  Evidence: open() is untested.
+Stances: (none yet)
+
 
 ## 5. The lead's summary and your question
 Lead's summary of R2:
@@ -734,7 +753,7 @@ Rules:
 (none)
 
 ## 7. How to reply
-Stances required on: F3
+Stances required on: F3, F4
 Write ONLY this JSON to the file:
 /golden/reviews/rev-golden/r3/claude.json
 Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
@@ -820,6 +839,14 @@ Sources:
   Evidence: tests have no torn case.
 Stances: (none yet)
 
+### F4 [open] low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Lead's rationale: Worth checking separately.
+Sources:
+- agy/x3 (R2, low, medium): The open path has no regression test
+  Evidence: open() is untested.
+Stances: (none yet)
+
 
 ## 5. The lead's summary and your question
 Lead's summary of R2:
@@ -838,7 +865,7 @@ Rules:
 - [m1 R1] Look at the lock's error paths too.
 
 ## 7. How to reply
-Stances required on: F3
+Stances required on: F3, F4
 Write ONLY this JSON to the file:
 /golden/reviews/rev-golden/r3/codex.json
 Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
@@ -922,6 +949,14 @@ Lead's rationale: Needed for F1's fix.
 Sources:
 - agy/x2 (R2, low, high): No test covers the torn line
   Evidence: tests have no torn case.
+Stances: (none yet)
+
+### F4 [open] low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Lead's rationale: Worth checking separately.
+Sources:
+- agy/x3 (R2, low, medium): The open path has no regression test
+  Evidence: open() is untested.
 Stances: (none yet)
 
 
@@ -1038,6 +1073,16 @@ Stances:
 - claude R3: confirm
 - codex R3: confirm
 
+### F4 [open] low · tests · medium · src/store.rs:52
+Claim: The open path has no regression test
+Lead's rationale: Worth checking separately.
+Sources:
+- agy/x3 (R2, low, medium): The open path has no regression test
+  Evidence: open() is untested.
+Stances:
+- claude R3: confirm — Same test as F3.
+- codex R3: confirm
+
 
 ## 6. User interventions
 - [m1 R1 to codex] Look at the lock's error paths too.
@@ -1051,7 +1096,7 @@ Write ONLY this JSON to the file:
 Write the whole file in one go when you are done. Do not answer in the terminal.
 
 { "summary": "what this round found and what is still in dispute",
-  "ops": [{"op": "add", "id": "F4", "from": ["claude/1", "codex/2"], "claim": "one line",
+  "ops": [{"op": "add", "id": "F5", "from": ["claude/1", "codex/2"], "claim": "one line",
            "location": {"path": "src/a.rs", "line": 10}, "severity": "high", "category": "correctness",
            "confidence": "high", "status": "open", "rationale": "…", "fix": "…"},
           {"op": "merge", "id": "F1", "from": ["agy/4"]},
@@ -1063,7 +1108,7 @@ Write the whole file in one go when you are done. Do not answer in the terminal.
 
 Rules:
 - every raw finding in section 4 goes into exactly one add or merge "from", or one dismiss with a reason; none may be left out
-- new finding ids: 1-16 letters, digits, '-' or '_', not taken; the next free one is F4
+- new finding ids: 1-16 letters, digits, '-' or '_', not taken; the next free one is F5
 - merge "from" may also name other live findings, which become merged into "id"
 - update changes at least one of claim, location, severity, category, confidence, status, rationale, fix
 - status: open, agreed, disputed or rejected (rejected needs a rationale)

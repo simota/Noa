@@ -721,3 +721,25 @@ fn ac12_after_every_lead_output_each_raw_finding_is_in_exactly_one_place() {
     assert!(rig.engine.session().round(2).unwrap().outcome.is_some());
     check(&rig);
 }
+
+#[test]
+fn ac20_a_log_whose_participants_or_lead_reply_path_were_edited_is_not_resumed() {
+    let mut rig = Rig::new(3);
+    through_round_one(&mut rig);
+    let dir = Path::new("/data/reviews/rev-1");
+    let session = rig.engine.session().clone();
+
+    let mut renamed = session.clone();
+    renamed.reviewers[1].id = p("intruder");
+    let err = check_resumable(&renamed, dir).unwrap_err();
+    assert!(err.contains("参加者 ID がパネルと一致しません"), "{err}");
+
+    let mut moved = session.clone();
+    moved.rounds[0].lead_brief.as_mut().unwrap().reply_path = PathBuf::from("/etc/passwd");
+    let err = check_resumable(&moved, dir).unwrap_err();
+    assert!(err.contains("R1 のリードの返答パス"), "{err}");
+
+    // Untouched, it gets past both checks (to the snapshot, absent here).
+    let err = check_resumable(&session, dir).unwrap_err();
+    assert!(err.contains("スナップショット"), "{err}");
+}

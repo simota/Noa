@@ -57,11 +57,9 @@ impl Roots {
     ) -> Roots {
         let claude = claude_config.unwrap_or_else(|| home.join(".claude"));
         let codex = codex_home.unwrap_or_else(|| home.join(".codex"));
-        let mut codex_sessions = vec![codex.join("sessions")];
-        let archived = codex.join("archived_sessions");
-        if archived.is_dir() {
-            codex_sessions.push(archived);
-        }
+        // Both roots always: a directory created after start is found by the
+        // next rescan, and enumeration skips one that is missing.
+        let codex_sessions = vec![codex.join("sessions"), codex.join("archived_sessions")];
         Roots {
             claude_projects: Some(claude.join("projects")),
             claude_credentials: Some(claude.join(".credentials.json")),
@@ -93,7 +91,6 @@ mod tests {
     fn roots_under_home_follow_env_overrides() {
         let home = tempfile::tempdir().unwrap();
         let data = Path::new("/data");
-        std::fs::create_dir_all(home.path().join(".codex/archived_sessions")).unwrap();
         let r = Roots::with_overrides(home.path(), data, None, None);
         assert_eq!(
             r.claude_projects,
@@ -128,7 +125,13 @@ mod tests {
             o.claude_credentials,
             Some(PathBuf::from("/cfg/claude/.credentials.json"))
         );
-        assert_eq!(o.codex_sessions, vec![PathBuf::from("/cfg/codex/sessions")]);
+        assert_eq!(
+            o.codex_sessions,
+            vec![
+                PathBuf::from("/cfg/codex/sessions"),
+                PathBuf::from("/cfg/codex/archived_sessions")
+            ]
+        );
         assert_eq!(o.agy_dir, r.agy_dir);
         let own = r.own_dir.unwrap();
         assert_eq!(index_path(&own), own.join("index-v1.json"));

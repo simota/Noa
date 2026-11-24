@@ -6,7 +6,9 @@
 //! `Origin::Live`) and only when 5 min have passed since that window's last
 //! sample or its used % moved by at least one point. At open, samples older
 //! than 400 days are dropped, rewriting the file (temp file + rename) when more
-//! than 10 % of it is old.
+//! than 10 % of it is old. The read, prune and rename at open and each
+//! append hold an exclusive lock on `limits.jsonl.lock`, so a sample another
+//! window appends is not lost under the rename.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
@@ -37,6 +39,7 @@ impl History {
 
     /// `open` with the clock given (for the 400-day cut-off).
     pub fn open_at(path: PathBuf, now: Unix) -> History {
+        let guard = lock(&path);
         let text = std::fs::read(&path).unwrap_or_default();
         let mut all: Vec<LimitSample> = text
             .split(|b| *b == b'\n')
@@ -47,11 +50,12 @@ impl History {
         all.retain(|s| s.ts >= cutoff);
         let old = lines - all.len();
         all.sort_by_key(|s| s.ts);
-        if old * 10 > lines {
+        if old * 10 > lines && guard.is_ok() {
             // Best effort: a failed rewrite leaves the old file, read again
             // (and pruned in memory) next time.
             let _ = rewrite(&path, &all);
         }
+        drop(guard);
         let mut last = HashMap::new();
         for s in &all {
             last.insert((s.agent, s.window_id.clone()), (s.ts, s.used_percent));
@@ -101,9 +105,7 @@ impl History {
         if due.is_empty() {
             return Ok(());
         }
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        let _guard = lock(&self.path)?;
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
@@ -127,6 +129,21 @@ impl History {
         let start = self.samples.partition_point(|s| s.ts < since);
         &self.samples[start..]
     }
+}
+
+/// Exclusive lock on `<history>.lock`, held until the file is dropped. A
+/// separate file, because the rename at open replaces the history itself.
+fn lock(path: &std::path::Path) -> io::Result<std::fs::File> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("jsonl.lock"))?;
+    f.lock()?;
+    Ok(f)
 }
 
 fn rewrite(path: &std::path::Path, samples: &[LimitSample]) -> io::Result<()> {
@@ -337,11 +354,13 @@ mod tests {
         let kept = file_lines(&path);
         assert_eq!(kept.len(), 10);
         assert!(kept.iter().all(|s| s.ts >= T0 - RETENTION_SECS));
-        let names: Vec<_> = std::fs::read_dir(dir.path())
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(names, vec![std::ffi::OsString::from("limits.jsonl")]);
+        names.sort();
+        // No temp file left; only the history and its lock file.
+        assert_eq!(names, ["limits.jsonl", "limits.jsonl.lock"]);
     }
 
     #[test]

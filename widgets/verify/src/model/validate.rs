@@ -368,14 +368,33 @@ pub fn parse_criteria(text: &str, session: &Session) -> Result<CriteriaOutput, V
             ));
         }
     }
-    let mut missing_user = Vec::new();
+    // Each line the person gave is one criterion: a line given twice is two
+    // criteria with the same statement (AC-5).
+    let mut given: Vec<(&str, usize)> = Vec::new();
     for line in session.user_criteria.iter().map(|l| l.trim()) {
-        match user_seen.get(line).copied().unwrap_or(0) {
-            0 => missing_user.push(format!("{line:?}")),
-            1 => {}
-            k => problems.push(format!(
-                "the person's line {line:?} appears {k} times; give it exactly once"
-            )),
+        match given.iter_mut().find(|(l, _)| *l == line) {
+            Some((_, k)) => *k += 1,
+            None => given.push((line, 1)),
+        }
+    }
+    let mut missing_user = Vec::new();
+    for (line, want) in given {
+        let seen = user_seen.get(line).copied().unwrap_or(0);
+        if seen < want {
+            missing_user.push(if want == 1 {
+                format!("{line:?}")
+            } else {
+                format!("{line:?} (given {want} times, {seen} here)")
+            });
+        } else if seen > want {
+            let once = if want == 1 {
+                "once".to_owned()
+            } else {
+                format!("{want} times, as the person gave it")
+            };
+            problems.push(format!(
+                "the person's line {line:?} appears {seen} times; give it exactly {once}"
+            ));
         }
     }
     if !missing_user.is_empty() {
@@ -1692,6 +1711,10 @@ pub fn parse_judge(
                         ));
                     } else if session.criterion(&criterion).is_none() {
                         problems.push(format!("{at}: {criterion} is not a criterion"));
+                    } else if session.result_as_of(&part, &criterion, round).is_none() {
+                        problems.push(format!(
+                            "{at}: {part} has no result on {criterion} to reproduce or refute"
+                        ));
                     } else {
                         let subject = Subject::Result { part, criterion };
                         if !mine.contains(&subject) {

@@ -20,9 +20,10 @@
 
 **条件付き合格**
 
-Every must criterion holds; the nested-link defect remains.
+Every must criterion holds; the slow cold start (should) and the nested-link defect remain.
 
 止めているもの:
+- **AC-3** Opening a tab stays under 50 ms
 - **D1** A symlinked cwd is resolved to its target's parent
 
 ## 受け入れ基準
@@ -31,7 +32,7 @@ Every must criterion holds; the nested-link defect remains.
 |---|---|---|---|---|---|---|
 | AC-1 | 必須 | New tabs open in the focused pane's cwd | 検証済 | ✓↻ | ✗↻ | ✓↻ |
 | AC-2 | 必須 | A cwd that no longer exists falls back to $HOME | 検証済 | ✓↻ | ✓≠ | ✓↻ |
-| AC-3 | 推奨 | Opening a tab stays under 50 ms | 検証済 | ✓ | ⊘ | ✓ |
+| AC-3 | 推奨 | Opening a tab stays under 50 ms | 不合格 | ✓ | ⊘ | ✗ |
 | AC-5 | 推奨 | Quitting keeps every tab's cwd for the next launch | 対象外 | – | ✓≠ | ⊘ |
 
 ### AC-1 New tabs open in the focused pane's cwd
@@ -59,12 +60,11 @@ Every must criterion holds; the nested-link defect remains.
 
 ### AC-3 Opening a tab stays under 50 ms
 
-- 判定: 検証済（R2）— Two benchmarks under the limit.
-  - `claude/r1/e3` コマンド `for i in $(seq 20); do` …（bench） · 終了コード 0 · digest `233e39392ce9da75` · 1029 バイト · `evidence/r1/claude/logs/3.log`
-  - `agy/r1/e2` コマンド `./bench open-tab --long-path`（bench） · 終了コード 0 · 保存なし
+- 判定: 不合格（R2）— agy's cold-start benchmark takes 72 ms, over the limit.
+  - `agy/r2/e1` コマンド `./bench open-tab --cold`（bench） · 終了コード 1 · digest `e1baf61110e31231` · 1026 バイト · `evidence/r2/agy/logs/1.log`
 - claude（R1）: 成功 — 31 ms median.
 - codex（R1）: 実行不能 — No display in the sandbox.
-- agy（R1）: 成功
+- agy（R2）: 失敗 — A cold start takes 72 ms.
 
 ### AC-5 Quitting keeps every tab's cwd for the next launch
 
@@ -92,6 +92,8 @@ Every must criterion holds; the nested-link defect remains.
 
 ## 証跡一覧
 
+再実行は各検証者自身のペインで、その検証者のエージェントがウィジェットの書いたスクリプトを起動して行いました。同じ環境で同じ終了コードが出るかの確認で、別の検証者による独立した追試ではありません（追試は「## 追試」）。
+
 - `codex/r1/e3` コマンド `cargo test -p app cwd_gone`（.） · 終了コード 0 · 再実行 不一致（1） · digest `e789da942a51bc14` · 1028 バイト · `evidence/r1/codex/logs/3.log`
   - 再実行のログ: digest `40944dff7b077ac1` · 1029 バイト · `evidence/r1/codex.rerun/2.log`
 - `claude/r1/e1` コマンド `cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 一致（0） · digest `3145b15b544f640b` · 1029 バイト · `evidence/r1/claude/logs/1.log`
@@ -109,6 +111,7 @@ Every must criterion holds; the nested-link defect remains.
 - `claude/r2/e1` コマンド `cargo test -p app cwd_symlink -- --exact`（.） · 終了コード 0 · 再実行 一致（0） · digest `b5c829dabcf4f722` · 1029 バイト · `evidence/r2/claude/logs/1.log`
   - 再実行のログ: digest `f0c6d72cc0fc172c` · 1030 バイト · `evidence/r2/claude.rerun/1.log`
 - `claude/r2/e2` コマンド `./scripts/nested-link.sh`（.） · 終了コード 1 · digest `034760f3b5757f7f` · 1029 バイト · `evidence/r2/claude/logs/2.log`
+- `agy/r2/e1` コマンド `./bench open-tab --cold`（bench） · 終了コード 1 · digest `e1baf61110e31231` · 1026 バイト · `evidence/r2/agy/logs/1.log`
 
 ## 基準の変更
 
@@ -126,5 +129,5 @@ Every must criterion holds; the nested-link defect remains.
 
 ## ラウンド記録
 
-- R1（独立検証）: AC-1 fails for a symlinked cwd; AC-2 and AC-3 hold; AC-5 is untested.
-- R2（追試）: codex's AC-1 failure did not reproduce; the nested-link defect did. AC-5 does not apply to this change.
+- R1（独立検証）: AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; AC-5 is untested.
+- R2（追試）: codex's AC-1 failure did not reproduce; the nested-link defect did; a cold start breaks AC-3. AC-5 does not apply to this change.

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use verify::model::export::{self, SECTIONS};
-use verify::model::types::EvidenceKey;
+use verify::model::types::{EvidenceKey, RulingKind};
 
 fn assert_same(what: &str, got: &str, file: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -174,7 +174,12 @@ fn ac20_the_report_has_every_section_differed_reruns_first_and_the_criteria_chan
     assert!(section(&report, SECTIONS[0]).starts_with("**条件付き合格**"));
     let evidence = section(&report, SECTIONS[4]);
     assert!(
-        evidence.starts_with("- `codex/r1/e3` コマンド `cargo test -p app cwd_gone`"),
+        evidence.starts_with("再実行は各検証者自身のペインで、その検証者のエージェントが"),
+        "where the re-runs ran is said first: {evidence}"
+    );
+    let first = evidence.lines().find(|l| l.starts_with("- ")).unwrap();
+    assert!(
+        first.starts_with("- `codex/r1/e3` コマンド `cargo test -p app cwd_gone`"),
         "{evidence}"
     );
     let changes = section(&report, SECTIONS[5]);
@@ -236,30 +241,47 @@ fn ac33_the_report_embeds_images_and_links_videos_with_captions_and_marks() {
 #[test]
 fn ac24_the_fix_task_lists_failed_criteria_with_their_log_tails_and_the_defects_repro() {
     let (_, session) = scenario::run();
+    // What 修正を依頼 offers: the criteria whose final ruling is failed.
+    let failed: Vec<String> = session
+        .criteria
+        .iter()
+        .filter(|c| session.ruling(&c.id).map(|r| r.kind) == Some(RulingKind::Failed))
+        .map(|c| c.id.clone())
+        .collect();
+    assert_eq!(failed, ["AC-3"], "the scenario ends with AC-3 failed");
     let tail: String = (1..=80).map(|n| format!("line {n}\n")).collect();
-    let tails = BTreeMap::from([(EvidenceKey::new("codex/r1/e1"), tail)]);
-    let task = export::fix_task(&session, &["AC-1".into()], &["D1".into()], &tails);
+    let tails = BTreeMap::from([(EvidenceKey::new("agy/r2/e1"), tail)]);
+    let task = export::fix_task(&session, &failed, &["D1".into()], &tails);
     assert!(
         task.starts_with("# Fix request from verification ver-golden\n"),
         "{task}"
     );
     assert!(
-        task.contains("### AC-1 [must] New tabs open in the focused pane's cwd"),
+        task.contains("### AC-3 [should] Opening a tab stays under 50 ms"),
         "{task}"
     );
     assert!(
-        task.contains("- codex (R1) reported fail: With a symlinked cwd the tab opens in $HOME."),
+        task.contains(
+            "- Judge (R2): failed — agy's cold-start benchmark takes 72 ms, over the limit."
+        ),
         "{task}"
     );
     assert!(
-        task.contains("cargo test -p app cwd_symlink -- --exact"),
+        task.contains("- agy (R2) reported fail: A cold start takes 72 ms."),
         "{task}"
     );
+    assert!(task.contains("./bench open-tab --cold"), "{task}");
     assert!(
         task.contains("Last 80 lines of its log:\n\n```\nline 1\n"),
         "{task}"
     );
     assert!(task.contains("line 80\n```"), "{task}");
+    assert!(
+        task.contains(
+            "Stored copy: /golden/repo/.noa/verify/ver-golden/evidence/r2/agy/logs/1.log"
+        ),
+        "{task}"
+    );
     assert!(
         task.contains("### D1 [high] A symlinked cwd is resolved to its target's parent"),
         "{task}"
@@ -273,6 +295,28 @@ fn ac24_the_fix_task_lists_failed_criteria_with_their_log_tails_and_the_defects_
             "Stored copy: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log"
         ),
         "{task}"
+    );
+}
+
+#[test]
+fn ac21_the_ruling_brief_shows_the_log_tail_of_a_command_only_a_cross_check_cites() {
+    let (briefs, _) = scenario::run();
+    let judge = briefs
+        .split("===== ")
+        .find(|s| s.starts_with("R2 brief to judge"))
+        .unwrap();
+    let checks = &judge[judge.find("## 5. Cross-checks").unwrap()..judge.find("## 6.").unwrap()];
+    assert!(
+        checks.contains(
+            "  - claude/r2/e2: command `./scripts/nested-link.sh` (cwd .) exit 1\n    stored: "
+        ),
+        "{checks}"
+    );
+    assert!(
+        checks.contains(
+            "    log tail:\n```\nrunning ./scripts/nested-link.sh\ntest cwd_inherit ... FAILED\nexit 1\n```"
+        ),
+        "{checks}"
     );
 }
 

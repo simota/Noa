@@ -5,7 +5,8 @@
 //! a log gone before ingest, re-runs that match and one that differs, a
 //! person's screenshot, and the judge's rulings with a defect and its
 //! assignments; then a cross-check round with a refutation, a reproduced
-//! defect and a dispute, ending in a verdict.
+//! defect, a dispute and a verifier's own result turned to fail, ending in
+//! a verdict with a failed criterion.
 //!
 //! Every brief the engine sends (re-run briefs and corrections included)
 //! and the report at the end are collected in order. Nothing touches the
@@ -380,11 +381,11 @@ const R1_AGY: &str = r#"{"summary": "Long paths and a Japanese locale.",
   {"id": "o1", "kind": "observation", "text": "The pane closed when I pressed Cmd-Q."}
  ]}"#;
 
-const R1_JUDGE: &str = r#"{"summary": "AC-1 fails for a symlinked cwd; AC-2 and AC-3 hold; AC-5 is untested.",
+const R1_JUDGE: &str = r#"{"summary": "AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; AC-5 is untested.",
  "rulings": [
   {"criterion": "AC-1", "ruling": "failed", "rationale": "codex's symlink test fails and the recording shows $HOME.", "evidence": ["codex/r1/e1", "codex/r1/e2"]},
   {"criterion": "AC-2", "ruling": "verified", "rationale": "claude's test re-ran with the same status.", "evidence": ["claude/r1/e1"]},
-  {"criterion": "AC-3", "ruling": "verified", "rationale": "Two benchmarks under the limit.", "evidence": ["claude/r1/e3", "agy/r1/e2"]},
+  {"criterion": "AC-3", "ruling": "inconclusive", "rationale": "Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.", "evidence": ["claude/r1/e3"]},
   {"criterion": "AC-5", "ruling": "inconclusive", "rationale": "Only codex passed it, on a test that does not quit."}
  ],
  "defect_ops": [
@@ -406,22 +407,28 @@ const R2_CLAUDE: &str = r#"{"summary": "codex's symlink test passes here; the de
 
 const R2_CODEX: &str = r#"{"summary": "Nothing assigned to me."}"#;
 
-const R2_AGY: &str = r#"{"summary": "codex's AC-5 test never quits the app.",
+const R2_AGY: &str = r#"{"summary": "codex's AC-5 test never quits the app; a cold start is slow.",
+ "results": [
+  {"criterion": "AC-3", "result": "fail", "note": "A cold start takes 72 ms.", "evidence": ["e1"]}
+ ],
+ "evidence": [
+  {"id": "e1", "kind": "command", "cmd": "./bench open-tab --cold", "cwd": "bench", "exit": 1, "log": "logs/1.log", "rerun": false}
+ ],
  "cross_checks": [
   {"subject": "codex/AC-5", "outcome": "disputed", "note": "cwd_gone does not exercise quitting at all."}
  ]}"#;
 
-const R2_JUDGE: &str = r#"{"summary": "codex's AC-1 failure did not reproduce; the nested-link defect did. AC-5 does not apply to this change.",
+const R2_JUDGE: &str = r#"{"summary": "codex's AC-1 failure did not reproduce; the nested-link defect did; a cold start breaks AC-3. AC-5 does not apply to this change.",
  "rulings": [
   {"criterion": "AC-1", "ruling": "verified", "rationale": "claude's re-run matched and the person's screenshot shows /tmp; codex's failure did not reproduce.", "evidence": ["claude/r1/e1", "user/1"]},
   {"criterion": "AC-2", "ruling": "same"},
-  {"criterion": "AC-3", "ruling": "same"},
+  {"criterion": "AC-3", "ruling": "failed", "rationale": "agy's cold-start benchmark takes 72 ms, over the limit.", "evidence": ["agy/r2/e1"]},
   {"criterion": "AC-5", "ruling": "not_applicable", "rationale": "Session restore on quit is not part of this change."}
  ],
  "defect_ops": [
   {"op": "update", "id": "D1", "status": "agreed", "rationale": "claude reproduced it with a nested link."}
  ],
- "verdict": {"decision": "pass_with_issues", "rationale": "Every must criterion holds; the nested-link defect remains.", "blocking": ["D1"]}}"#;
+ "verdict": {"decision": "pass_with_issues", "rationale": "Every must criterion holds; the slow cold start (should) and the nested-link defect remain.", "blocking": ["AC-3", "D1"]}}"#;
 
 /// Runs the scenario and returns every brief and correction sent, then
 /// (separately) the session at the end.

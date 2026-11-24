@@ -4,7 +4,7 @@
 //! Information isolation is enforced here: a round-1 (blind) verifier brief
 //! never names another verifier, a peer worktree or a peer reply path.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -68,10 +68,12 @@ pub const RULING_SECTIONS: [&str; 9] = [
 pub const RERUN_SECTIONS: [&str; 1] = ["## Re-run"];
 
 /// The evidence standard, as the ruling brief states it (L1-6 rules).
-pub const EVIDENCE_STANDARD: [&str; 7] = [
+pub const EVIDENCE_STANDARD: [&str; 9] = [
     "Every criterion gets one ruling per round; \"ruling\": \"same\" carries the previous one over unchanged.",
+    "Evidence cited for verified or failed belongs to that criterion: cited by a result on it, by a cross-check whose subject is a result on it, or media whose shows names it.",
+    "Evidence whose file was not stored (missing at ingest) counts for nothing.",
     "verified needs at least one cited command evidence whose re-run matched, or pass results from two different verifiers each citing command or file evidence (cite one item of each); and no unanswered fail result or reproduced refutation on that criterion.",
-    "failed needs at least one cited fail result or reproduced evidence.",
+    "failed needs at least one cited fail result, or evidence of a reproduced cross-check that reproduced a fail result on it (or a defect); a reproduced pass backs no failure.",
     "inconclusive and not_applicable need a rationale.",
     "Cited evidence keys exist; an observation alone never satisfies verified.",
     "Media the person attached (user/<n>) counts as one independent source for verified only together with a verifier's pass on the same criterion.",
@@ -730,8 +732,14 @@ fn write_standing(out: &mut String, session: &Session, round: RoundNo) {
             .map(|r| format!("{} (R{}): {}", r.kind.name(), r.round, r.rationale.trim()))
             .unwrap_or_else(|| "not ruled".to_owned());
         let _ = writeln!(out, "### {} — {ruling}", c.id);
+        // Every result, not just the latest: an update leaves the earlier
+        // one and its evidence readable (L1-4 item 4).
         for part in session.verifier_ids() {
-            if let Some(r) = session.result_as_of(part, &c.id, round.saturating_sub(1)) {
+            for r in session
+                .results
+                .iter()
+                .filter(|r| &r.part == part && r.criterion == c.id && r.round < round)
+            {
                 let _ = write!(out, "- {part} R{}: {}", r.round, r.outcome.name());
                 if !r.note.is_empty() {
                     let _ = write!(out, " — {}", r.note.trim());
@@ -746,7 +754,18 @@ fn write_standing(out: &mut String, session: &Session, round: RoundNo) {
     out.push('\n');
 }
 
-fn section_defects(out: &mut String, heading: &str, session: &Session, round: RoundNo) {
+/// The defects section of the ruling brief: this round's raw defects (with
+/// the failing log tails they cite not shown yet, `tailed`) and the
+/// defects so far.
+fn section_defects<'a>(
+    out: &mut String,
+    heading: &str,
+    session: &'a Session,
+    round: RoundNo,
+    reply_dir: &Path,
+    tails: &BTreeMap<EvidenceKey, String>,
+    tailed: &mut BTreeSet<&'a EvidenceKey>,
+) {
     let _ = writeln!(out, "{heading}");
     let raws: Vec<_> = session
         .raw_defects
@@ -786,6 +805,12 @@ fn section_defects(out: &mut String, heading: &str, session: &Session, round: Ro
         if let Some(fix) = &raw.fix {
             let _ = writeln!(out, "Fix: {}", fix.trim());
         }
+        for key in &raw.evidence {
+            if tails.contains_key(key) && !tailed.contains(key) {
+                write_item(out, session, key, reply_dir);
+                write_tail(out, key, tails, tailed);
+            }
+        }
     }
     out.push_str("\nDefects so far:\n");
     if session.defects.is_empty() {
@@ -806,6 +831,20 @@ fn section_defects(out: &mut String, heading: &str, session: &Session, round: Ro
         );
     }
     out.push('\n');
+}
+
+/// `key`'s failing log tail, unless already shown.
+fn write_tail<'a>(
+    out: &mut String,
+    key: &'a EvidenceKey,
+    tails: &BTreeMap<EvidenceKey, String>,
+    tailed: &mut BTreeSet<&'a EvidenceKey>,
+) {
+    if let Some(tail) = tails.get(key)
+        && tailed.insert(key)
+    {
+        let _ = writeln!(out, "    log tail:\n```\n{}\n```", tail.trim_end());
+    }
 }
 
 /// The judge's ruling brief for `round`. `tails` holds the last 40 lines
@@ -872,6 +911,8 @@ pub fn judge_brief(
     body.push('\n');
 
     let _ = writeln!(body, "{}", RULING_SECTIONS[3]);
+    // Each failing log's tail once, under the first item citing it.
+    let mut tailed: BTreeSet<&EvidenceKey> = BTreeSet::new();
     for c in &session.criteria {
         let _ = writeln!(body, "### {} [{}] {}", c.id, c.priority.name(), c.statement);
         let mut any = false;
@@ -888,9 +929,7 @@ pub fn judge_brief(
             body.push('\n');
             for key in &r.evidence {
                 write_item(&mut body, session, key, reply_dir);
-                if let Some(tail) = tails.get(key) {
-                    let _ = writeln!(body, "    log tail:\n```\n{}\n```", tail.trim_end());
-                }
+                write_tail(&mut body, key, tails, &mut tailed);
             }
         }
         if !any {
@@ -941,11 +980,20 @@ pub fn judge_brief(
         body.push('\n');
         for key in &c.evidence {
             write_item(&mut body, session, key, reply_dir);
+            write_tail(&mut body, key, tails, &mut tailed);
         }
     }
     body.push('\n');
 
-    section_defects(&mut body, RULING_SECTIONS[5], session, round);
+    section_defects(
+        &mut body,
+        RULING_SECTIONS[5],
+        session,
+        round,
+        reply_dir,
+        tails,
+        &mut tailed,
+    );
 
     let _ = writeln!(body, "{}", RULING_SECTIONS[6]);
     for rule in EVIDENCE_STANDARD {
@@ -1032,7 +1080,7 @@ pub fn judge_brief(
             .join(", "),
     );
     body.push_str("; values <verifier>/<criterion> of another verifier, or a live defect id\n");
-    body.push_str("- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified; blocking lists the should criteria not verified and live defects), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a not_applicable criterion holds nothing back\n");
+    body.push_str("- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back\n");
     body.push_str("- verdict: only in the last round or with \"close\": true\n");
 
     let judge = session.judge.id.clone();

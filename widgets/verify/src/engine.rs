@@ -278,6 +278,10 @@ fn rejected<T>(why: impl Into<String>) -> Result<T, EngineError> {
     Err(EngineError::Rejected(why.into()))
 }
 
+/// Why a criterion's 検証方法 (`how`) cannot be left blank: the judge's
+/// criteria are held to the same rule (L1-6).
+const HOW_EMPTY: &str = "検証方法（how）を書いてください";
+
 /// Why a re-run item that never ran is `not_run` in 共有 mode (L1-5 step 1).
 pub const SHARED_NOT_RUN: &str =
     "shared (read-only) mode: a re-run would run in the person's own tree, so none is made";
@@ -873,6 +877,7 @@ impl Engine {
             Input::Redeliver { round, part, kind } => {
                 if let Some(brief) = self.open_brief(round, &part, kind)
                     && brief.receipt.sent.is_some()
+                    && !Self::script_started(brief)
                 {
                     Self::send(&mut out, round, brief);
                 }
@@ -1036,6 +1041,12 @@ impl Engine {
                     if !self.reruns_pending(round.no, part) {
                         continue;
                     }
+                    // A log cut between the ingest and its not_run batch:
+                    // still no script or brief in 共有 mode (AC-11).
+                    if self.session.isolation == Isolation::Shared {
+                        self.shared_not_run(out, round.no, part)?;
+                        continue;
+                    }
                     match round.brief(part, BriefKind::Rerun) {
                         // The runner picks up watching every request whose
                         // items lack an outcome; an unsent brief goes now.
@@ -1164,6 +1175,11 @@ impl Engine {
             && round.phase != Phase::Closed
         {
             return Ok(());
+        }
+        // A ruled round that gave the verdict ends the verification, also
+        // when the log was cut before its close (an early close resumed).
+        if self.session.verdict().is_some() {
+            return self.close(out);
         }
         if self.session.rounds.len() as RoundNo >= self.session.max_rounds {
             return self.close(out);
@@ -1353,36 +1369,42 @@ impl Engine {
                 tails,
             }],
         )?;
-        let pending: Vec<EvidenceKey> = self
-            .session
-            .rerun_items(round, part)
-            .iter()
-            .map(|e| e.key.clone())
-            .collect();
-        if pending.is_empty() {
+        if self.session.rerun_items(round, part).is_empty() {
             return Ok(());
         }
         match self.session.isolation {
-            // Never in the person's tree (AC-11): no script, no brief.
-            Isolation::Shared => {
-                let batch = pending
-                    .into_iter()
-                    .map(|key| Event::RerunFinished {
-                        key,
-                        rerun: Rerun::NotRun {
-                            why: SHARED_NOT_RUN.to_owned(),
-                            log: None,
-                        },
-                    })
-                    .collect();
-                self.commit(out, batch)?;
-            }
+            Isolation::Shared => self.shared_not_run(out, round, part)?,
             Isolation::Worktree => out.effects.push(Effect::Rerun {
                 round,
                 part: part.clone(),
             }),
         }
         Ok(())
+    }
+
+    /// In 共有 mode, every re-run item of `part` in `round` still without an
+    /// outcome ends `not_run`: a re-run never runs in the person's tree
+    /// (AC-11), so no script or brief is made.
+    fn shared_not_run(
+        &mut self,
+        out: &mut Output,
+        round: RoundNo,
+        part: &PartId,
+    ) -> Result<(), EngineError> {
+        let batch = self
+            .session
+            .rerun_items(round, part)
+            .into_iter()
+            .filter(|e| e.rerun.is_none())
+            .map(|e| Event::RerunFinished {
+                key: e.key.clone(),
+                rerun: Rerun::NotRun {
+                    why: SHARED_NOT_RUN.to_owned(),
+                    log: None,
+                },
+            })
+            .collect();
+        self.commit(out, batch)
     }
 
     fn rerun_written(
@@ -1557,9 +1579,13 @@ impl Engine {
                 if !statement_ok(&statement) {
                     return rejected(format!("基準は1行・{MAX_STATEMENT}文字までです"));
                 }
+                let how = how.trim().to_owned();
+                if how.is_empty() {
+                    return rejected(HOW_EMPTY);
+                }
                 CriteriaEdit::Add {
                     statement,
-                    how: how.trim().to_owned(),
+                    how,
                     priority,
                 }
             }
@@ -1578,6 +1604,9 @@ impl Engine {
                 }
                 if statement.is_none() && how.is_none() && priority.is_none() {
                     return rejected("変更がありません");
+                }
+                if how.as_deref().is_some_and(|h| h.trim().is_empty()) {
+                    return rejected(HOW_EMPTY);
                 }
                 CriteriaEdit::Edit {
                     id,
@@ -1616,6 +1645,15 @@ impl Engine {
         self.commit(out, vec![Event::CriteriaEdited { edit, at }])
     }
 
+    /// Whether `brief` is a re-run brief whose script has started
+    /// (`RerunStarted`): it is never sent again, whatever its pane reports,
+    /// and the runner's watch takes its commands to their outcomes (L1-5
+    /// step 4). A second start would run the same commands twice into the
+    /// same logs and exit files.
+    fn script_started(brief: &Brief) -> bool {
+        brief.kind == BriefKind::Rerun && brief.receipt.started.is_some()
+    }
+
     fn retry_or_fail(
         &mut self,
         out: &mut Output,
@@ -1627,6 +1665,9 @@ impl Engine {
         let Some(brief) = self.open_brief(round, part, kind) else {
             return Ok(());
         };
+        if Self::script_started(brief) {
+            return Ok(());
+        }
         if brief.receipt.retries < self.config.max_retries {
             self.commit(
                 out,

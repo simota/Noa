@@ -46,6 +46,19 @@ pub fn encode_path(path: &str) -> String {
     out
 }
 
+/// Text for a Markdown link label (`[label](…)`): `\`, `[` and `]`
+/// escaped, so a caption holding a bracket does not end the label early.
+fn label(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Where a stored copy is linked: its absolute path into `base` (the
 /// judge's reply dir), or its path relative to the reply dir.
 fn link(base: Option<&Path>, stored: &Path) -> String {
@@ -364,7 +377,7 @@ fn write_media(out: &mut String, item: &Evidence, base: Option<&Path>) {
     else {
         return;
     };
-    let caption = caption.as_deref().map(one_line).unwrap_or_default();
+    let caption = label(&caption.as_deref().map(one_line).unwrap_or_default());
     let who = if item.attached.is_some() {
         "（あなたが添付）"
     } else {
@@ -558,6 +571,21 @@ fn write_evidence(out: &mut String, session: &Session) {
             Some(Rerun::Differed { .. } | Rerun::TimedOut { .. })
         )
     };
+    // Where the re-runs below ran, said once (L1-5 Trust).
+    let reruns = session
+        .evidence
+        .iter()
+        .any(|e| matches!(e.body, EvidenceBody::Command { rerun: true, .. }));
+    if reruns {
+        out.push_str(match session.isolation {
+            Isolation::Worktree => {
+                "再実行は各検証者自身のペインで、その検証者のエージェントがウィジェットの書いたスクリプトを起動して行いました。同じ環境で同じ終了コードが出るかの確認で、別の検証者による独立した追試ではありません（追試は「## 追試」）。\n\n"
+            }
+            Isolation::Shared => {
+                "共有（読み取りのみ）モードのため、再実行は一つも行っていません（`rerun: true` の項目はすべて未実行）。\n\n"
+            }
+        });
+    }
     let (first, rest): (Vec<&Evidence>, Vec<&Evidence>) =
         session.evidence.iter().partition(flagged);
     for item in first.into_iter().chain(rest) {
@@ -1037,5 +1065,84 @@ fn rerun_english(rerun: &Rerun) -> String {
         Rerun::Differed { exit: None, .. } => "differed (no exit status)".to_owned(),
         Rerun::TimedOut { .. } => "timed out".to_owned(),
         Rerun::NotRun { why, .. } => format!("not run: {why}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::types::Isolation;
+    use crate::testkit::{self, Options, Rig, VERIFIERS, all_pass, cmd, reply_json};
+
+    #[test]
+    fn ac33_a_caption_holding_brackets_keeps_its_media_link_whole() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &reply_json(
+                &[
+                    ("AC-1", "pass", &["e1", "e2", "e3"]),
+                    ("AC-2", "pass", &["e1"]),
+                    ("AC-3", "pass", &["e1"]),
+                ],
+                &[
+                    cmd("e1", 0, true),
+                    r#"{"id": "e2", "kind": "file", "path": "shots/key.png", "caption": "右側の ] キー"}"#
+                        .to_owned(),
+                    r#"{"id": "e3", "kind": "file", "path": "video/key.mov", "caption": "[x] を押す \\ 戻る"}"#
+                        .to_owned(),
+                ],
+                "",
+            ),
+        );
+        rig.reply("codex", &all_pass());
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        let report = report_markdown(rig.engine.session(), None);
+        assert!(
+            report.contains("- ![右側の \\] キー](evidence/r1/claude/shots/key.png)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("- ▶ [\\[x\\] を押す \\\\ 戻る](evidence/r1/claude/video/key.mov)"),
+            "{report}"
+        );
+    }
+
+    /// The `## 証跡一覧` section of `report`.
+    fn evidence_section(report: &str) -> &str {
+        let at = report.find(SECTIONS[4]).unwrap();
+        let rest = &report[at..];
+        &rest[..rest.find(SECTIONS[5]).unwrap()]
+    }
+
+    #[test]
+    fn the_report_says_once_where_the_reruns_ran() {
+        let mut rig = Rig::new(2);
+        testkit::through_round_one(&mut rig);
+        let report = report_markdown(rig.engine.session(), None);
+        let pane = "再実行は各検証者自身のペインで、その検証者のエージェントがウィジェットの書いたスクリプトを起動して行いました。";
+        assert_eq!(report.matches(pane).count(), 1, "{report}");
+        assert!(evidence_section(&report).contains(pane), "{report}");
+
+        let mut rig = Rig::build(Options {
+            isolation: Isolation::Shared,
+            ..Options::default()
+        });
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        for part in VERIFIERS {
+            rig.reply(part, &all_pass());
+        }
+        rig.ingest();
+        let report = report_markdown(rig.engine.session(), None);
+        let none = "共有（読み取りのみ）モードのため、再実行は一つも行っていません";
+        assert_eq!(report.matches(none).count(), 1, "{report}");
+        assert!(evidence_section(&report).contains(none), "{report}");
+        assert!(!report.contains(pane), "{report}");
     }
 }

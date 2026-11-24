@@ -938,10 +938,32 @@ impl Session {
             .collect()
     }
 
+    /// `defect`'s id and the ids of every defect merged into it, directly
+    /// or through another merged one.
+    fn merged_ids<'a>(&'a self, defect: &'a Defect) -> BTreeSet<&'a str> {
+        let mut ids = BTreeSet::from([defect.id.as_str()]);
+        loop {
+            let before = ids.len();
+            for d in &self.defects {
+                if d.merged_into
+                    .as_deref()
+                    .is_some_and(|into| ids.contains(into))
+                {
+                    ids.insert(d.id.as_str());
+                }
+            }
+            if ids.len() == before {
+                return ids;
+            }
+        }
+    }
+
     /// Who supports and disputes `defect`, from its sources and the
-    /// cross-checks on it (review L2-4).
+    /// cross-checks on it and on the defects merged into it (review L2-4):
+    /// a merge moves the sources, and the checks on them count with them.
     pub fn tally(&self, defect: &Defect) -> Tally {
         let origins = defect.origins();
+        let ids = self.merged_ids(defect);
         let mut supporters = Vec::new();
         let mut disputers = Vec::new();
         let mut silent = Vec::new();
@@ -953,7 +975,7 @@ impl Session {
                 .rev()
                 .find(|c| {
                     &c.by == part
-                        && matches!(&c.subject, Subject::Defect { id } if *id == defect.id)
+                        && matches!(&c.subject, Subject::Defect { id } if ids.contains(id.as_str()))
                 })
                 .map(|c| c.outcome);
             match check {
@@ -1183,6 +1205,43 @@ mod tests {
         assert_eq!(tally.agreement, Agreement::Split);
         let ids: Vec<&str> = session.ranked().iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids, ["D2", "D10"], "D2 has one supporter, D10 is split");
+    }
+
+    #[test]
+    fn ac18_a_merge_keeps_the_cross_checks_on_the_merged_defect_in_the_tally() {
+        let mut session = with_raws();
+        judged(
+            &mut session,
+            1,
+            vec![add("D1", &["codex/1"]), add("D2", &["claude-2/7"])],
+        )
+        .unwrap();
+        session.cross_checks.push(crate::model::types::CrossCheck {
+            round: 2,
+            by: p("claude"),
+            subject: Subject::Defect { id: "D1".into() },
+            outcome: CrossOutcome::Reproduced,
+            note: "fails here too".into(),
+            evidence: Vec::new(),
+        });
+        let tally = session.tally(session.defect("D1").unwrap());
+        assert_eq!(tally.supporters, vec![p("claude"), p("codex")]);
+        judged(
+            &mut session,
+            1,
+            vec![DefectOp::Merge {
+                id: "D2".into(),
+                from: vec!["D1".into()],
+            }],
+        )
+        .unwrap();
+        let tally = session.tally(session.defect("D2").unwrap());
+        assert_eq!(
+            tally.supporters,
+            vec![p("claude"), p("codex"), p("claude-2")],
+            "claude's reproduction of D1 moves with D1's sources"
+        );
+        assert_eq!(tally.agreement, Agreement::Unanimous);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::reduce::Event;
 use crate::model::types::{
     AgentKind, AgentSetup, BuiltinStrategy, CriterionSource, Media, Outcome, Priority, Subject,
 };
@@ -619,7 +620,11 @@ fn ac17_round_one_may_not_close_with_a_criterion_on_one_matched_pass() {
         log: None,
     });
     rig.rerun("claude-2", |_, exit| Rerun::Matched { exit, log: None });
-    let judge = JUDGE_R1.replace("codex/r1/e1", "claude/r1/e1");
+    // Every ruling meets the standard (claude's matched e1 backs each
+    // criterion); only the early close is refused.
+    let judge = JUDGE_R1
+        .replace("codex/r1/e1", "claude/r1/e1")
+        .replace("claude-2/r1/e1", "claude/r1/e1");
     let judge = format!("{}{CLOSE_PASS}", judge.trim_end().trim_end_matches('}'));
     rig.judge(&judge);
     assert!(!rig.engine.session().closed);
@@ -864,8 +869,61 @@ fn a_held_verification_waits_after_a_ruling_and_an_extension_rebuilds_removed_wo
     rig.feed(Input::UserSetHold { hold: true, at: 11 });
     testkit::through_round_one(&mut rig);
     assert!(rig.engine.session().waits_to_continue());
-    assert_eq!(rig.round(), 1);
-    rig.feed(Input::UserContinue { at: 900 });
+    assert_eq!(rig.round(), 1, "held after the ruling");
+    let at = rig.tick();
+    rig.feed(Input::UserContinue { at });
+    assert_eq!(rig.round(), 2);
+    // Round 2 (the last) ends in a verdict; the worktrees are removed.
+    rig.deliver();
+    for part in VERIFIERS {
+        rig.reply(part, r#"{"summary": "Nothing more."}"#);
+    }
+    rig.ingest();
+    let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+    rig.judge(&format!(
+        r#"{{"summary": "s", "rulings": [{}, {}, {}], "verdict": {{"decision": "pass", "rationale": "Holds.", "blocking": []}}}}"#,
+        same("AC-1"),
+        same("AC-2"),
+        same("AC-3")
+    ));
+    assert!(rig.engine.session().closed, "{:?}", rig.rejected("judge"));
+    for part in VERIFIERS {
+        rig.feed(Input::WorktreeRemoved { part: p(part) });
+    }
+    // +1: open again and, being held, waiting; 次のラウンドへ makes the
+    // removed worktrees anew first, then the round starts.
+    let made_before = rig
+        .effects
+        .iter()
+        .filter(|e| **e == Effect::MakeWorktrees)
+        .count();
+    let at = rig.tick();
+    rig.feed(Input::UserExtend { by: 1, at });
+    let s = rig.engine.session();
+    assert!(!s.closed && s.max_rounds == 3 && s.verdict().is_none());
+    assert!(s.waits_to_continue(), "held after the extension too");
+    let at = rig.tick();
+    rig.feed(Input::UserContinue { at });
+    assert_eq!(
+        rig.effects
+            .iter()
+            .filter(|e| **e == Effect::MakeWorktrees)
+            .count(),
+        made_before + 1,
+        "the removed worktrees are rebuilt"
+    );
+    assert_eq!(rig.round(), 2, "no round before its worktrees exist");
+    testkit::make_worktrees(&mut rig);
+    let s = rig.engine.session();
+    assert!(s.worktrees.values().all(|t| t.state == WorktreeState::Made));
+    assert_eq!(rig.round(), 3);
+    assert_eq!(rig.phase(), Phase::Briefing);
+}
+
+#[test]
+fn a_verification_ended_by_hand_cannot_be_extended() {
+    let mut rig = Rig::new(2);
+    testkit::through_round_one(&mut rig);
     assert_eq!(rig.round(), 2);
     rig.feed(Input::UserClose);
     for part in VERIFIERS {
@@ -875,6 +933,262 @@ fn a_held_verification_waits_after_a_ruling_and_an_extension_rebuilds_removed_wo
         .try_feed(Input::UserExtend { by: 1, at: 950 })
         .unwrap_err();
     assert!(err.contains("ラウンド上限の前に終了"), "{err}");
+}
+
+/// The engine resumed from `rig`'s log cut right after the first batch
+/// holding an event `cut` matches, and its output on `Start`.
+fn resumed_after(rig: &Rig, cut: impl Fn(&Event) -> bool) -> (Engine, Output) {
+    let end = rig
+        .log
+        .iter()
+        .position(|batch| batch.iter().any(&cut))
+        .expect("the log holds the batch to cut after");
+    let session = reduce::replay(&rig.log[..=end]).unwrap();
+    let mut engine = Engine::resume(
+        session,
+        Path::new("/data/verifications/ver-1"),
+        Config::default(),
+    );
+    let out = engine.handle(Input::Start { now: 5_000 }).unwrap();
+    (engine, out)
+}
+
+#[test]
+fn ac11_a_shared_log_cut_between_ingest_and_not_run_resumes_without_a_rerun_script() {
+    let mut rig = Rig::build(Options {
+        isolation: Isolation::Shared,
+        ..Options::default()
+    });
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    for part in VERIFIERS {
+        rig.reply(part, &all_pass());
+    }
+    rig.ingest();
+    // Cut after the last ingest (codex's: replies are ingested in id
+    // order), before its not_run batch.
+    let (engine, out) = resumed_after(
+        &rig,
+        |e| matches!(e, Event::EvidenceIngested { part, .. } if part.as_str() == "codex"),
+    );
+    assert!(
+        !out.effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rerun { .. })),
+        "no re-run script is asked for in 共有 mode: {:?}",
+        out.effects
+    );
+    let s = engine.session();
+    assert_eq!(
+        s.evidence_item(&key("codex/r1/e1")).unwrap().rerun,
+        Some(Rerun::NotRun {
+            why: SHARED_NOT_RUN.into(),
+            log: None
+        })
+    );
+    assert_eq!(s.phase(), Phase::Ruling, "the judge is briefed");
+}
+
+#[test]
+fn ac17_an_early_close_cut_before_its_session_closed_stays_closed_on_resume() {
+    let mut rig = Rig::new(3);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    for part in VERIFIERS {
+        rig.reply(part, &all_pass());
+    }
+    rig.ingest();
+    rig.rerun_all_matched();
+    let judge = format!("{}{CLOSE_PASS}", JUDGE_R1.trim_end().trim_end_matches('}'));
+    rig.judge(&judge);
+    assert!(rig.engine.session().closed, "{:?}", rig.rejected("judge"));
+    let (engine, out) = resumed_after(&rig, |e| matches!(e, Event::JudgeAccepted { .. }));
+    let s = engine.session();
+    assert!(s.closed, "the verdict ends it");
+    assert_eq!(s.rounds.len(), 1, "no round 2");
+    assert_eq!(
+        s.verdict().map(|v| v.decision),
+        Some(crate::model::types::Decision::Pass)
+    );
+    assert!(
+        !out.effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendBrief { .. })),
+        "{:?}",
+        out.effects
+    );
+    assert!(out.effects.contains(&Effect::RemoveWorktrees));
+    assert!(out.effects.contains(&Effect::WriteReport));
+}
+
+#[test]
+fn a_started_rerun_script_is_never_sent_again() {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    for part in VERIFIERS {
+        rig.reply(part, &all_pass());
+    }
+    rig.ingest();
+    rig.rerun("claude", |_, exit| Rerun::Matched { exit, log: None });
+    rig.rerun("codex", |_, exit| Rerun::Matched { exit, log: None });
+    let part = p("claude-2");
+    let reply_dir = crate::store::verifier_reply_dir(rig.engine.session(), &part);
+    rig.feed(Input::RerunWritten {
+        round: 1,
+        part: part.clone(),
+        request: RerunRequest {
+            nonce: "1".repeat(32),
+            items: vec![crate::model::types::RerunItem {
+                key: key("claude-2/r1/e1"),
+                n: 1,
+                cmd_digest: 3,
+            }],
+            script_digest: 4,
+        },
+        script: crate::store::rerun_dir(&reply_dir, 1, &part).join("run.sh"),
+    });
+    let at = rig.tick();
+    rig.feed(Input::Sent {
+        round: 1,
+        part: part.clone(),
+        kind: BriefKind::Rerun,
+        at,
+    });
+    let at = rig.tick();
+    rig.feed(Input::RerunStarted {
+        round: 1,
+        part: part.clone(),
+        at,
+    });
+    // The pane errs, a send fails late, the pane is lost: the detached
+    // script runs on, nothing is sent again.
+    let at = rig.tick();
+    for input in [
+        Input::AgentStateChanged {
+            part: part.clone(),
+            state: AgentState::Error,
+            at,
+        },
+        Input::SendFailed {
+            round: 1,
+            part: part.clone(),
+            kind: BriefKind::Rerun,
+            error: "pane gone".into(),
+        },
+        Input::Redeliver {
+            round: 1,
+            part: part.clone(),
+            kind: BriefKind::Rerun,
+        },
+        Input::Tick {
+            now: at + 3_600_000,
+        },
+    ] {
+        let out = rig.feed(input);
+        assert!(
+            !out.effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendBrief { .. })),
+            "{:?}",
+            out.effects
+        );
+    }
+    let receipt = rig
+        .engine
+        .session()
+        .current_round()
+        .unwrap()
+        .brief(&part, BriefKind::Rerun)
+        .unwrap()
+        .receipt
+        .clone();
+    assert_eq!((receipt.retries, receipt.failed), (0, None));
+    // The watch takes it to its outcome.
+    let at = rig.tick();
+    rig.feed(Input::RerunReported {
+        round: 1,
+        key: key("claude-2/r1/e1"),
+        rerun: Rerun::Matched { exit: 0, log: None },
+        at,
+    });
+    assert_eq!(rig.phase(), Phase::Ruling);
+}
+
+#[test]
+fn a_criterion_cannot_be_left_without_how_to_verify_it() {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    let at = rig.tick();
+    let err = rig
+        .try_feed(Input::CriteriaEdit {
+            edit: CriteriaEdit::Edit {
+                id: "AC-1".into(),
+                statement: None,
+                how: Some("  ".into()),
+                priority: None,
+            },
+            at,
+        })
+        .unwrap_err();
+    assert_eq!(err, HOW_EMPTY);
+    let err = rig
+        .try_feed(Input::CriteriaEdit {
+            edit: CriteriaEdit::Add {
+                statement: "Quitting keeps the session".into(),
+                how: " \n ".into(),
+                priority: Priority::Should,
+            },
+            at,
+        })
+        .unwrap_err();
+    assert_eq!(err, HOW_EMPTY);
+    let s = rig.engine.session();
+    assert!(s.criteria_edits.is_empty());
+    assert!(s.criteria.iter().all(|c| !c.how.trim().is_empty()));
+}
+
+#[test]
+fn the_ruling_brief_shows_the_tail_of_a_failing_log_only_a_defect_cites() {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    rig.reply("claude", &all_pass());
+    rig.reply("codex", &all_pass());
+    rig.reply(
+        "claude-2",
+        &reply_json(
+            &[
+                ("AC-1", "pass", &["e1"]),
+                ("AC-2", "pass", &["e1"]),
+                ("AC-3", "pass", &["e1"]),
+            ],
+            &[cmd("e1", 0, true), cmd("e2", 1, false)],
+            r#", "defects": [{"id": "1", "claim": "The store loses the last line", "severity": "high", "category": "regression",
+               "confidence": "high", "repro": "1. kill -9 2. reopen", "evidence": ["e2"]}]"#,
+        ),
+    );
+    let tails = std::collections::BTreeMap::from([(
+        key("claude-2/r1/e2"),
+        "write store\npanicked: lost line\n".to_owned(),
+    )]);
+    rig.ingest_except(&[], &tails);
+    rig.rerun_all_matched();
+    assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude-2"));
+    let brief = rig.brief("judge", BriefKind::Work);
+    let defects = &brief[brief.find("## 6. Defects").unwrap()..brief.find("## 7.").unwrap()];
+    assert!(
+        defects.contains("  - claude-2/r1/e2: command `cargo test e2` (cwd .) exit 1"),
+        "{defects}"
+    );
+    assert!(
+        defects.contains("    log tail:\n```\nwrite store\npanicked: lost line\n```"),
+        "{defects}"
+    );
 }
 
 #[test]

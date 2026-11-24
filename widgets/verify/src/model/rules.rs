@@ -6,29 +6,60 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::types::{
-    CrossOutcome, Decision, Defect, Evidence, EvidenceBody, EvidenceKey, Outcome, PartId, Priority,
-    Rerun, RoundNo, Ruling, RulingKind, Session, Severity, Subject, USER_EVIDENCE_OWNER, Verdict,
+    CrossCheck, CrossOutcome, Decision, Defect, Evidence, EvidenceBody, EvidenceKey, Outcome,
+    PartId, Priority, Rerun, RoundNo, Ruling, RulingKind, Session, Severity, Subject,
+    USER_EVIDENCE_OWNER, Verdict,
 };
 
-/// Whether `item` is a command or a file: evidence the widget stored, as
-/// opposed to an observation.
-fn is_backed(item: &Evidence) -> bool {
+/// Whether `item` is a command or a file, as opposed to an observation.
+fn is_command_or_file(item: &Evidence) -> bool {
     matches!(
         item.body,
         EvidenceBody::Command { .. } | EvidenceBody::File { .. }
     )
 }
 
+/// Whether `item` counts toward the standard as stored evidence: a command
+/// or a file whose file the widget stored (at ingest, or attached). One
+/// whose file was gone before ingest counts for nothing (L1-6).
+fn is_backed(item: &Evidence) -> bool {
+    is_command_or_file(item) && item.stored.is_some()
+}
+
 fn is_matched_command(item: &Evidence) -> bool {
-    matches!(item.body, EvidenceBody::Command { .. })
+    is_backed(item)
+        && matches!(item.body, EvidenceBody::Command { .. })
         && matches!(item.rerun, Some(Rerun::Matched { .. }))
+}
+
+/// Whether `key` is evidence for `criterion` (L1-6): cited by a result on
+/// it, or by a cross-check whose subject is a result on it, or a media
+/// item whose `shows` names it. A media item with `shows` is evidence only
+/// for the criteria it names (L1-5a), whoever cites it.
+fn belongs(session: &Session, criterion: &str, key: &EvidenceKey) -> bool {
+    if let Some(Evidence {
+        body: EvidenceBody::File { shows, .. },
+        ..
+    }) = session.evidence_item(key)
+        && !shows.is_empty()
+    {
+        return shows.iter().any(|s| s == criterion);
+    }
+    session
+        .results
+        .iter()
+        .any(|r| r.criterion == criterion && r.evidence.contains(key))
+        || session.cross_checks.iter().any(|c| {
+            matches!(&c.subject, Subject::Result { criterion: on, .. } if on == criterion)
+                && c.evidence.contains(key)
+        })
 }
 
 /// The independent sources behind `criterion` being met that the ruling
 /// cites in `cited`: each verifier whose latest result on it is `pass` and
-/// whose command or file evidence for that result is cited, and the person,
-/// when `cited` holds media they attached showing it (it counts only beside
-/// a verifier's pass, since one source is never enough).
+/// whose stored command or file evidence for that result is cited, and the
+/// person, when `cited` holds media they attached showing it (it counts
+/// only beside a verifier's pass, since one source is never enough).
 fn independent_passes(
     session: &Session,
     criterion: &str,
@@ -46,7 +77,8 @@ fn independent_passes(
         .collect();
     let attached = cited.iter().filter(|k| k.is_user()).any(|k| {
         session.evidence_item(k).is_some_and(|e| {
-            matches!(&e.body, EvidenceBody::File { shows, .. } if shows.iter().any(|s| s == criterion))
+            is_backed(e)
+                && matches!(&e.body, EvidenceBody::File { shows, .. } if shows.iter().any(|s| s == criterion))
         })
     });
     if attached {
@@ -72,36 +104,45 @@ fn unanswered_fail<'a>(session: &'a Session, criterion: &str) -> Option<&'a Part
         .map(|r| &r.part)
 }
 
+/// Whether `check` reproduced a `fail` result on `criterion` (as that
+/// result stood before the check's round).
+fn reproduces_fail(session: &Session, criterion: &str, check: &CrossCheck) -> bool {
+    check.outcome == CrossOutcome::Reproduced
+        && matches!(&check.subject, Subject::Result { part, criterion: on }
+            if on == criterion
+                && session
+                    .result_as_of(part, criterion, check.round.saturating_sub(1))
+                    .is_some_and(|r| r.outcome == Outcome::Fail))
+}
+
 /// The first `reproduced` cross-check on a `fail` result on `criterion`:
 /// a failure another verifier confirmed.
 fn reproduced_fail<'a>(session: &'a Session, criterion: &str) -> Option<(&'a PartId, &'a PartId)> {
     session.cross_checks.iter().find_map(|c| match &c.subject {
-        Subject::Result {
-            part,
-            criterion: on,
-        } if on == criterion
-            && c.outcome == CrossOutcome::Reproduced
-            && session
-                .result_as_of(part, criterion, c.round.saturating_sub(1))
-                .is_some_and(|r| r.outcome == Outcome::Fail) =>
-        {
+        Subject::Result { part, .. } if reproduces_fail(session, criterion, c) => {
             Some((&c.by, part))
         }
         _ => None,
     })
 }
 
-/// Whether `key` is cited by a `fail` result on `criterion`, or by a
-/// `reproduced` cross-check.
+/// Whether `key` (evidence for `criterion`) backs it failing: cited by a
+/// `fail` result on it, or by a `reproduced` cross-check that reproduced a
+/// `fail` result on it or a defect; a reproduced pass backs no failure. A
+/// command or file whose file was not stored backs nothing.
 fn backs_failure(session: &Session, criterion: &str, key: &EvidenceKey) -> bool {
-    session
-        .results
-        .iter()
-        .any(|r| r.criterion == criterion && r.outcome == Outcome::Fail && r.evidence.contains(key))
-        || session
-            .cross_checks
-            .iter()
-            .any(|c| c.outcome == CrossOutcome::Reproduced && c.evidence.contains(key))
+    let counts = session
+        .evidence_item(key)
+        .is_some_and(|e| e.file_path().is_none() || e.stored.is_some());
+    counts
+        && (session.results.iter().any(|r| {
+            r.criterion == criterion && r.outcome == Outcome::Fail && r.evidence.contains(key)
+        }) || session.cross_checks.iter().any(|c| {
+            c.evidence.contains(key)
+                && (reproduces_fail(session, criterion, c)
+                    || (c.outcome == CrossOutcome::Reproduced
+                        && matches!(c.subject, Subject::Defect { .. })))
+        }))
 }
 
 /// Why `ruling` on criterion `criterion` in `round` breaks the evidence
@@ -121,6 +162,16 @@ pub fn check_ruling(
             ));
         }
     }
+    if matches!(ruling.kind, RulingKind::Verified | RulingKind::Failed)
+        && let Some(key) = ruling
+            .evidence
+            .iter()
+            .find(|k| !belongs(session, criterion, k))
+    {
+        return Err(format!(
+            "{criterion}: cited evidence {key} is not evidence for {criterion} (cite what a result or a cross-check on {criterion} cites, or media whose shows names it)"
+        ));
+    }
     let cited: Vec<&Evidence> = ruling
         .evidence
         .iter()
@@ -128,7 +179,7 @@ pub fn check_ruling(
         .collect();
     match ruling.kind {
         RulingKind::Verified => {
-            if !cited.is_empty() && !cited.iter().any(|e| is_backed(e)) {
+            if !cited.is_empty() && !cited.iter().any(|e| is_command_or_file(e)) {
                 return Err(format!(
                     "{criterion}: an observation alone never makes a criterion verified; cite a command or a file"
                 ));
@@ -145,9 +196,21 @@ pub fn check_ruling(
             }
             let matched = cited.iter().any(|e| is_matched_command(e));
             if !matched && independent_passes(session, criterion, &ruling.evidence).len() < 2 {
-                return Err(format!(
-                    "{criterion}: verified needs a matched re-run or two independent passes"
-                ));
+                let unstored: Vec<&str> = cited
+                    .iter()
+                    .filter(|e| is_command_or_file(e) && e.stored.is_none())
+                    .map(|e| e.key.as_str())
+                    .collect();
+                return Err(if unstored.is_empty() {
+                    format!(
+                        "{criterion}: verified needs a matched re-run or two independent passes"
+                    )
+                } else {
+                    format!(
+                        "{criterion}: verified needs a matched re-run or two independent passes; {} was not stored (gone before ingest) and counts for nothing",
+                        unstored.join(", ")
+                    )
+                });
             }
         }
         RulingKind::Failed => {
@@ -176,9 +239,12 @@ pub fn check_ruling(
 /// Why `verdict` does not follow from `rulings` (this round's, every
 /// criterion) and `defects` (as this round's defect ops leave them).
 ///
-/// A criterion ruled `not_applicable` holds nothing back: it was found not
-/// to apply (L1-2), so `pass` asks every other `must` criterion to be
-/// verified.
+/// A `should` criterion ruled `not_applicable` holds nothing back. A
+/// `must` one was not verified: it refuses `pass`, and allows
+/// `pass_with_issues` only with it listed in `blocking` (L1-6).
+/// `pass_with_issues` lists in `blocking` everything that holds the change
+/// back: each `should` criterion not verified, each `must` one ruled
+/// `not_applicable`, each live defect.
 pub fn check_verdict(
     session: &Session,
     rulings: &BTreeMap<String, Ruling>,
@@ -223,12 +289,27 @@ pub fn check_verdict(
     }
     let failed_must = of(Priority::Must, RulingKind::Failed);
     let must_open = unverified(Priority::Must);
+    let must_not_applicable = of(Priority::Must, RulingKind::NotApplicable);
     match verdict.decision {
         Decision::Pass | Decision::PassWithIssues if !must_open.is_empty() => Err(format!(
             "verdict: {} needs every must criterion verified; {} {} not",
             verdict.decision.name(),
             must_open.join(", "),
             if must_open.len() == 1 { "is" } else { "are" }
+        )),
+        Decision::Pass if !must_not_applicable.is_empty() => Err(format!(
+            "verdict: pass needs every must criterion verified; {} (must) {} ruled not_applicable; use pass_with_issues with {} in blocking",
+            must_not_applicable.join(", "),
+            if must_not_applicable.len() == 1 {
+                "was"
+            } else {
+                "were"
+            },
+            if must_not_applicable.len() == 1 {
+                "it"
+            } else {
+                "them"
+            }
         )),
         Decision::Pass if !serious.is_empty() => Err(format!(
             "verdict: pass with live critical or high defect {}; use pass_with_issues or fail",
@@ -238,8 +319,10 @@ pub fn check_verdict(
             Err("verdict: pass takes no blocking; use pass_with_issues".to_owned())
         }
         Decision::PassWithIssues => {
-            let issues: Vec<&str> = unverified(Priority::Should)
-                .into_iter()
+            let issues: Vec<&str> = must_not_applicable
+                .iter()
+                .copied()
+                .chain(unverified(Priority::Should))
                 .chain(live.iter().map(|d| d.id.as_str()))
                 .collect();
             if issues.is_empty() {
@@ -254,15 +337,27 @@ pub fn check_verdict(
                     issues.join(", ")
                 ));
             }
-            match verdict
+            if let Some(id) = verdict
                 .blocking
                 .iter()
                 .find(|id| !issues.contains(&id.as_str()))
             {
-                Some(id) => Err(format!(
-                    "verdict.blocking: {id} holds nothing back (only a should criterion not verified or a live defect does)"
-                )),
-                None => Ok(()),
+                return Err(format!(
+                    "verdict.blocking: {id} holds nothing back (only a should criterion not verified, a must criterion ruled not_applicable or a live defect does)"
+                ));
+            }
+            let missing: Vec<&str> = issues
+                .iter()
+                .copied()
+                .filter(|id| !verdict.blocking.iter().any(|b| b == id))
+                .collect();
+            if missing.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "verdict.blocking: missing {}; pass_with_issues lists everything that holds the change back",
+                    missing.join(", ")
+                ))
             }
         }
         Decision::Fail if failed_must.is_empty() => {

@@ -651,6 +651,11 @@ fn ac30_each_media_rule_is_its_own_problem_line() {
 /// - claude-2: nothing passed but AC-3 on e1 (no re-run), and a high
 ///   defect `1`.
 fn ruled_round(max_rounds: RoundNo) -> Rig {
+    ruled_round_with(max_rounds, &[])
+}
+
+/// [`ruled_round`] with the items keyed in `gone` gone before ingest.
+fn ruled_round_with(max_rounds: RoundNo, gone: &[&str]) -> Rig {
     let mut rig = Rig::build(Options {
         max_rounds,
         ..Options::default()
@@ -696,7 +701,7 @@ fn ruled_round(max_rounds: RoundNo) -> Rig {
                "confidence": "high", "location": {"path": "src/store.rs", "line": 11}, "repro": "1. kill -9 2. reopen", "evidence": ["e1"]}]"#,
         ),
     );
-    rig.ingest();
+    rig.ingest_except(gone, &Default::default());
     rig.rerun_all_matched();
     assert_eq!(rig.phase(), Phase::Ruling);
     rig
@@ -996,4 +1001,401 @@ fn ac14_the_verdict_must_follow_from_the_rulings_and_the_defects() {
             "verdict: nothing holds the change back (every should criterion verified, no live defect); use pass"
         ]
     );
+}
+
+#[test]
+fn ac5_a_line_the_person_gave_twice_is_two_criteria() {
+    let line = testkit::USER_LINE;
+    let rig = Rig::build(Options {
+        user_criteria: vec![line.to_owned(), line.to_owned()],
+        ..Options::default()
+    });
+    let session = rig.engine.session();
+    let user = |id: &str| criterion(id, line, "must", "user", "pwd");
+    let problems = |text: &str| {
+        parse_criteria(text, session)
+            .map(|_| Vec::new())
+            .unwrap_or_else(|e| e.problems)
+    };
+    // Each line kept, under its own id: accepted.
+    assert_eq!(
+        problems(&criteria_json(&[user("AC-1"), user("AC-2")])),
+        Vec::<String>::new()
+    );
+    // One of the two dropped: refused.
+    assert_eq!(
+        problems(&criteria_json(&[user("AC-1")])),
+        [format!(
+            "the person's criteria missing (each once, source user, their wording kept): {line:?} (given 2 times, 1 here)"
+        )]
+    );
+    // One more than given: refused.
+    assert_eq!(
+        problems(&criteria_json(&[user("AC-1"), user("AC-2"), user("AC-3")])),
+        [format!(
+            "the person's line {line:?} appears 3 times; give it exactly 2 times, as the person gave it"
+        )]
+    );
+}
+
+#[test]
+fn ac13_cited_evidence_must_be_evidence_for_the_criterion_it_rules_on() {
+    let rig = ruled_round(2);
+    let with = |i: usize, replacement: String| {
+        let mut rulings = good_rulings();
+        rulings[i] = replacement;
+        judge_json(&rulings, "open", "")
+    };
+    // codex/r1/e1 is codex's AC-1 failure, re-run matched: no evidence for
+    // AC-2 or AC-3, whichever way it is cited.
+    for (i, id) in [(1, "AC-2"), (2, "AC-3")] {
+        let problems = judge_problems(
+            &rig,
+            &with(i, ruling(id, "verified", "matched", &["codex/r1/e1"])),
+        );
+        assert_eq!(
+            problems,
+            [format!(
+                "{id}: cited evidence codex/r1/e1 is not evidence for {id} (cite what a result or a cross-check on {id} cites, or media whose shows names it)"
+            )]
+        );
+    }
+    let problems = judge_problems(
+        &rig,
+        &with(2, ruling("AC-3", "failed", "fails", &["codex/r1/e1"])),
+    );
+    assert!(
+        problems[0].starts_with("AC-3: cited evidence codex/r1/e1 is not evidence for AC-3"),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn ac13_evidence_gone_before_ingest_counts_for_nothing() {
+    let rig = ruled_round_with(2, &["codex/r1/e2"]);
+    // claude's and codex's passes on AC-3 would be two, but codex's log was
+    // never stored.
+    let problems = judge_problems(&rig, &judge_json(&good_rulings(), "open", ""));
+    assert_eq!(
+        problems,
+        [
+            "AC-3: verified needs a matched re-run or two independent passes; codex/r1/e2 was not stored (gone before ingest) and counts for nothing"
+        ]
+    );
+    // Nor does a matched re-run whose log is gone.
+    let rig = all_passed_with_a_defect_except(&["claude/r1/e1"]);
+    let pass = verdict_json("pass", "");
+    let rulings = |ac1: &str| {
+        vec![
+            ruling("AC-1", "verified", "matched", &[ac1]),
+            ruling("AC-2", "verified", "matched", &["codex/r1/e1"]),
+            ruling("AC-3", "verified", "matched", &["claude-2/r1/e1"]),
+        ]
+    };
+    assert_eq!(
+        judge_problems(
+            &rig,
+            &judge_json(&rulings("claude/r1/e1"), "rejected", &pass)
+        ),
+        [
+            "AC-1: verified needs a matched re-run or two independent passes; claude/r1/e1 was not stored (gone before ingest) and counts for nothing"
+        ]
+    );
+    assert_eq!(
+        judge_problems(
+            &rig,
+            &judge_json(&rulings("codex/r1/e1"), "rejected", &pass)
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn ac13_a_reproduced_pass_backs_no_failure_and_a_reproduced_fail_does() {
+    let mut rig = ruled_round(3);
+    rig.judge(&judge_json(
+        &good_rulings(),
+        "open",
+        r#", "assign": {"codex": ["claude/AC-2"], "claude-2": ["codex/AC-1"]}"#,
+    ));
+    assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+    rig.deliver();
+    rig.reply("claude", r#"{"summary": "Nothing assigned."}"#);
+    rig.reply(
+        "codex",
+        &reply_json(
+            &[],
+            &[cmd("e1", 0, false)],
+            r#", "cross_checks": [{"subject": "claude/AC-2", "outcome": "reproduced", "note": "passes here too", "evidence": ["e1"]}]"#,
+        ),
+    );
+    rig.reply(
+        "claude-2",
+        &reply_json(
+            &[],
+            &[cmd("e1", 101, false)],
+            r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "reproduced", "note": "fails here too", "evidence": ["e1"]}]"#,
+        ),
+    );
+    rig.ingest();
+    assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+    let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+    let text = |ac1: String, ac2: String, ac3: String| {
+        format!(r#"{{"summary": "s", "rulings": [{ac1}, {ac2}, {ac3}]}}"#)
+    };
+    // codex reproduced claude's AC-2 pass: no ground for AC-2 failing, and
+    // no evidence at all for AC-3.
+    let problems = judge_problems(
+        &rig,
+        &text(
+            same("AC-1"),
+            ruling("AC-2", "failed", "codex says", &["codex/r2/e1"]),
+            same("AC-3"),
+        ),
+    );
+    assert_eq!(
+        problems,
+        ["AC-2: failed needs a cited fail result or reproduced evidence"]
+    );
+    let problems = judge_problems(
+        &rig,
+        &text(
+            same("AC-1"),
+            same("AC-2"),
+            ruling("AC-3", "failed", "codex says", &["codex/r2/e1"]),
+        ),
+    );
+    assert!(
+        problems[0].starts_with("AC-3: cited evidence codex/r2/e1 is not evidence for AC-3"),
+        "{problems:?}"
+    );
+    // claude-2 reproduced codex's AC-1 fail: that backs AC-1 failing.
+    let problems = judge_problems(
+        &rig,
+        &text(
+            ruling("AC-1", "failed", "reproduced", &["claude-2/r2/e1"]),
+            same("AC-2"),
+            same("AC-3"),
+        ),
+    );
+    assert_eq!(problems, Vec::<String>::new());
+}
+
+/// Round 1 of a one-round verification where every verifier passed every
+/// criterion on a matched re-run and claude-2 reported a high defect.
+fn all_passed_with_a_defect() -> Rig {
+    all_passed_with_a_defect_except(&[])
+}
+
+/// [`all_passed_with_a_defect`] with the items keyed in `gone` gone before
+/// ingest.
+fn all_passed_with_a_defect_except(gone: &[&str]) -> Rig {
+    let mut rig = Rig::build(Options {
+        max_rounds: 1,
+        ..Options::default()
+    });
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    let defect = r#", "defects": [{"id": "1", "claim": "The store loses the last line", "severity": "high", "category": "regression",
+       "confidence": "high", "repro": "1. kill -9 2. reopen", "evidence": ["e1"]}]"#;
+    rig.reply("claude", &all_pass());
+    rig.reply("codex", &all_pass());
+    rig.reply(
+        "claude-2",
+        &format!("{}{defect}}}", all_pass().trim_end_matches('}')),
+    );
+    rig.ingest_except(gone, &Default::default());
+    rig.rerun_all_matched();
+    assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude-2"));
+    rig
+}
+
+fn verdict_json(decision: &str, blocking: &str) -> String {
+    format!(
+        r#", "verdict": {{"decision": "{decision}", "rationale": "r", "blocking": [{blocking}]}}"#
+    )
+}
+
+#[test]
+fn ac14_a_must_criterion_ruled_not_applicable_refuses_pass_and_needs_blocking() {
+    let rig = all_passed_with_a_defect();
+    let rulings = vec![
+        ruling("AC-1", "not_applicable", "Tabs are not part of it.", &[]),
+        ruling("AC-2", "verified", "matched", &["codex/r1/e1"]),
+        ruling("AC-3", "verified", "matched", &["claude-2/r1/e1"]),
+    ];
+    // The defect is rejected: only AC-1 holds the change back.
+    let problems = |decision: &str, blocking: &str| {
+        judge_problems(
+            &rig,
+            &judge_json(&rulings, "rejected", &verdict_json(decision, blocking)),
+        )
+    };
+    assert_eq!(
+        problems("pass", ""),
+        [
+            "verdict: pass needs every must criterion verified; AC-1 (must) was ruled not_applicable; use pass_with_issues with it in blocking"
+        ]
+    );
+    assert_eq!(
+        problems("pass_with_issues", ""),
+        ["verdict: pass_with_issues needs blocking to list what holds it back: AC-1"]
+    );
+    assert_eq!(
+        problems("pass_with_issues", "\"AC-1\""),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn ac14_pass_with_issues_lists_everything_that_holds_the_change_back() {
+    let rig = all_passed_with_a_defect();
+    // Every must verified, AC-3 (should) inconclusive, D1 high and open.
+    let rulings = vec![
+        ruling("AC-1", "verified", "matched", &["claude/r1/e1"]),
+        ruling("AC-2", "verified", "matched", &["codex/r1/e1"]),
+        ruling("AC-3", "inconclusive", "not measured", &[]),
+    ];
+    let problems = |blocking: &str| {
+        judge_problems(
+            &rig,
+            &judge_json(
+                &rulings,
+                "open",
+                &verdict_json("pass_with_issues", blocking),
+            ),
+        )
+    };
+    assert_eq!(
+        problems("\"AC-3\""),
+        [
+            "verdict.blocking: missing D1; pass_with_issues lists everything that holds the change back"
+        ]
+    );
+    assert_eq!(
+        problems("\"D1\""),
+        [
+            "verdict.blocking: missing AC-3; pass_with_issues lists everything that holds the change back"
+        ]
+    );
+    assert_eq!(problems("\"AC-3\", \"D1\""), Vec::<String>::new());
+}
+
+#[test]
+fn assignments_name_a_result_the_verifier_has() {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    for part in ["claude", "claude-2"] {
+        let at = rig.tick();
+        rig.feed(crate::engine::Input::Sent {
+            round: 1,
+            part: p(part),
+            kind: crate::model::types::BriefKind::Work,
+            at,
+        });
+    }
+    // codex fails before replying: it has no result to cross-check.
+    for _ in 0..3 {
+        rig.feed(crate::engine::Input::SendFailed {
+            round: 1,
+            part: p("codex"),
+            kind: crate::model::types::BriefKind::Work,
+            error: "pane gone".into(),
+        });
+    }
+    rig.reply("claude", &all_pass());
+    rig.reply("claude-2", &all_pass());
+    rig.ingest();
+    rig.rerun_all_matched();
+    assert_eq!(rig.phase(), Phase::Ruling);
+    let rulings = format!(
+        r#""rulings": [{}, {}, {}]"#,
+        ruling(
+            "AC-1",
+            "verified",
+            "two",
+            &["claude/r1/e1", "claude-2/r1/e1"]
+        ),
+        ruling(
+            "AC-2",
+            "verified",
+            "two",
+            &["claude/r1/e1", "claude-2/r1/e1"]
+        ),
+        ruling(
+            "AC-3",
+            "verified",
+            "two",
+            &["claude/r1/e1", "claude-2/r1/e1"]
+        ),
+    );
+    let text = |assign: &str| format!(r#"{{"summary": "s", {rulings}, "assign": {assign}}}"#);
+    assert_eq!(
+        judge_problems(&rig, &text(r#"{"claude": ["codex/AC-1"]}"#)),
+        ["assign.claude[0]: codex has no result on AC-1 to reproduce or refute"]
+    );
+    assert_eq!(
+        judge_problems(&rig, &text(r#"{"claude": ["claude-2/AC-1"]}"#)),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn the_cross_brief_lists_every_result_so_far_not_only_the_latest() {
+    let mut rig = ruled_round(3);
+    rig.judge(&judge_json(&good_rulings(), "open", ""));
+    assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+    rig.deliver();
+    // codex turns its AC-1 fail into a pass.
+    let assigned = rig
+        .engine
+        .session()
+        .current_round()
+        .unwrap()
+        .assignments
+        .clone();
+    for part in VERIFIERS {
+        let checks: Vec<String> = assigned
+            .get(&p(part))
+            .into_iter()
+            .flatten()
+            .map(|s| {
+                format!(r#"{{"subject": "{s}", "outcome": "disputed", "note": "not looked at"}}"#)
+            })
+            .collect();
+        let results = if part == "codex" {
+            r#""results": [{"criterion": "AC-1", "result": "pass", "note": "fixed by a rebuild", "evidence": ["e1"]}], "evidence": [{"id": "e1", "kind": "command", "cmd": "cargo test cwd_after_rebuild", "cwd": ".", "exit": 0, "log": "logs/1.log", "rerun": false}], "#
+        } else {
+            ""
+        };
+        let text = format!(
+            r#"{{"summary": "s", {results}"cross_checks": [{}]}}"#,
+            checks.join(", ")
+        );
+        rig.reply(part, &text);
+    }
+    rig.ingest();
+    assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+    let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+    rig.judge(&format!(
+        r#"{{"summary": "s", "rulings": [{}, {}, {}]}}"#,
+        ruling("AC-1", "inconclusive", "codex changed its mind", &[]),
+        same("AC-2"),
+        same("AC-3")
+    ));
+    assert_eq!(rig.round(), 3, "{:?}", rig.rejected("judge"));
+    let brief = rig.brief("claude", crate::model::types::BriefKind::Work);
+    let so_far = &brief[brief.find("## 5. Rulings and results so far").unwrap()..];
+    let so_far = &so_far[..so_far.find("## 6.").unwrap()];
+    let ac1 = &so_far[so_far.find("### AC-1").unwrap()..so_far.find("### AC-2").unwrap()];
+    for line in [
+        "- codex R1: fail — Saw it.",
+        "  - codex/r1/e1: command `cargo test e1` (cwd .) exit 101",
+        "- codex R2: pass — fixed by a rebuild",
+        "  - codex/r2/e1: command `cargo test cwd_after_rebuild` (cwd .) exit 0",
+    ] {
+        assert!(ac1.contains(line), "{line:?} in\n{ac1}");
+    }
 }

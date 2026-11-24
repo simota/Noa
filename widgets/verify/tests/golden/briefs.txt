@@ -454,8 +454,10 @@ Defects so far:
 
 ## 7. Evidence standard
 - Every criterion gets one ruling per round; "ruling": "same" carries the previous one over unchanged.
+- Evidence cited for verified or failed belongs to that criterion: cited by a result on it, by a cross-check whose subject is a result on it, or media whose shows names it.
+- Evidence whose file was not stored (missing at ingest) counts for nothing.
 - verified needs at least one cited command evidence whose re-run matched, or pass results from two different verifiers each citing command or file evidence (cite one item of each); and no unanswered fail result or reproduced refutation on that criterion.
-- failed needs at least one cited fail result or reproduced evidence.
+- failed needs at least one cited fail result, or evidence of a reproduced cross-check that reproduced a fail result on it (or a defect); a reproduced pass backs no failure.
 - inconclusive and not_applicable need a rationale.
 - Cited evidence keys exist; an observation alone never satisfies verified.
 - Media the person attached (user/<n>) counts as one independent source for verified only together with a verifier's pass on the same criterion.
@@ -491,7 +493,7 @@ Rules:
 - defect ops: every raw defect of section 6 in exactly one add or merge "from", or one dismiss with a reason; new ids are free (the next is D1); status open, agreed, disputed or rejected (rejected needs a rationale)
 - severity: critical, high, medium, low, info; confidence: high, medium, low; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
 - assign: verifier ids: claude, codex, agy; values <verifier>/<criterion> of another verifier, or a live defect id
-- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified; blocking lists the should criteria not verified and live defects), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a not_applicable criterion holds nothing back
+- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back
 - verdict: only in the last round or with "close": true
 ===== R2 brief to claude =====
 ## 1. Request and round
@@ -537,7 +539,7 @@ Whatever your strategy, report a result for every criterion you are asked about.
 
 ## 5. Rulings and results so far
 The judge's summary of R1:
-AC-1 fails for a symlinked cwd; AC-2 and AC-3 hold; AC-5 is untested.
+AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; AC-5 is untested.
 
 ### AC-1 — failed (R1): codex's symlink test fails and the recording shows $HOME.
 - claude R1: pass — pwd shows /tmp.
@@ -563,7 +565,7 @@ AC-1 fails for a symlinked cwd; AC-2 and AC-3 hold; AC-5 is untested.
 - agy R1: pass
   - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
-### AC-3 — verified (R1): Two benchmarks under the limit.
+### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 - claude R1: pass — 31 ms median.
   - claude/r1/e3: command `for i in $(seq 20); do` … (cwd bench) exit 0
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
@@ -676,7 +678,7 @@ Whatever your strategy, report a result for every criterion you are asked about.
 
 ## 5. Rulings and results so far
 The judge's summary of R1:
-AC-1 fails for a symlinked cwd; AC-2 and AC-3 hold; AC-5 is untested.
+AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; AC-5 is untested.
 
 ### AC-1 — failed (R1): codex's symlink test fails and the recording shows $HOME.
 - claude R1: pass — pwd shows /tmp.
@@ -702,7 +704,7 @@ AC-1 fails for a symlinked cwd; AC-2 and AC-3 hold; AC-5 is untested.
 - agy R1: pass
   - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
-### AC-3 — verified (R1): Two benchmarks under the limit.
+### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 - claude R1: pass — 31 ms median.
   - claude/r1/e3: command `for i in $(seq 20); do` … (cwd bench) exit 0
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
@@ -812,7 +814,7 @@ Whatever your strategy, report a result for every criterion you are asked about.
 
 ## 5. Rulings and results so far
 The judge's summary of R1:
-AC-1 fails for a symlinked cwd; AC-2 and AC-3 hold; AC-5 is untested.
+AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; AC-5 is untested.
 
 ### AC-1 — failed (R1): codex's symlink test fails and the recording shows $HOME.
 - claude R1: pass — pwd shows /tmp.
@@ -838,7 +840,7 @@ AC-1 fails for a symlinked cwd; AC-2 and AC-3 hold; AC-5 is untested.
 - agy R1: pass
   - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
-### AC-3 — verified (R1): Two benchmarks under the limit.
+### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 - claude R1: pass — 31 ms median.
   - claude/r1/e3: command `for i in $(seq 20); do` … (cwd bench) exit 0
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
@@ -941,7 +943,7 @@ Isolation: one detached worktree per verifier; re-runs in each verifier's own pa
   Summary: Nothing assigned to me.
 - agy (agy): replied
   Strategy: custom (custom): Odd locales & very long paths
-  Summary: codex's AC-5 test never quits the app.
+  Summary: codex's AC-5 test never quits the app; a cold start is slow.
 
 ## 4. Results this round
 ### AC-1 [must] New tabs open in the focused pane's cwd
@@ -951,8 +953,16 @@ Your ruling so far (R1): failed — codex's symlink test fails and the recording
 - (no new result this round)
 Your ruling so far (R1): verified — claude's test re-ran with the same status.
 ### AC-3 [should] Opening a tab stays under 50 ms
-- (no new result this round)
-Your ruling so far (R1): verified — Two benchmarks under the limit.
+- agy: fail — A cold start takes 72 ms.
+  - agy/r2/e1: command `./bench open-tab --cold` (cwd bench) exit 1
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r2/agy/logs/1.log (1026 bytes, digest e1baf61110e31231)
+    log tail:
+```
+running ./bench open-tab --cold
+test cwd_inherit ... FAILED
+exit 1
+```
+Your ruling so far (R1): inconclusive — Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 ### AC-5 [should] Quitting keeps every tab's cwd for the next launch
 - (no new result this round)
 Your ruling so far (R1): inconclusive — Only codex passed it, on a test that does not quit.
@@ -971,6 +981,12 @@ You may open images by their stored path when your CLI can read images. You cann
 - claude on D1: reproduced — A link inside a link resolves wrong.
   - claude/r2/e2: command `./scripts/nested-link.sh` (cwd .) exit 1
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r2/claude/logs/2.log (1029 bytes, digest 034760f3b5757f7f)
+    log tail:
+```
+running ./scripts/nested-link.sh
+test cwd_inherit ... FAILED
+exit 1
+```
 - agy on codex/AC-5: disputed — cwd_gone does not exercise quitting at all.
 
 ## 6. Defects
@@ -982,8 +998,10 @@ Defects so far:
 
 ## 7. Evidence standard
 - Every criterion gets one ruling per round; "ruling": "same" carries the previous one over unchanged.
+- Evidence cited for verified or failed belongs to that criterion: cited by a result on it, by a cross-check whose subject is a result on it, or media whose shows names it.
+- Evidence whose file was not stored (missing at ingest) counts for nothing.
 - verified needs at least one cited command evidence whose re-run matched, or pass results from two different verifiers each citing command or file evidence (cite one item of each); and no unanswered fail result or reproduced refutation on that criterion.
-- failed needs at least one cited fail result or reproduced evidence.
+- failed needs at least one cited fail result, or evidence of a reproduced cross-check that reproduced a fail result on it (or a defect); a reproduced pass backs no failure.
 - inconclusive and not_applicable need a rationale.
 - Cited evidence keys exist; an observation alone never satisfies verified.
 - Media the person attached (user/<n>) counts as one independent source for verified only together with a verifier's pass on the same criterion.
@@ -1019,5 +1037,5 @@ Rules:
 - defect ops: every raw defect of section 6 in exactly one add or merge "from", or one dismiss with a reason; new ids are free (the next is D2); status open, agreed, disputed or rejected (rejected needs a rationale)
 - severity: critical, high, medium, low, info; confidence: high, medium, low; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
 - assign: verifier ids: claude, codex, agy; values <verifier>/<criterion> of another verifier, or a live defect id
-- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified; blocking lists the should criteria not verified and live defects), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a not_applicable criterion holds nothing back
+- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back
 - verdict: only in the last round or with "close": true

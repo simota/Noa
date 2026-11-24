@@ -290,6 +290,16 @@ impl Rig {
     /// Copies (pretends to) every replied verifier's evidence of the
     /// current round.
     pub fn ingest(&mut self) {
+        self.ingest_except(&[], &Default::default());
+    }
+
+    /// As [`Rig::ingest`], but the items keyed in `gone` were gone before
+    /// ingest (not stored), and `tails` are the failing logs' tails.
+    pub fn ingest_except(
+        &mut self,
+        gone: &[&str],
+        tails: &std::collections::BTreeMap<EvidenceKey, String>,
+    ) {
         let round = self.round();
         let parts: Vec<PartId> = self
             .engine
@@ -309,13 +319,19 @@ impl Rig {
                 .session()
                 .reported_items(round, &part)
                 .into_iter()
+                .filter(|e| !gone.contains(&e.key.as_str()))
                 .filter_map(|e| Some((e.key.clone(), stored_for(round, &part, e.file_path()?))))
+                .collect();
+            let tails = tails
+                .iter()
+                .filter(|(k, _)| k.split().is_some_and(|(p, _, _)| p == part))
+                .map(|(k, t)| (k.clone(), t.clone()))
                 .collect();
             self.feed(Input::Ingested {
                 round,
                 part,
                 items,
-                tails: Default::default(),
+                tails,
             });
         }
     }

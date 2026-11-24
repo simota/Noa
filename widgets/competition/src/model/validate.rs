@@ -1,5 +1,5 @@
-//! Validation of external agent outputs: contestant submission Markdown and
-//! judge evaluation JSON.
+//! Validation of external agent outputs: contestant submission Markdown,
+//! judge evaluation JSON (by seat in a panel), and a panel lead's verdict.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -148,17 +148,38 @@ fn strip_fence(text: &str) -> &str {
     inner.trim_end().strip_suffix("```").unwrap_or(inner).trim()
 }
 
-/// Checks the judge's JSON for `round` against `session`.
+/// Checks the judge's JSON for `round` against `session`: the lead's
+/// scorecard in a panel.
 pub fn parse_judge(
     text: &str,
     session: &Session,
     round: RoundNo,
+) -> Result<JudgeOutput, ValidationError> {
+    parse_scorecard(text, session, round, &session.judge.id)
+}
+
+/// Checks `judge`'s JSON for `round` against `session`. A single judge has
+/// the rules of [`parse_judge`]; in a panel, what a seat may write differs
+/// (only the lead publishes the checklist or asks to close, nobody names
+/// the winner before the verdict step, and amendments reach only the
+/// judge's own earlier scorecards).
+pub fn parse_scorecard(
+    text: &str,
+    session: &Session,
+    round: RoundNo,
+    judge: &PartId,
 ) -> Result<JudgeOutput, ValidationError> {
     let raw: RawJudgeOutput = serde_json::from_str(strip_fence(text))
         .map_err(|e| ValidationError::one(format!("not valid judge JSON: {e}")))?;
     if session.round(round).is_none() {
         return Err(ValidationError::one(format!("there is no round {round}")));
     }
+    if !session.is_judge(judge) {
+        return Err(ValidationError::one(format!("{judge} is not a judge")));
+    }
+    let panel = session.is_panel();
+    let lead = &session.judge.id;
+    let is_lead = judge == lead;
 
     let mut problems = Vec::new();
     let overview = raw.overview.trim().to_owned();
@@ -294,7 +315,40 @@ pub fn parse_judge(
         None => None,
     };
 
-    if is_last || raw.close {
+    if panel {
+        if is_lead {
+            if winner_id.is_some() {
+                problems.push(
+                    "winner: leave null; the lead names the winner in the verdict step, after every judge has scored"
+                        .to_owned(),
+                );
+            }
+            if final_verdict.is_some() {
+                problems.push(
+                    "final_verdict: leave null; the lead writes it in the verdict step, after every judge has scored"
+                        .to_owned(),
+                );
+            }
+        } else {
+            if !raw.checklist.iter().all(|c| c.trim().is_empty()) {
+                problems.push(format!(
+                    "checklist: only the lead judge ({lead}) publishes the checklist"
+                ));
+            }
+            if raw.close {
+                problems.push(format!(
+                    "close: only the lead judge ({lead}) can end the competition early"
+                ));
+            }
+            if winner_id.is_some() {
+                problems.push("winner: only the lead judge names the winner".to_owned());
+            }
+            if final_verdict.is_some() {
+                problems
+                    .push("final_verdict: only the lead judge writes the final verdict".to_owned());
+            }
+        }
+    } else if is_last || raw.close {
         if winner_id.is_none() {
             problems.push("\"winner\" is required when closing or on the final round".to_owned());
         }
@@ -310,15 +364,26 @@ pub fn parse_judge(
     let mut amendments = Vec::new();
     for (i, raw) in raw.amendments.into_iter().enumerate() {
         let at = format!("amendments[{i}]");
+        let contestant = PartId::new(raw.contestant.clone());
+        if panel {
+            let own = raw.round < round
+                && session
+                    .round(raw.round)
+                    .and_then(|r| r.scorecards.get(judge))
+                    .is_some_and(|card| card.evaluations.contains_key(&contestant));
+            if !own {
+                problems.push(format!(
+                    "{at}: round {} has no score of yours ({judge}) for {:?} (only your own earlier scores can be amended)",
+                    raw.round, raw.contestant
+                ));
+            }
+        }
         let judged = raw.round < round
             && session
                 .round(raw.round)
                 .and_then(|r| r.outcome.as_ref())
-                .is_some_and(|o| {
-                    o.evaluations
-                        .contains_key(&PartId::new(raw.contestant.clone()))
-                });
-        if !judged {
+                .is_some_and(|o| o.evaluations.contains_key(&contestant));
+        if !panel && !judged {
             problems.push(format!(
                 "{at}: round {} has no judged evaluation of {:?} (only earlier, judged rounds can be amended)",
                 raw.round, raw.contestant
@@ -349,7 +414,11 @@ pub fn parse_judge(
         ranking,
         winner: winner_id,
         final_verdict,
-        close: raw.close || is_last,
+        close: if panel && !is_lead {
+            false
+        } else {
+            raw.close || is_last
+        },
         amendments,
         checklist: raw
             .checklist
@@ -360,11 +429,67 @@ pub fn parse_judge(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawVerdict {
+    winner: String,
+    final_verdict: String,
+}
+
+/// A panel lead's accepted verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verdict {
+    pub winner: PartId,
+    pub final_verdict: String,
+}
+
+/// Checks the lead's verdict JSON for `round`: `winner` must be one of the
+/// entries with the highest mean (the lead breaks a tie; it cannot
+/// overrule the mean), and `final_verdict` must say something.
+pub fn parse_verdict(
+    text: &str,
+    session: &Session,
+    round: RoundNo,
+) -> Result<Verdict, ValidationError> {
+    let raw: RawVerdict = serde_json::from_str(strip_fence(text))
+        .map_err(|e| ValidationError::one(format!("not valid verdict JSON: {e}")))?;
+    let top = super::aggregate::top_set(session, round);
+    if top.is_empty() {
+        return Err(ValidationError::one(format!(
+            "round {round} has no combined scores to name a winner from"
+        )));
+    }
+    let mut problems = Vec::new();
+    let winner = PartId::new(raw.winner.trim());
+    if !session.is_contestant(&winner) {
+        problems.push(format!("winner {:?} is not a contestant", winner.as_str()));
+    } else if !top.contains(&winner) {
+        let top: Vec<&str> = top.iter().map(PartId::as_str).collect();
+        problems.push(format!(
+            "winner {:?} does not have the highest mean; name one of: {}",
+            winner.as_str(),
+            top.join(", ")
+        ));
+    }
+    let final_verdict = raw.final_verdict.trim().to_owned();
+    if final_verdict.is_empty() {
+        problems.push("\"final_verdict\" is empty".to_owned());
+    }
+    if !problems.is_empty() {
+        return Err(ValidationError { problems });
+    }
+    Ok(Verdict {
+        winner,
+        final_verdict,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::aggregate::tests::{cards, judge_next, panel_session, settle};
     use crate::model::types::{
-        AgentKind, JUDGE_ID, Participant, Phase, Role, Round, RoundKind, SessionId,
+        AgentKind, JUDGE_ID, Participant, Phase, Role, Round, RoundKind, SessionId, judge_id,
     };
 
     fn session(max_rounds: Option<RoundNo>) -> Session {
@@ -384,6 +509,7 @@ mod tests {
             rev: 1,
             created_at: 1,
             judge: p(JUDGE_ID, AgentKind::Claude, Role::Judge),
+            co_judges: Vec::new(),
             contestants: vec![
                 p("claude", AgentKind::Claude, Role::Contestant),
                 p("codex", AgentKind::Codex, Role::Contestant),
@@ -397,6 +523,9 @@ mod tests {
                 briefs: vec![],
                 submissions: BTreeMap::new(),
                 judge_brief: None,
+                co_judge_briefs: Vec::new(),
+                scorecards: BTreeMap::new(),
+                verdict_brief: None,
                 outcome: None,
             }],
             winner: None,
@@ -751,6 +880,160 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("at most 32"), "{}", &err[..err.len().min(300)]);
+    }
+
+    const SCORES: &str = r#""evaluations": {
+"claude": { "score": 70, "feedback": "a" },
+"codex": { "score": 80, "feedback": "b" }
+  },
+  "ranking": ["codex", "claude"]"#;
+
+    fn scorecard(extra: &str) -> String {
+        format!("{{\n  \"overview\": \"R\",\n  {SCORES}{extra}\n}}")
+    }
+
+    #[test]
+    fn co_judges_only_score() {
+        let s = panel_session(Some(3));
+        let second = judge_id(1);
+        let raw = scorecard(
+            r#", "checklist": ["mine"], "close": true, "winner": "codex", "final_verdict": "codex""#,
+        );
+        let err = parse_scorecard(&raw, &s, 1, &second).unwrap_err();
+        assert_eq!(
+            err.problems,
+            [
+                "checklist: only the lead judge (judge) publishes the checklist",
+                "close: only the lead judge (judge) can end the competition early",
+                "winner: only the lead judge names the winner",
+                "final_verdict: only the lead judge writes the final verdict",
+            ]
+        );
+        let out = parse_scorecard(&scorecard(""), &s, 1, &second).unwrap();
+        assert!(!out.close && out.checklist.is_empty() && out.winner.is_none());
+        // Even on the last round a co-judge's card does not close.
+        let last = panel_session(Some(1));
+        assert!(
+            !parse_scorecard(&scorecard(""), &last, 1, &second)
+                .unwrap()
+                .close
+        );
+        // Today's rules still hold for every seat.
+        let bad = r#"{"overview":" ","evaluations":{"claude":{"score":70,"feedback":"a"}},"ranking":["claude"]}"#;
+        let err = parse_scorecard(bad, &s, 1, &judge_id(2))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"overview\" is empty"), "{err}");
+        assert!(
+            err.contains("evaluations is missing contestant \"codex\""),
+            "{err}"
+        );
+        assert!(parse_scorecard(&scorecard(""), &s, 1, &PartId::new("claude")).is_err());
+    }
+
+    #[test]
+    fn a_panel_lead_leaves_the_winner_to_the_verdict_step() {
+        // The final round: a single judge must name the winner, a lead must not.
+        let s = panel_session(Some(1));
+        let out = parse_judge(&scorecard(r#", "checklist": ["c"]"#), &s, 1).unwrap();
+        assert!(out.close, "the last round's judgment closes");
+        assert_eq!(out.checklist, ["c"]);
+        assert_eq!((out.winner, out.final_verdict), (None, None));
+        let raw = scorecard(r#", "winner": "codex", "final_verdict": "codex wins""#);
+        let err = parse_judge(&raw, &s, 1).unwrap_err();
+        assert_eq!(
+            err.problems,
+            [
+                "winner: leave null; the lead names the winner in the verdict step, after every judge has scored",
+                "final_verdict: leave null; the lead writes it in the verdict step, after every judge has scored",
+            ]
+        );
+        // An early close is the lead's to ask for.
+        let s = panel_session(Some(3));
+        let out = parse_scorecard(&scorecard(r#", "close": true"#), &s, 1, &judge_id(0));
+        assert!(out.unwrap().close);
+    }
+
+    #[test]
+    fn amendments_reach_only_the_judges_own_cards() {
+        let mut s = panel_session(Some(3));
+        let mut r1 = cards(
+            &[("codex", 80), ("claude", 70)],
+            &[("codex", 80), ("claude", 72)],
+            &[("codex", 80), ("claude", 74)],
+        );
+        // judge-2 has no R1 card here: what it would amend is another's.
+        r1.remove(&judge_id(1));
+        s.rounds[0].scorecards = r1;
+        judge_next(&mut s, 2);
+        let amend = |round: RoundNo| {
+            scorecard(&format!(
+                r#", "amendments": [ {{ "round": {round}, "contestant": "claude", "score": 90, "reason": "misread" }} ]"#
+            ))
+        };
+        let err = parse_scorecard(&amend(1), &s, 2, &judge_id(1)).unwrap_err();
+        assert_eq!(
+            err.problems,
+            [
+                "amendments[0]: round 1 has no score of yours (judge-2) for \"claude\" (only your own earlier scores can be amended)"
+            ]
+        );
+        let out = parse_scorecard(&amend(1), &s, 2, &judge_id(0)).unwrap();
+        assert_eq!(out.amendments[0].score, 90);
+        assert!(parse_scorecard(&amend(1), &s, 2, &judge_id(2)).is_ok());
+        // Not the round being scored.
+        let err = parse_scorecard(&amend(2), &s, 2, &judge_id(2)).unwrap_err();
+        assert!(err.to_string().contains("amendments[0]: round 2"), "{err}");
+    }
+
+    #[test]
+    fn a_verdict_names_an_entry_with_the_highest_mean() {
+        let mut s = panel_session(Some(1));
+        assert!(parse_verdict(r#"{"winner":"codex","final_verdict":"v"}"#, &s, 1).is_err());
+        // codex 80+82+80 = 242 and claude 81+80+81 = 242: a tie.
+        settle(
+            &mut s,
+            1,
+            &cards(
+                &[("claude", 81), ("codex", 80)],
+                &[("codex", 82), ("claude", 80)],
+                &[("codex", 80), ("claude", 81)],
+            ),
+        )
+        .unwrap();
+        for winner in ["claude", "codex"] {
+            let raw = format!(
+                "```json\n{{\"winner\": \"{winner}\", \"final_verdict\": \" Close call. \"}}\n```"
+            );
+            let verdict = parse_verdict(&raw, &s, 1).unwrap();
+            assert_eq!(verdict.winner.as_str(), winner);
+            assert_eq!(verdict.final_verdict, "Close call.");
+        }
+        let mut lower = panel_session(Some(1));
+        settle(
+            &mut lower,
+            1,
+            &cards(
+                &[("claude", 81), ("codex", 80)],
+                &[("codex", 82), ("claude", 80)],
+                &[("codex", 81), ("claude", 81)],
+            ),
+        )
+        .unwrap();
+        let err =
+            parse_verdict(r#"{"winner":"claude","final_verdict":" "}"#, &lower, 1).unwrap_err();
+        assert_eq!(
+            err.problems,
+            [
+                "winner \"claude\" does not have the highest mean; name one of: codex",
+                "\"final_verdict\" is empty",
+            ]
+        );
+        let err =
+            parse_verdict(r#"{"winner":"judge","final_verdict":"v"}"#, &lower, 1).unwrap_err();
+        assert_eq!(err.problems, ["winner \"judge\" is not a contestant"]);
+        let extra = r#"{"winner":"codex","final_verdict":"v","close":true}"#;
+        assert!(parse_verdict(extra, &lower, 1).is_err());
     }
 
     #[test]

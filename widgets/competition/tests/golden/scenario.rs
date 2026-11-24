@@ -239,7 +239,7 @@ pub fn run(
         max_rounds: Some(3),
         reveal_interval: 2,
         workdir: None,
-        judge: AgentKind::Claude.into(),
+        judges: &[AgentKind::Claude.into()],
         panel: &[
             AgentKind::Claude.into(),
             AgentKind::Codex.into(),

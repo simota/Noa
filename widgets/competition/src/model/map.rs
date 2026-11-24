@@ -181,6 +181,9 @@ mod tests {
                     })
                     .collect::<BTreeMap<_, _>>(),
                 judge_brief: None,
+                co_judge_briefs: Vec::new(),
+                scorecards: BTreeMap::new(),
+                verdict_brief: None,
                 outcome: None,
             })
             .collect();
@@ -193,6 +196,7 @@ mod tests {
             rev: 1,
             created_at: 0,
             judge: p("judge", Role::Judge),
+            co_judges: Vec::new(),
             contestants: entries
                 .iter()
                 .map(|(id, _)| p(id, Role::Contestant))

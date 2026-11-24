@@ -915,7 +915,7 @@ impl Competition {
                     workdir,
                     max_rounds: Some(form.max_rounds),
                     reveal_interval: form.reveal_interval,
-                    judge: form.judge,
+                    judges: vec![form.judge],
                     panel: form.panel,
                 });
             }
@@ -1417,7 +1417,7 @@ mod tests {
             max_rounds: Some(max_rounds),
             reveal_interval: 5,
             workdir: None,
-            judge: AgentKind::Codex.into(),
+            judges: &[AgentKind::Codex.into()],
             panel: &panel,
         };
         let (mut engine, out) =
@@ -1589,7 +1589,9 @@ mod tests {
         );
         assert_eq!(form.judge.kind, AgentKind::Codex);
         assert_eq!(form.max_rounds, 3);
-        let (_, contestants) = competition::engine::participants(&form.judge, &form.panel);
+        let contestants =
+            competition::engine::participants(std::slice::from_ref(&form.judge), &form.panel)
+                .contestants;
         let ids: Vec<&str> = contestants.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["claude", "claude-2"]);
         std::fs::remove_dir_all(&root).unwrap();
@@ -1663,7 +1665,7 @@ mod tests {
         let panel = start::read(&screen.tree, &screen.start).panel;
         // A new row takes the last row's kind.
         assert!(panel[3..].iter().all(|c| c.kind == AgentKind::Agy));
-        let (_, contestants) = competition::engine::participants(&panel[0], &panel);
+        let contestants = competition::engine::participants(&panel[..1], &panel).contestants;
         assert_eq!(contestants[5].id.as_str(), "agy-4");
         // The remove buttons are wired to their rows.
         assert_eq!(

@@ -229,7 +229,7 @@ pub fn simulate_competition(rounds: RoundNo) -> (Session, Vec<Vec<Event>>, Strin
         workdir: None,
         max_rounds: Some(rounds + 1),
         reveal_interval: 5,
-        judge: AgentKind::Claude.into(),
+        judges: &[AgentKind::Claude.into()],
         panel: &[
             AgentKind::Claude.into(),
             AgentKind::Codex.into(),

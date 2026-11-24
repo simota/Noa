@@ -902,9 +902,16 @@ pub(super) struct AttachParts {
     marks_label: WidgetId,
     pub(super) marks: WidgetId,
     error: WidgetId,
+    /// Why 追加 is off once the verification has closed (L1-5a).
+    pub(super) closed: WidgetId,
     pub(super) submit: WidgetId,
     pub(super) cancel: WidgetId,
 }
+
+/// Shown in an open 証跡を追加 form once the verification has closed: what
+/// was typed stays, and 追加 is off.
+pub(super) const ATTACH_CLOSED: &str =
+    "検証が終了したため、この証跡は追加できません（入力した内容はそのまま残っています）";
 
 /// A file waiting to be attached.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -955,6 +962,14 @@ pub(super) fn insert_attach(tree: &mut UiTree, parent: WidgetId) -> AttachParts 
         TextArea::new("00:04 ⌘T を押す\n00:06.5 新しいタブが $HOME を表示").min_lines(2),
     );
     let error = tree.insert(Some(root), Label::new("").font_size(11.5).wrap(true));
+    let closed = tree.insert(
+        Some(root),
+        Label::new(ATTACH_CLOSED)
+            .font_size(11.5)
+            .color(Role::Muted)
+            .wrap(true),
+    );
+    tree.set_hidden(closed, true);
     let buttons = tree.insert(Some(root), Container::row().gap(6.0));
     let submit = tree.insert(
         Some(buttons),
@@ -974,9 +989,17 @@ pub(super) fn insert_attach(tree: &mut UiTree, parent: WidgetId) -> AttachParts 
         marks_label,
         marks,
         error,
+        closed,
         submit,
         cancel,
     }
+}
+
+/// Whether the form's 追加 can be used: only while 証跡を追加 can (L1-5a).
+/// Otherwise it is off and the form says why; やめる closes it.
+pub(super) fn attach_open(tree: &mut UiTree, parts: &AttachParts, open: bool) {
+    tree.set_enabled(parts.submit, open);
+    tree.set_hidden(parts.closed, open);
 }
 
 /// Shows the form for `draft`, empty but for `shows` (the selected

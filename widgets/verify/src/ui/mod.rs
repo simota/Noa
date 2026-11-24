@@ -921,10 +921,17 @@ impl Verify {
         );
     }
 
+    /// The open form's buttons: 追加 only while 証跡を追加 can be used
+    /// (L1-5a), so a form left open when the verification closes keeps
+    /// what was typed and says why it cannot be added.
     fn attach_actions(&mut self) {
         if self.attach_current.is_some() {
-            self.actions
-                .push((self.attach.submit, Action::AttachSubmit));
+            let open = self.can_attach();
+            evidence::attach_open(&mut self.tree, &self.attach, open);
+            if open {
+                self.actions
+                    .push((self.attach.submit, Action::AttachSubmit));
+            }
             self.actions
                 .push((self.attach.cancel, Action::AttachCancel));
         }

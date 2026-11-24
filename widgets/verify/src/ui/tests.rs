@@ -1949,6 +1949,35 @@ fn media_is_attached_from_the_file_chooser_only_while_the_verification_runs() {
     assert!(confirming.tree.is_hidden(confirming.attach.root));
 }
 
+#[test]
+fn an_open_attach_form_keeps_its_text_but_cannot_add_once_the_verification_closes() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    drop_files(&mut screen, &["/shots/tab.png"]);
+    let caption = screen.attach.caption;
+    screen
+        .tree
+        .update::<TextArea, _>(caption, |a, cx| a.set_text(cx, "新しいタブ"));
+    assert!(acts(&screen).contains(&Action::AttachSubmit));
+    assert!(screen.tree.is_hidden(screen.attach.closed));
+    // The verdict arrives while the form is open.
+    let mut closed = crate::demo::held();
+    closed.closed = true;
+    closed.rev += 1;
+    link.snapshots.send(snapshot(closed, None, 0)).unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert!(!screen.tree.is_hidden(screen.attach.root));
+    assert!(!acts(&screen).contains(&Action::AttachSubmit));
+    assert!(!screen.tree.is_enabled(screen.attach.submit));
+    assert!(!screen.tree.is_hidden(screen.attach.closed));
+    assert_eq!(
+        screen.tree.get::<TextArea>(caption).unwrap().text(),
+        "新しいタブ"
+    );
+    assert!(commands(&link).is_empty());
+    act(&mut screen, Action::AttachCancel);
+    assert!(screen.tree.is_hidden(screen.attach.root));
+}
+
 // ---- stored views ----
 
 #[test]

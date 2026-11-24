@@ -8,8 +8,8 @@ use std::path::Path;
 
 use crate::model::rules::History;
 use crate::model::types::{
-    CRITERIA_ROUND, CriteriaEdit, Defect, Evidence, EvidenceBody, EvidenceKey, Isolation, Outcome,
-    Phase, Rerun, RulingKind, Session, Subject, TargetKind, short_id,
+    CRITERIA_ROUND, CriteriaEdit, CrossOutcome, Defect, Evidence, EvidenceBody, EvidenceKey,
+    Isolation, Outcome, Phase, Rerun, RulingKind, Session, Subject, TargetKind, short_id,
 };
 
 /// The report's section headings, in order (after the title).
@@ -751,7 +751,9 @@ fn write_gaps(out: &mut String, session: &Session) {
         })
         .map(|c| c.id.as_str())
         .collect();
-    if !untested.is_empty() && session.frozen_at.is_some() {
+    // While the criteria wait to be confirmed no result is due yet; once
+    // the verification is over (also when it ended there) none will come.
+    if !untested.is_empty() && (session.frozen_at.is_some() || session.closed) {
         gaps = true;
         let _ = writeln!(out, "- 成功・失敗の結果がない基準: {}", untested.join(", "));
     }
@@ -955,6 +957,16 @@ pub fn fix_task(
             );
         }
     }
+    // A ref: the tab opens in the target's checkout, which may have
+    // another commit out (review L1-9).
+    if let Some(head) = &m.head_ref {
+        let _ = writeln!(
+            out,
+            "- The verifiers checked {head} at `{}`. If this working tree is not on that \
+             commit (`git rev-parse HEAD`), stop and ask before changing anything.",
+            m.head_sha.as_deref().unwrap_or("?")
+        );
+    }
     out.push_str(match session.isolation {
         Isolation::Worktree => {
             "- The verifiers ran in copies of it; the stored logs below are what they saw. The \
@@ -1047,6 +1059,53 @@ pub fn fix_task(
                 check.outcome.name(),
                 one_line(&check.note)
             );
+        }
+        // A defect's reproduction whose evidence backs this failure (L1-6
+        // rule 6) gives the steps, also when the defect is not in scope.
+        let backing: Vec<_> = session
+            .cross_checks
+            .iter()
+            .filter(|x| {
+                x.outcome == CrossOutcome::Reproduced
+                    && x.evidence.iter().any(|k| keys.contains(&k))
+            })
+            .collect();
+        let mut shown: Vec<&str> = Vec::new();
+        for check in backing {
+            let Subject::Defect { id } = &check.subject else {
+                continue;
+            };
+            let _ = writeln!(
+                out,
+                "- {} reproduced defect {id} (R{}): {}",
+                check.by,
+                check.round,
+                one_line(&check.note)
+            );
+            if let Some(d) = session.defect(id)
+                && !shown.contains(&id.as_str())
+            {
+                shown.push(id);
+                // Indented past the list item's own two spaces.
+                let repro: Vec<String> = d
+                    .repro
+                    .trim()
+                    .lines()
+                    .map(|l| format!("      {l}"))
+                    .collect();
+                let _ = writeln!(
+                    out,
+                    "  {id} [{}] {}\n  Repro:\n\n{}\n",
+                    d.severity.name(),
+                    d.claim,
+                    repro.join("\n")
+                );
+            }
+            for key in &check.evidence {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
         }
         for key in keys {
             write_fix_item(&mut out, session, key, tails);
@@ -1533,6 +1592,117 @@ mod tests {
         assert!(
             shared.contains(here) && !shared.contains(copies),
             "{shared}"
+        );
+    }
+
+    #[test]
+    fn ac24_a_fix_task_for_a_ref_says_to_stop_when_the_tree_is_not_on_its_commit() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        let stop = format!(
+            "- The verifiers checked feat/cwd at `{}`. If this working tree is not on that \
+             commit (`git rev-parse HEAD`), stop and ask before changing anything.\n",
+            testkit::HEAD_SHA
+        );
+        let task = fix_task(
+            rig.engine.session(),
+            &["AC-1".into()],
+            &[],
+            &BTreeMap::new(),
+        );
+        assert!(task.contains(&stop), "{task}");
+        // Work-tree mode: what the verifiers saw was the tree itself.
+        let mut session = rig.engine.session().clone();
+        session.manifest.head_ref = None;
+        let task = fix_task(&session, &["AC-1".into()], &[], &BTreeMap::new());
+        assert!(!task.contains("stop and ask"), "{task}");
+    }
+
+    #[test]
+    fn ac24_a_criterion_failed_on_a_defects_reproduction_keeps_its_repro_steps_alone() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &format!(
+                r#"{}, "defects": [{{"id": "1", "claim": "The store loses the last line", "severity": "high",
+                   "category": "regression", "confidence": "high", "repro": "1. kill -9 mid-write\n2. reopen the store",
+                   "evidence": ["e1"]}}]}}"#,
+                all_pass().trim_end_matches('}')
+            ),
+        );
+        rig.reply("codex", &all_pass());
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(&format!(
+            r#"{}, "defect_ops": [{{"op": "add", "id": "D1", "from": ["claude/1"], "claim": "The store loses the last line",
+                 "repro": "1. kill -9 mid-write\n2. reopen the store", "severity": "high", "category": "regression",
+                 "confidence": "high", "status": "open", "rationale": "Seen once."}}], "assign": {{"codex": ["D1"]}}}}"#,
+            testkit::JUDGE_R1.trim_end().trim_end_matches('}')
+        ));
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        rig.deliver();
+        rig.reply("claude", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply(
+            "codex",
+            &reply_json(
+                &[],
+                &[r#"{"id": "p1", "kind": "file", "path": "shots/empty.png", "caption": "the store is empty after reopen", "shows": ["AC-2"]}"#
+                    .to_owned()],
+                r#", "cross_checks": [{"subject": "D1", "outcome": "reproduced", "note": "lost here too", "evidence": ["p1"]}]"#,
+            ),
+        );
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+        // The picture backs AC-2 failing through D1's reproduction alone
+        // (L1-6 rule 6).
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "same"},
+              {"criterion": "AC-2", "ruling": "failed", "rationale": "codex reproduced D1: the store is empty", "evidence": ["codex/r2/p1"]},
+              {"criterion": "AC-3", "ruling": "same"}]}"#,
+        );
+        assert_eq!(rig.round(), 3, "{:?}", rig.rejected("judge"));
+        let task = fix_task(
+            rig.engine.session(),
+            &["AC-2".into()],
+            &[],
+            &BTreeMap::new(),
+        );
+        let ac2 = &task[task.find("### AC-2").unwrap()..];
+        assert!(
+            ac2.contains("Evidence codex/r2/p1: file shots/empty.png"),
+            "{ac2}"
+        );
+        assert!(
+            ac2.contains(
+                "- codex reproduced defect D1 (R2): lost here too\n  \
+                 D1 [high] The store loses the last line\n  \
+                 Repro:\n\n      1. kill -9 mid-write\n      2. reopen the store\n"
+            ),
+            "{ac2}"
+        );
+    }
+
+    #[test]
+    fn a_verification_closed_while_its_criteria_wait_lists_every_one_as_untested() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        assert_eq!(rig.phase(), Phase::Confirming);
+        let held = report_markdown(rig.engine.session(), None);
+        assert!(
+            !gaps_section(&held).contains("成功・失敗の結果がない基準"),
+            "not yet: the criteria may still be edited\n{held}"
+        );
+        rig.feed(crate::engine::Input::UserClose);
+        let report = report_markdown(rig.engine.session(), None);
+        assert!(
+            gaps_section(&report).contains("- 成功・失敗の結果がない基準: AC-1, AC-2, AC-3\n"),
+            "{report}"
         );
     }
 

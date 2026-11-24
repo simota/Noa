@@ -433,6 +433,37 @@ const R2_JUDGE: &str = r#"{"summary": "codex's AC-1 failure did not reproduce; t
 /// Runs the scenario and returns every brief and correction sent, then
 /// (separately) the session at the end.
 pub fn run() -> (String, Session) {
+    let run = play();
+    let session = run.engine.session().clone();
+    assert!(session.closed, "the scenario ends in a verdict");
+    (run.out, session)
+}
+
+/// The scenario given one more round (+1) after its verdict: the briefs
+/// round 3 sends once the removed worktrees are made again.
+pub fn extended() -> String {
+    let mut run = play();
+    run.out.clear();
+    let at = run.at();
+    run.feed(Input::UserExtend { by: 1, at });
+    for part in VERIFIERS {
+        let path = verify::worktree::path_for(
+            Path::new(REPO),
+            &SessionId::new("ver-golden"),
+            &PartId::new(part),
+        );
+        run.feed(Input::WorktreeMade {
+            part: PartId::new(part),
+            path,
+        });
+    }
+    let now = run.at();
+    run.feed(Input::Tick { now });
+    assert_eq!(run.round(), 3, "round 3 started");
+    run.out
+}
+
+fn play() -> Run {
     let panel = vec![
         VerifierChoice {
             agent: AgentChoice {
@@ -587,7 +618,5 @@ pub fn run() -> (String, Session) {
             part: PartId::new(part),
         });
     }
-    let session = run.engine.session().clone();
-    assert!(session.closed, "the scenario ends in a verdict");
-    (run.out, session)
+    run
 }

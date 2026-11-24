@@ -19,6 +19,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::fsx;
 use crate::model::export;
@@ -186,21 +187,103 @@ pub fn report_path(dir: &Path) -> PathBuf {
     dir.join(REPORT_FILE)
 }
 
+/// The line [`prepare_workdir`] adds to a `.noa/.gitignore` it did not
+/// write: this widget's folder, relative to `.noa/`.
+const VERIFY_IGNORE_LINE: &str = "/verify/";
+
 /// Makes `<workdir>/.noa/` with a `.gitignore` holding `*`, so the
-/// verification's files never show in `git status`. A `.noa` (or anything
-/// below it) that is a link is refused.
+/// verification's files never show in `git status`. A `.noa/.gitignore`
+/// already there is kept; when git does not ignore `.noa/verify/` with it,
+/// [`VERIFY_IGNORE_LINE`] is appended, and a folder git still does not
+/// ignore refuses the start with the reason. A `.noa` (or anything below
+/// it) that is a link is refused.
 pub fn prepare_workdir(workdir: &Path) -> io::Result<()> {
     let dir = workdir.join(".noa");
     fsx::create_dirs(workdir, &dir.join(VERIFY_DIR))?;
+    let gitignore = dir.join(".gitignore");
     // `create_new` does not follow a link left at the name.
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(dir.join(".gitignore"))
+        .open(&gitignore)
     {
-        Ok(mut file) => io::Write::write_all(&mut file, b"*\n"),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e),
+        Ok(mut file) => return file.write_all(b"*\n"),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    if verify_dir_ignored(workdir)? {
+        return Ok(());
+    }
+    append_ignore_line(&gitignore)?;
+    if verify_dir_ignored(workdir)? {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{} を書き足しても .noa/verify/ が Git に無視されません。検証の証跡が Git に含まれるおそれがあるため開始しません",
+        gitignore.display()
+    )))
+}
+
+/// Whether git ignores `<workdir>/.noa/verify/` (`git check-ignore`, run
+/// without the person's `GIT_*` variables).
+fn verify_dir_ignored(workdir: &Path) -> io::Result<bool> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(workdir)
+        .args(["check-ignore", "-q", "--"])
+        .arg(Path::new(".noa").join(VERIFY_DIR))
+        .stdin(Stdio::null());
+    without_git_env(&mut cmd);
+    let output = cmd
+        .output()
+        .map_err(|e| io::Error::other(format!("git を起動できません: {e}")))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(io::Error::other(format!(
+            ".noa/verify/ が Git に無視されているか確かめられないため開始しません: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
+}
+
+/// Appends [`VERIFY_IGNORE_LINE`] to `gitignore`, on a line of its own,
+/// keeping every line it has. A link or anything but a plain file is
+/// refused.
+fn append_ignore_line(gitignore: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _};
+    let file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(gitignore)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} は通常のファイルではありません", gitignore.display()),
+        ));
+    }
+    let mut last = [0u8; 1];
+    let open_line = meta.len() > 0 && {
+        file.read_exact_at(&mut last, meta.len() - 1)?;
+        last[0] != b'\n'
+    };
+    let line = format!(
+        "{}{VERIFY_IGNORE_LINE}\n",
+        if open_line { "\n" } else { "" }
+    );
+    (&file).write_all(line.as_bytes())
+}
+
+/// Clears every `GIT_*` variable `cmd` would inherit, so git finds the
+/// repository from its directory alone, not from the person's environment
+/// (a `GIT_DIR` or `GIT_WORK_TREE` set in their shell, say).
+fn without_git_env(cmd: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            cmd.env_remove(name);
+        }
     }
 }
 
@@ -647,6 +730,70 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// `git -C dir <args>`'s exit status, run without the test's `GIT_*`
+    /// variables.
+    fn git(dir: &Path, args: &[&str]) -> i32 {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        without_git_env(&mut cmd);
+        cmd.status().unwrap().code().unwrap()
+    }
+
+    #[test]
+    fn an_existing_noa_gitignore_gets_the_verify_folder_ignored_and_keeps_its_lines() {
+        let repo = temp_root("ignore-repo");
+        fs::create_dir_all(repo.join(".noa")).unwrap();
+        assert_eq!(git(&repo, &["init", "-q"]), 0);
+        let gitignore = repo.join(".noa/.gitignore");
+        // The person's own file, its last line without a newline.
+        fs::write(&gitignore, "logs/").unwrap();
+        prepare_workdir(&repo).unwrap();
+        assert_eq!(fs::read_to_string(&gitignore).unwrap(), "logs/\n/verify/\n");
+        let shot = repo.join(".noa/verify/ver-1/evidence/user/1.png");
+        fs::create_dir_all(shot.parent().unwrap()).unwrap();
+        fs::write(&shot, "png").unwrap();
+        assert_eq!(
+            git(
+                &repo,
+                &[
+                    "check-ignore",
+                    "-q",
+                    ".noa/verify/ver-1/evidence/user/1.png"
+                ]
+            ),
+            0
+        );
+        // Ignored now: the next start leaves the file as it is.
+        prepare_workdir(&repo).unwrap();
+        assert_eq!(fs::read_to_string(&gitignore).unwrap(), "logs/\n/verify/\n");
+        // A file that already ignores the folder is not touched.
+        fs::write(&gitignore, "*\n").unwrap();
+        prepare_workdir(&repo).unwrap();
+        assert_eq!(fs::read_to_string(&gitignore).unwrap(), "*\n");
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn a_start_is_refused_when_git_does_not_confirm_the_verify_folder_is_ignored() {
+        let dir = temp_root("ignore-nogit");
+        fs::create_dir_all(dir.join(".noa")).unwrap();
+        let gitignore = dir.join(".noa/.gitignore");
+        fs::write(&gitignore, "logs/\n").unwrap();
+        assert_eq!(
+            git(&dir, &["rev-parse", "--git-dir"]),
+            128,
+            "not a repository"
+        );
+        let err = prepare_workdir(&dir).unwrap_err();
+        assert!(err.to_string().contains(".noa/verify/"), "{err}");
+        assert_eq!(fs::read_to_string(&gitignore).unwrap(), "logs/\n");
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// A first batch for a verification `id` created at `at`.

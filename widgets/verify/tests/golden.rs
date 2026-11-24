@@ -335,3 +335,39 @@ fn ac31_the_persons_screenshot_is_in_the_next_ruling_brief() {
     );
     assert!(judge.contains("    shows: AC-1"), "{judge}");
 }
+
+#[test]
+fn ac21_a_round_after_an_extension_briefs_every_ruling_and_what_checks_and_rulings_cite() {
+    let briefs = scenario::extended();
+    for part in scenario::VERIFIERS {
+        let brief = briefs
+            .split("===== ")
+            .find(|s| s.starts_with(&format!("R3 brief to {part} ")))
+            .unwrap_or_else(|| panic!("no R3 brief to {part}:\n{briefs}"));
+        let standing = &brief
+            [brief.find("## 5. Rulings and results so far").unwrap()..brief.find("## 6.").unwrap()];
+        // The command only claude's R2 reproduction of D1 cites.
+        assert!(
+            standing.contains(
+                "  - claude/r2/e2: command `./scripts/nested-link.sh` (cwd .) exit 1\n    stored: /golden/repo/.noa/verify/ver-golden/evidence/r2/claude/logs/2.log"
+            ),
+            "{part}:\n{standing}"
+        );
+        // The person's screenshot only AC-1's R2 ruling cites.
+        assert!(
+            standing.contains(
+                "  - user/1: PNG image Screenshot 2026-11-24.png — \"pwd shows /tmp in the new tab\"\n    stored: /golden/repo/.noa/verify/ver-golden/evidence/user/1.png"
+            ),
+            "{part}:\n{standing}"
+        );
+        // AC-3's R1 ruling beside its R2 one.
+        let ac3 = &standing[standing.find("### AC-3").unwrap()..standing.find("### AC-5").unwrap()];
+        assert!(
+            ac3.starts_with(
+                "### AC-3 — failed (R2): agy's cold-start benchmark takes 72 ms, over the limit.\n\
+                 - judge R1: inconclusive — Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.\n"
+            ),
+            "{part}:\n{ac3}"
+        );
+    }
+}

@@ -9,8 +9,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::model::types::{
-    Brief, BriefKind, EvidenceBody, EvidenceKey, Isolation, JUDGE_ID, MAX_CAPTION, MAX_CMD,
-    MAX_CRITERIA, MAX_DEFECTS, MAX_EVIDENCE_ITEMS, MAX_LOG_BYTES, MAX_MARKS, MAX_RERUNS,
+    Brief, BriefKind, CrossCheck, EvidenceBody, EvidenceKey, Isolation, JUDGE_ID, MAX_CAPTION,
+    MAX_CMD, MAX_CRITERIA, MAX_DEFECTS, MAX_EVIDENCE_ITEMS, MAX_LOG_BYTES, MAX_MARKS, MAX_RERUNS,
     MAX_STATEMENT, MsgKind, PartId, Receipt, Rerun, RoundKind, RoundNo, Session, Strategy, Subject,
     TargetKind, short_id,
 };
@@ -721,18 +721,38 @@ fn rerun_text(rerun: &Rerun) -> String {
     }
 }
 
-/// Rulings and every result so far, with identities (round ≥ 2 briefs).
+/// Rulings and every result so far, with identities (round ≥ 2 briefs):
+/// per criterion its rulings, every result and every cross-check on one,
+/// each with the evidence it cites, and what the rulings cite besides (the
+/// person's media, say); then each defect with its sources' evidence and
+/// the cross-checks on it (L1-4 item 4; media wherever cited, L1-5a).
 fn write_standing(out: &mut String, session: &Session, round: RoundNo) {
     let reply_dir = crate::store::reply_dir(session);
     if let Some((no, summary)) = session.summary_before(round) {
         let _ = writeln!(out, "The judge's summary of R{no}:\n{}\n", summary.trim());
     }
     for c in &session.criteria {
-        let ruling = session
-            .ruling(&c.id)
+        let rulings: Vec<_> = session
+            .rulings
+            .get(&c.id)
+            .into_iter()
+            .flatten()
+            .filter(|r| r.round < round)
+            .collect();
+        let ruling = rulings
+            .last()
             .map(|r| format!("{} (R{}): {}", r.kind.name(), r.round, r.rationale.trim()))
             .unwrap_or_else(|| "not ruled".to_owned());
         let _ = writeln!(out, "### {} — {ruling}", c.id);
+        // The earlier rulings: a later one does not take their reasons away.
+        for r in &rulings[..rulings.len().saturating_sub(1)] {
+            let _ = write!(out, "- judge R{}: {}", r.round, r.kind.name());
+            if !r.rationale.trim().is_empty() {
+                let _ = write!(out, " — {}", r.rationale.trim());
+            }
+            out.push('\n');
+        }
+        let mut listed: BTreeSet<&EvidenceKey> = BTreeSet::new();
         // Every result, not just the latest: an update leaves the earlier
         // one and its evidence readable (L1-4 item 4).
         for part in session.verifier_ids() {
@@ -748,11 +768,72 @@ fn write_standing(out: &mut String, session: &Session, round: RoundNo) {
                 out.push('\n');
                 for key in &r.evidence {
                     write_item(out, session, key, &reply_dir);
+                    listed.insert(key);
                 }
             }
         }
+        for check in session.cross_checks.iter().filter(|x| {
+            x.round < round
+                && matches!(&x.subject, Subject::Result { criterion, .. } if *criterion == c.id)
+        }) {
+            write_check(out, session, check, &reply_dir);
+            listed.extend(&check.evidence);
+        }
+        let cited: Vec<&EvidenceKey> = rulings
+            .iter()
+            .flat_map(|r| &r.evidence)
+            .filter(|k| listed.insert(k))
+            .collect();
+        if !cited.is_empty() {
+            out.push_str("- also cited by the judge:\n");
+            for key in cited {
+                write_item(out, session, key, &reply_dir);
+            }
+        }
+    }
+    for d in &session.defects {
+        let _ = writeln!(
+            out,
+            "### {} — {} · {} · {}: {}\nRepro: {}",
+            d.id,
+            d.status.name(),
+            d.severity.name(),
+            d.category,
+            d.claim,
+            d.repro.trim()
+        );
+        for raw in d.sources.iter().filter_map(|k| session.raw_defect(k)) {
+            let _ = writeln!(out, "- {} (R{}): {}", raw.key, raw.round, raw.claim);
+            for key in &raw.evidence {
+                write_item(out, session, key, &reply_dir);
+            }
+        }
+        for check in session.cross_checks.iter().filter(|x| {
+            x.round < round && matches!(&x.subject, Subject::Defect { id } if *id == d.id)
+        }) {
+            write_check(out, session, check, &reply_dir);
+        }
     }
     out.push('\n');
+}
+
+/// One earlier cross-check, with the evidence it cites.
+fn write_check(out: &mut String, session: &Session, check: &CrossCheck, reply_dir: &Path) {
+    let _ = write!(
+        out,
+        "- {} R{} cross-check on {}: {}",
+        check.by,
+        check.round,
+        check.subject,
+        check.outcome.name()
+    );
+    if !check.note.is_empty() {
+        let _ = write!(out, " — {}", check.note.trim());
+    }
+    out.push('\n');
+    for key in &check.evidence {
+        write_item(out, session, key, reply_dir);
+    }
 }
 
 /// The defects section of the ruling brief: this round's raw defects (each

@@ -971,6 +971,51 @@ fn a_held_verification_waits_after_a_ruling_and_an_extension_rebuilds_removed_wo
 }
 
 #[test]
+fn a_hold_set_while_an_extension_rebuilds_the_worktrees_stops_before_its_round() {
+    let mut rig = Rig::new(2);
+    testkit::through_round_one(&mut rig);
+    assert_eq!(rig.round(), 2);
+    rig.deliver();
+    for part in VERIFIERS {
+        rig.reply(part, r#"{"summary": "Nothing more."}"#);
+    }
+    rig.ingest();
+    let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+    rig.judge(&format!(
+        r#"{{"summary": "s", "rulings": [{}, {}, {}], "verdict": {{"decision": "pass", "rationale": "Holds.", "blocking": []}}}}"#,
+        same("AC-1"),
+        same("AC-2"),
+        same("AC-3")
+    ));
+    assert!(rig.engine.session().closed, "{:?}", rig.rejected("judge"));
+    for part in VERIFIERS {
+        rig.feed(Input::WorktreeRemoved { part: p(part) });
+    }
+    // +1 while not held: the worktrees are made anew for round 3.
+    let at = rig.tick();
+    rig.feed(Input::UserExtend { by: 1, at });
+    assert_eq!(rig.effects.last(), Some(&Effect::MakeWorktrees));
+    // ラウンド後に停止 turned on while they are made.
+    let at = rig.tick();
+    rig.feed(Input::UserSetHold { hold: true, at });
+    let sends = |rig: &Rig| {
+        rig.effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SendBrief { .. }))
+            .count()
+    };
+    let sent = sends(&rig);
+    testkit::make_worktrees(&mut rig);
+    assert_eq!(rig.round(), 2, "held: round 3 waits for 次のラウンドへ");
+    assert_eq!(sends(&rig), sent, "no brief before 次のラウンドへ");
+    assert!(rig.engine.session().waits_to_continue());
+    let at = rig.tick();
+    rig.feed(Input::UserContinue { at });
+    assert_eq!(rig.round(), 3);
+    assert_eq!(sends(&rig), sent + VERIFIERS.len());
+}
+
+#[test]
 fn a_verification_ended_by_hand_cannot_be_extended() {
     let mut rig = Rig::new(2);
     testkit::through_round_one(&mut rig);

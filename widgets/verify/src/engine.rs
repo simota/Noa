@@ -565,6 +565,9 @@ pub struct Engine {
     /// A round waits for the worktrees [`Effect::MakeWorktrees`] asked for:
     /// it starts on the first tick after every one is made.
     pending_start: bool,
+    /// Whether that start goes past the hold (次のラウンドへ asked for it);
+    /// ラウンド後に停止 turned on meanwhile takes it back.
+    pending_go: bool,
 }
 
 impl Engine {
@@ -638,6 +641,7 @@ impl Engine {
             config,
             waiting: BTreeMap::new(),
             pending_start: false,
+            pending_go: false,
         }
     }
 
@@ -869,6 +873,9 @@ impl Engine {
             Input::UserSetHold { hold, at } => {
                 if hold != self.session.hold {
                     let waiting = self.session.waits_to_continue();
+                    if hold {
+                        self.pending_go = false;
+                    }
                     self.commit(&mut out, vec![Event::HoldSet { hold }])?;
                     if waiting && !hold {
                         self.start_next(&mut out, at, false)?;
@@ -906,7 +913,8 @@ impl Engine {
                 self.timeouts(&mut out, now)?;
                 if self.pending_start && self.worktrees_ready() {
                     self.pending_start = false;
-                    self.start_next(&mut out, now, true)?;
+                    let go = std::mem::take(&mut self.pending_go);
+                    self.start_next(&mut out, now, go)?;
                 }
                 self.advance(&mut out)?;
             }
@@ -1233,7 +1241,10 @@ impl Engine {
             // A failed worktree refuses the round until the person retries.
             if !failed && !self.pending_start {
                 self.pending_start = true;
+                self.pending_go = go;
                 out.effects.push(Effect::MakeWorktrees);
+            } else if go {
+                self.pending_go = true;
             }
             return Ok(());
         }

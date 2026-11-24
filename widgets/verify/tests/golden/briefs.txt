@@ -583,6 +583,11 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: blocked — Quitting kills my pane.
   - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
+### D1 — open · high · falsify: A symlinked cwd is resolved to its target's parent
+Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
+- codex/1 (R1): A symlinked cwd is resolved to its target's parent
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
 
 ## 6. Your assignments
 Reproduce or refute each of these in your own worktree, with your own evidence:
@@ -722,6 +727,11 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: blocked — Quitting kills my pane.
   - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
+### D1 — open · high · falsify: A symlinked cwd is resolved to its target's parent
+Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
+- codex/1 (R1): A symlinked cwd is resolved to its target's parent
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
 
 ## 6. Your assignments
 (none this round; you may still update your own results with new evidence)
@@ -858,6 +868,11 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: blocked — Quitting kills my pane.
   - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
+### D1 — open · high · falsify: A symlinked cwd is resolved to its target's parent
+Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
+- codex/1 (R1): A symlinked cwd is resolved to its target's parent
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
 
 ## 6. Your assignments
 Reproduce or refute each of these in your own worktree, with your own evidence:

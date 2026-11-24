@@ -1000,3 +1000,48 @@ fn a_sent_draft_clears_when_it_reaches_the_log_unless_rewritten() {
         assert_eq!(screen.pending_intervention, None);
     }
 }
+
+/// The messages of the toasts on screen, oldest first.
+fn toasts(screen: &Review) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack: Vec<WidgetId> = screen.tree.overlays().collect();
+    while let Some(id) = stack.pop() {
+        if let Some(toast) = screen.tree.get::<Toast>(id) {
+            out.push(toast.message().to_owned());
+        }
+        stack.extend(screen.tree.children(id).iter().rev());
+    }
+    out
+}
+
+/// A clipboard that takes nothing, as when the OS refuses the write.
+struct RefusingClipboard;
+
+impl noa_gpui_core::clipboard::Clipboard for RefusingClipboard {
+    fn read_text(&mut self) -> Option<String> {
+        None
+    }
+    fn write_text(&mut self, _text: &str) {}
+}
+
+#[test]
+fn copying_the_report_says_whether_it_reached_the_clipboard() {
+    let mut screen = Review::demo();
+    act(&mut screen, Action::CopyReport);
+    assert_eq!(
+        screen.tree.clipboard().read_text(),
+        Some(export::report_markdown(screen.session.as_ref().unwrap()))
+    );
+    assert_eq!(
+        toasts(&screen),
+        ["レポートをクリップボードにコピーしました"]
+    );
+
+    let mut screen = Review::demo();
+    screen.tree.set_clipboard(Box::new(RefusingClipboard));
+    act(&mut screen, Action::CopyReport);
+    assert_eq!(
+        toasts(&screen),
+        ["レポートをクリップボードにコピーできませんでした"]
+    );
+}

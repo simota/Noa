@@ -1102,8 +1102,15 @@ impl Review {
             Action::CopyReport => {
                 if let Some(session) = &self.session {
                     let md = export::report_markdown(session);
-                    self.tree.clipboard().write_text(&md);
-                    self.toast("レポートをクリップボードにコピーしました");
+                    // The clipboard reports no failure: what it holds
+                    // afterwards tells whether the copy took.
+                    let clipboard = self.tree.clipboard();
+                    clipboard.write_text(&md);
+                    if clipboard.read_text().as_deref() == Some(md.as_str()) {
+                        self.toast("レポートをクリップボードにコピーしました");
+                    } else {
+                        self.toast("レポートをクリップボードにコピーできませんでした");
+                    }
                 }
             }
             Action::SaveReport => {

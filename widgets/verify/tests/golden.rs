@@ -1,0 +1,293 @@
+//! Golden tests pinning every brief, correction note and the final report
+//! of a fixed two-round verification byte for byte.
+//!
+//! The fixtures under `golden/` were generated from the first
+//! implementation (`VERIFY_BLESS=1 cargo test --test golden` writes them)
+//! and reviewed by hand; a difference here is a behaviour change, to be
+//! blessed only on purpose.
+
+#[path = "golden/scenario.rs"]
+mod scenario;
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use verify::model::export::{self, SECTIONS};
+use verify::model::types::EvidenceKey;
+
+fn assert_same(what: &str, got: &str, file: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(file);
+    if std::env::var_os("VERIFY_BLESS").is_some() {
+        std::fs::write(&path, got).unwrap();
+        return;
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    if got == want {
+        return;
+    }
+    let at = got
+        .bytes()
+        .zip(want.bytes())
+        .position(|(a, b)| a != b)
+        .unwrap_or(got.len().min(want.len()));
+    let window = |s: &str| {
+        let from = s.floor_char_boundary(at.saturating_sub(200));
+        let to = s.ceil_char_boundary((at + 200).min(s.len()));
+        s[from..to].to_owned()
+    };
+    panic!(
+        "{what} differs from {file} at byte {at} (got {} bytes, want {})\n--- got ---\n{}\n--- want ---\n{}",
+        got.len(),
+        want.len(),
+        window(got),
+        window(&want),
+    );
+}
+
+fn report() -> String {
+    let (_, session) = scenario::run();
+    export::report_markdown(&session, Some(&verify::store::reply_dir(&session)))
+}
+
+/// The body of `heading` (up to the next `## `) in `report`.
+fn section<'a>(report: &'a str, heading: &str) -> &'a str {
+    let start = report.find(heading).unwrap() + heading.len();
+    let rest = &report[start..];
+    rest[..rest.find("\n## ").unwrap_or(rest.len())].trim()
+}
+
+#[test]
+fn ac21_briefs_and_corrections_match_the_golden_file() {
+    let (briefs, _) = scenario::run();
+    assert_same("briefs", &briefs, "briefs.txt");
+}
+
+#[test]
+fn ac20_the_report_matches_the_golden_file() {
+    assert_same("report", &report(), "report.md");
+}
+
+#[test]
+fn ac7_round_one_verifier_briefs_name_no_peer_worktree_or_reply_path() {
+    let (briefs, _) = scenario::run();
+    let mut checked = Vec::new();
+    for brief in briefs
+        .split("===== ")
+        .filter(|s| s.starts_with("R1 brief to ") || s.starts_with("R1 correction to "))
+    {
+        let to = brief
+            .split(" to ")
+            .nth(1)
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap();
+        if to == "judge" {
+            continue;
+        }
+        checked.push(to.to_owned());
+        for peer in scenario::VERIFIERS.iter().filter(|p| **p != to) {
+            for named in [
+                format!("verifier {peer}"),
+                format!("verify-ver-golden-{peer}"),
+                format!("/r1/{peer}/"),
+                format!("{peer}/"),
+            ] {
+                assert!(!brief.contains(&named), "R1 brief to {to} names {named:?}");
+            }
+        }
+        assert!(
+            to == "codex" || !brief.contains("symlink too"),
+            "R1 brief to {to} shows codex's intervention"
+        );
+    }
+    assert_eq!(
+        checked,
+        ["claude", "codex", "agy", "claude"],
+        "every blind brief and the correction were checked"
+    );
+}
+
+#[test]
+fn ac21_a_reply_breaking_several_rules_gets_one_line_for_each() {
+    let (briefs, _) = scenario::run();
+    let correction = briefs
+        .split("===== ")
+        .find(|s| s.starts_with("R1 correction to claude"))
+        .expect("claude's first reply was turned down");
+    assert!(
+        correction.contains(
+            "- evidence[0] (e1).log \"../e1.log\" must be a plain relative path, without \"..\""
+        ),
+        "{correction}"
+    );
+    assert!(
+        correction
+            .contains("- results: missing AC-2, AC-3, AC-5 (one result per criterion in round 1)"),
+        "{correction}"
+    );
+    let criteria = briefs
+        .split("===== ")
+        .find(|s| s.starts_with("criteria correction to judge"))
+        .expect("the first criteria were turned down");
+    assert!(
+        criteria.contains("Your criteria JSON could not be used"),
+        "{criteria}"
+    );
+    assert!(
+        criteria.contains("the person's criteria missing"),
+        "{criteria}"
+    );
+}
+
+#[test]
+fn ac21_rerun_briefs_start_the_widgets_script_and_say_reply_nothing() {
+    let (briefs, _) = scenario::run();
+    let rerun = briefs
+        .split("===== ")
+        .find(|s| s.starts_with("R1 re-run brief to codex"))
+        .unwrap();
+    assert!(
+        rerun.contains("nohup sh '/golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun/run.sh' >/dev/null 2>&1 &"),
+        "{rerun}"
+    );
+    assert!(rerun.contains("Reply nothing."), "{rerun}");
+    assert!(
+        !rerun.contains("cargo test"),
+        "the brief holds no reported command"
+    );
+}
+
+#[test]
+fn ac20_the_report_has_every_section_differed_reruns_first_and_the_criteria_changes() {
+    let report = report();
+    let mut at = 0;
+    for heading in SECTIONS {
+        let found = report[at..]
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading} missing or out of order"));
+        at += found + heading.len();
+    }
+    assert!(report.contains("\n# 検証結果\n"), "final, not provisional");
+    assert!(section(&report, SECTIONS[0]).starts_with("**条件付き合格**"));
+    let evidence = section(&report, SECTIONS[4]);
+    assert!(
+        evidence.starts_with("- `codex/r1/e3` コマンド `cargo test -p app cwd_gone`"),
+        "{evidence}"
+    );
+    let changes = section(&report, SECTIONS[5]);
+    for line in [
+        "- 編集: AC-3 Opening a tab stays under 50 ms",
+        "- 追加: AC-5 Quitting keeps every tab's cwd for the next launch",
+        "- 削除: AC-4 The change is documented（request）",
+        "- 対象外と判定: AC-5",
+    ] {
+        assert!(changes.contains(line), "{line:?} in {changes}");
+    }
+    let gaps = section(&report, SECTIONS[6]);
+    for line in [
+        "- AC-3 を codex が実行できませんでした（R1）: No display in the sandbox.",
+        "- 取り込み前に消えた証跡: `agy/r1/e2`（logs/2.log）",
+        "- 観察だけを根拠にした結果: AC-5（agy R1・実行不能）",
+    ] {
+        assert!(gaps.contains(line), "{line:?} in {gaps}");
+    }
+}
+
+#[test]
+fn ac33_the_report_embeds_images_and_links_videos_with_captions_and_marks() {
+    let report = report();
+    let base = "/golden/repo/.noa/verify/ver-golden";
+    assert!(
+        report.starts_with(&format!("> 証跡のリンク先: `{base}`")),
+        "{report}"
+    );
+    let ac1 = section(&report, "### AC-1 ");
+    assert!(
+        ac1.contains(&format!(
+            "![pwd in the new tab shows /tmp]({base}/evidence/r1/claude/shots/new%20tab.png)"
+        )),
+        "{ac1}"
+    );
+    assert!(
+        ac1.contains(&format!(
+            "▶ [cd into a symlink, Cmd-T, pwd]({base}/evidence/r1/codex/video/symlink.mov)"
+        )),
+        "{ac1}"
+    );
+    assert!(ac1.contains("  - 00:06.5 the new tab shows $HOME"), "{ac1}");
+    assert!(
+        ac1.contains(&format!(
+            "![pwd shows /tmp in the new tab]({base}/evidence/user/1.png)（あなたが添付）"
+        )),
+        "{ac1}"
+    );
+    // 証跡ごと書き出す: the same report links into the bundle relatively.
+    let (_, session) = scenario::run();
+    let bundle = export::report_markdown(&session, None);
+    assert!(bundle.starts_with("# 検証結果\n"), "{bundle}");
+    assert!(bundle.contains("](evidence/r1/claude/shots/new%20tab.png)"));
+    assert!(bundle.contains("](evidence/user/1.png)"));
+    assert!(!bundle.contains(base), "no absolute link in the bundle");
+}
+
+#[test]
+fn ac24_the_fix_task_lists_failed_criteria_with_their_log_tails_and_the_defects_repro() {
+    let (_, session) = scenario::run();
+    let tail: String = (1..=80).map(|n| format!("line {n}\n")).collect();
+    let tails = BTreeMap::from([(EvidenceKey::new("codex/r1/e1"), tail)]);
+    let task = export::fix_task(&session, &["AC-1".into()], &["D1".into()], &tails);
+    assert!(
+        task.starts_with("# Fix request from verification ver-golden\n"),
+        "{task}"
+    );
+    assert!(
+        task.contains("### AC-1 [must] New tabs open in the focused pane's cwd"),
+        "{task}"
+    );
+    assert!(
+        task.contains("- codex (R1) reported fail: With a symlinked cwd the tab opens in $HOME."),
+        "{task}"
+    );
+    assert!(
+        task.contains("cargo test -p app cwd_symlink -- --exact"),
+        "{task}"
+    );
+    assert!(
+        task.contains("Last 80 lines of its log:\n\n```\nline 1\n"),
+        "{task}"
+    );
+    assert!(task.contains("line 80\n```"), "{task}");
+    assert!(
+        task.contains("### D1 [high] A symlinked cwd is resolved to its target's parent"),
+        "{task}"
+    );
+    assert!(
+        task.contains("    1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd"),
+        "{task}"
+    );
+    assert!(
+        task.contains(
+            "Stored copy: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log"
+        ),
+        "{task}"
+    );
+}
+
+#[test]
+fn ac31_the_persons_screenshot_is_in_the_next_ruling_brief() {
+    let (briefs, _) = scenario::run();
+    let judge = briefs
+        .split("===== ")
+        .find(|s| s.starts_with("R1 brief to judge"))
+        .unwrap();
+    assert!(
+        judge.contains(
+            "  - user/1: PNG image Screenshot 2026-11-24.png — \"pwd shows /tmp in the new tab\""
+        ),
+        "{judge}"
+    );
+    assert!(judge.contains("    shows: AC-1"), "{judge}");
+}

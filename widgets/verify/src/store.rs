@@ -16,11 +16,13 @@
 //! In 共有 mode a verifier's `r<N>/<verifier>/` sits in the judge's reply dir.
 
 use std::fmt;
-use std::fs::File;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use crate::model::reduce::ReduceError;
+use crate::fsx;
+use crate::model::export;
+use crate::model::reduce::{self, ReduceError};
 use crate::model::types::{
     Decision, Event, Isolation, Millis, PartId, RoundNo, Session, SessionId, TargetKind,
 };
@@ -187,49 +189,120 @@ pub fn report_path(dir: &Path) -> PathBuf {
 /// Makes `<workdir>/.noa/` with a `.gitignore` holding `*`, so the
 /// verification's files never show in `git status`. A `.noa` (or anything
 /// below it) that is a link is refused.
-pub fn prepare_workdir(_workdir: &Path) -> io::Result<()> {
-    todo!("U2: prepare_workdir (review's)")
+pub fn prepare_workdir(workdir: &Path) -> io::Result<()> {
+    let dir = workdir.join(".noa");
+    fsx::create_dirs(workdir, &dir.join(VERIFY_DIR))?;
+    // `create_new` does not follow a link left at the name.
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(".gitignore"))
+    {
+        Ok(mut file) => io::Write::write_all(&mut file, b"*\n"),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Writes the report whole, through a temporary file created exclusively
 /// beside it.
-pub fn write_report(_dir: &Path, _text: &str) -> io::Result<PathBuf> {
-    todo!("U2: write_report")
+pub fn write_report(dir: &Path, text: &str) -> io::Result<PathBuf> {
+    let path = report_path(dir);
+    fsx::write_replace(dir, &path, text.as_bytes())?;
+    Ok(path)
 }
 
-/// Whether `dir`'s stored report is not what its log gives.
-pub fn report_is_stale(_dir: &Path, _session: &Session) -> bool {
-    todo!("U2: report_is_stale")
+/// The report `session` gives: media linked by absolute path into its
+/// judge's reply dir (L1-8).
+pub fn report_text(session: &Session) -> String {
+    export::report_markdown(session, Some(&reply_dir(session)))
+}
+
+/// Whether `dir`'s stored report is not what its log gives (missing, or
+/// the verification stopped between writing its log and its report). One
+/// not ruled on once has no report to compare.
+pub fn report_is_stale(dir: &Path, session: &Session) -> bool {
+    let has_report = session.closed || session.rounds.iter().any(|r| r.outcome.is_some());
+    has_report && fs::read_to_string(report_path(dir)).ok() != Some(report_text(session))
 }
 
 /// Writes `dir`'s report again from its log, holding the log's lock.
-pub fn rewrite_report(_dir: &Path) -> Result<(), StoreError> {
-    todo!("U2: rewrite_report")
+pub fn rewrite_report(dir: &Path) -> Result<(), StoreError> {
+    let (store, session) = Store::open(dir)?;
+    write_report(dir, &report_text(&session))?;
+    drop(store);
+    Ok(())
 }
 
 /// Writes `text` as the next free `fix-<n>.md` in the judge's reply dir
 /// and returns its path; nothing is written over or through a link.
 /// Callers check first that the log belongs to `dir`
 /// ([`crate::engine::check_store_paths`]).
-pub fn write_fix_task(_dir: &Path, _session: &Session, _text: &str) -> io::Result<PathBuf> {
-    todo!("U2: write_fix_task")
+pub fn write_fix_task(dir: &Path, session: &Session, text: &str) -> io::Result<PathBuf> {
+    let id = Path::new(session.id.as_str());
+    let plain = matches!(
+        id.components().collect::<Vec<_>>().as_slice(),
+        [std::path::Component::Normal(_)]
+    );
+    if !plain || dir.file_name() != Some(std::ffi::OsStr::new(session.id.as_str())) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("検証 ID {} はこのフォルダの名前になりません", session.id),
+        ));
+    }
+    let base = reply_base(session);
+    let reply = reply_dir(session);
+    let folder = fsx::open_dir(&base, &reply, true)?;
+    for n in 1..=MAX_FIX_TASKS {
+        let name = format!("fix-{n}.md");
+        match fsx::write_new_at(&folder, std::ffi::OsStr::new(&name), text.as_bytes()) {
+            Ok(()) => return Ok(reply.join(name)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other(format!(
+        "{} に修正の依頼が {MAX_FIX_TASKS} 件あります",
+        reply.display()
+    )))
 }
 
 /// Makes the folder a reply goes to, below `base`.
-pub fn prepare_reply(_base: &Path, _path: &Path) -> io::Result<()> {
-    todo!("U2: prepare_reply")
+pub fn prepare_reply(base: &Path, path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(parent) => fsx::create_dirs(base, parent),
+        None => Ok(()),
+    }
 }
 
 /// Removes a reply file; a link on the way to it is refused.
-pub fn clear_reply(_base: &Path, _path: &Path) -> io::Result<()> {
-    todo!("U2: clear_reply")
+pub fn clear_reply(base: &Path, path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fsx::check_no_links(base, parent)?;
+    }
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
 }
 
 /// A reply file's bytes, or `None` while it is not there. A link on the
 /// way, a file that is not a plain file and one over [`MAX_REPLY_BYTES`]
 /// are errors.
-pub fn read_reply(_base: &Path, _path: &Path) -> io::Result<Option<Vec<u8>>> {
-    todo!("U2: read_reply")
+pub fn read_reply(base: &Path, path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let file = match fsx::open_read(base, path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let (bytes, over) = fsx::read_capped(file, MAX_REPLY_BYTES)?;
+    if over {
+        return Err(io::Error::other(format!(
+            "返答が大きすぎます（{} MiB 超）",
+            MAX_REPLY_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(Some(bytes))
 }
 
 #[derive(Debug)]
@@ -272,40 +345,141 @@ pub struct Store {
     file: File,
 }
 
+fn line(batch: &[Event]) -> io::Result<Vec<u8>> {
+    let mut line = serde_json::to_vec(batch).map_err(io::Error::other)?;
+    line.push(b'\n');
+    Ok(line)
+}
+
 impl Store {
     /// Creates `dir`'s log with its first batch, locked.
-    pub fn create(_dir: &Path, _first: &[Event]) -> Result<Store, StoreError> {
-        todo!("U2: Store::create")
+    pub fn create(dir: &Path, first: &[Event]) -> Result<Store, StoreError> {
+        reduce::create(first).map_err(StoreError::Reduce)?;
+        fs::create_dir_all(dir)?;
+        let file = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(dir.join(EVENTS_FILE))?;
+        lock(&file)?;
+        let mut store = Store {
+            dir: dir.to_owned(),
+            file,
+        };
+        store.append(first)?;
+        Ok(store)
     }
 
     /// Opens `dir`'s log to append to it, folding it into its session; a
     /// torn last line is cut off. The log stays locked while open.
-    pub fn open(_dir: &Path) -> Result<(Store, Session), StoreError> {
-        todo!("U2: Store::open")
+    pub fn open(dir: &Path) -> Result<(Store, Session), StoreError> {
+        let path = dir.join(EVENTS_FILE);
+        let mut file = OpenOptions::new().append(true).open(&path)?;
+        lock(&file)?;
+        let text = fs::read(&path)?;
+        let parsed = parse(&text)?;
+        let session = reduce::replay(&parsed.batches).map_err(StoreError::Reduce)?;
+        if parsed.torn {
+            if parsed.kept < text.len() {
+                file.set_len(parsed.kept as u64)?;
+            } else {
+                file.write_all(b"\n")?;
+            }
+        }
+        Ok((
+            Store {
+                dir: dir.to_owned(),
+                file,
+            },
+            session,
+        ))
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    pub fn append(&mut self, _batch: &[Event]) -> io::Result<()> {
-        let _ = &self.file;
-        todo!("U2: Store::append")
+    pub fn append(&mut self, batch: &[Event]) -> io::Result<()> {
+        self.file.write_all(&line(batch)?)
     }
 
-    pub fn append_all(&mut self, _batches: &[Vec<Event>]) -> io::Result<()> {
-        todo!("U2: Store::append_all")
+    pub fn append_all(&mut self, batches: &[Vec<Event>]) -> io::Result<()> {
+        for batch in batches {
+            self.append(batch)?;
+        }
+        Ok(())
     }
+}
+
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Takes the log's exclusive lock, held until the file is closed.
+fn lock(file: &File) -> Result<(), StoreError> {
+    let until = std::time::Instant::now() + LOCK_GRACE;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                std::thread::sleep(LOCK_POLL);
+            }
+            Err(fs::TryLockError::WouldBlock) => return Err(StoreError::Busy),
+            Err(fs::TryLockError::Error(e)) => return Err(StoreError::Io(e)),
+        }
+    }
+}
+
+struct Parsed {
+    batches: Vec<Vec<Event>>,
+    /// Bytes up to the end of the last whole line.
+    kept: usize,
+    /// Whether the last line was cut short.
+    torn: bool,
+}
+
+fn parse(text: &[u8]) -> Result<Parsed, StoreError> {
+    let mut batches = Vec::new();
+    let mut kept = 0;
+    let mut offset = 0;
+    let mut torn = false;
+    for (n, raw) in text.split_inclusive(|&b| b == b'\n').enumerate() {
+        let complete = raw.ends_with(b"\n");
+        offset += raw.len();
+        if raw.trim_ascii().is_empty() {
+            kept = offset;
+            continue;
+        }
+        match serde_json::from_slice::<Vec<Event>>(raw) {
+            Ok(batch) => {
+                batches.push(batch);
+                kept = offset;
+                torn = !complete;
+            }
+            Err(_) if !complete => torn = true,
+            Err(error) => {
+                return Err(StoreError::Corrupt {
+                    line: n + 1,
+                    error: error.to_string(),
+                });
+            }
+        }
+    }
+    Ok(Parsed {
+        batches,
+        kept,
+        torn,
+    })
 }
 
 /// Folds `dir`'s log without writing to it or taking its lock.
-pub fn read_session(_dir: &Path) -> Result<Session, StoreError> {
-    todo!("U2: read_session")
+pub fn read_session(dir: &Path) -> Result<Session, StoreError> {
+    let text = fs::read(dir.join(EVENTS_FILE))?;
+    let parsed = parse(&text)?;
+    reduce::replay(&parsed.batches).map_err(StoreError::Reduce)
 }
 
 /// Whether a runner holds `dir`'s log open right now.
-pub fn is_busy(_dir: &Path) -> bool {
-    todo!("U2: is_busy")
+pub fn is_busy(dir: &Path) -> bool {
+    File::open(dir.join(EVENTS_FILE))
+        .is_ok_and(|file| matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)))
 }
 
 /// One past verification under the store root, as the start view lists it.
@@ -346,41 +520,145 @@ pub struct LogStamp {
 }
 
 /// `dir`'s log stamp, or `None` when it cannot be read.
-pub fn log_stamp(_dir: &Path) -> Option<LogStamp> {
-    todo!("U2: log_stamp")
+pub fn log_stamp(dir: &Path) -> Option<LogStamp> {
+    let meta = fs::metadata(dir.join(EVENTS_FILE)).ok()?;
+    Some(LogStamp {
+        modified: meta.modified().ok()?,
+        len: meta.len(),
+    })
 }
 
-/// `dir` listed: its log read now.
-pub fn listed(_dir: &Path) -> Listed {
-    todo!("U2: listed")
+/// `dir` listed: its log read now (stamped first, so a write during the
+/// read shows as a change next time).
+pub fn listed(dir: &Path) -> Listed {
+    let stamp = log_stamp(dir);
+    let summary = read_session(dir)
+        .map(|session| Summary {
+            busy: is_busy(dir),
+            ..Summary::of(dir, &session)
+        })
+        .map_err(|e| e.to_string());
+    Listed {
+        dir: dir.to_owned(),
+        summary,
+        stamp,
+    }
 }
 
 /// The newest `limit` verifications under `root`, newest first.
-pub fn list_sessions(_root: &Path, _limit: usize) -> Vec<Listed> {
-    todo!("U2: list_sessions")
+pub fn list_sessions(root: &Path, limit: usize) -> Vec<Listed> {
+    page_sessions(root, &[], limit).0
 }
 
 /// The newest `count` verifications under `root` and how many it holds;
 /// an unchanged row of `shown` is kept.
-pub fn page_sessions(_root: &Path, _shown: &[Listed], _count: usize) -> (Vec<Listed>, usize) {
-    todo!("U2: page_sessions")
+pub fn page_sessions(root: &Path, shown: &[Listed], count: usize) -> (Vec<Listed>, usize) {
+    let dirs = session_dirs(root);
+    let total = dirs.len();
+    let rows = dirs
+        .into_iter()
+        .take(count)
+        .map(|dir| match shown.iter().find(|l| l.dir == dir) {
+            // Only a summary that was read is kept; a row that failed is
+            // tried again (a log made readable keeps its stamp).
+            Some(old)
+                if old.summary.is_ok() && old.stamp.is_some() && old.stamp == log_stamp(&dir) =>
+            {
+                let mut row = old.clone();
+                if let Ok(summary) = &mut row.summary {
+                    summary.busy = is_busy(&dir);
+                }
+                row
+            }
+            _ => listed(&dir),
+        })
+        .collect();
+    (rows, total)
 }
 
 /// How many verifications `root` holds (no log is read).
-pub fn count_sessions(_root: &Path) -> usize {
-    todo!("U2: count_sessions")
+pub fn count_sessions(root: &Path) -> usize {
+    session_dirs(root).len()
+}
+
+/// The verification folders under `root` (those with a log), newest first.
+fn session_dirs(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<((Millis, u32), PathBuf)> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|dir| dir.join(EVENTS_FILE).is_file())
+        .map(|dir| {
+            let order = dir
+                .file_name()
+                .map(|name| id_order(&name.to_string_lossy()))
+                .unwrap_or_default();
+            (order, dir)
+        })
+        .collect();
+    dirs.sort_by(|a, b| b.cmp(a));
+    dirs.into_iter().map(|(_, dir)| dir).collect()
+}
+
+/// `ver-<millis>` or `ver-<millis>-<n>` as `(millis, n)`, for ordering.
+fn id_order(name: &str) -> (Millis, u32) {
+    let rest = name.strip_prefix("ver-").unwrap_or_default();
+    let (at, n) = rest.split_once('-').unwrap_or((rest, "0"));
+    (at.parse().unwrap_or(0), n.parse().unwrap_or(0))
 }
 
 impl Summary {
     /// `session` (logged in `dir`) as listed, before its lock is looked at.
-    pub fn of(_dir: &Path, _session: &Session) -> Summary {
-        todo!("U2: Summary::of")
+    pub fn of(dir: &Path, session: &Session) -> Summary {
+        Summary {
+            dir: dir.to_owned(),
+            id: session.id.clone(),
+            created_at: session.created_at,
+            kind: session.target.kind,
+            label: session.manifest.label.clone(),
+            decision: session.verdict().map(|v| v.decision),
+            rulings: session.ruling_counts(),
+            closed: session.closed,
+            rounds: session.rounds.len(),
+            max_rounds: session.max_rounds,
+            busy: false,
+            extendable: session.extendable().is_ok(),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn temp_root(name: &str) -> PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "noa-verify-store-{}-{name}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A first batch for a verification `id` created at `at`.
+    fn created(id: &str, at: Millis) -> Vec<Event> {
+        let rig = testkit::Rig::new(2);
+        let mut log = rig.log[0].clone();
+        if let Some(Event::Created {
+            id: own, at: when, ..
+        }) = log.first_mut()
+        {
+            *own = SessionId::new(id);
+            *when = at;
+        }
+        log
+    }
 
     #[test]
     fn rerun_logs_are_stored_where_no_reported_evidence_can_be() {
@@ -400,5 +678,150 @@ mod tests {
             assert!(!path.starts_with(rerun_evidence_dir(Path::new(""), 1, &part)));
         }
         assert!(!rerun.starts_with(&reported));
+    }
+
+    #[test]
+    fn a_second_open_of_a_held_log_is_busy_and_a_read_still_works() {
+        let root = temp_root("busy");
+        let dir = root.join("ver-1");
+        let store = Store::create(&dir, &created("ver-1", 1)).unwrap();
+        assert!(is_busy(&dir));
+        assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
+        assert_eq!(read_session(&dir).unwrap().id.as_str(), "ver-1");
+        drop(store);
+        assert!(!is_busy(&dir));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_torn_last_line_is_cut_on_open() {
+        let root = temp_root("torn");
+        let dir = root.join("ver-1");
+        drop(Store::create(&dir, &created("ver-1", 1)).unwrap());
+        let path = dir.join(EVENTS_FILE);
+        let whole = fs::read(&path).unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"[{"event":"hold_set","ho"#).unwrap();
+        drop(file);
+        let (mut store, session) = Store::open(&dir).unwrap();
+        assert!(!session.hold);
+        assert_eq!(fs::read(&path).unwrap(), whole);
+        store.append(&[Event::HoldSet { hold: true }]).unwrap();
+        drop(store);
+        assert!(read_session(&dir).unwrap().hold);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sessions_list_newest_first_and_an_unreadable_log_says_why() {
+        let root = temp_root("list");
+        for (id, at) in [("ver-5", 5), ("ver-20", 20), ("ver-20-2", 21)] {
+            drop(Store::create(&root.join(id), &created(id, at)).unwrap());
+        }
+        fs::create_dir_all(root.join("ver-30")).unwrap();
+        fs::write(root.join("ver-30").join(EVENTS_FILE), "not json\n").unwrap();
+        let listed = list_sessions(&root, 10);
+        let names: Vec<String> = listed
+            .iter()
+            .map(|l| l.dir.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["ver-30", "ver-20-2", "ver-20", "ver-5"]);
+        assert!(listed[0].summary.as_ref().unwrap_err().contains("line 1"));
+        let s = listed[1].summary.as_ref().unwrap();
+        assert_eq!((s.rounds, s.closed, s.rulings), (0, false, [0; 5]));
+        assert_eq!(list_sessions(&root, 2).len(), 2);
+        assert_eq!(count_sessions(&root), 4);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_report_is_replaced_whole_and_never_through_a_link() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root("report");
+        let victim = temp_root("report-victim");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("v"), "keep").unwrap();
+        symlink(victim.join("v"), root.join(format!(".{REPORT_FILE}.tmp"))).unwrap();
+        write_report(&root, "one").unwrap();
+        write_report(&root, "two").unwrap();
+        assert_eq!(fs::read_to_string(report_path(&root)).unwrap(), "two");
+        assert_eq!(fs::read_to_string(victim.join("v")).unwrap(), "keep");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(victim);
+    }
+
+    #[test]
+    fn replies_are_read_cleared_and_prepared_only_below_their_base_without_links() {
+        use std::os::unix::fs::symlink;
+        let base = temp_root("reply-base");
+        let elsewhere = temp_root("reply-elsewhere");
+        let dir = base.join(".noa/verify/ver-1");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("a.json"), "{}").unwrap();
+        symlink(&elsewhere, dir.join("r1")).unwrap();
+        let path = dir.join("r1/a.json");
+        assert!(fsx::is_link_error(&read_reply(&base, &path).unwrap_err()));
+        assert!(clear_reply(&base, &path).is_err());
+        assert!(elsewhere.join("a.json").exists());
+        assert!(prepare_reply(&base, &dir.join("r1/sub/b.json")).is_err());
+        assert!(!elsewhere.join("sub").exists());
+        let work = temp_root("reply-work");
+        fs::create_dir_all(&work).unwrap();
+        symlink(&elsewhere, work.join(".noa")).unwrap();
+        assert!(prepare_workdir(&work).is_err());
+        assert!(!elsewhere.join(".gitignore").exists());
+        let fresh = temp_root("reply-fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        prepare_workdir(&fresh).unwrap();
+        assert_eq!(
+            fs::read_to_string(fresh.join(".noa/.gitignore")).unwrap(),
+            "*\n"
+        );
+        assert!(fresh.join(".noa/verify").is_dir());
+        fs::create_dir_all(dir.join("r2")).unwrap();
+        fs::write(dir.join("r2/a.json"), "{}").unwrap();
+        assert_eq!(
+            read_reply(&base, &dir.join("r2/a.json")).unwrap().unwrap(),
+            b"{}"
+        );
+        assert_eq!(read_reply(&base, &dir.join("r2/none.json")).unwrap(), None);
+        let big = File::create(dir.join("r2/big.json")).unwrap();
+        big.set_len(MAX_REPLY_BYTES + 1).unwrap();
+        assert!(read_reply(&base, &dir.join("r2/big.json")).is_err());
+        for d in [base, elsewhere, work, fresh] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn a_report_is_stale_until_rewritten_and_fix_tasks_take_the_next_free_name() {
+        let root = temp_root("stale");
+        let mut rig = testkit::Rig::in_workdir(2, &root.join("repo"));
+        fs::create_dir_all(root.join("repo")).unwrap();
+        testkit::through_round_one(&mut rig);
+        let dir = root.join("data").join(rig.engine.session().id.as_str());
+        let mut store = Store::create(&dir, &rig.log[0]).unwrap();
+        store.append_all(&rig.log[1..]).unwrap();
+        drop(store);
+        let session = rig.engine.session();
+        assert!(report_is_stale(&dir, session), "missing");
+        rewrite_report(&dir).unwrap();
+        assert_eq!(
+            fs::read_to_string(report_path(&dir)).unwrap(),
+            report_text(session)
+        );
+        assert!(!report_is_stale(&dir, session));
+        let (held, _) = Store::open(&dir).unwrap();
+        assert!(matches!(rewrite_report(&dir), Err(StoreError::Busy)));
+        drop(held);
+        let first = write_fix_task(&dir, session, "one").unwrap();
+        let second = write_fix_task(&dir, session, "two").unwrap();
+        assert_eq!(first, reply_dir(session).join("fix-1.md"));
+        assert_eq!(second, reply_dir(session).join("fix-2.md"));
+        assert_eq!(fs::read_to_string(first).unwrap(), "one");
+        assert!(write_fix_task(&root.join("other"), session, "x").is_err());
+        let _ = fs::remove_dir_all(root);
     }
 }

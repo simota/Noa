@@ -180,8 +180,8 @@ Rules: 1–30 criteria; ids `AC-<n>` unique, from 1 without gaps; `priority` `mu
      "marks": [{"t": "00:04", "note": "⌘T pressed"}, {"t": "00:06.5", "note": "new tab shows $HOME"}]}
   ],
   "defects": [
-    {"id": "1", "claim": "…", "severity": "high", "location": {"path": "crates/…", "line": 40},
-     "repro": "1. … 2. …", "evidence": ["e1"]}
+    {"id": "1", "claim": "…", "severity": "high", "category": "falsify", "confidence": "high",
+     "location": {"path": "crates/…", "line": 40}, "repro": "1. … 2. …", "evidence": ["e1"]}
   ],
   "cross_checks": [
     {"subject": "codex/AC-2", "outcome": "not_reproduced", "note": "…", "evidence": ["e3"]}
@@ -192,7 +192,7 @@ Rules: 1–30 criteria; ids `AC-<n>` unique, from 1 without gaps; `priority` `mu
 Rules:
 - `results`: round 1: exactly one per criterion (missing ones listed). Round ≥ 2: optional updates of its own results.
 - `result` `pass` needs at least one `command` or `file` evidence; `fail` needs evidence and a note; `blocked` (could not run: missing tool, build broken) and `not_tested` need a note.
-- `evidence` ids unique in the reply; every id cited exists; every evidence item is cited at least once. `cmd` 1–2000 characters, single-line or multi-line; `cwd` relative, no `..`; `exit` an integer; paths relative to the reply dir's `r<N>/<verifier>/`, no `..`, no leading `/`.
+- `evidence` ids unique in the reply; every id cited exists; every evidence item is cited at least once. `cmd` 1–2000 characters, single-line or multi-line; `cwd` relative, no `..`; `exit` an integer; paths relative to the reply dir's `r<N>/<verifier>/`, no `..`, no leading `/`, and not under `rerun/`: the widget keeps that directory for its re-run script and logs (L1-5), so a `file` or `log` path starting with `rerun/` is one problem line.
 - `defects`: at most 20; fields as review's raw findings plus `repro` (required) and `evidence` (at least one id).
 - `cross_checks`: not allowed in round 1. From round 2, exactly one per assignment of this verifier (missing ones listed); `subject` is an assignment (`<verifier>/<AC id>` or a defect id); `outcome` `reproduced`|`not_reproduced`|`disputed`; evidence required except for `disputed` with a note.
 

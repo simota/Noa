@@ -3,9 +3,13 @@
 //! an agent (L1-7 item 3).
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::model::types::{EvidenceKey, Session};
+use crate::model::types::{
+    CRITERIA_ROUND, CriteriaEdit, Defect, Evidence, EvidenceBody, EvidenceKey, Isolation, Outcome,
+    Phase, Rerun, RulingKind, Session, Subject, TargetKind, short_id,
+};
 
 /// The report's section headings, in order (after the title).
 pub const SECTIONS: [&str; 8] = [
@@ -19,27 +23,1019 @@ pub const SECTIONS: [&str; 8] = [
     "## ラウンド記録",
 ];
 
-/// The report. Media are linked by absolute path into `base` (the judge's
-/// reply dir) when given, by their path relative to it when `None` (証跡ごと
-/// 書き出す).
-pub fn report_markdown(_session: &Session, _base: Option<&Path>) -> String {
-    todo!("U2: report_markdown")
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Text for a Markdown table cell.
+fn cell(text: &str) -> String {
+    one_line(text).replace('|', "\\|")
+}
+
+/// `path` percent-encoded per component, `/` kept (L1-8): the bytes of a
+/// component outside `A-Z a-z 0-9 - . _ ~` become `%XX`.
+pub fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
+/// Where a stored copy is linked: its absolute path into `base` (the
+/// judge's reply dir), or its path relative to the reply dir.
+fn link(base: Option<&Path>, stored: &Path) -> String {
+    match base {
+        Some(base) => encode_path(&base.join(stored).to_string_lossy()),
+        None => encode_path(&stored.to_string_lossy()),
+    }
+}
+
+fn mark_text(t_ms: u64) -> String {
+    crate::model::brief::mark_text(t_ms)
 }
 
 /// Every brief that gave up: `(round, participant, why)`.
-pub fn failures(_session: &Session) -> Vec<(u32, String, String)> {
-    todo!("U2: failures")
+pub fn failures(session: &Session) -> Vec<(u32, String, String)> {
+    let mut out = Vec::new();
+    if let Some(brief) = &session.criteria_brief
+        && let (Some(why), None) = (&brief.receipt.failed, brief.receipt.replied)
+    {
+        out.push((CRITERIA_ROUND, brief.to.to_string(), why.clone()));
+    }
+    for round in &session.rounds {
+        for brief in round
+            .briefs
+            .iter()
+            .chain(&round.rerun_briefs)
+            .chain(&round.judge_brief)
+        {
+            if let (Some(why), None) = (&brief.receipt.failed, brief.receipt.replied) {
+                out.push((round.no, brief.to.to_string(), why.clone()));
+            }
+        }
+    }
+    out
 }
+
+/// The report. Media are linked by absolute path into `base` (the judge's
+/// reply dir) when given, by their path relative to it when `None` (証跡ごと
+/// 書き出す).
+pub fn report_markdown(session: &Session, base: Option<&Path>) -> String {
+    let mut out = String::with_capacity(16384);
+    if let Some(base) = base {
+        let _ = writeln!(
+            out,
+            "> 証跡のリンク先: `{}`（このマシン上で、このフォルダがある間だけ開けます）\n",
+            base.display()
+        );
+    }
+    write_head(&mut out, session);
+    write_verdict(&mut out, session);
+    write_criteria(&mut out, session, base);
+    write_defects(&mut out, session);
+    write_cross_checks(&mut out, session);
+    write_evidence(&mut out, session);
+    write_changes(&mut out, session);
+    write_gaps(&mut out, session);
+    write_rounds(&mut out, session);
+    out
+}
+
+fn write_head(out: &mut String, session: &Session) {
+    let provisional = session.verdict().is_none() && !session.closed;
+    let _ = writeln!(
+        out,
+        "# 検証結果{}\n",
+        if provisional { "（暫定）" } else { "" }
+    );
+    let m = &session.manifest;
+    let _ = writeln!(
+        out,
+        "- 対象: {}（{}）",
+        m.label,
+        session.target.kind.label()
+    );
+    if let Some(repo) = &m.repo {
+        let _ = writeln!(out, "- 場所: `{}`", repo.display());
+    }
+    let short = |s: &Option<String>| {
+        s.as_deref()
+            .map_or_else(|| "?".to_owned(), |s| short_id(s, 10))
+    };
+    match session.target.kind {
+        TargetKind::Diff => {
+            let _ = writeln!(
+                out,
+                "- 比較: {} `{}` … {} `{}`（merge-base `{}`）",
+                m.base_ref.as_deref().unwrap_or("?"),
+                short(&m.base_sha),
+                m.head_ref.as_deref().unwrap_or("作業ツリー"),
+                short(&m.head_sha),
+                short(&m.merge_base),
+            );
+        }
+        TargetKind::State => {
+            let _ = writeln!(
+                out,
+                "- 状態: {} `{}`",
+                m.head_ref.as_deref().unwrap_or("作業ツリー"),
+                short(&m.head_sha)
+            );
+        }
+    }
+    let _ = write!(out, "- ファイル: {}", m.files.len());
+    if m.additions() > 0 || m.deletions() > 0 {
+        let _ = write!(out, "（+{} −{}）", m.additions(), m.deletions());
+    }
+    if !session.target.paths.is_empty() {
+        let _ = write!(out, "・絞り込み: {}", session.target.paths.join(" "));
+    }
+    out.push('\n');
+    if !session.request.trim().is_empty() {
+        let _ = writeln!(out, "- 依頼: {}", one_line(&session.request));
+    }
+    if let Some(spec) = &session.spec {
+        let _ = writeln!(out, "- 仕様: `{}`（{} 行）", spec.path, spec.lines);
+    }
+    let _ = write!(out, "- 隔離: {}", session.isolation.label());
+    if session.isolation == Isolation::Shared {
+        out.push_str("（隔離は強制されず、再実行もしていません）");
+    }
+    out.push('\n');
+    out.push_str("- パネル:\n");
+    for part in &session.verifiers {
+        let strategy = part
+            .strategy
+            .as_ref()
+            .map(|s| s.label())
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "  - {} → {}（{}{}）",
+            part.id,
+            strategy,
+            part.kind.command(),
+            part.setup
+                .label()
+                .map(|l| format!(" · {l}"))
+                .unwrap_or_default()
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  - 判定役: {}{}",
+        session.judge.kind.command(),
+        session
+            .judge
+            .setup
+            .label()
+            .map(|l| format!(" · {l}"))
+            .unwrap_or_default()
+    );
+    let state = if session.closed {
+        "終了"
+    } else if session.waits_to_continue() {
+        "停止中"
+    } else {
+        session.phase().label()
+    };
+    let _ = writeln!(
+        out,
+        "- ラウンド: {} / {}・{state}\n",
+        session.rounds.len(),
+        session.max_rounds
+    );
+}
+
+/// What a blocking id names: a criterion's statement or a defect's claim.
+fn named(session: &Session, id: &str) -> String {
+    session
+        .criterion(id)
+        .map(|c| c.statement.clone())
+        .or_else(|| session.defect(id).map(|d| d.claim.clone()))
+        .unwrap_or_default()
+}
+
+fn write_verdict(out: &mut String, session: &Session) {
+    let _ = writeln!(out, "{}\n", SECTIONS[0]);
+    match session.verdict() {
+        Some(v) => {
+            let _ = writeln!(
+                out,
+                "**{}**\n\n{}\n",
+                v.decision.label(),
+                v.rationale.trim()
+            );
+            if !v.blocking.is_empty() {
+                out.push_str("止めているもの:\n");
+                for id in &v.blocking {
+                    let _ = writeln!(out, "- **{id}** {}", named(session, id));
+                }
+                out.push('\n');
+            }
+        }
+        None if session.closed => out.push_str("判定なし（ユーザーが終了）\n\n"),
+        None => out.push_str("まだ判定はありません（最終ラウンドで出ます）。\n\n"),
+    }
+}
+
+/// The re-run mark of a result: ↻ when a command it cites matched, ≠ when
+/// one differed (or timed out), nothing otherwise.
+fn rerun_mark(session: &Session, evidence: &[EvidenceKey]) -> &'static str {
+    let reruns: Vec<&Rerun> = evidence
+        .iter()
+        .filter_map(|k| session.evidence_item(k)?.rerun.as_ref())
+        .collect();
+    if reruns
+        .iter()
+        .any(|r| matches!(r, Rerun::Differed { .. } | Rerun::TimedOut { .. }))
+    {
+        "≠"
+    } else if reruns.iter().any(|r| matches!(r, Rerun::Matched { .. })) {
+        "↻"
+    } else {
+        ""
+    }
+}
+
+/// The media shown under `criterion`: those its ruling or results cite
+/// (unless their `shows` leaves it out) and those the person attached for
+/// it, each once, in evidence order.
+fn media_for<'a>(session: &'a Session, criterion: &str) -> Vec<&'a Evidence> {
+    let mut cited: Vec<&EvidenceKey> = session
+        .results
+        .iter()
+        .filter(|r| r.criterion == criterion)
+        .flat_map(|r| &r.evidence)
+        .collect();
+    if let Some(rulings) = session.rulings.get(criterion) {
+        cited.extend(rulings.iter().flat_map(|r| &r.evidence));
+    }
+    session
+        .evidence
+        .iter()
+        .filter(|e| e.media().is_some() && e.stored.is_some())
+        .filter(|e| {
+            let EvidenceBody::File { shows, .. } = &e.body else {
+                return false;
+            };
+            let named = shows.iter().any(|s| s == criterion);
+            if e.attached.is_some() {
+                named
+            } else {
+                cited.contains(&&e.key) && (shows.is_empty() || named)
+            }
+        })
+        .collect()
+}
+
+/// One evidence item on one line: what it is, its exit status and re-run,
+/// digest, size and stored path.
+fn item_line(item: &Evidence) -> String {
+    let mut out = format!("`{}` ", item.key);
+    match &item.body {
+        EvidenceBody::Command { cmd, cwd, exit, .. } => {
+            let first = cmd.lines().next().unwrap_or_default();
+            let more = if cmd.lines().count() > 1 { " …" } else { "" };
+            let _ = write!(out, "コマンド `{first}`{more}（{cwd}） · 終了コード {exit}");
+            if let Some(r) = &item.rerun {
+                let _ = write!(out, " · 再実行 {}", rerun_label(r));
+            }
+        }
+        EvidenceBody::File {
+            path,
+            caption,
+            media,
+            ..
+        } => {
+            match media {
+                Some(m) => {
+                    let _ = write!(out, "{}（{}）`{path}`", m.label(), m.name());
+                }
+                None => {
+                    let _ = write!(out, "ファイル `{path}`");
+                }
+            }
+            if let Some(caption) = caption {
+                let _ = write!(out, "「{}」", one_line(caption));
+            }
+        }
+        EvidenceBody::Observation { text } => {
+            let _ = write!(out, "観察（未裏付け）: {}", one_line(text));
+        }
+    }
+    if item.attached.is_some() {
+        out.push_str("（あなたが添付）");
+    }
+    match &item.stored {
+        Some(s) => {
+            let _ = write!(
+                out,
+                " · digest `{:016x}` · {} バイト · `{}`",
+                s.digest,
+                s.bytes,
+                s.path.display()
+            );
+        }
+        None if item.file_path().is_some() => out.push_str(" · 保存なし"),
+        None => {}
+    }
+    out
+}
+
+fn rerun_label(rerun: &Rerun) -> String {
+    match rerun {
+        Rerun::Matched { exit, .. } => format!("一致（{exit}）"),
+        Rerun::Differed { exit: Some(e), .. } => format!("不一致（{e}）"),
+        Rerun::Differed { exit: None, .. } => "不一致（終了コードなし）".to_owned(),
+        Rerun::TimedOut { .. } => "時間切れ".to_owned(),
+        Rerun::NotRun { why, .. } => format!("未実行（{}）", one_line(why)),
+    }
+}
+
+fn write_media(out: &mut String, item: &Evidence, base: Option<&Path>) {
+    let (Some(media), Some(stored), EvidenceBody::File { caption, marks, .. }) =
+        (item.media(), &item.stored, &item.body)
+    else {
+        return;
+    };
+    let caption = caption.as_deref().map(one_line).unwrap_or_default();
+    let who = if item.attached.is_some() {
+        "（あなたが添付）"
+    } else {
+        ""
+    };
+    let target = link(base, &stored.path);
+    if media.is_video() {
+        let _ = writeln!(out, "- ▶ [{caption}]({target}){who}");
+        for mark in marks {
+            let _ = writeln!(out, "  - {} {}", mark_text(mark.t_ms), one_line(&mark.note));
+        }
+    } else {
+        let _ = writeln!(out, "- ![{caption}]({target}){who}");
+    }
+}
+
+fn write_criteria(out: &mut String, session: &Session, base: Option<&Path>) {
+    let _ = writeln!(out, "{}\n", SECTIONS[1]);
+    if session.criteria.is_empty() {
+        out.push_str("（基準はまだありません）\n\n");
+        return;
+    }
+    let _ = write!(out, "| ID | 優先度 | 基準 | 判定 |");
+    for part in session.verifier_ids() {
+        let _ = write!(out, " {part} |");
+    }
+    out.push_str("\n|---|---|---|---|");
+    for _ in session.verifier_ids() {
+        out.push_str("---|");
+    }
+    out.push('\n');
+    for c in &session.criteria {
+        let ruling = session
+            .ruling(&c.id)
+            .map(|r| r.kind.label())
+            .unwrap_or("未判定");
+        let _ = write!(
+            out,
+            "| {} | {} | {} | {ruling} |",
+            c.id,
+            c.priority.label(),
+            cell(&c.statement)
+        );
+        for part in session.verifier_ids() {
+            match session.latest_result(part, &c.id) {
+                Some(r) => {
+                    let _ = write!(
+                        out,
+                        " {}{} |",
+                        r.outcome.mark(),
+                        rerun_mark(session, &r.evidence)
+                    );
+                }
+                None => out.push_str("  |"),
+            }
+        }
+        out.push('\n');
+    }
+    out.push('\n');
+    for c in &session.criteria {
+        let _ = writeln!(out, "### {} {}\n", c.id, c.statement);
+        match session.ruling(&c.id) {
+            Some(r) => {
+                let _ = writeln!(
+                    out,
+                    "- 判定: {}（R{}）{}",
+                    r.kind.label(),
+                    r.round,
+                    if r.rationale.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!("— {}", one_line(&r.rationale))
+                    }
+                );
+                for key in &r.evidence {
+                    if let Some(item) = session.evidence_item(key) {
+                        let _ = writeln!(out, "  - {}", item_line(item));
+                    }
+                }
+            }
+            None => out.push_str("- 判定: 未判定\n"),
+        }
+        for part in session.verifier_ids() {
+            if let Some(r) = session.latest_result(part, &c.id) {
+                let _ = write!(out, "- {part}（R{}）: {}", r.round, r.outcome.label());
+                if !r.note.is_empty() {
+                    let _ = write!(out, " — {}", one_line(&r.note));
+                }
+                out.push('\n');
+            }
+        }
+        let media = media_for(session, &c.id);
+        if !media.is_empty() {
+            out.push_str("- スクショ・動画:\n");
+            let mut nested = String::new();
+            for item in media {
+                write_media(&mut nested, item, base);
+            }
+            for line in nested.lines() {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+        out.push('\n');
+    }
+}
+
+fn write_defects(out: &mut String, session: &Session) {
+    let _ = writeln!(out, "{}\n", SECTIONS[2]);
+    let live: Vec<&Defect> = session
+        .ranked()
+        .into_iter()
+        .filter(|d| d.status.is_live())
+        .collect();
+    if live.is_empty() {
+        out.push_str("（不具合はありません）\n\n");
+    }
+    for d in live {
+        let tally = session.tally(d);
+        let _ = writeln!(out, "### {} [{}] {}\n", d.id, d.severity.label(), d.claim);
+        let _ = writeln!(
+            out,
+            "- {} · {} · {}（{}）· {}",
+            session.category_label(&d.category),
+            d.status.label(),
+            tally.label(),
+            tally.agreement.label(),
+            d.confidence.label()
+        );
+        let location = match &d.location {
+            Some(loc) if !d.in_target => format!("`{loc}`（対象外）"),
+            Some(loc) if d.in_diff == Some(false) => format!("`{loc}`（差分外）"),
+            Some(loc) => format!("`{loc}`"),
+            None => "（対象全体）".to_owned(),
+        };
+        let _ = writeln!(out, "- 場所: {location}");
+        let origins: Vec<String> = d.sources.iter().map(|k| k.to_string()).collect();
+        let _ = writeln!(out, "- 出典: {}", origins.join(", "));
+        let _ = writeln!(out, "- 判断: {}", one_line(&d.rationale));
+        let _ = writeln!(out, "- 再現手順: {}", one_line(&d.repro));
+        let evidence: Vec<&str> = d
+            .sources
+            .iter()
+            .filter_map(|k| session.raw_defect(k))
+            .flat_map(|r| r.evidence.iter().map(EvidenceKey::as_str))
+            .collect();
+        if !evidence.is_empty() {
+            let _ = writeln!(out, "- 証跡: {}", evidence.join(", "));
+        }
+        if let Some(fix) = d.fix.as_deref().or_else(|| {
+            d.sources
+                .iter()
+                .find_map(|k| session.raw_defect(k).and_then(|r| r.fix.as_deref()))
+        }) {
+            let _ = writeln!(out, "- 修正案: {}", one_line(fix));
+        }
+        out.push('\n');
+    }
+}
+
+fn write_cross_checks(out: &mut String, session: &Session) {
+    let _ = writeln!(out, "{}\n", SECTIONS[3]);
+    if session.cross_checks.is_empty() {
+        out.push_str("（ありません）\n");
+    }
+    for c in &session.cross_checks {
+        let _ = write!(
+            out,
+            "- R{} {} → {}: {}",
+            c.round,
+            c.by,
+            c.subject,
+            c.outcome.label()
+        );
+        if !c.note.is_empty() {
+            let _ = write!(out, " — {}", one_line(&c.note));
+        }
+        out.push('\n');
+    }
+    out.push('\n');
+}
+
+fn write_evidence(out: &mut String, session: &Session) {
+    let _ = writeln!(out, "{}\n", SECTIONS[4]);
+    if session.evidence.is_empty() {
+        out.push_str("（ありません）\n\n");
+        return;
+    }
+    let flagged = |e: &&Evidence| {
+        matches!(
+            e.rerun,
+            Some(Rerun::Differed { .. } | Rerun::TimedOut { .. })
+        )
+    };
+    let (first, rest): (Vec<&Evidence>, Vec<&Evidence>) =
+        session.evidence.iter().partition(flagged);
+    for item in first.into_iter().chain(rest) {
+        let _ = writeln!(out, "- {}", item_line(item));
+        if let Some(log) = item.rerun.as_ref().and_then(rerun_log) {
+            let _ = writeln!(
+                out,
+                "  - 再実行のログ: digest `{:016x}` · {} バイト · `{}`",
+                log.digest,
+                log.bytes,
+                log.path.display()
+            );
+        }
+    }
+    out.push('\n');
+}
+
+fn rerun_log(rerun: &Rerun) -> Option<&crate::model::types::Stored> {
+    match rerun {
+        Rerun::Matched { log, .. }
+        | Rerun::Differed { log, .. }
+        | Rerun::TimedOut { log }
+        | Rerun::NotRun { log, .. } => log.as_ref(),
+    }
+}
+
+fn write_changes(out: &mut String, session: &Session) {
+    let _ = writeln!(out, "{}\n", SECTIONS[5]);
+    let mut any = false;
+    // An added criterion gets one past every number used (`reduce`), so the
+    // person's additions hold the highest numbers.
+    let adds = session
+        .criteria_edits
+        .iter()
+        .filter(|(e, _)| matches!(e, CriteriaEdit::Add { .. }))
+        .count();
+    let mut ids: Vec<&str> = session
+        .criteria
+        .iter()
+        .chain(&session.removed_criteria)
+        .map(|c| c.id.as_str())
+        .collect();
+    ids.sort_by(|a, b| crate::model::types::natural_cmp(b, a));
+    let added: Vec<&str> = ids.into_iter().take(adds).collect();
+    for c in &session.criteria {
+        let what = if added.contains(&c.id.as_str()) {
+            "追加"
+        } else if c.edited {
+            "編集"
+        } else {
+            continue;
+        };
+        any = true;
+        let _ = writeln!(out, "- {what}: {} {}", c.id, c.statement);
+    }
+    for c in &session.removed_criteria {
+        any = true;
+        let _ = writeln!(out, "- 削除: {} {}（{}）", c.id, c.statement, c.source);
+    }
+    if session
+        .criteria_edits
+        .iter()
+        .any(|(e, _)| matches!(e, CriteriaEdit::Move { .. }))
+    {
+        any = true;
+        let order: Vec<&str> = session.criteria.iter().map(|c| c.id.as_str()).collect();
+        let _ = writeln!(out, "- 並べ替え: {}", order.join(", "));
+    }
+    for c in &session.criteria {
+        if let Some(r) = session.ruling(&c.id)
+            && r.kind == RulingKind::NotApplicable
+        {
+            any = true;
+            let _ = writeln!(
+                out,
+                "- 対象外と判定: {} {} — {}",
+                c.id,
+                c.statement,
+                one_line(&r.rationale)
+            );
+        }
+    }
+    if !any {
+        out.push_str("（ありません）\n");
+    }
+    out.push('\n');
+}
+
+fn write_gaps(out: &mut String, session: &Session) {
+    let _ = writeln!(out, "{}\n", SECTIONS[6]);
+    let mut gaps = false;
+    let untested: Vec<&str> = session
+        .criteria
+        .iter()
+        .filter(|c| {
+            !session.verifier_ids().any(|p| {
+                session
+                    .latest_result(p, &c.id)
+                    .is_some_and(|r| matches!(r.outcome, Outcome::Pass | Outcome::Fail))
+            })
+        })
+        .map(|c| c.id.as_str())
+        .collect();
+    if !untested.is_empty() && session.frozen_at.is_some() {
+        gaps = true;
+        let _ = writeln!(out, "- 成功・失敗の結果がない基準: {}", untested.join(", "));
+    }
+    for (round, part, why) in failures(session) {
+        gaps = true;
+        let when = if round == CRITERIA_ROUND {
+            "基準策定".to_owned()
+        } else {
+            format!("R{round}")
+        };
+        let _ = writeln!(
+            out,
+            "- {when} で {part} が返答できませんでした: {}",
+            one_line(&why)
+        );
+    }
+    for part in session.verifier_ids() {
+        for c in &session.criteria {
+            if let Some(r) = session.latest_result(part, &c.id)
+                && r.outcome == Outcome::Blocked
+            {
+                gaps = true;
+                let _ = writeln!(
+                    out,
+                    "- {} を {part} が実行できませんでした（R{}）: {}",
+                    c.id,
+                    r.round,
+                    one_line(&r.note)
+                );
+            }
+        }
+    }
+    for item in &session.evidence {
+        if let Some(Rerun::NotRun { why, .. }) = &item.rerun {
+            gaps = true;
+            let _ = writeln!(
+                out,
+                "- 再実行されなかったコマンド: `{}` — {}",
+                item.key,
+                one_line(why)
+            );
+        }
+        if item.stored.is_none()
+            && item.file_path().is_some()
+            && item.attached.is_none()
+            && item
+                .key
+                .split()
+                .and_then(|(p, r, _)| session.round(r).map(|round| round.ingested.contains(&p)))
+                .unwrap_or(false)
+        {
+            gaps = true;
+            let _ = writeln!(
+                out,
+                "- 取り込み前に消えた証跡: `{}`（{}）",
+                item.key,
+                item.file_path().unwrap_or_default()
+            );
+        }
+    }
+    if session.isolation == Isolation::Shared {
+        gaps = true;
+        out.push_str("- 共有（読み取りのみ）モード: 隔離は強制されず、再実行もしていません\n");
+    }
+    for r in &session.results {
+        let only_observed =
+            !r.evidence.is_empty() && r.evidence.iter().all(|k| session.is_observation(k));
+        if only_observed {
+            gaps = true;
+            let _ = writeln!(
+                out,
+                "- 観察だけを根拠にした結果: {}（{} R{}・{}）",
+                r.criterion,
+                r.part,
+                r.round,
+                r.outcome.label()
+            );
+        }
+    }
+    for raw in session.unplaced() {
+        gaps = true;
+        let state = if session.closed {
+            "判定されずに終わった不具合"
+        } else {
+            "判定待ちの不具合"
+        };
+        let _ = writeln!(
+            out,
+            "- {state}: {}（R{}・{}）{}",
+            raw.key,
+            raw.round,
+            raw.severity.label(),
+            one_line(&raw.claim)
+        );
+    }
+    if !gaps {
+        out.push_str("（ありません）\n");
+    }
+    out.push('\n');
+}
+
+fn write_rounds(out: &mut String, session: &Session) {
+    let _ = writeln!(out, "{}\n", SECTIONS[7]);
+    if session.rounds.is_empty() {
+        out.push_str("（まだありません）\n");
+    }
+    for round in &session.rounds {
+        let _ = write!(out, "- R{}（{}）: ", round.no, round.kind.label());
+        match (&round.outcome, round.phase) {
+            (Some(outcome), _) => out.push_str(&one_line(&outcome.summary)),
+            (None, Phase::Closed) => out.push_str("（判定なし）"),
+            (None, _) if session.closed => out.push_str("（中断）"),
+            (None, _) => out.push_str("（進行中）"),
+        }
+        out.push('\n');
+    }
+}
+
+/// How many trailing lines of a cited log the fix task shows (L1-7 item 3).
+pub const FIX_TAIL_LINES: usize = 80;
 
 /// The task for an agent asked to fix `criteria` (failed criterion ids)
 /// and `defects` (defect ids): each failed criterion with its failing
 /// evidence and `tails` (the last 80 lines of each cited stored log, read
 /// by the runner), each defect with its repro steps.
 pub fn fix_task(
-    _session: &Session,
-    _criteria: &[String],
-    _defects: &[String],
-    _tails: &BTreeMap<EvidenceKey, String>,
+    session: &Session,
+    criteria: &[String],
+    defects: &[String],
+    tails: &BTreeMap<EvidenceKey, String>,
 ) -> String {
-    todo!("U2: fix_task")
+    let m = &session.manifest;
+    let criteria: Vec<_> = session
+        .criteria
+        .iter()
+        .filter(|c| criteria.contains(&c.id))
+        .collect();
+    let defects: Vec<&Defect> = session
+        .ranked()
+        .into_iter()
+        .filter(|d| defects.contains(&d.id))
+        .collect();
+    let mut out = String::with_capacity(4096);
+    let _ = writeln!(
+        out,
+        "# Fix request from verification {}\n\n\
+         A panel of coding agents verified a change in this repository ({}) by running it \
+         against acceptance criteria, and a judge ruled on each one from recorded evidence. \
+         Fix the {} failed criteri{} and {} defect{} below in this working tree.\n",
+        session.id,
+        m.label,
+        criteria.len(),
+        if criteria.len() == 1 { "on" } else { "a" },
+        defects.len(),
+        if defects.len() == 1 { "" } else { "s" },
+    );
+    out.push_str("## What was verified\n\n");
+    let short = |s: &Option<String>| {
+        s.as_deref()
+            .map_or_else(|| "?".to_owned(), |s| short_id(s, 10))
+    };
+    match session.target.kind {
+        TargetKind::Diff => {
+            let _ = writeln!(
+                out,
+                "- The change from {} `{}` (merge base `{}`) to {}.",
+                m.base_ref.as_deref().unwrap_or("?"),
+                short(&m.base_sha),
+                short(&m.merge_base),
+                match &m.head_ref {
+                    Some(head) => format!("{head} `{}`", short(&m.head_sha)),
+                    None => format!(
+                        "the work tree (on `{}`, with its uncommitted and untracked changes)",
+                        short(&m.head_sha)
+                    ),
+                },
+            );
+        }
+        TargetKind::State => {
+            let _ = writeln!(
+                out,
+                "- The tree as it was at {} `{}`.",
+                m.head_ref.as_deref().unwrap_or("the work tree on"),
+                short(&m.head_sha)
+            );
+        }
+    }
+    out.push_str(
+        "- The verifiers ran in copies of it; the stored logs below are what they saw. The work \
+         tree may have changed since.\n\n",
+    );
+    out.push_str(
+        "## How to work\n\n\
+         - Fix only what is listed here.\n\
+         - Reproduce each failure first with the command or steps given; if it does not \
+         reproduce, leave it and say why.\n\
+         - Follow the repository's own rules (AGENTS.md, CLAUDE.md, CONTRIBUTING) and run \
+         the checks that cover what you change.\n\
+         - Do not push, publish, or open pull requests.\n\
+         - End with a report: for each criterion and defect id, what you changed, or why you \
+         left it.\n\n",
+    );
+    if let Some(v) = session.verdict() {
+        let _ = writeln!(
+            out,
+            "## The judge's verdict: {}\n\n{}\n",
+            v.decision.name(),
+            one_line(&v.rationale)
+        );
+        if !v.blocking.is_empty() {
+            let _ = writeln!(out, "Blocking: {}\n", v.blocking.join(", "));
+        }
+    }
+    if !criteria.is_empty() {
+        out.push_str("## Failed criteria\n\n");
+    }
+    for c in criteria {
+        let _ = writeln!(
+            out,
+            "### {} [{}] {}\n",
+            c.id,
+            c.priority.name(),
+            c.statement
+        );
+        if !c.how.trim().is_empty() {
+            let _ = writeln!(out, "- How it is checked: {}", one_line(&c.how));
+        }
+        if let Some(r) = session.ruling(&c.id) {
+            let _ = writeln!(
+                out,
+                "- Judge (R{}): {} — {}",
+                r.round,
+                r.kind.name(),
+                one_line(&r.rationale)
+            );
+        }
+        // The failing evidence: what the ruling cites, then every fail
+        // result's own, each once.
+        let mut keys: Vec<&EvidenceKey> = session
+            .ruling(&c.id)
+            .map(|r| r.evidence.iter().collect())
+            .unwrap_or_default();
+        for r in session
+            .results
+            .iter()
+            .filter(|r| r.criterion == c.id && r.outcome == Outcome::Fail)
+        {
+            let _ = writeln!(
+                out,
+                "- {} (R{}) reported fail: {}",
+                r.part,
+                r.round,
+                one_line(&r.note)
+            );
+            for key in &r.evidence {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+        for check in session.cross_checks.iter().filter(
+            |x| matches!(&x.subject, Subject::Result { criterion, .. } if *criterion == c.id),
+        ) {
+            let _ = writeln!(
+                out,
+                "- {} cross-checked {} (R{}): {} — {}",
+                check.by,
+                check.subject,
+                check.round,
+                check.outcome.name(),
+                one_line(&check.note)
+            );
+        }
+        for key in keys {
+            write_fix_item(&mut out, session, key, tails);
+        }
+        out.push('\n');
+    }
+    if !defects.is_empty() {
+        out.push_str("## Defects\n\n");
+    }
+    for d in defects {
+        let _ = writeln!(out, "### {} [{}] {}\n", d.id, d.severity.name(), d.claim);
+        let location = match &d.location {
+            Some(loc) => format!("`{loc}`"),
+            None => "the target as a whole".to_owned(),
+        };
+        let _ = writeln!(out, "- Location: {location}");
+        let _ = writeln!(
+            out,
+            "- Status: {} · judge: {}",
+            d.status.name(),
+            one_line(&d.rationale)
+        );
+        let _ = writeln!(out, "- Repro:\n\n{}\n", indent(d.repro.trim()));
+        if let Some(fix) = d.fix.as_deref().or_else(|| {
+            d.sources
+                .iter()
+                .find_map(|k| session.raw_defect(k).and_then(|r| r.fix.as_deref()))
+        }) {
+            let _ = writeln!(out, "- Suggested fix: {}", one_line(fix));
+        }
+        for raw in d.sources.iter().filter_map(|k| session.raw_defect(k)) {
+            for key in &raw.evidence {
+                write_fix_item(&mut out, session, key, tails);
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn indent(text: &str) -> String {
+    text.lines()
+        .map(|l| format!("    {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One evidence item of a fix task, with its stored log's tail.
+fn write_fix_item(
+    out: &mut String,
+    session: &Session,
+    key: &EvidenceKey,
+    tails: &BTreeMap<EvidenceKey, String>,
+) {
+    let Some(item) = session.evidence_item(key) else {
+        return;
+    };
+    match &item.body {
+        EvidenceBody::Command { cmd, cwd, exit, .. } => {
+            let _ = writeln!(
+                out,
+                "- Evidence {key}: exit {exit} in `{cwd}`:\n\n{}\n",
+                indent(cmd.trim())
+            );
+            if let Some(r) = &item.rerun {
+                let _ = writeln!(out, "  Re-run: {}", rerun_english(r));
+            }
+        }
+        EvidenceBody::File { path, caption, .. } => {
+            let _ = write!(out, "- Evidence {key}: file {path}");
+            if let Some(caption) = caption {
+                let _ = write!(out, " — {}", one_line(caption));
+            }
+            out.push('\n');
+        }
+        EvidenceBody::Observation { text } => {
+            let _ = writeln!(out, "- Evidence {key} (observation): {}", one_line(text));
+        }
+    }
+    if let Some(stored) = &item.stored {
+        let reply_dir = crate::store::reply_dir(session);
+        let _ = writeln!(
+            out,
+            "  Stored copy: {}",
+            reply_dir.join(&stored.path).display()
+        );
+    }
+    if let Some(tail) = tails.get(key) {
+        let _ = writeln!(
+            out,
+            "  Last {FIX_TAIL_LINES} lines of its log:\n\n```\n{}\n```\n",
+            tail.trim_end()
+        );
+    }
+}
+
+fn rerun_english(rerun: &Rerun) -> String {
+    match rerun {
+        Rerun::Matched { exit, .. } => format!("matched (exit {exit})"),
+        Rerun::Differed { exit: Some(e), .. } => format!("differed (exit {e})"),
+        Rerun::Differed { exit: None, .. } => "differed (no exit status)".to_owned(),
+        Rerun::TimedOut { .. } => "timed out".to_owned(),
+        Rerun::NotRun { why, .. } => format!("not run: {why}"),
+    }
 }

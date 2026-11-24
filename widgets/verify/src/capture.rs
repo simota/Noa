@@ -5,9 +5,11 @@
 //! the person's work tree.
 //!
 //! As review's capture: read-only git commands only, with optional locks
-//! off, so the index and the work tree are never written; file identity
-//! from NUL-separated machine output; files read without following
-//! symbolic links (see `fsx`) and never past their cap.
+//! off and every command that reads the index given a copy of it
+//! ([`IndexCopy`]), so the index and the work tree are never written; file
+//! identity from NUL-separated machine output; files read without
+//! following symbolic links (see `fsx`) and never past their cap. A ref's
+//! files are taken as its checkout gives them.
 
 use std::fs;
 use std::io::{self, Read};
@@ -180,6 +182,78 @@ fn git(dir: &Path) -> Command {
         .env("LC_ALL", "C")
         .env_remove("GIT_EXTERNAL_DIFF");
     cmd
+}
+
+/// A private copy of a repository's index, removed when dropped. `git
+/// diff` compares a file whose stat information no longer matches the
+/// index (a new mtime, say) by content and then writes the refreshed stat
+/// information back to the index, even with optional locks off; the
+/// capture's commands that read the index are given a copy through
+/// `GIT_INDEX_FILE` instead, so that write goes to the copy and the
+/// person's index is never written.
+struct IndexCopy {
+    path: PathBuf,
+}
+
+impl Drop for IndexCopy {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+        let mut lock = self.path.clone().into_os_string();
+        lock.push(".lock");
+        let _ = fs::remove_file(lock);
+    }
+}
+
+impl IndexCopy {
+    /// Copies the index of the work tree `dir` into a new file of the
+    /// temporary directory. A repository without an index file gets a
+    /// path where none is, which git reads as an empty index, as it reads
+    /// the missing original.
+    fn of(dir: &Path) -> Result<IndexCopy, String> {
+        use std::os::unix::ffi::OsStringExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let index = git_line(
+            dir,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        )?;
+        let index = PathBuf::from(std::ffi::OsString::from_vec(index));
+        let cannot = |e: io::Error| format!("インデックスの写しを作れません: {e}");
+        let (copy, mut file) = loop {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let path = std::env::temp_dir().join(format!(
+                "noa-verify-index-{}-{}-{stamp}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::File::options().write(true).create_new(true).open(&path) {
+                Ok(file) => break (IndexCopy { path }, file),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(cannot(e)),
+            }
+        };
+        match fs::File::open(&index) {
+            Ok(mut source) => {
+                io::copy(&mut source, &mut file).map_err(cannot)?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::remove_file(&copy.path).map_err(cannot)?;
+            }
+            Err(e) => return Err(cannot(e)),
+        }
+        Ok(copy)
+    }
+}
+
+/// [`git`] for a command that reads the index (`diff`, `ls-files`): given
+/// an [`IndexCopy`], which must outlive the command.
+fn git_indexed(dir: &Path) -> Result<(Command, IndexCopy), String> {
+    let copy = IndexCopy::of(dir)?;
+    let mut cmd = git(dir);
+    cmd.env("GIT_INDEX_FILE", &copy.path);
+    Ok((cmd, copy))
 }
 
 #[derive(Debug)]
@@ -547,15 +621,16 @@ const DIFF_COMMON: [&str; 5] = [
     "--find-renames",
 ];
 
-/// Whether `path` lies in a `.noa/` folder, which holds the widgets' own
-/// files (this snapshot among them): never part of a target.
+/// Whether `path` lies in the `.noa/` folder at the top of the repository,
+/// which holds the widgets' own files (this snapshot among them): never
+/// part of a target. A `.noa/` anywhere below the top is the person's.
 fn in_noa(path: &str) -> bool {
-    path.split('/').any(|part| part == ".noa")
+    path == ".noa" || path.starts_with(".noa/")
 }
 
 /// Untracked, non-ignored paths under `paths` (all, when empty).
 fn untracked_paths(repo: &Path, paths: &[String]) -> Result<Vec<String>, String> {
-    let mut cmd = git(repo);
+    let (mut cmd, _index) = git_indexed(repo)?;
     cmd.args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
         .args(paths);
     let mut untracked = nul_fields(&run(cmd, MAX_LISTING_BYTES)?);
@@ -575,7 +650,7 @@ fn diff_view(
     range: &[String],
     untracked: bool,
 ) -> Result<DiffView, String> {
-    let mut cmd = git(repo);
+    let (mut cmd, index) = git_indexed(repo)?;
     cmd.arg("diff")
         .args(DIFF_COMMON)
         .args(["--unified=3", "--src-prefix=a/", "--dst-prefix=b/"])
@@ -587,7 +662,8 @@ fn diff_view(
         Err(RunError::TooLarge) => return Err(too_large_diff(MAX_DIFF_BYTES)),
         Err(RunError::Failed(why)) => return Err(why),
     };
-    let mut cmd = git(repo);
+    drop(index);
+    let (mut cmd, _index) = git_indexed(repo)?;
     cmd.arg("diff")
         .args(DIFF_COMMON)
         .args(["--raw", "-z", "--no-abbrev"])
@@ -696,7 +772,7 @@ struct RecipeView {
 }
 
 fn recipe_view(repo: &Path, head_sha: &str) -> Result<RecipeView, String> {
-    let mut cmd = git(repo);
+    let (mut cmd, _index) = git_indexed(repo)?;
     cmd.arg("diff").args([
         "--binary",
         "--no-ext-diff",
@@ -1014,8 +1090,17 @@ fn capture_diff(
         let read = match &target.head {
             Head::Worktree => read_worktree(repo, &entry.path, MAX_FILE_BYTES),
             Head::Ref(_) => {
+                // The file as a checkout of the head gives it (line-ending
+                // conversion and the other filters its attributes name, the
+                // attributes read from the head itself), which is what a
+                // verifier's worktree holds and is checked against.
                 let mut cmd = git(repo);
-                cmd.args(["cat-file", "blob", &entry.new_sha]);
+                cmd.arg(format!("--attr-source={head_sha}")).args([
+                    "cat-file",
+                    "--filters",
+                    &format!("--path={}", entry.path),
+                    &entry.new_sha,
+                ]);
                 match run_capped(cmd, &[0], MAX_FILE_BYTES) {
                     Ok(bytes) => Ok((bytes, false)),
                     Err(RunError::TooLarge) => Ok((Vec::new(), true)),
@@ -1261,17 +1346,53 @@ pub(crate) mod tests {
         fs::write(repo.join(".noa/verify/ver-1/x.txt"), "own\n").unwrap();
     }
 
-    fn status_and_index(repo: &Path) -> (String, Vec<u8>) {
-        (
-            sh(repo, &["status", "--porcelain", "--untracked-files=all"]),
-            fs::read(repo.join(".git/index")).unwrap(),
-        )
+    /// The person's index as bytes and every entry of the work tree
+    /// outside `.git` with its content (a link's target), read without
+    /// git: `git status` refreshes the index itself, so it would hide a
+    /// write.
+    fn index_and_tree(repo: &Path) -> (Vec<u8>, Vec<(PathBuf, Vec<u8>)>) {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path == root.join(".git") {
+                    continue;
+                }
+                let meta = fs::symlink_metadata(&path).unwrap();
+                let rel = path.strip_prefix(root).unwrap().to_owned();
+                if meta.file_type().is_symlink() {
+                    let target = fs::read_link(&path).unwrap();
+                    out.push((rel, target.into_os_string().into_encoded_bytes()));
+                } else if meta.is_dir() {
+                    out.push((rel, Vec::new()));
+                    walk(root, &path, out);
+                } else {
+                    out.push((rel, fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut tree = Vec::new();
+        walk(repo, repo, &mut tree);
+        tree.sort();
+        (fs::read(repo.join(".git/index")).unwrap(), tree)
+    }
+
+    /// Gives the tracked `path` a new mtime, its content unchanged: the
+    /// index's stat information no longer matches the file.
+    fn touch_only(repo: &Path, path: &str) {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(repo.join(path))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
     }
 
     #[test]
     fn ac01_a_ref_head_gives_the_review_snapshot_and_a_recipe_of_its_commit() {
         let repo = repo();
-        let before = status_and_index(&repo);
+        touch_only(&repo, "a.txt");
+        let before = index_and_tree(&repo);
         let dest = temp("dest").join("target");
         let captured = capture(&diff_target(&repo, Head::Ref("feat".into())), &dest, 7).unwrap();
         let manifest = &captured.manifest;
@@ -1311,7 +1432,11 @@ pub(crate) mod tests {
         );
         assert!(!dest.join(WORKTREE_PATCH).exists());
         assert!(!dest.join(UNTRACKED_DIR).exists());
-        assert_eq!(status_and_index(&repo), before);
+        assert_eq!(
+            index_and_tree(&repo),
+            before,
+            "the index or the tree changed"
+        );
         verify(&dest, manifest, &captured.rebuild, None).unwrap();
         fs::write(dest.join(FILES_DIR).join("a.txt"), "edited").unwrap();
         assert!(verify(&dest, manifest, &captured.rebuild, None).is_err());
@@ -1322,10 +1447,17 @@ pub(crate) mod tests {
      {
         let repo = repo();
         dirty(&repo);
-        let before = status_and_index(&repo);
+        // A tracked file whose mtime alone changed: `git diff` would write
+        // its refreshed stat information to the person's index.
+        touch_only(&repo, "new.txt");
+        let before = index_and_tree(&repo);
         let dest = temp("dest").join("target");
         let captured = capture(&diff_target(&repo, Head::Worktree), &dest, 1).unwrap();
-        assert_eq!(status_and_index(&repo), before, "status or index changed");
+        assert_eq!(
+            index_and_tree(&repo),
+            before,
+            "the index or the tree changed"
+        );
 
         let head = sh(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
         assert_eq!(captured.rebuild.head_sha, head);
@@ -1333,6 +1465,7 @@ pub(crate) mod tests {
         assert_eq!(captured.rebuild.worktree_patch, Some(digest_bytes(&patch)));
         let text = String::from_utf8_lossy(&patch);
         assert!(text.contains("+five") && text.contains("+staged"), "{text}");
+        assert!(!text.contains("new.txt"), "an mtime is no change: {text}");
         let untracked: Vec<&str> = captured
             .rebuild
             .untracked
@@ -1364,6 +1497,38 @@ pub(crate) mod tests {
         verify(&dest, &captured.manifest, &captured.rebuild, None).unwrap();
         fs::write(dest.join(UNTRACKED_DIR).join("notes/draft.txt"), "x").unwrap();
         assert!(verify(&dest, &captured.manifest, &captured.rebuild, None).is_err());
+    }
+
+    #[test]
+    fn ac01_only_the_noa_folder_at_the_top_is_left_out_not_one_of_the_persons_below_it() {
+        let repo = repo();
+        dirty(&repo);
+        fs::create_dir_all(repo.join("fixtures/.noa")).unwrap();
+        fs::write(repo.join("fixtures/.noa/input.json"), "{}\n").unwrap();
+        let dest = temp("noa-below").join("target");
+        let captured = capture(&diff_target(&repo, Head::Worktree), &dest, 0).unwrap();
+        let untracked: Vec<&str> = captured
+            .rebuild
+            .untracked
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .collect();
+        assert!(
+            untracked.contains(&"fixtures/.noa/input.json"),
+            "{untracked:?}"
+        );
+        assert!(
+            !untracked.iter().any(|p| p.starts_with(".noa/")),
+            "{untracked:?}"
+        );
+        assert_eq!(
+            fs::read(dest.join(UNTRACKED_DIR).join("fixtures/.noa/input.json")).unwrap(),
+            b"{}\n"
+        );
+        let file = captured.manifest.file("fixtures/.noa/input.json").unwrap();
+        assert_eq!(file.status, FileStatus::Untracked);
+        assert!(captured.manifest.file(".noa/verify/ver-1/x.txt").is_none());
+        verify(&dest, &captured.manifest, &captured.rebuild, None).unwrap();
     }
 
     #[test]

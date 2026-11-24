@@ -8,14 +8,29 @@ use crate::model::types::{MAX_FILE_BYTES, MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, Medi
 /// header (about 40 bytes as muxers write it, its `DocType` at bytes 24–35).
 pub const SNIFF_BYTES: usize = 64;
 
-/// The major brands of an `ftyp` box that say MP4 video: the ISO base
-/// media and MP4 families, H.264 and Apple's M4V. Any other brand (HEIF
-/// and AVIF images — `heic`, `heix`, `mif1`, `avif` — M4A audio, 3GP, …)
-/// is not media here.
-const MP4_BRANDS: [&[u8; 4]; 14] = [
-    b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"M4V ",
-    b"M4VH", b"M4VP", b"dash", b"mmp4",
+/// The `ftyp` brands that say MP4 video: the ISO base media family
+/// (`isom`, `iso2`–`iso9`), MP4 (`mp41`, `mp42`, `mp71`), H.264 and AV1
+/// (`avc1`, `av01`), Apple's M4V, DASH and CMAF (`dash`, `cmfc`, `cmf2`),
+/// MPEG-4 mobile (`mmp4`), Flash video (`f4v `), Sony's XAVC and MSNV and
+/// Dolby Vision (`dby1`).
+const MP4_BRANDS: [&[u8; 4]; 25] = [
+    b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"iso7", b"iso8", b"iso9", b"mp41",
+    b"mp42", b"mp71", b"avc1", b"av01", b"M4V ", b"M4VH", b"M4VP", b"dash", b"cmfc", b"cmf2",
+    b"mmp4", b"f4v ", b"XAVC", b"MSNV", b"dby1",
 ];
+
+/// Major brands of ISO base media files that are not video here, whatever
+/// brands they list as compatible: HEIF and AVIF images and image
+/// sequences, M4A / M4B / M4P and Flash audio, and 3GP / 3G2.
+fn not_video(major: &[u8]) -> bool {
+    const IMAGE_OR_AUDIO: [&[u8; 4]; 19] = [
+        b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs", b"mif1", b"mif2",
+        b"msf1", b"miaf", b"avif", b"avis", b"M4A ", b"M4B ", b"M4P ", b"F4A ", b"F4B ",
+    ];
+    IMAGE_OR_AUDIO.iter().any(|brand| major == &brand[..])
+        || major.starts_with(b"3gp")
+        || major.starts_with(b"3g2")
+}
 
 /// The media `head` (a file's first [`SNIFF_BYTES`] bytes, or fewer for a
 /// short file) starts like: PNG, JPEG, GIF, WebP, MP4 / QuickTime (`ftyp`
@@ -35,15 +50,28 @@ pub fn sniff(head: &[u8]) -> Option<Media> {
         return Some(Media::Webp);
     }
     // ISO base media: a first box of type `ftyp`, its major brand saying
-    // QuickTime (`qt  `) or one of the MP4 family.
+    // QuickTime (`qt  `), or it or one of the compatible brands after it
+    // (from byte 16 to the end of the box) saying MP4 video, unless the
+    // major brand says an image or audio.
     if head.len() >= 12 && &head[4..8] == b"ftyp" {
-        let brand = &head[8..12];
-        if brand == b"qt  " {
+        let major = &head[8..12];
+        if major == b"qt  " {
             return Some(Media::QuickTime);
         }
-        return MP4_BRANDS
-            .iter()
-            .any(|mp4| brand == &mp4[..])
+        if not_video(major) {
+            return None;
+        }
+        // A size of 0 runs the box to the end of the file, 1 gives it in
+        // eight more bytes: either way, as far as `head` goes.
+        let size = u32::from_be_bytes(head[..4].try_into().expect("four bytes")) as usize;
+        let end = match size {
+            0 | 1 => head.len(),
+            size => size.min(head.len()),
+        };
+        let compatible = head.get(16..end).unwrap_or_default().chunks_exact(4);
+        return std::iter::once(major)
+            .chain(compatible)
+            .any(|brand| MP4_BRANDS.iter().any(|mp4| brand == &mp4[..]))
             .then_some(Media::Mp4);
     }
     // EBML: WebM and Matroska share the header, told apart by its DocType.
@@ -245,7 +273,7 @@ pub(crate) mod tests {
     }
 
     fn ftyp(brand: &[u8; 4], compatible: &[u8]) -> Vec<u8> {
-        let mut out = vec![0, 0, 0, 0x18];
+        let mut out = (16 + compatible.len() as u32).to_be_bytes().to_vec();
         out.extend_from_slice(b"ftyp");
         out.extend_from_slice(brand);
         out.extend_from_slice(&[0, 0, 0, 0]);
@@ -265,6 +293,37 @@ pub(crate) mod tests {
         ] {
             assert_eq!(sniff(&ftyp(brand, b"mif1miaf")), None, "{brand:?}");
         }
+
+        // A video whose major brand is a newer ISO one, or one this does
+        // not know, with a video brand among its compatible ones (as
+        // ffmpeg writes `iso8` with `iso8iso2mp41`, say).
+        for (major, compatible) in [
+            (b"iso8", &b"iso8iso2mp41"[..]),
+            (b"iso9", b"iso9"),
+            (b"av01", b"av01iso6mp41"),
+            (b"zzzz", b"zzzzmp42isom"),
+        ] {
+            assert_eq!(
+                sniff(&ftyp(major, compatible)),
+                Some(Media::Mp4),
+                "{major:?} {compatible:?}"
+            );
+        }
+        // Images, audio and 3GP list video brands among their compatible
+        // ones too; an unknown brand with none is not media either.
+        for (major, compatible) in [
+            (b"heic", &b"mif1heiciso8"[..]),
+            (b"avif", b"avifmif1miafiso8"),
+            (b"M4A ", b"M4A mp42isom"),
+            (b"3gp4", b"isom3gp4"),
+            (b"zzzz", b"zzzzabcd"),
+        ] {
+            assert_eq!(sniff(&ftyp(major, compatible)), None, "{major:?}");
+        }
+        // Compatible brands past the box's end are not its.
+        let mut short = ftyp(b"zzzz", b"");
+        short.extend_from_slice(b"mp42");
+        assert_eq!(sniff(&short), None);
 
         let webm = ebml(b"webm");
         assert_eq!(&webm[31..35], b"webm", "past the first 32 bytes");

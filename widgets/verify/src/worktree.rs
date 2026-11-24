@@ -290,10 +290,27 @@ fn check_files(
         let (bytes, over) = fsx::read_capped(file, MAX_WORKTREE_PATCH_BYTES).ok()?;
         (!over).then(|| (capture::digest_bytes(&bytes), exec))
     };
+    // Whether the target adds anything below `dir`: a file `a` replaced by
+    // a directory `a/` is recorded as `a` deleted and the files in it added.
+    let adds_below = |dir: &str| {
+        let prefix = format!("{dir}/");
+        manifest
+            .files
+            .iter()
+            .filter(|f| f.status != FileStatus::Deleted)
+            .map(|f| f.path.as_str())
+            .chain(manifest.omitted.iter().map(|o| o.path.as_str()))
+            .chain(untracked.iter().map(|u| u.file))
+            .any(|added| added.starts_with(&prefix))
+    };
     let mut differ: Vec<&str> = Vec::new();
     for file in &manifest.files {
         let ok = if file.status == FileStatus::Deleted {
-            relative(&file.path).is_some_and(|rel| fs::symlink_metadata(path.join(rel)).is_err())
+            // Gone, or now a directory (not a link to one) of added files.
+            relative(&file.path).is_some_and(|rel| match fs::symlink_metadata(path.join(rel)) {
+                Err(_) => true,
+                Ok(meta) => meta.is_dir() && adds_below(&file.path),
+            })
         } else {
             read(&file.path).map(|(digest, _)| digest) == Some(file.digest)
         };
@@ -451,7 +468,7 @@ mod tests {
     use super::*;
     use crate::capture::tests::{diff_target, dirty, repo, sh, temp};
     use crate::capture::{Captured, capture};
-    use crate::model::types::Head;
+    use crate::model::types::{Head, Target};
 
     /// The snapshot of `head` (captured into a folder of its own) and
     /// where verifier `claude` of session `ver-1` would get its worktree.
@@ -675,6 +692,121 @@ mod tests {
         assert_eq!(
             fs::read_to_string(path.join("a.txt")).unwrap(),
             "kept\nand changed\n"
+        );
+    }
+
+    #[test]
+    fn ac03_a_file_replaced_by_a_directory_of_files_is_rebuilt() {
+        let repo = temp("file-to-dir");
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("a"), "a file\n").unwrap();
+        fs::write(repo.join("z.txt"), "z\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        sh(&repo, &["checkout", "-q", "-b", "feat"]);
+        fs::remove_file(repo.join("a")).unwrap();
+        fs::create_dir(repo.join("a")).unwrap();
+        fs::write(repo.join("a/b"), "inside\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "a is a folder"]);
+
+        // A ref: git records `a` deleted and `a/b` added.
+        let (c, target_dir, path) = setup(&repo, Head::Ref("feat".into()));
+        assert_eq!(c.manifest.file("a").unwrap().status, FileStatus::Deleted);
+        assert_eq!(c.manifest.file("a/b").unwrap().status, FileStatus::Added);
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        assert_eq!(fs::read_to_string(path.join("a/b")).unwrap(), "inside\n");
+        remove(&repo, &path).unwrap();
+
+        // The work tree, `a/b` untracked there.
+        sh(&repo, &["checkout", "-q", "main"]);
+        fs::remove_file(repo.join("a")).unwrap();
+        fs::create_dir(repo.join("a")).unwrap();
+        fs::write(repo.join("a/b"), "untracked\n").unwrap();
+        let target_dir = temp("snap").join("target");
+        let target = Target {
+            base: Some("main".into()),
+            ..diff_target(&repo, Head::Worktree)
+        };
+        let c = capture(&target, &target_dir, 0).unwrap();
+        assert_eq!(c.manifest.file("a").unwrap().status, FileStatus::Deleted);
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        assert_eq!(fs::read_to_string(path.join("a/b")).unwrap(), "untracked\n");
+
+        // Still refused: a deleted path that is a directory of nothing the
+        // target adds, and one that is a link to a directory.
+        let mut nothing_below = c.manifest.clone();
+        nothing_below.files.retain(|f| f.path == "a");
+        let none = check_files(&path, &nothing_below, &[]).unwrap_err();
+        assert!(none.contains("一致しません: a"), "{none}");
+        fs::rename(path.join("a"), path.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", path.join("a")).unwrap();
+        let built: Vec<Untracked> = c
+            .rebuild
+            .untracked
+            .iter()
+            .map(|(file, _)| Untracked {
+                file,
+                rel: PathBuf::from(file),
+                bytes: b"untracked\n".to_vec(),
+                exec: false,
+            })
+            .collect();
+        let link = check_files(&path, &c.manifest, &built).unwrap_err();
+        assert!(link.contains("一致しません: a"), "{link}");
+    }
+
+    #[test]
+    fn ac03_a_repository_that_converts_line_endings_rebuilds_as_captured() {
+        let repo = temp("crlf");
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
+        fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        sh(&repo, &["checkout", "-q", "-b", "feat"]);
+        fs::write(repo.join("a.txt"), "one\nTWO\nthree\n").unwrap();
+        fs::write(repo.join("new.txt"), "fresh\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "feat"]);
+
+        // A ref: its files as its checkout gives them, CRLF.
+        let (c, target_dir, path) = setup(&repo, Head::Ref("feat".into()));
+        let snapshot = capture::snapshot_path(&target_dir, "a.txt").unwrap();
+        assert_eq!(
+            fs::read_to_string(snapshot).unwrap(),
+            "one\r\nTWO\r\nthree\r\n"
+        );
+        let a = c.manifest.file("a.txt").unwrap();
+        assert_eq!((a.lines, a.additions, a.deletions), (3, 2, 1));
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("new.txt")).unwrap(),
+            "fresh\r\n"
+        );
+        remove(&repo, &path).unwrap();
+        // The head's own attributes count, not the person's tree's.
+        fs::write(repo.join(".gitattributes"), "").unwrap();
+        let (c, target_dir, path) = setup(&repo, Head::Ref("feat".into()));
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        remove(&repo, &path).unwrap();
+
+        // The work tree as a checkout left it, with a CRLF change on top.
+        sh(&repo, &["checkout", "-q", "--", ".gitattributes"]);
+        for file in ["a.txt", "new.txt"] {
+            fs::remove_file(repo.join(file)).unwrap();
+        }
+        sh(&repo, &["checkout", "-q", "--", "."]);
+        assert_eq!(
+            fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "one\r\nTWO\r\nthree\r\n"
+        );
+        fs::write(repo.join("a.txt"), "one\r\nTWO\r\nthree\r\nfour\r\n").unwrap();
+        let (c, target_dir, path) = setup(&repo, Head::Worktree);
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("a.txt")).unwrap(),
+            "one\r\nTWO\r\nthree\r\nfour\r\n"
         );
     }
 

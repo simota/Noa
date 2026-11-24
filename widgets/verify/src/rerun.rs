@@ -234,7 +234,8 @@ fn quote(text: &str) -> String {
 /// runs it, `set -m`, then per command `cd` to `<worktree>/<cwd>`, run
 /// `"${SHELL:-/bin/sh}" <dir>/<n>.cmd` in the background with output to
 /// `<n>.log`, its pid and the script's own to `<n>.pid`, wait, its exit
-/// status to `<n>.exit` (temporary file + `mv`); at the end `done` holding
+/// status to `<n>.exit` (temporary file + `mv`), then end what is left of
+/// its process group and wait until nothing is; at the end `done` holding
 /// `nonce`. Every path single-quoted; no reported text in it.
 ///
 /// Each command runs in a background subshell, which `set -m` makes the
@@ -247,6 +248,15 @@ fn quote(text: &str) -> String {
 /// is gone without an `<n>.exit` means it was stopped, never that the
 /// status is still on its way. A `cd` that fails writes `<n>.nocwd`
 /// instead (its error in the log), and the command does not run.
+///
+/// The subshell ending is not the command ending: processes it started
+/// stay in its group (a child that ignores the timeout's SIGTERM, a
+/// background job). Once the subshell is gone, the script sends what is
+/// left of the group SIGTERM, SIGKILL
+/// [`RERUN_KILL_GRACE`](crate::model::types::RERUN_KILL_GRACE) later, and
+/// starts the next command (or writes `done`) only once nothing of the
+/// group is left, so two commands never run at once. A group id in use is
+/// never given to a new process, so the group signalled is the command's.
 pub fn script(nonce: &str, dir: &Path, worktree: &Path, items: &[(u32, &str)]) -> String {
     let mut out = String::from(
         "#!/bin/sh\n\
@@ -274,6 +284,14 @@ pub fn script(nonce: &str, dir: &Path, worktree: &Path, items: &[(u32, &str)]) -
             "echo \"$p $$\" > \"$d/{n}.pid.tmp\" && mv -f \"$d/{n}.pid.tmp\" \"$d/{n}.pid\""
         );
         let _ = writeln!(out, "wait \"$p\"");
+        let _ = writeln!(
+            out,
+            "i=0; while kill -0 -- \"-$p\" 2>/dev/null; do \
+             if [ \"$i\" -eq 0 ]; then kill -TERM -- \"-$p\" 2>/dev/null; fi; \
+             if [ \"$i\" -ge {grace} ]; then kill -KILL -- \"-$p\" 2>/dev/null; fi; \
+             i=$((i + 1)); sleep 0.1; done",
+            grace = RERUN_KILL_GRACE / 100
+        );
     }
     let _ = writeln!(
         out,
@@ -810,6 +828,48 @@ mod tests {
     }
 
     #[test]
+    fn ac10_the_next_command_starts_only_once_nothing_of_the_one_before_is_left() {
+        // A command past its limit whose child ignores SIGTERM (it outlives
+        // the subshell until the SIGKILL), and one that exits leaving a
+        // background job running (ended by the script, its status kept).
+        for (first, end) in [
+            ("trap '' TERM; sleep 30; sleep 30", End::TimedOut),
+            ("sleep 30 & exit 0", End::Exited(0)),
+        ] {
+            let (worktree, dir) = layout("left-behind");
+            let commands = [command("e1", first, "."), command("e2", "exit 0", ".")];
+            let request = write_request(&worktree, &dir, &worktree, &commands).unwrap();
+            let mut child = start(&dir);
+            let limits = Limits {
+                run: 500,
+                next_start: 10_000,
+            };
+            let mut overlapped = false;
+            let status = watch_all(&dir, &request, limits, |status| {
+                if let (Some(first), Some(_)) = (status.items[0].pid, status.items[1].pid) {
+                    overlapped |= group_exists(first);
+                }
+            });
+            child.wait().unwrap();
+            let pid = status.items[0].pid.unwrap();
+            assert!(
+                !overlapped,
+                "{first:?}: command 2 started beside group {pid}"
+            );
+            assert!(
+                !group_exists(pid),
+                "{first:?}: `done` was written while group {pid} still ran"
+            );
+            let ends: Vec<End> = status
+                .items
+                .iter()
+                .map(|i| i.end.clone().unwrap())
+                .collect();
+            assert_eq!(ends, [end, End::Exited(0)], "{first:?}");
+        }
+    }
+
+    #[test]
     fn ac10_the_timeout_kill_works_whatever_sh_starts_the_script() {
         // macOS's `/bin/sh` (bash), dash, which turns job control off
         // without a terminal, and zsh as `sh`, which refuses `set -m`.
@@ -1116,6 +1176,14 @@ mod tests {
         assert!(text.starts_with("#!/bin/sh\n"));
         assert!(text.contains("\n[ -n \"${BASH_VERSION-}\" ] || exec /bin/bash \"$0\"\nset -m\n"));
         assert!(text.contains("echo \"$p $$\" > \"$d/2.pid.tmp\""), "{text}");
+        assert!(
+            text.contains("wait \"$p\"\ni=0; while kill -0 -- \"-$p\" 2>/dev/null; do "),
+            "{text}"
+        );
+        assert!(
+            text.contains("if [ \"$i\" -ge 50 ]; then kill -KILL -- \"-$p\""),
+            "{text}"
+        );
         assert!(text.contains("echo '00ff' > \"$d/done.tmp\""));
         assert!(nonce().unwrap() != nonce().unwrap());
         assert!(nonce().unwrap().bytes().all(|b| b.is_ascii_hexdigit()));

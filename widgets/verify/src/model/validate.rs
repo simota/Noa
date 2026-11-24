@@ -818,6 +818,13 @@ pub fn parse_reply(
                     }
                 }
                 let shows: Vec<String> = shows.iter().map(|s| s.trim().to_owned()).collect();
+                // `shows` ties a picture to criteria (L1-5a); a plain file
+                // is evidence only for what cites it.
+                if !shows.is_empty() && found.is_some() && media == Some(None) {
+                    problems.push(format!(
+                        "{at}.shows: {path} is not an image or a video; only media take shows"
+                    ));
+                }
                 for id in &shows {
                     if session.criterion(id).is_none() {
                         problems.push(format!(

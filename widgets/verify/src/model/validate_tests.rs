@@ -1399,3 +1399,179 @@ fn the_cross_brief_lists_every_result_so_far_not_only_the_latest() {
         assert!(ac1.contains(line), "{line:?} in\n{ac1}");
     }
 }
+
+/// [`ruled_round`] ruled once with claude-2 assigned codex's AC-1 fail,
+/// and round 2 with claude-2's `not_reproduced` on it citing `e1`; the
+/// items keyed in `gone` gone before round 2's ingest.
+fn fail_answered_with(gone: &[&str]) -> Rig {
+    let mut rig = ruled_round(3);
+    rig.judge(&judge_json(
+        &good_rulings(),
+        "open",
+        r#", "assign": {"claude-2": ["codex/AC-1"]}"#,
+    ));
+    assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+    rig.deliver();
+    rig.reply("claude", r#"{"summary": "Nothing assigned."}"#);
+    rig.reply("codex", r#"{"summary": "Nothing assigned."}"#);
+    rig.reply(
+        "claude-2",
+        &reply_json(
+            &[],
+            &[cmd("e1", 0, false)],
+            r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "not_reproduced", "note": "passes here", "evidence": ["e1"]}]"#,
+        ),
+    );
+    rig.ingest_except(gone, &Default::default());
+    assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude-2"));
+    rig
+}
+
+#[test]
+fn ac13_a_not_reproduced_whose_evidence_was_not_stored_answers_no_fail() {
+    let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+    let text = format!(
+        r#"{{"summary": "s", "rulings": [{}, {}, {}]}}"#,
+        ruling("AC-1", "verified", "matched", &["claude/r1/e1"]),
+        same("AC-2"),
+        same("AC-3")
+    );
+    let rig = fail_answered_with(&["claude-2/r2/e1"]);
+    assert_eq!(
+        judge_problems(&rig, &text),
+        [
+            "AC-1: verified despite codex's fail, which no not_reproduced cross-check has answered; claude-2/r2/e1 was not stored (gone before ingest) and counts for nothing"
+        ]
+    );
+    // Stored, the same answer lets AC-1 be verified.
+    let rig = fail_answered_with(&[]);
+    assert_eq!(judge_problems(&rig, &text), Vec::<String>::new());
+}
+
+#[test]
+fn ac30_only_media_take_shows() {
+    let rig = round_one();
+    let text = reply_json(
+        &[
+            ("AC-1", "pass", &["e1", "f1"]),
+            ("AC-2", "not_tested", &[]),
+            ("AC-3", "not_tested", &[]),
+        ],
+        &[
+            cmd("e1", 0, false),
+            r#"{"id": "f1", "kind": "file", "path": "notes.txt", "shows": ["AC-1"]}"#.to_owned(),
+        ],
+        "",
+    );
+    let files = facts_for(&text);
+    assert_eq!(
+        reply_problems(&rig, "claude", &text, &files),
+        ["evidence[1] (f1).shows: notes.txt is not an image or a video; only media take shows"]
+    );
+    // The same file without shows goes through.
+    let plain = text.replace(r#", "shows": ["AC-1"]"#, "");
+    assert_eq!(
+        reply_problems(&rig, "claude", &plain, &files),
+        Vec::<String>::new()
+    );
+}
+
+/// Round 1 where codex fails AC-1 on a stored video `v1` alone, and claude
+/// and claude-2 pass AC-3 each on a stored video `v1` of their own; every
+/// other result passes on a matched re-run of `e1`.
+fn ruled_on_videos() -> Rig {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    let video = r#"{"id": "v1", "kind": "file", "path": "video/tab.mov", "caption": "cd /tmp, ⌘T, pwd",
+        "marks": [{"t": "00:06.5", "note": "the new tab shows $HOME"}]}"#;
+    let ac3_on_video = reply_json(
+        &[
+            ("AC-1", "pass", &["e1"]),
+            ("AC-2", "pass", &["e1"]),
+            ("AC-3", "pass", &["v1"]),
+        ],
+        &[cmd("e1", 0, true), video.to_owned()],
+        "",
+    );
+    rig.reply("claude", &ac3_on_video);
+    rig.reply(
+        "codex",
+        &reply_json(
+            &[
+                ("AC-1", "fail", &["v1"]),
+                ("AC-2", "pass", &["e1"]),
+                ("AC-3", "pass", &["e1"]),
+            ],
+            &[cmd("e1", 0, true), video.to_owned()],
+            "",
+        ),
+    );
+    rig.reply("claude-2", &ac3_on_video);
+    rig.ingest();
+    rig.rerun_all_matched();
+    assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+    rig
+}
+
+#[test]
+fn l1_5a_a_ruling_on_video_alone_must_say_what_its_caption_and_marks_show() {
+    let rig = ruled_on_videos();
+    let text = |ac1: String, ac3: String| {
+        format!(
+            r#"{{"summary": "s", "rulings": [{ac1}, {}, {ac3}]}}"#,
+            ruling("AC-2", "verified", "matched", &["claude/r1/e1"])
+        )
+    };
+    let ac1_failed =
+        |rationale: &str, evidence: &[&str]| ruling("AC-1", "failed", rationale, evidence);
+    let ac3_verified = |rationale: &str| {
+        ruling(
+            "AC-3",
+            "verified",
+            rationale,
+            &["claude/r1/v1", "claude-2/r1/v1"],
+        )
+    };
+    assert_eq!(
+        judge_problems(
+            &rig,
+            &text(ac1_failed("", &["codex/r1/v1"]), ac3_verified("two passes"))
+        ),
+        [
+            "AC-1: failed rests on video evidence alone (codex/r1/v1); its rationale must name the caption and marks it relied on"
+        ]
+    );
+    assert_eq!(
+        judge_problems(
+            &rig,
+            &text(
+                ac1_failed(
+                    "the caption says pwd at 00:06.5 shows $HOME",
+                    &["codex/r1/v1"]
+                ),
+                ac3_verified("")
+            )
+        ),
+        [
+            "AC-3: verified rests on video evidence alone (claude/r1/v1, claude-2/r1/v1); its rationale must name the caption and marks it relied on"
+        ]
+    );
+    // Beside a command, a video is not alone.
+    assert_eq!(
+        judge_problems(
+            &rig,
+            &text(
+                ac1_failed("", &["codex/r1/v1", "claude/r1/e1"]),
+                ac3_verified("both recordings end under 200 ms")
+            )
+        ),
+        Vec::<String>::new()
+    );
+    let brief = rig.brief("judge", crate::model::types::BriefKind::Work);
+    assert!(
+        brief.contains("When a verified or failed ruling rests on video evidence alone (no command, image or other file among the stored evidence it cites), its rationale must name the caption and marks it relied on; an empty rationale there is refused."),
+        "{brief}"
+    );
+}

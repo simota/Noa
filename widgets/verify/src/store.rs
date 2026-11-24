@@ -220,9 +220,12 @@ pub fn report_text(session: &Session) -> String {
 
 /// Whether `dir`'s stored report is not what its log gives (missing, or
 /// the verification stopped between writing its log and its report). One
-/// not ruled on once has no report to compare.
+/// whose judge has had no output accepted (not even the criteria) has no
+/// report to compare.
 pub fn report_is_stale(dir: &Path, session: &Session) -> bool {
-    let has_report = session.closed || session.rounds.iter().any(|r| r.outcome.is_some());
+    let has_report = session.closed
+        || session.criteria_accepted
+        || session.rounds.iter().any(|r| r.outcome.is_some());
     has_report && fs::read_to_string(report_path(dir)).ok() != Some(report_text(session))
 }
 
@@ -822,6 +825,23 @@ mod tests {
         assert_eq!(second, reply_dir(session).join("fix-2.md"));
         assert_eq!(fs::read_to_string(first).unwrap(), "one");
         assert!(write_fix_task(&root.join("other"), session, "x").is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_report_is_due_once_the_judges_criteria_are_accepted() {
+        let root = temp_root("criteria");
+        let mut rig = testkit::Rig::in_workdir(2, &root.join("repo"));
+        testkit::accept_default_criteria(&mut rig);
+        let dir = root.join("data").join(rig.engine.session().id.as_str());
+        let mut store = Store::create(&dir, &rig.log[0]).unwrap();
+        store.append_all(&rig.log[1..]).unwrap();
+        drop(store);
+        let session = rig.engine.session();
+        assert!(session.rounds.is_empty(), "held for confirmation");
+        assert!(report_is_stale(&dir, session), "missing");
+        rewrite_report(&dir).unwrap();
+        assert!(!report_is_stale(&dir, session));
         let _ = fs::remove_dir_all(root);
     }
 }

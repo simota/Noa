@@ -437,7 +437,7 @@ Media the person attached (cite as user/<n>):
     stored: /golden/repo/.noa/verify/ver-golden/evidence/user/1.png (1019 bytes, digest d08a6e548ee8ef4f)
     shows: AC-1
 
-You may open images by their stored path when your CLI can read images. You cannot watch videos: a video's claim rests on its caption and marks, and your rationale must say so when a ruling rests on a video alone.
+You may open images by their stored path when your CLI can read images. You cannot watch videos: a video's claim rests on its caption and marks. When a verified or failed ruling rests on video evidence alone (no command, image or other file among the stored evidence it cites), its rationale must name the caption and marks it relied on; an empty rationale there is refused.
 
 ## 5. Cross-checks
 (none this round)
@@ -448,6 +448,8 @@ Raw defects this round (place each one):
 Claim: A symlinked cwd is resolved to its target's parent
 Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
 Evidence: codex/r1/e1
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
 
 Defects so far:
 (none)
@@ -972,7 +974,7 @@ Media the person attached (cite as user/<n>):
     stored: /golden/repo/.noa/verify/ver-golden/evidence/user/1.png (1019 bytes, digest d08a6e548ee8ef4f)
     shows: AC-1
 
-You may open images by their stored path when your CLI can read images. You cannot watch videos: a video's claim rests on its caption and marks, and your rationale must say so when a ruling rests on a video alone.
+You may open images by their stored path when your CLI can read images. You cannot watch videos: a video's claim rests on its caption and marks. When a verified or failed ruling rests on video evidence alone (no command, image or other file among the stored evidence it cites), its rationale must name the caption and marks it relied on; an empty rationale there is refused.
 
 ## 5. Cross-checks
 - claude on codex/AC-1: not_reproduced — cwd_symlink passes in my worktree.

@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::types::{
-    CrossCheck, CrossOutcome, Decision, Defect, Evidence, EvidenceBody, EvidenceKey, Outcome,
-    PartId, Priority, Rerun, RoundNo, Ruling, RulingKind, Session, Severity, Subject,
+    CrossCheck, CrossOutcome, Decision, Defect, Evidence, EvidenceBody, EvidenceKey, Media,
+    Outcome, PartId, Priority, Rerun, RoundNo, Ruling, RulingKind, Session, Severity, Subject,
     USER_EVIDENCE_OWNER, Verdict,
 };
 
@@ -24,6 +24,12 @@ fn is_command_or_file(item: &Evidence) -> bool {
 /// whose file was gone before ingest counts for nothing (L1-6).
 fn is_backed(item: &Evidence) -> bool {
     is_command_or_file(item) && item.stored.is_some()
+}
+
+/// Whether `item` counts toward the standard at all: an observation, or a
+/// command or file whose file the widget stored (L1-6).
+fn counts(item: &Evidence) -> bool {
+    item.file_path().is_none() || item.stored.is_some()
 }
 
 fn is_matched_command(item: &Evidence) -> bool {
@@ -88,20 +94,35 @@ fn independent_passes(
 }
 
 /// The first verifier whose latest result on `criterion` is `fail` with no
-/// later `not_reproduced` cross-check on it.
-fn unanswered_fail<'a>(session: &'a Session, criterion: &str) -> Option<&'a PartId> {
+/// later `not_reproduced` cross-check on it citing evidence that counts,
+/// with the evidence of such checks that was not stored (a check whose
+/// evidence all went before ingest answers nothing, L1-6).
+fn unanswered_fail<'a>(
+    session: &'a Session,
+    criterion: &str,
+) -> Option<(&'a PartId, Vec<&'a EvidenceKey>)> {
     session
         .latest_with(criterion, Outcome::Fail)
         .into_iter()
-        .find(|fail| {
-            !session.cross_checks.iter().any(|c| {
+        .find_map(|fail| {
+            let mut unstored = Vec::new();
+            for check in session.cross_checks.iter().filter(|c| {
                 c.round > fail.round
                     && c.outcome == CrossOutcome::NotReproduced
                     && matches!(&c.subject, Subject::Result { part, criterion: on }
                         if *part == fail.part && on == criterion)
-            })
+            }) {
+                let (kept, gone): (Vec<&EvidenceKey>, Vec<&EvidenceKey>) = check
+                    .evidence
+                    .iter()
+                    .partition(|k| session.evidence_item(k).is_some_and(counts));
+                if !kept.is_empty() {
+                    return None;
+                }
+                unstored.extend(gone);
+            }
+            Some((&fail.part, unstored))
         })
-        .map(|r| &r.part)
 }
 
 /// Whether `check` reproduced a `fail` result on `criterion` (as that
@@ -131,10 +152,7 @@ fn reproduced_fail<'a>(session: &'a Session, criterion: &str) -> Option<(&'a Par
 /// `fail` result on it or a defect; a reproduced pass backs no failure. A
 /// command or file whose file was not stored backs nothing.
 fn backs_failure(session: &Session, criterion: &str, key: &EvidenceKey) -> bool {
-    let counts = session
-        .evidence_item(key)
-        .is_some_and(|e| e.file_path().is_none() || e.stored.is_some());
-    counts
+    session.evidence_item(key).is_some_and(counts)
         && (session.results.iter().any(|r| {
             r.criterion == criterion && r.outcome == Outcome::Fail && r.evidence.contains(key)
         }) || session.cross_checks.iter().any(|c| {
@@ -184,10 +202,18 @@ pub fn check_ruling(
                     "{criterion}: an observation alone never makes a criterion verified; cite a command or a file"
                 ));
             }
-            if let Some(part) = unanswered_fail(session, criterion) {
-                return Err(format!(
+            if let Some((part, unstored)) = unanswered_fail(session, criterion) {
+                let mut why = format!(
                     "{criterion}: verified despite {part}'s fail, which no not_reproduced cross-check has answered"
-                ));
+                );
+                if !unstored.is_empty() {
+                    let keys: Vec<&str> = unstored.iter().map(|k| k.as_str()).collect();
+                    why.push_str(&format!(
+                        "; {} was not stored (gone before ingest) and counts for nothing",
+                        keys.join(", ")
+                    ));
+                }
+                return Err(why);
             }
             if let Some((by, part)) = reproduced_fail(session, criterion) {
                 return Err(format!(
@@ -232,6 +258,23 @@ pub fn check_ruling(
                 ));
             }
         }
+    }
+    // A video cannot be watched by the judge: a ruling resting on videos
+    // alone rests on their captions and marks, and says which (L1-5a).
+    let backed: Vec<&&Evidence> = cited.iter().filter(|e| is_backed(e)).collect();
+    if matches!(ruling.kind, RulingKind::Verified | RulingKind::Failed)
+        && ruling.rationale.trim().is_empty()
+        && !backed.is_empty()
+        && backed
+            .iter()
+            .all(|e| e.media().is_some_and(Media::is_video))
+    {
+        let keys: Vec<&str> = backed.iter().map(|e| e.key.as_str()).collect();
+        return Err(format!(
+            "{criterion}: {} rests on video evidence alone ({}); its rationale must name the caption and marks it relied on",
+            ruling.kind.name(),
+            keys.join(", ")
+        ));
     }
     Ok(())
 }

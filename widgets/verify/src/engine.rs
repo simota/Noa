@@ -1049,9 +1049,13 @@ impl Engine {
                     }
                     match round.brief(part, BriefKind::Rerun) {
                         // The runner picks up watching every request whose
-                        // items lack an outcome; an unsent brief goes now.
+                        // items lack an outcome; an unsent brief goes now,
+                        // unless its script started before `Sent` was
+                        // logged (L1-5 step 4).
                         Some(brief)
-                            if brief.receipt.sent.is_none() && brief.receipt.failed.is_none() =>
+                            if brief.receipt.sent.is_none()
+                                && brief.receipt.failed.is_none()
+                                && !Self::script_started(brief) =>
                         {
                             Self::send(out, round.no, brief)
                         }
@@ -1102,13 +1106,27 @@ impl Engine {
 
     /// Gives the verification `by` more rounds past its limit. One that
     /// ended at its limit is open again, and its next round starts unless
-    /// it is held.
+    /// it is held. An ended one whose worktrees are not all removed yet
+    /// (closing asks for their removal, L1-3) waits for that: its next
+    /// round is never sent into a worktree being removed, and rebuilds
+    /// them.
     fn extend(&mut self, out: &mut Output, by: RoundNo, at: Millis) -> Result<(), EngineError> {
         if by == 0 {
             return rejected("1ラウンド以上追加してください");
         }
         if let Err(why) = self.session.extendable() {
             return rejected(why);
+        }
+        if self.session.closed
+            && self
+                .session
+                .worktrees
+                .values()
+                .any(|t| t.state == WorktreeState::Made)
+        {
+            return rejected(
+                "ワークツリーの削除が終わっていません（削除が終わってから追加してください）",
+            );
         }
         let base = self
             .session
@@ -1845,6 +1863,9 @@ impl Engine {
                         batch.push(Event::CriteriaFrozen { at });
                     }
                     self.commit(out, batch)?;
+                    // Every accepted judge output is reported (L1-8), the
+                    // criteria too.
+                    out.effects.push(Effect::WriteReport);
                     self.start_next(out, at, false)
                 }
                 Err(error) => self.reject_reply(out, round, &brief, digest, error.to_string()),

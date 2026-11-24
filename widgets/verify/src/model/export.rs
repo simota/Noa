@@ -276,9 +276,9 @@ fn rerun_mark(session: &Session, evidence: &[EvidenceKey]) -> &'static str {
     }
 }
 
-/// The media shown under `criterion`: those its ruling or results cite
-/// (unless their `shows` leaves it out) and those the person attached for
-/// it, each once, in evidence order.
+/// The media shown under `criterion`: those its ruling, its results or the
+/// cross-checks on its results cite (unless their `shows` leaves it out)
+/// and those the person attached for it, each once, in evidence order.
 fn media_for<'a>(session: &'a Session, criterion: &str) -> Vec<&'a Evidence> {
     let mut cited: Vec<&EvidenceKey> = session
         .results
@@ -286,6 +286,15 @@ fn media_for<'a>(session: &'a Session, criterion: &str) -> Vec<&'a Evidence> {
         .filter(|r| r.criterion == criterion)
         .flat_map(|r| &r.evidence)
         .collect();
+    cited.extend(
+        session
+            .cross_checks
+            .iter()
+            .filter(
+                |c| matches!(&c.subject, Subject::Result { criterion: on, .. } if on == criterion),
+            )
+            .flat_map(|c| &c.evidence),
+    );
     if let Some(rulings) = session.rulings.get(criterion) {
         cited.extend(rulings.iter().flat_map(|r| &r.evidence));
     }
@@ -706,10 +715,14 @@ fn write_gaps(out: &mut String, session: &Session) {
             one_line(&why)
         );
     }
+    // Every round's, not just the latest: a later update leaves the reason
+    // it could not run before (L1-8 item 8).
     for part in session.verifier_ids() {
         for c in &session.criteria {
-            if let Some(r) = session.latest_result(part, &c.id)
-                && r.outcome == Outcome::Blocked
+            for r in session
+                .results
+                .iter()
+                .filter(|r| &r.part == part && r.criterion == c.id && r.outcome == Outcome::Blocked)
             {
                 gaps = true;
                 let _ = writeln!(
@@ -1144,5 +1157,109 @@ mod tests {
         assert_eq!(report.matches(none).count(), 1, "{report}");
         assert!(evidence_section(&report).contains(none), "{report}");
         assert!(!report.contains(pane), "{report}");
+    }
+
+    #[test]
+    fn ac33_an_image_only_a_cross_check_cites_is_embedded_under_its_criterion() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply("claude", &all_pass());
+        rig.reply(
+            "codex",
+            &reply_json(
+                &[
+                    ("AC-1", "fail", &["e1"]),
+                    ("AC-2", "pass", &["e2"]),
+                    ("AC-3", "pass", &["e2"]),
+                ],
+                &[cmd("e1", 101, true), cmd("e2", 0, false)],
+                "",
+            ),
+        );
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "failed", "rationale": "codex's test fails", "evidence": ["codex/r1/e1"]},
+              {"criterion": "AC-2", "ruling": "verified", "rationale": "matched", "evidence": ["claude/r1/e1"]},
+              {"criterion": "AC-3", "ruling": "verified", "rationale": "matched", "evidence": ["claude/r1/e1"]}],
+             "assign": {"claude-2": ["codex/AC-1"]}}"#,
+        );
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        rig.deliver();
+        rig.reply("claude", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply("codex", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply(
+            "claude-2",
+            &reply_json(
+                &[],
+                &[
+                    r#"{"id": "p1", "kind": "file", "path": "shots/home.png", "caption": "the new tab shows $HOME", "shows": ["AC-1"]}"#
+                        .to_owned(),
+                ],
+                r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "reproduced", "note": "fails here too", "evidence": ["p1"]}]"#,
+            ),
+        );
+        rig.ingest();
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("claude-2"));
+        let report = report_markdown(rig.engine.session(), None);
+        let ac1 = &report[report.find("### AC-1").unwrap()..report.find("### AC-2").unwrap()];
+        assert!(
+            ac1.contains("- ![the new tab shows $HOME](evidence/r2/claude-2/shots/home.png)"),
+            "{ac1}"
+        );
+    }
+
+    #[test]
+    fn a_blocked_result_and_its_reason_stay_listed_after_a_later_update() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &format!(
+                r#"{{"summary": "s", "results": [
+                  {{"criterion": "AC-1", "result": "pass", "note": "ok", "evidence": ["e1"]}},
+                  {{"criterion": "AC-2", "result": "pass", "note": "ok", "evidence": ["e1"]}},
+                  {{"criterion": "AC-3", "result": "blocked", "note": "画面がない"}}],
+                 "evidence": [{}]}}"#,
+                cmd("e1", 0, true)
+            ),
+        );
+        rig.reply("codex", &all_pass());
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(testkit::JUDGE_R1);
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &format!(
+                r#"{{"summary": "s", "results": [{{"criterion": "AC-3", "result": "pass", "note": "a screen now", "evidence": ["e1"]}}], "evidence": [{}]}}"#,
+                cmd("e1", 0, false)
+            ),
+        );
+        rig.reply("codex", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(
+            rig.engine
+                .session()
+                .latest_result(&testkit::p("claude"), "AC-3")
+                .map(|r| r.outcome),
+            Some(crate::model::types::Outcome::Pass),
+            "{:?}",
+            rig.rejected("claude")
+        );
+        let report = report_markdown(rig.engine.session(), None);
+        assert!(
+            report.contains("- AC-3 を claude が実行できませんでした（R1）: 画面がない"),
+            "{report}"
+        );
     }
 }

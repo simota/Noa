@@ -1204,3 +1204,170 @@ fn a_log_whose_reply_paths_were_edited_is_not_its_own() {
     let err = check_store_paths(&session, &dir.join("..").join("ver-2")).unwrap_err();
     assert!(err.contains("フォルダ名と一致しません"), "{err}");
 }
+
+#[test]
+fn a_rerun_script_that_started_before_its_send_was_logged_is_not_sent_again_on_resume() {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    for part in VERIFIERS {
+        rig.reply(part, &all_pass());
+    }
+    rig.ingest();
+    rig.rerun("claude", |_, exit| Rerun::Matched { exit, log: None });
+    rig.rerun("codex", |_, exit| Rerun::Matched { exit, log: None });
+    let part = p("claude-2");
+    let reply_dir = crate::store::verifier_reply_dir(rig.engine.session(), &part);
+    rig.feed(Input::RerunWritten {
+        round: 1,
+        part: part.clone(),
+        request: RerunRequest {
+            nonce: "1".repeat(32),
+            items: vec![crate::model::types::RerunItem {
+                key: key("claude-2/r1/e1"),
+                n: 1,
+                cmd_digest: 3,
+            }],
+            script_digest: 4,
+        },
+        script: crate::store::rerun_dir(&reply_dir, 1, &part).join("run.sh"),
+    });
+    // The first `.pid` is seen before `Sent` is logged; the widget stops.
+    let at = rig.tick();
+    rig.feed(Input::RerunStarted {
+        round: 1,
+        part: part.clone(),
+        at,
+    });
+    let (mut engine, out) = resumed_after(
+        &rig,
+        |e| matches!(e, Event::BriefStarted { to, kind: BriefKind::Rerun, .. } if *to == part),
+    );
+    assert!(
+        !out.effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendBrief { .. })),
+        "{:?}",
+        out.effects
+    );
+    // The watch takes it to its outcome.
+    engine
+        .handle(Input::RerunReported {
+            round: 1,
+            key: key("claude-2/r1/e1"),
+            rerun: Rerun::Matched { exit: 0, log: None },
+            at: 5_010,
+        })
+        .unwrap();
+    assert_eq!(engine.session().phase(), Phase::Ruling);
+}
+
+#[test]
+fn an_extension_waits_until_the_ended_verifications_worktrees_are_removed() {
+    let mut rig = Rig::new(1);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    for part in VERIFIERS {
+        rig.reply(part, &all_pass());
+    }
+    rig.ingest();
+    rig.rerun_all_matched();
+    rig.judge(&format!(
+        "{}{}",
+        JUDGE_R1.trim_end().trim_end_matches('}'),
+        r#", "verdict": {"decision": "pass", "rationale": "Holds.", "blocking": []}}"#
+    ));
+    assert!(rig.engine.session().closed, "{:?}", rig.rejected("judge"));
+    assert!(rig.asked(&Effect::RemoveWorktrees));
+    let made_before = rig
+        .effects
+        .iter()
+        .filter(|e| **e == Effect::MakeWorktrees)
+        .count();
+    // Before the removal is done, and while one worktree is still left.
+    for removed in [0, 2] {
+        for part in &VERIFIERS[..removed] {
+            rig.feed(Input::WorktreeRemoved { part: p(part) });
+        }
+        let at = rig.tick();
+        let err = rig.try_feed(Input::UserExtend { by: 1, at }).unwrap_err();
+        assert!(
+            err.contains("ワークツリーの削除が終わっていません"),
+            "{err}"
+        );
+        let s = rig.engine.session();
+        assert!(s.closed && s.max_rounds == 1 && s.rounds.len() == 1);
+    }
+    rig.feed(Input::WorktreeRemoved {
+        part: p("claude-2"),
+    });
+    let at = rig.tick();
+    let out = rig.feed(Input::UserExtend { by: 1, at });
+    assert!(
+        !out.effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendBrief { .. })),
+        "no brief before the worktrees are made again: {:?}",
+        out.effects
+    );
+    assert_eq!(
+        rig.effects
+            .iter()
+            .filter(|e| **e == Effect::MakeWorktrees)
+            .count(),
+        made_before + 1
+    );
+    testkit::make_worktrees(&mut rig);
+    let s = rig.engine.session();
+    assert!(s.worktrees.values().all(|t| t.state == WorktreeState::Made));
+    assert_eq!((rig.round(), rig.phase()), (2, Phase::Briefing));
+}
+
+#[test]
+fn accepted_criteria_are_reported_while_they_wait_for_confirmation() {
+    let mut rig = Rig::new(2);
+    assert!(!rig.asked(&Effect::WriteReport));
+    testkit::accept_default_criteria(&mut rig);
+    assert_eq!(rig.phase(), Phase::Confirming);
+    assert!(rig.asked(&Effect::WriteReport));
+}
+
+#[test]
+fn the_ruling_brief_lists_the_media_only_a_defect_cites() {
+    let mut rig = Rig::new(2);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    rig.deliver();
+    rig.reply("claude", &all_pass());
+    rig.reply("codex", &all_pass());
+    rig.reply(
+        "claude-2",
+        &reply_json(
+            &[
+                ("AC-1", "pass", &["e1"]),
+                ("AC-2", "pass", &["e1"]),
+                ("AC-3", "pass", &["e1"]),
+            ],
+            &[
+                cmd("e1", 0, true),
+                r#"{"id": "p1", "kind": "file", "path": "shots/lost.png", "caption": "the last line is gone after reopening"}"#
+                    .to_owned(),
+            ],
+            r#", "defects": [{"id": "1", "claim": "The store loses the last line", "severity": "high", "category": "regression",
+               "confidence": "high", "repro": "1. kill -9 2. reopen", "evidence": ["p1"]}]"#,
+        ),
+    );
+    rig.ingest();
+    rig.rerun_all_matched();
+    assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude-2"));
+    let brief = rig.brief("judge", BriefKind::Work);
+    let defects = &brief[brief.find("## 6. Defects").unwrap()..brief.find("## 7.").unwrap()];
+    assert!(
+        defects.contains(
+            "  - claude-2/r1/p1: PNG image shots/lost.png — \"the last line is gone after reopening\"\n    stored: /repo/.noa/verify/ver-1/evidence/r1/claude-2/shots/lost.png (100 bytes, digest "
+        ),
+        "{defects}"
+    );
+}

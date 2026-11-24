@@ -754,9 +754,9 @@ fn write_standing(out: &mut String, session: &Session, round: RoundNo) {
     out.push('\n');
 }
 
-/// The defects section of the ruling brief: this round's raw defects (with
-/// the failing log tails they cite not shown yet, `tailed`) and the
-/// defects so far.
+/// The defects section of the ruling brief: this round's raw defects (each
+/// with its evidence items, and the failing log tails they cite not shown
+/// yet, `tailed`) and the defects so far.
 fn section_defects<'a>(
     out: &mut String,
     heading: &str,
@@ -805,11 +805,11 @@ fn section_defects<'a>(
         if let Some(fix) = &raw.fix {
             let _ = writeln!(out, "Fix: {}", fix.trim());
         }
+        // Every item, whatever else cites it: media only a defect cites
+        // reach the judge with their stored path and caption (L1-5a).
         for key in &raw.evidence {
-            if tails.contains_key(key) && !tailed.contains(key) {
-                write_item(out, session, key, reply_dir);
-                write_tail(out, key, tails, tailed);
-            }
+            write_item(out, session, key, reply_dir);
+            write_tail(out, key, tails, tailed);
         }
     }
     out.push_str("\nDefects so far:\n");
@@ -961,7 +961,7 @@ pub fn judge_brief(
             }
         }
     }
-    body.push_str("\nYou may open images by their stored path when your CLI can read images. You cannot watch videos: a video's claim rests on its caption and marks, and your rationale must say so when a ruling rests on a video alone.\n\n");
+    body.push_str("\nYou may open images by their stored path when your CLI can read images. You cannot watch videos: a video's claim rests on its caption and marks. When a verified or failed ruling rests on video evidence alone (no command, image or other file among the stored evidence it cites), its rationale must name the caption and marks it relied on; an empty rationale there is refused.\n\n");
 
     let _ = writeln!(body, "{}", RULING_SECTIONS[4]);
     let checks: Vec<_> = session

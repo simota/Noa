@@ -18,6 +18,10 @@ pub(super) struct Parts {
     pub(super) recipients: WidgetId,
     pub(super) area: WidgetId,
     pub(super) send: WidgetId,
+    /// The row the send button ends.
+    row: WidgetId,
+    /// Whether the send button is the screen's default (Return) button.
+    send_is_default: bool,
     built_for: Option<String>,
 }
 
@@ -74,12 +78,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(field),
         TextArea::new("追加指示を送る（例: 認可まわりを重点的に見てください）").min_lines(2),
     );
-    let send = tree.insert(
-        Some(row),
-        Button::new("送信")
-            .default_button(true)
-            .control_size(ControlSize::Small),
-    );
+    let send = tree.insert(Some(row), send_button(true));
     note(
         tree,
         root,
@@ -91,7 +90,36 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         recipients,
         area,
         send,
+        row,
+        send_is_default: true,
         built_for: None,
+    }
+}
+
+fn send_button(default: bool) -> Button {
+    Button::new("送信")
+        .default_button(default)
+        .control_size(ControlSize::Small)
+}
+
+/// Makes the send button the screen's default (Return) button, or not: a
+/// held review's default is 次のラウンドへ, and Return goes to the first
+/// default button in the tree.
+pub(super) fn set_send_default(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    default: bool,
+    text: &mut TextStore,
+) {
+    if parts.send_is_default == default {
+        return;
+    }
+    let focused = tree.focused() == Some(parts.send);
+    tree.remove(parts.send, text);
+    parts.send = tree.insert(Some(parts.row), send_button(default));
+    parts.send_is_default = default;
+    if focused {
+        tree.set_focus(Some(parts.send));
     }
 }
 

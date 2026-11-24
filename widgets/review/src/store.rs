@@ -17,6 +17,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::fsx;
+use crate::model::export;
 use crate::model::reduce::{self, Event, ReduceError};
 use crate::model::types::{Decision, Millis, PartId, RoundNo, Session, SessionId, TargetKind};
 
@@ -118,6 +119,25 @@ pub fn write_report(dir: &Path, text: &str) -> io::Result<PathBuf> {
     let path = report_path(dir);
     fsx::write_replace(dir, &path, text.as_bytes())?;
     Ok(path)
+}
+
+/// Whether `dir`'s stored report is not what its log gives (missing, or
+/// the review stopped between writing its log and its report). A review not
+/// yet consolidated once has no report to compare.
+pub fn report_is_stale(dir: &Path, session: &Session) -> bool {
+    let has_report = session.closed || session.rounds.iter().any(|r| r.outcome.is_some());
+    has_report
+        && fs::read_to_string(report_path(dir)).ok() != Some(export::report_markdown(session))
+}
+
+/// Writes `dir`'s report again from its log, holding the log's lock while
+/// it does (a runner that took the review up meanwhile is not written
+/// under: the log is then [`StoreError::Busy`]).
+pub fn rewrite_report(dir: &Path) -> Result<(), StoreError> {
+    let (store, session) = Store::open(dir)?;
+    write_report(dir, &export::report_markdown(&session))?;
+    drop(store);
+    Ok(())
 }
 
 /// Makes the folder a reply goes to, below `base` ([`reply_base`]).
@@ -605,5 +625,40 @@ mod tests {
         for d in [base, elsewhere, work] {
             let _ = fs::remove_dir_all(d);
         }
+    }
+
+    fn stored(dir: &Path, log: &[Vec<Event>]) {
+        let mut store = Store::create(dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+    }
+
+    #[test]
+    fn a_report_is_stale_until_rewritten_from_the_log() {
+        let root = temp_root("report");
+        // Not consolidated yet: there is no report to compare.
+        let rig = crate::testkit::Rig::new(3);
+        let fresh = root.join("rev-fresh");
+        stored(&fresh, &rig.log);
+        assert!(!report_is_stale(&fresh, rig.engine.session()));
+
+        let mut rig = crate::testkit::Rig::new(3);
+        crate::testkit::through_round_one(&mut rig);
+        let dir = root.join("rev-1");
+        stored(&dir, &rig.log);
+        let session = rig.engine.session();
+        assert!(report_is_stale(&dir, session), "missing");
+        rewrite_report(&dir).unwrap();
+        assert_eq!(
+            fs::read_to_string(report_path(&dir)).unwrap(),
+            export::report_markdown(session)
+        );
+        assert!(!report_is_stale(&dir, session));
+        fs::write(report_path(&dir), "edited").unwrap();
+        assert!(report_is_stale(&dir, session), "differs");
+        // A runner holding the log is not written under.
+        let (held, _) = Store::open(&dir).unwrap();
+        assert!(matches!(rewrite_report(&dir), Err(StoreError::Busy)));
+        drop(held);
+        let _ = fs::remove_dir_all(root);
     }
 }

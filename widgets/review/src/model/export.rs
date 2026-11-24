@@ -65,6 +65,26 @@ pub fn failures(session: &Session) -> Vec<(u32, String, String)> {
 
 pub fn report_markdown(session: &Session) -> String {
     let mut out = String::with_capacity(8192);
+    // Live findings, ranked (L2-4): the findings list, the lenses and the
+    // disputed section all go by them.
+    let ranked: Vec<&Finding> = session
+        .ranked()
+        .into_iter()
+        .filter(|f| f.status.is_live())
+        .collect();
+    write_head(&mut out, session);
+    write_verdict(&mut out, session);
+    write_findings(&mut out, session, &ranked);
+    write_lenses(&mut out, session, &ranked);
+    write_disputed(&mut out, session, &ranked);
+    write_set_aside(&mut out, session);
+    write_gaps(&mut out, session);
+    write_rounds(&mut out, session);
+    out
+}
+
+/// The title, and what was reviewed, by whom and how far.
+fn write_head(out: &mut String, session: &Session) {
     let provisional = session.verdict().is_none() && !session.closed;
     let _ = writeln!(
         out,
@@ -147,8 +167,10 @@ pub fn report_markdown(session: &Session) -> String {
         session.rounds.len(),
         session.max_rounds
     );
+}
 
-    // 1. Verdict.
+/// 1. The verdict.
+fn write_verdict(out: &mut String, session: &Session) {
     let _ = writeln!(out, "{}\n", SECTIONS[0]);
     match session.verdict() {
         Some(v) => {
@@ -170,18 +192,15 @@ pub fn report_markdown(session: &Session) -> String {
         None if session.closed => out.push_str("判定なし（ユーザーが終了）\n\n"),
         None => out.push_str("まだ判定はありません（最終ラウンドで出ます）。\n\n"),
     }
+}
 
-    // 2. Ranked findings.
+/// 2. The live findings, ranked.
+fn write_findings(out: &mut String, session: &Session, ranked: &[&Finding]) {
     let _ = writeln!(out, "{}\n", SECTIONS[1]);
-    let ranked: Vec<&Finding> = session
-        .ranked()
-        .into_iter()
-        .filter(|f| f.status.is_live())
-        .collect();
     if ranked.is_empty() {
         out.push_str("（指摘はありません）\n\n");
     }
-    for f in &ranked {
+    for f in ranked {
         let tally = session.tally(f);
         let _ = writeln!(out, "### {} [{}] {}\n", f.id, f.severity.label(), f.claim);
         let _ = writeln!(
@@ -214,15 +233,17 @@ pub fn report_markdown(session: &Session) -> String {
         }
         out.push('\n');
     }
+}
 
-    // 3. Per lens.
+/// 3. The findings per lens, with who holds it.
+fn write_lenses(out: &mut String, session: &Session, ranked: &[&Finding]) {
     let _ = writeln!(out, "{}\n", SECTIONS[2]);
     let mut lenses: Vec<String> = session
         .panel_lenses()
         .iter()
         .map(|l| l.id().to_owned())
         .collect();
-    for f in &ranked {
+    for f in ranked {
         if !lenses.contains(&f.category) {
             lenses.push(f.category.clone());
         }
@@ -250,8 +271,10 @@ pub fn report_markdown(session: &Session) -> String {
         }
         out.push('\n');
     }
+}
 
-    // 4. Disputed.
+/// 4. Each disputed finding with every stance.
+fn write_disputed(out: &mut String, session: &Session, ranked: &[&Finding]) {
     let _ = writeln!(out, "{}\n", SECTIONS[3]);
     let disputed: Vec<&&Finding> = ranked
         .iter()
@@ -281,8 +304,10 @@ pub fn report_markdown(session: &Session) -> String {
         }
         out.push('\n');
     }
+}
 
-    // 5. Rejected, withdrawn, merged, dismissed.
+/// 5. Rejected, withdrawn and merged findings, and dismissed raw ones.
+fn write_set_aside(out: &mut String, session: &Session) {
     let _ = writeln!(out, "{}\n", SECTIONS[4]);
     let mut any = false;
     for f in session.findings.iter().filter(|f| !f.status.is_live()) {
@@ -319,8 +344,11 @@ pub fn report_markdown(session: &Session) -> String {
         out.push_str("（ありません）\n");
     }
     out.push('\n');
+}
 
-    // 6. Coverage gaps.
+/// 6. What the review did not cover.
+fn write_gaps(out: &mut String, session: &Session) {
+    let m = &session.manifest;
     let _ = writeln!(out, "{}\n", SECTIONS[5]);
     let mut gaps = false;
     let unheld = session.unheld_lenses();
@@ -366,8 +394,10 @@ pub fn report_markdown(session: &Session) -> String {
         out.push_str("（ありません）\n");
     }
     out.push('\n');
+}
 
-    // 7. Rounds.
+/// 7. Each round and the lead's summary of it.
+fn write_rounds(out: &mut String, session: &Session) {
     let _ = writeln!(out, "{}\n", SECTIONS[6]);
     for round in &session.rounds {
         let _ = write!(out, "- R{}（{}）: ", round.no, round.kind.label());
@@ -379,7 +409,6 @@ pub fn report_markdown(session: &Session) -> String {
         }
         out.push('\n');
     }
-    out
 }
 
 #[cfg(test)]

@@ -47,6 +47,8 @@ pub(super) struct Parts {
     pub(super) paths: WidgetId,
     pub(super) text: WidgetId,
     pub(super) document_file: WidgetId,
+    /// 選択…: picks the document file in an open panel.
+    pub(super) pick_document: WidgetId,
     pub(super) document_workdir: WidgetId,
     pub(super) request: WidgetId,
     pub(super) max_rounds: WidgetId,
@@ -480,6 +482,12 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         "またはファイル（本文が空のとき）",
         "例: ~/repos/my-app/docs/plan.md",
     );
+    // In a row of its own, so it keeps its own width under the field.
+    let pick_row = tree.insert(Some(document), Container::row());
+    let pick_document = tree.insert(
+        Some(pick_row),
+        Button::new("選択…").control_size(ControlSize::Small),
+    );
     let document_workdir = field(
         tree,
         document,
@@ -588,6 +596,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         paths,
         text,
         document_file,
+        pick_document,
         document_workdir,
         request,
         max_rounds,
@@ -920,9 +929,16 @@ pub(super) fn apply_kinds(
     fill(tree, parts, form, text)
 }
 
+/// Puts the file chosen in the open panel in the document file field.
+pub(super) fn set_document_file(tree: &mut UiTree, parts: &Parts, path: &Path) {
+    let path = path.display().to_string();
+    tree.update::<TextField, _>(parts.document_file, |f, cx| f.set_text(cx, path));
+}
+
 pub(super) fn actions(parts: &Parts, actions: &mut Vec<(WidgetId, Action)>) {
     actions.push((parts.start_button, Action::Start));
     actions.push((parts.add_row, Action::AddPanelRow));
+    actions.push((parts.pick_document, Action::PickDocument));
     for (index, row) in parts.panel.iter().enumerate() {
         actions.push((row.remove, Action::RemovePanelRow(index)));
     }

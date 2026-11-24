@@ -196,7 +196,7 @@ Rules:
 Window title 「Noa · 多角レビュー」 (Japanese locale) / "Noa · Multi-Agent Review", app name `Noa Review`. Minimum window as competition's (left 280 + center 520 + right 310 + dividers, 600 high).
 
 1. **開始ビュー** (no session yet):
-   - 対象: a segmented control 「Git 差分 | ファイル / フォルダ | 文書・計画」 and the fields of L1-1 (repository / root / document file with 選択…; base ref with placeholder 「自動（origin の既定ブランチ）」; head 「作業ツリー（未コミットを含む）」 or a ref; path filter; document text area; context working directory).
+   - 対象: a segmented control 「Git 差分 | ファイル / フォルダ | 文書・計画」 and the fields of L1-1 (repository / root / document file; the document file has 選択…, an open panel (the platform's panel has no folder mode, so the repository and root are typed); base ref with placeholder 「自動（origin の既定ブランチ）」; head 「作業ツリー（未コミットを含む）」 or a ref; path filter; document text area; context working directory).
    - 依頼・重点 (optional text area): what the reviewers should know or look at first.
    - リード: agent / model / effort.
    - レビュアー: 2–6 rows of agent / model / effort / 観点 (pop-up of the six built-ins and カスタム) / custom lens text (shown for カスタム), with 追加 and a remove button per row.
@@ -205,14 +205,14 @@ Window title 「Noa · 多角レビュー」 (Japanese locale) / "Noa · Multi-A
    - Installed agents: `src/installed.rs` asks the user's login shell (`$SHELL -l -i -c`, as agents are started) once, on a background thread, which of claude / codex / agy it can run. The lead menu, every reviewer row's menu and the default panel offer only those kinds (menu index maps through the offered list); the start button waits for the check and stays off when none is installed, so a started review has only installed kinds. 再開, and +N on a read-only stored review, are refused with the missing kinds named when its lead or a reviewer uses one that is not installed. A failed probe or a non-POSIX shell exit is `Installed::Unknown`: every kind is offered and nothing is blocked. `--demo*` and `--session` assume all installed.
 2. **Board** (a session is on screen):
    - Header: target label and kind tag, status, verdict tag once given; コピー, レポート保存, 新しいレビュー.
-   - **進捗ストリップ**: 「ラウンド n / max · 独立レビュー｜相互検証」, steps 配信 → レビュー → 取りまとめ → 完了 with the current one marked, a badge per agent (待機中 / 送信済 / レビュー中 / 提出済 / 失敗) with elapsed time, and 停止中 while held.
+   - **進捗ストリップ**: 「ラウンド n / max · 独立レビュー｜相互検証」, steps 配信 → レビュー → 取りまとめ → ラウンド完了 with the current one marked, a badge per agent (待機中 / 送信済 / レビュー中 / 提出済 / 失敗) with elapsed time, and 停止中 while held.
    - Left, **レビュアーカード**: one per reviewer (id, agent · model · effort, lens tag, this round's badge, raw findings written, stances given, ペインを開く) and one for the lead (リード, badge, ペインを開く). ペインを開く brings the pane forward (`noa.focusPane`); without a pane or a link it shows a notice; a read-only stored review shows no button. Above them a target card: kind, base…head short SHAs, files (+additions −deletions), omitted count, スナップショットを開く (opens `target/` in Finder).
    - Center tabs:
      - **指摘** (findings board): filters by 重大度 (致命的 / 高 / 中 / 低 / 情報), 観点 (the session's lenses and その他), 状態 (未検証 / 合意 / 対立 / 却下 / 取り下げ / 統合; default all but 却下, 取り下げ and 統合), 合意度 (全員一致 / 多数 / 対立 / 単独, L2-4), and レビュアー; 「表示 n / 全 m」. A row per finding: id, severity, lens, status, the tally (支持 3 · 反論 1 · 未表明 1), location (`path:line`, with 差分外 or 対象外 tags), claim, origins. Sorted per L2-4. A click selects it for the thread.
      - **マトリクス**: lens × severity counts of live findings (rows: the session's lenses, その他, and built-in lenses nobody holds, greyed 「担当なし」; columns 致命的…情報 and 計). A click on a cell opens 指摘 filtered to it. Below, file coverage: per target file, +/−, findings by severity, reviewers that reported it reviewed, reviewers that skipped it (with reason); a file no reviewer reported reviewing is marked 未レビュー; omitted files are listed greyed with the reason.
      - **レポート**: the report of L1-6 as it stands (headed 暫定 until a verdict), with コピー and 保存.
    - Right, **指摘スレッド** for the selected finding: id, claim, severity / lens / status / confidence, location (opens the snapshot file), the lead's rationale and fix; 出典: each raw finding (reviewer, round, proposed severity, claim, evidence, fix); スタンス: per reviewer, by round (支持 / 反論 / 補足 / 不明 / 取り下げ, note, evidence, proposed severity); 履歴: status and severity changes by round. With nothing selected: the lead's latest summary and the verdict.
-   - Bottom: composer (宛先 全員 / each reviewer / リード; 送信) and ラウンド後に停止, 次のラウンドへ (while held), +1, +3, 再試行 (when something is retryable), 終了.
+   - Bottom: composer (宛先 全員 / each reviewer / リード; 送信) and ラウンド後に停止, 次のラウンドへ (while held), +1, +3, 再試行 (when something is retryable), 終了 (asks first: an alert whose default, キャンセル, answers Return and Escape, since a review ended before its last round can be neither resumed nor extended).
    - A read-only stored review has no composer and no round controls, except +1 / +3 when extendable (they resume it) and 再開 when unfinished.
 
 ### L1-6. Report

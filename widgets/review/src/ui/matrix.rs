@@ -10,10 +10,15 @@ use review::model::types::{Session, Severity, covers};
 
 use super::{Action, caption, heading, keep_scroll, note, scroll_column, severity_tone, tag};
 
+/// The lens column's width when there is room; it gives way first in a
+/// narrow pane (its label truncates).
 const LENS_COL: f32 = 230.0;
 /// The category of findings outside every lens (その他).
 const OTHER: &str = "other";
+/// A count column's width when there is room; the columns share what is
+/// left over, and narrow no further than [`CELL_MIN`].
 const CELL: f32 = 58.0;
+const CELL_MIN: f32 = 40.0;
 
 fn cell_box(tree: &mut UiTree, parent: WidgetId, width: f32) -> WidgetId {
     let justify = if width >= LENS_COL {
@@ -25,10 +30,16 @@ fn cell_box(tree: &mut UiTree, parent: WidgetId, width: f32) -> WidgetId {
         Some(parent),
         Container::new(Style {
             size: LayoutSize {
-                width: length(width),
+                width: auto(),
                 height: length(30.0),
             },
-            flex_shrink: 0.0,
+            min_size: LayoutSize {
+                width: length(if width >= LENS_COL { 0.0 } else { CELL_MIN }),
+                height: auto(),
+            },
+            flex_basis: length(width),
+            flex_grow: if width >= LENS_COL { 0.0 } else { 1.0 },
+            flex_shrink: 1.0,
             align_items: AlignItems::CENTER,
             justify_content: justify,
             padding: noa_gpui_core::style::Rect {
@@ -115,7 +126,16 @@ pub(super) fn insert(
         let name = cell_box(tree, row, LENS_COL);
         let line = tree.insert(
             Some(name),
-            Container::row().gap(4.0).align_items(AlignItems::CENTER),
+            Container::new(Style {
+                flex_direction: noa_gpui_core::style::FlexDirection::Row,
+                align_items: AlignItems::CENTER,
+                gap: super::gap(4.0),
+                min_size: LayoutSize {
+                    width: length(0.0),
+                    height: auto(),
+                },
+                ..Default::default()
+            }),
         );
         tree.insert(
             Some(line),

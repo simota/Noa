@@ -752,3 +752,638 @@ fn a_shown_review_whose_agent_is_gone_is_not_resumed_or_extended() {
     assert_eq!(commands(&link), [Command::Resume { dir }]);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// The smallest window the app allows, in logical pixels.
+const SMALLEST: (f32, f32) = (MIN_WINDOW.0 as f32, MIN_WINDOW.1 as f32);
+
+/// Lays `screen` out in a window of `size`, as `--snapshot` does.
+fn lay_out(screen: &mut Review, size: (f32, f32)) {
+    let mut text = TextStore::new(Default::default());
+    let viewport = noa_gpui_scene::Size::new(size.0, size.1);
+    noa_gpui_platform::Screen::prepare(screen, viewport, &mut text);
+}
+
+/// What under `host` reaches past its right edge: cut off where the pane
+/// ends.
+fn cut_off(screen: &Review, host: WidgetId) -> Vec<WidgetId> {
+    let edge = screen.tree.window_rect(host).unwrap().right();
+    let mut out = Vec::new();
+    let mut stack = screen.tree.children(host).to_vec();
+    while let Some(id) = stack.pop() {
+        if screen
+            .tree
+            .window_rect(id)
+            .is_some_and(|r| r.right() > edge + 0.5)
+        {
+            out.push(id);
+        }
+        stack.extend_from_slice(screen.tree.children(id));
+    }
+    out
+}
+
+#[test]
+fn the_progress_strip_fits_the_smallest_window() {
+    for mut screen in [Review::demo(), Review::demo_held()] {
+        lay_out(&mut screen, SMALLEST);
+        assert_eq!(cut_off(&screen, screen.progress_host), vec![]);
+    }
+}
+
+fn press(screen: &mut Review, key: noa_gpui_core::Key) {
+    let mut text = TextStore::new(Default::default());
+    noa_gpui_platform::Screen::dispatch(
+        screen,
+        noa_gpui_core::Event::KeyDown {
+            key,
+            modifiers: Default::default(),
+        },
+        &mut text,
+    );
+}
+
+fn is_selected(screen: &Review, action: &Action) -> bool {
+    let id = widget_for(screen, action).unwrap();
+    screen
+        .tree
+        .get::<noa_gpui_core::widgets::Button>(id)
+        .unwrap()
+        .is_selected()
+}
+
+#[test]
+fn return_on_a_held_review_goes_to_the_next_round() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    press(&mut screen, noa_gpui_core::Key::Enter);
+    assert_eq!(commands(&link), vec![Command::Continue]);
+}
+
+#[test]
+fn return_on_a_running_review_sends_the_draft() {
+    let mut running = crate::demo::held();
+    running.hold = false;
+    let (mut screen, link) = live_with(running);
+    screen
+        .tree
+        .update::<noa_gpui_core::widgets::TextArea, _>(screen.composer.area, |a, cx| {
+            a.set_text(cx, "認可も見てください")
+        });
+    press(&mut screen, noa_gpui_core::Key::Enter);
+    assert!(matches!(
+        commands(&link).as_slice(),
+        [Command::Intervene { body, .. }] if body == "認可も見てください"
+    ));
+}
+
+#[test]
+fn the_shown_tab_and_the_filters_on_are_selected_buttons() {
+    let mut screen = Review::demo();
+    assert!(is_selected(&screen, &Action::ShowTab(CenterTab::Findings)));
+    assert!(!is_selected(&screen, &Action::ShowTab(CenterTab::Matrix)));
+    assert!(is_selected(
+        &screen,
+        &Action::ToggleStatus(FindingStatus::Agreed)
+    ));
+    assert!(!is_selected(
+        &screen,
+        &Action::ToggleSeverity(Severity::Critical)
+    ));
+    act(&mut screen, Action::ToggleSeverity(Severity::Critical));
+    assert!(is_selected(
+        &screen,
+        &Action::ToggleSeverity(Severity::Critical)
+    ));
+}
+
+/// Presses the focused widget with Space and returns the action the widget
+/// focused afterwards carries.
+fn press_focused(screen: &mut Review, action: &Action) -> Option<Action> {
+    let id = widget_for(screen, action).unwrap();
+    screen.tree.set_focus(Some(id));
+    press(screen, noa_gpui_core::Key::Space);
+    let focused = screen.tree.focused()?;
+    screen
+        .actions
+        .iter()
+        .find(|(id, _)| *id == focused)
+        .map(|(_, a)| a.clone())
+}
+
+#[test]
+fn keyboard_focus_stays_on_what_was_pressed() {
+    let mut screen = Review::demo();
+    let critical = Action::ToggleSeverity(Severity::Critical);
+    assert_eq!(
+        press_focused(&mut screen, &critical),
+        Some(critical.clone())
+    );
+    assert!(screen.filters.severities.contains(&Severity::Critical));
+    let matrix = Action::ShowTab(CenterTab::Matrix);
+    assert_eq!(press_focused(&mut screen, &matrix), Some(matrix));
+    let findings = Action::ShowTab(CenterTab::Findings);
+    assert_eq!(press_focused(&mut screen, &findings), Some(findings));
+    // A finding's row: selecting and clearing keep focus on that row.
+    let f2 = Action::SelectFinding(Some("F2".into()));
+    let selected = Action::SelectFinding(None);
+    assert_eq!(press_focused(&mut screen, &f2), Some(selected.clone()));
+    assert_eq!(screen.selected.as_deref(), Some("F2"));
+    assert_eq!(press_focused(&mut screen, &selected), Some(f2));
+    assert_eq!(screen.selected, None);
+}
+
+/// The tags' texts under `host`, in tree order.
+fn tag_texts(screen: &Review, host: WidgetId) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![host];
+    while let Some(id) = stack.pop() {
+        if let Some(tag) = screen.tree.get::<noa_gpui_core::widgets::Tag>(id) {
+            out.push(tag.text().to_owned());
+        }
+        stack.extend(screen.tree.children(id).iter().rev());
+    }
+    out
+}
+
+#[test]
+fn a_held_review_does_not_read_as_finished() {
+    let screen = Review::demo_held();
+    let tags = tag_texts(&screen, screen.progress_host);
+    assert!(tags.contains(&"✓ ラウンド完了".to_owned()), "{tags:?}");
+    assert!(!tags.contains(&"✓ 完了".to_owned()), "{tags:?}");
+}
+
+#[test]
+fn ending_a_review_asks_first_and_return_keeps_it_running() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    act(&mut screen, Action::Close);
+    assert!(screen.close_alert.is_some());
+    assert_eq!(commands(&link), vec![]);
+    // Return answers the default button, キャンセル.
+    press(&mut screen, noa_gpui_core::Key::Enter);
+    assert!(screen.close_alert.is_none());
+    assert_eq!(commands(&link), vec![]);
+    // Escape cancels too.
+    act(&mut screen, Action::Close);
+    press(&mut screen, noa_gpui_core::Key::Escape);
+    assert_eq!(commands(&link), vec![]);
+    // レビューを終了, chosen on purpose, ends it.
+    act(&mut screen, Action::Close);
+    press(&mut screen, noa_gpui_core::Key::Tab);
+    press(&mut screen, noa_gpui_core::Key::Space);
+    assert!(screen.close_alert.is_none());
+    assert_eq!(commands(&link), vec![Command::Close]);
+}
+
+fn draft(screen: &Review) -> String {
+    composer::text(&screen.tree, &screen.composer)
+}
+
+fn type_draft(screen: &mut Review, body: &str) {
+    screen
+        .tree
+        .update::<noa_gpui_core::widgets::TextArea, _>(screen.composer.area, |a, cx| {
+            a.set_text(cx, body)
+        });
+}
+
+fn with_intervention(mut session: Session, body: &str) -> Session {
+    let n = session.messages.len() + 1;
+    session.messages.push(review::model::types::Message {
+        id: review::model::types::MessageId::nth(n),
+        round: 1,
+        author: review::model::types::Author::User,
+        kind: review::model::types::MsgKind::Intervention,
+        to: Vec::new(),
+        body: body.to_owned(),
+        at: 1,
+    });
+    session
+}
+
+#[test]
+fn a_new_draft_survives_resending_an_instruction_already_in_the_log() {
+    let earlier = "認可も見てください";
+    let (mut screen, link) = live_with(with_intervention(crate::demo::held(), earlier));
+    type_draft(&mut screen, earlier);
+    act(&mut screen, Action::Send);
+    assert_eq!(commands(&link).len(), 1);
+    // The next draft, then a tab switch with no new snapshot: the earlier
+    // message in the log is not this send arriving.
+    type_draft(&mut screen, "次はテストも");
+    act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+    assert_eq!(draft(&screen), "次はテストも");
+}
+
+#[test]
+fn a_sent_draft_clears_when_it_reaches_the_log_unless_rewritten() {
+    for (rewrite, left) in [(None, ""), (Some("別の下書き"), "別の下書き")] {
+        let (mut screen, link) = live_with(crate::demo::held());
+        type_draft(&mut screen, "認可も見てください");
+        act(&mut screen, Action::Send);
+        if let Some(text) = rewrite {
+            type_draft(&mut screen, text);
+        }
+        assert_eq!(commands(&link).len(), 1);
+        let mut next = with_intervention(crate::demo::held(), "認可も見てください");
+        next.rev += 1;
+        link.snapshots
+            .send(Snapshot {
+                link: Link::Live,
+                session: Some(Arc::new(next)),
+                reply_root: None,
+                session_dir: None,
+                generation: 0,
+            })
+            .unwrap();
+        screen.poll_live(&mut TextStore::new(Default::default()));
+        assert_eq!(draft(&screen), left);
+        assert_eq!(screen.pending_intervention, None);
+    }
+}
+
+/// The messages of the toasts on screen, oldest first.
+fn toasts(screen: &Review) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack: Vec<WidgetId> = screen.tree.overlays().collect();
+    while let Some(id) = stack.pop() {
+        if let Some(toast) = screen.tree.get::<Toast>(id) {
+            out.push(toast.message().to_owned());
+        }
+        stack.extend(screen.tree.children(id).iter().rev());
+    }
+    out
+}
+
+/// A clipboard that refuses the write, as the OS one can: it keeps what it
+/// held.
+struct RefusingClipboard;
+
+impl noa_gpui_core::clipboard::Clipboard for RefusingClipboard {
+    fn read_text(&mut self) -> Option<String> {
+        Some("前の内容".to_owned())
+    }
+    fn write_text(&mut self, _text: &str) {}
+}
+
+#[test]
+fn copying_the_report_says_whether_it_reached_the_clipboard() {
+    let mut screen = Review::demo();
+    act(&mut screen, Action::CopyReport);
+    assert_eq!(
+        screen.tree.clipboard().read_text(),
+        Some(export::report_markdown(screen.session.as_ref().unwrap()))
+    );
+    assert_eq!(
+        toasts(&screen),
+        ["レポートをクリップボードにコピーしました"]
+    );
+
+    let mut screen = Review::demo();
+    screen.tree.set_clipboard(Box::new(RefusingClipboard));
+    act(&mut screen, Action::CopyReport);
+    assert_eq!(
+        toasts(&screen),
+        ["レポートをクリップボードにコピーできませんでした"]
+    );
+}
+
+#[test]
+fn the_matrix_fits_the_smallest_window() {
+    let mut screen = Review::demo().with_view(Some(CenterTab::Matrix), None);
+    lay_out(&mut screen, SMALLEST);
+    assert_eq!(cut_off(&screen, screen.center_host), vec![]);
+}
+
+/// The height of the scrolled area under the center tabs.
+fn center_scroll_height(screen: &Review) -> f32 {
+    let scroll = screen
+        .tree
+        .children(screen.center_host)
+        .iter()
+        .copied()
+        .find(|&id| {
+            screen
+                .tree
+                .get::<noa_gpui_core::widgets::ScrollView>(id)
+                .is_some()
+        })
+        .unwrap();
+    screen.tree.window_rect(scroll).unwrap().height
+}
+
+#[test]
+fn a_held_review_in_the_smallest_window_keeps_room_for_its_findings() {
+    let mut screen = Review::demo_held();
+    lay_out(&mut screen, SMALLEST);
+    // Two finding rows fit once the filters scroll away.
+    let row = widget_for(&screen, &Action::SelectFinding(Some("F2".into()))).unwrap();
+    let row = screen.tree.window_rect(row).unwrap().height;
+    let height = center_scroll_height(&screen);
+    assert!(height >= 2.0 * row, "{height} < 2 × {row}");
+}
+
+fn button_label(screen: &Review, action: &Action) -> String {
+    let id = widget_for(screen, action).unwrap();
+    screen
+        .tree
+        .get::<noa_gpui_core::widgets::Button>(id)
+        .unwrap()
+        .label()
+        .to_owned()
+}
+
+#[test]
+fn the_agreement_filters_count_live_findings_as_the_severities_do() {
+    let screen = Review::demo();
+    let session = screen.session.as_ref().unwrap();
+    let live: Vec<_> = session
+        .findings
+        .iter()
+        .filter(|f| f.status.is_live())
+        .collect();
+    for a in Agreement::ALL {
+        let n = live
+            .iter()
+            .filter(|f| session.tally(f).agreement == a)
+            .count();
+        assert_eq!(
+            button_label(&screen, &Action::ToggleAgreement(a)),
+            format!("{} {n}", a.label())
+        );
+    }
+    let total: usize = Agreement::ALL
+        .iter()
+        .map(|a| {
+            live.iter()
+                .filter(|f| session.tally(f).agreement == *a)
+                .count()
+        })
+        .sum();
+    assert_eq!(total, live.len());
+}
+
+#[test]
+fn the_document_file_can_be_chosen_in_an_open_panel() {
+    use noa_gpui_platform::Screen as _;
+    let mut screen = Review::demo_start();
+    assert!(acts(&screen).contains(&Action::PickDocument));
+    act(&mut screen, Action::PickDocument);
+    let asked = screen.take_file_dialogs();
+    assert_eq!(asked.len(), 1);
+    assert!(!asked[0].save);
+    let mut text = TextStore::new(Default::default());
+    screen.file_dialog_finished(
+        FileDialogResult::Opened(vec![PathBuf::from("/tmp/plan.md")]),
+        &mut text,
+    );
+    assert_eq!(
+        start::read(&screen.tree, &screen.start).document_file,
+        "/tmp/plan.md"
+    );
+    // A cancelled panel leaves the field as it was.
+    screen.file_dialog_finished(FileDialogResult::Cancelled, &mut text);
+    assert_eq!(
+        start::read(&screen.tree, &screen.start).document_file,
+        "/tmp/plan.md"
+    );
+}
+
+#[test]
+fn a_lead_summary_with_the_sent_text_does_not_count_as_the_send() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    type_draft(&mut screen, "認可も見てください");
+    act(&mut screen, Action::Send);
+    assert_eq!(commands(&link).len(), 1);
+    // The lead's summary happens to read the same: it is not the user's
+    // instruction arriving, so the draft and the wait stay.
+    let mut next = crate::demo::held();
+    let n = next.messages.len() + 1;
+    next.messages.push(review::model::types::Message {
+        id: review::model::types::MessageId::nth(n),
+        round: 1,
+        author: review::model::types::Author::Part(review::model::types::PartId::new(
+            review::model::types::LEAD_ID,
+        )),
+        kind: review::model::types::MsgKind::Summary,
+        to: Vec::new(),
+        body: "認可も見てください".to_owned(),
+        at: 2,
+    });
+    next.rev += 1;
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(next)),
+            reply_root: None,
+            session_dir: None,
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert_eq!(draft(&screen), "認可も見てください");
+    assert!(screen.pending_intervention.is_some());
+}
+
+/// A clipboard that takes the text but cannot be read back.
+struct WriteOnlyClipboard;
+
+impl noa_gpui_core::clipboard::Clipboard for WriteOnlyClipboard {
+    fn read_text(&mut self) -> Option<String> {
+        None
+    }
+    fn write_text(&mut self, _text: &str) {}
+}
+
+#[test]
+fn a_copy_that_cannot_be_read_back_is_reported_as_unconfirmed() {
+    let mut screen = Review::demo();
+    screen.tree.set_clipboard(Box::new(WriteOnlyClipboard));
+    act(&mut screen, Action::CopyReport);
+    assert_eq!(
+        toasts(&screen),
+        ["レポートをコピーしましたが、クリップボードを読み返して確かめられませんでした"]
+    );
+    // Holding other text afterwards is a failure.
+    let mut screen = Review::demo();
+    screen.tree.set_clipboard(Box::new(RefusingClipboard));
+    act(&mut screen, Action::CopyReport);
+    assert_eq!(
+        toasts(&screen),
+        ["レポートをクリップボードにコピーできませんでした"]
+    );
+}
+
+#[test]
+fn every_filter_count_is_what_choosing_that_value_alone_shows() {
+    let mut screen = Review::demo();
+    // Each step adds to the filters before it: none, all cleared, then a
+    // severity, then one reviewer.
+    let steps = [
+        None,
+        Some(Action::ClearFilters),
+        Some(Action::ToggleSeverity(Severity::Critical)),
+        Some(Action::FilterReviewer(Some(PartId::new("codex")))),
+    ];
+    for step in steps {
+        if let Some(action) = step {
+            act(&mut screen, action);
+        }
+        let session = screen.session.clone().unwrap();
+        let only = |change: &dyn Fn(&mut Filters)| {
+            let mut filters = screen.filters.clone();
+            change(&mut filters);
+            board::shown(&session, &filters).len()
+        };
+        for s in Severity::ALL {
+            let n = only(&|f| f.severities = [s].into());
+            let action = Action::ToggleSeverity(s);
+            assert_eq!(button_label(&screen, &action), format!("{} {n}", s.label()));
+        }
+        for s in FindingStatus::ALL {
+            let n = only(&|f| f.statuses = [status_key(s)].into());
+            let action = Action::ToggleStatus(s);
+            assert_eq!(button_label(&screen, &action), format!("{} {n}", s.label()));
+        }
+        for a in Agreement::ALL {
+            let n = only(&|f| f.agreements = [agreement_key(a)].into());
+            let action = Action::ToggleAgreement(a);
+            assert_eq!(button_label(&screen, &action), format!("{} {n}", a.label()));
+        }
+    }
+}
+
+#[test]
+fn keyboard_focus_survives_a_new_state_of_the_review() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    let chip = Action::ToggleSeverity(Severity::Critical);
+    let id = widget_for(&screen, &chip).unwrap();
+    screen.tree.set_focus(Some(id));
+    let mut next = crate::demo::held();
+    next.rev += 1;
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(next)),
+            reply_root: None,
+            session_dir: None,
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    let focused = screen.tree.focused().expect("focus kept");
+    assert_ne!(focused, id, "the screen was rebuilt");
+    assert_eq!(widget_for(&screen, &chip), Some(focused));
+}
+
+#[test]
+fn focus_on_the_second_of_two_alike_buttons_stays_on_the_second() {
+    // A selected finding's row and the thread's 選択を解除 both clear the
+    // selection; focus on the latter stays there through a rebuild.
+    let (mut screen, link) = live_with(crate::demo::held());
+    act(&mut screen, Action::SelectFinding(Some("F2".into())));
+    let clear = Action::SelectFinding(None);
+    let alike: Vec<WidgetId> = screen
+        .actions
+        .iter()
+        .filter(|(_, a)| *a == clear)
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(alike.len(), 2);
+    screen.tree.set_focus(Some(alike[1]));
+    let mut next = crate::demo::held();
+    next.rev += 1;
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(next)),
+            reply_root: None,
+            session_dir: None,
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    let now: Vec<WidgetId> = screen
+        .actions
+        .iter()
+        .filter(|(_, a)| *a == clear)
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(screen.tree.focused(), Some(now[1]));
+}
+
+/// The top of the first finding row and how many rows show whole above the
+/// bottom of the scrolled list, with the screen laid out at `size`.
+fn first_rows(screen: &mut Review, size: (f32, f32)) -> (f32, usize) {
+    lay_out(screen, size);
+    let scroll = screen
+        .tree
+        .children(screen.center_host)
+        .iter()
+        .copied()
+        .rfind(|&id| {
+            screen
+                .tree
+                .get::<noa_gpui_core::widgets::ScrollView>(id)
+                .is_some()
+        })
+        .unwrap();
+    let bottom = screen.tree.window_rect(scroll).unwrap().bottom();
+    let rows: Vec<_> = screen
+        .actions
+        .iter()
+        .filter(|(_, a)| matches!(a, Action::SelectFinding(Some(_))))
+        .filter_map(|(id, _)| screen.tree.window_rect(*id))
+        .collect();
+    let top = rows.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let whole = rows.iter().filter(|r| r.bottom() <= bottom + 0.5).count();
+    (top, whole)
+}
+
+#[test]
+fn the_smallest_window_shows_as_much_of_the_findings_as_before() {
+    // Laid out by 601c4c3b (before the filters scrolled with the list): the
+    // first row's top and the rows shown whole at the smallest window.
+    let root = std::env::temp_dir().join(format!("noa-review-rows-{}", std::process::id()));
+    let stored = Review::stored(&stored_demo(&root)).unwrap();
+    // The stored review opens its snapshot from the target card (L1-5).
+    assert!(acts(&stored).contains(&Action::OpenSnapshot(None)));
+    for (mut screen, top_before, whole_before) in [
+        (Review::demo(), 300.2, 3),
+        (Review::demo_held(), 423.2, 0),
+        (stored, 300.2, 3),
+    ] {
+        let (top, whole) = first_rows(&mut screen, SMALLEST);
+        assert!(top <= top_before, "{top} > {top_before}");
+        assert!(whole >= whole_before, "{whole} < {whole_before}");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The demo review with its findings repeated up to `n` (ids F1…Fn).
+fn many_findings(n: usize) -> Session {
+    let mut session = crate::demo::session();
+    let base = session.findings.clone();
+    session.findings = (0..n)
+        .map(|i| {
+            let mut f = base[i % base.len()].clone();
+            f.id = format!("F{}", i + 1);
+            f
+        })
+        .collect();
+    session
+}
+
+#[test]
+fn a_rebuild_ranks_the_findings_at_most_once() {
+    // Fifteen chips and the summary count; only the list needs an order.
+    for nothing_shown in [false, true] {
+        let (mut screen, _link) = live_with(many_findings(50));
+        if nothing_shown {
+            screen.filters.severities = [Severity::Info].into();
+        }
+        let mut text = TextStore::new(Default::default());
+        board::RANKINGS.with(|n| n.set(0));
+        screen.rebuild_center(&mut text);
+        assert!(board::RANKINGS.with(|n| n.get()) <= 1);
+    }
+}

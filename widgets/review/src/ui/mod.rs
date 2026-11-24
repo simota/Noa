@@ -26,12 +26,12 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use noa_gpui_core::style::{
-    AlignItems, FlexDirection, LengthPercentage, Overflow, Point as LayoutPoint,
+    AlignItems, FlexDirection, FlexWrap, LengthPercentage, Overflow, Point as LayoutPoint,
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SelectionChanged, SplitPane,
-    SplitView, StatusBar, Tag, Toast, Tone,
+    Alert, AlertResponse, AlertStyle, Button, ButtonClicked, Container, ControlSize, Label,
+    ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
@@ -80,6 +80,8 @@ pub enum Action {
     SelectFinding(Option<String>),
     /// Opens a snapshot file (or the snapshot folder) in the OS.
     OpenSnapshot(Option<String>),
+    /// Opens a panel to choose the document file of a document review.
+    PickDocument,
     CopyReport,
     SaveReport,
     Send,
@@ -186,7 +188,8 @@ pub struct Review {
     tab: CenterTab,
     filters: Filters,
     selected: Option<String>,
-    pending_intervention: Option<String>,
+    /// An intervention sent and not yet seen in the log.
+    pending_intervention: Option<PendingIntervention>,
     file_dialogs: Vec<FileDialogRequest>,
     /// The session on screen was read from its log: no runner drives it.
     read_only: bool,
@@ -205,6 +208,8 @@ pub struct Review {
     report_stale: bool,
     /// A start was asked for: a refusal shows under the form.
     starting: bool,
+    /// The open alert that asks before the review is ended.
+    close_alert: Option<WidgetId>,
     built: Option<BuiltKey>,
     /// Which agents are installed: unknown until the background check
     /// reports (always "all" in the demo and in stored views, which stay
@@ -356,6 +361,7 @@ impl Review {
             extending: false,
             report_stale: false,
             starting: false,
+            close_alert: None,
             built: None,
             detection: start::Detection::all_installed(),
             installed: None,
@@ -390,6 +396,41 @@ impl Review {
     }
 
     fn rebuild(&mut self, text: &mut TextStore) {
+        // Rebuilding replaces the widgets, and focus would go with them: it
+        // goes back to the widget that takes the focused one's place.
+        let focused = self.focused_action();
+        self.rebuild_widgets(text);
+        if self.tree.focused().is_none()
+            && let Some((action, nth)) = focused
+        {
+            self.focus_action(&action, nth);
+        }
+    }
+
+    /// The action of the widget with keyboard focus, and which of the
+    /// widgets carrying it (in tree order) that is.
+    fn focused_action(&self) -> Option<(Action, usize)> {
+        let focused = self.tree.focused()?;
+        let at = self.actions.iter().position(|(id, _)| *id == focused)?;
+        let action = self.actions[at].1.clone();
+        let nth = self.actions[..at]
+            .iter()
+            .filter(|(_, a)| *a == action)
+            .count();
+        Some((action, nth))
+    }
+
+    /// Focuses the `nth` widget that carries `action` (the first, when there
+    /// are fewer now).
+    fn focus_action(&mut self, action: &Action, nth: usize) {
+        let mut carrying = self.actions.iter().filter(|(_, a)| a == action);
+        let first = carrying.clone().next().map(|(id, _)| *id);
+        if let Some(id) = carrying.nth(nth).map(|(id, _)| *id).or(first) {
+            self.tree.set_focus(Some(id));
+        }
+    }
+
+    fn rebuild_widgets(&mut self, text: &mut TextStore) {
         self.built = Some(self.built_key());
         self.actions.clear();
         let started = self.session.is_some();
@@ -480,7 +521,7 @@ impl Review {
         self.stored_dir = Some(dir.to_owned());
         self.stored_free = !store::is_busy(dir);
         self.report_stale = !matches!(self.source, Source::Demo)
-            && report_stale(dir, self.session.as_deref().expect("just set"));
+            && store::report_is_stale(dir, self.session.as_deref().expect("just set"));
         self.rebuild(text);
         Ok(())
     }
@@ -490,7 +531,7 @@ impl Review {
         let Some(session) = &self.session else {
             return;
         };
-        cards::insert(
+        let target = cards::insert(
             &mut self.tree,
             self.left_host,
             session,
@@ -499,6 +540,15 @@ impl Review {
             system_now(),
             &mut self.actions,
         );
+        // L1-5: the target card opens the snapshot, when there is one.
+        if self.reply_root.is_some() {
+            let row = self.tree.insert(Some(target), Container::row());
+            let open = self.tree.insert(
+                Some(row),
+                Button::new("スナップショットを開く").control_size(ControlSize::Small),
+            );
+            self.actions.push((open, Action::OpenSnapshot(None)));
+        }
     }
 
     fn rebuild_header(&mut self, text: &mut TextStore) {
@@ -580,6 +630,9 @@ impl Review {
             Some(self.center_host),
             Container::new(Style {
                 flex_direction: FlexDirection::Row,
+                // Wraps when the tabs, the findings summary and the
+                // snapshot button do not fit on one line.
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::CENTER,
                 flex_shrink: 0.0,
                 gap: gap(6.0),
@@ -613,17 +666,19 @@ impl Review {
                 Some(tabs),
                 Button::new(label)
                     .control_size(ControlSize::Small)
-                    .default_button(self.tab == tab),
+                    .selected(self.tab == tab),
             );
             self.actions.push((btn, Action::ShowTab(tab)));
         }
         spacer(&mut self.tree, tabs);
-        if self.reply_root.is_some() {
-            let open = self.tree.insert(
-                Some(tabs),
-                Button::new("スナップショットを開く").control_size(ControlSize::Small),
+        if self.tab == CenterTab::Findings {
+            board::summary(
+                &mut self.tree,
+                tabs,
+                &session,
+                &self.filters,
+                &mut self.actions,
             );
-            self.actions.push((open, Action::OpenSnapshot(None)));
         }
         match self.tab {
             CenterTab::Findings => board::insert(
@@ -669,15 +724,25 @@ impl Review {
             return;
         }
         composer::sync(&mut self.tree, &mut self.composer, session, text);
+        composer::set_send_default(
+            &mut self.tree,
+            &mut self.composer,
+            !session.waits_to_continue(),
+            text,
+        );
         if let Some(pending) = &self.pending_intervention
             && session
                 .messages
                 .iter()
-                .rev()
-                .any(|m| m.body.trim() == pending.trim())
+                .skip(pending.sent_at)
+                .any(|m| pending.arrived_as(m))
         {
+            // It arrived: the composer is emptied unless a new draft was
+            // started meanwhile.
+            if composer::text(&self.tree, &self.composer) == pending.body.trim() {
+                composer::clear(&mut self.tree, &self.composer);
+            }
             self.pending_intervention = None;
-            composer::clear(&mut self.tree, &self.composer);
         }
         self.actions.push((self.composer.send, Action::Send));
     }
@@ -1086,10 +1151,27 @@ impl Review {
             Action::CopyReport => {
                 if let Some(session) = &self.session {
                     let md = export::report_markdown(session);
-                    self.tree.clipboard().write_text(&md);
-                    self.toast("レポートをクリップボードにコピーしました");
+                    // The clipboard reports no failure: what it holds
+                    // afterwards tells whether the copy took, and one that
+                    // cannot be read back leaves it unknown.
+                    let clipboard = self.tree.clipboard();
+                    clipboard.write_text(&md);
+                    let message = match clipboard.read_text() {
+                        Some(held) if held == md => "レポートをクリップボードにコピーしました",
+                        Some(_) => "レポートをクリップボードにコピーできませんでした",
+                        None => {
+                            "レポートをコピーしましたが、クリップボードを読み返して確かめられませんでした"
+                        }
+                    };
+                    self.toast(message);
                 }
             }
+            Action::PickDocument => self.file_dialogs.push(FileDialogRequest {
+                save: false,
+                title: "レビューする文書を選択".into(),
+                file_name: String::new(),
+                filters: Vec::new(),
+            }),
             Action::SaveReport => {
                 if let Some(session) = &self.session {
                     self.file_dialogs.push(FileDialogRequest {
@@ -1109,11 +1191,30 @@ impl Review {
                     return;
                 }
                 let (_, to) = composer::recipient(&self.tree, &self.composer, session);
-                self.pending_intervention = Some(body.clone());
+                self.pending_intervention = Some(PendingIntervention {
+                    body: body.clone(),
+                    to: to.clone(),
+                    sent_at: session.messages.len(),
+                });
                 self.send_cmd(Command::Intervene { to, body });
             }
             Action::Retry => self.send_cmd(Command::Retry),
-            Action::Close => self.send_cmd(Command::Close),
+            // Ending a review before its last round cannot be undone (it
+            // can be neither resumed nor extended), so it is asked first;
+            // Return and Escape keep it running.
+            Action::Close => {
+                self.close_alert = Some(
+                    Alert::new("このレビューを終了しますか？")
+                        .informative_text(
+                            "総合判定なしで終わります。終了したレビューは再開もラウンドの追加もできません。",
+                        )
+                        .style(AlertStyle::Critical)
+                        .button("キャンセル")
+                        .button("レビューを終了")
+                        .cancel_button(0)
+                        .open(&mut self.tree),
+                );
+            }
             Action::NewReview => {
                 self.leave();
                 let form = start::Form::for_kinds(self.start.kinds());
@@ -1154,7 +1255,7 @@ impl Review {
                 let Some(dir) = self.stored_dir.clone() else {
                     return;
                 };
-                match regenerate_report(&dir) {
+                match store::rewrite_report(&dir) {
                     Ok(()) => {
                         self.report_stale = false;
                         self.toast("レポートをログから書き直しました");
@@ -1166,24 +1267,6 @@ impl Review {
             }
         }
     }
-}
-
-/// Whether `dir`'s stored report is not what its log gives. A review not
-/// yet consolidated once has no report to compare.
-fn report_stale(dir: &Path, session: &Session) -> bool {
-    let has_report = session.closed || session.rounds.iter().any(|r| r.outcome.is_some());
-    has_report
-        && std::fs::read_to_string(store::report_path(dir)).ok()
-            != Some(export::report_markdown(session))
-}
-
-/// Writes `dir`'s report from its log, holding the log's lock while it
-/// does (a runner that took it up meanwhile is not written under).
-fn regenerate_report(dir: &Path) -> Result<(), String> {
-    let (store, session) = store::Store::open(dir).map_err(|e| e.to_string())?;
-    store::write_report(dir, &export::report_markdown(&session)).map_err(|e| e.to_string())?;
-    drop(store);
-    Ok(())
 }
 
 impl Screen for Review {
@@ -1204,6 +1287,15 @@ impl Screen for Review {
     }
 
     fn handle(&mut self, message: UiMessage, text: &mut TextStore) {
+        if let Some(answer) = message.downcast_ref::<AlertResponse>()
+            && self.close_alert == Some(message.source)
+        {
+            self.close_alert = None;
+            if answer.button == 1 {
+                self.send_cmd(Command::Close);
+            }
+            return;
+        }
         if message.downcast_ref::<SelectionChanged>().is_some() {
             if message.source == self.start.lead {
                 start::lead_kind_changed(&mut self.tree, &mut self.start, text);
@@ -1222,7 +1314,21 @@ impl Screen for Review {
                 .find(|(id, _)| *id == message.source)
                 .cloned()
         {
+            let had_focus = self.tree.focused() == Some(message.source);
+            let again = pressed_again(
+                &action,
+                self.selected.as_deref(),
+                self.filters.reviewer.as_ref(),
+            );
             self.handle_action(action, text);
+            // A toggle pressed from the keyboard now carries another action
+            // (the rebuild could not find it): focus the widget that does.
+            if had_focus
+                && self.tree.focused().is_none()
+                && let Some(again) = again
+            {
+                self.focus_action(&again, 0);
+            }
         }
     }
 
@@ -1231,6 +1337,13 @@ impl Screen for Review {
     }
 
     fn file_dialog_finished(&mut self, result: FileDialogResult, _text: &mut TextStore) {
+        // Only 選択… opens a panel; レポート保存… saves.
+        if let FileDialogResult::Opened(paths) = &result
+            && let Some(path) = paths.first()
+        {
+            start::set_document_file(&mut self.tree, &self.start, path);
+            return;
+        }
         if let FileDialogResult::Saved(path) = result
             && let Some(session) = &self.session
         {
@@ -1240,6 +1353,46 @@ impl Screen for Review {
                 Err(e) => self.toast(format!("保存できませんでした: {e}")),
             }
         }
+    }
+}
+
+/// The action the widget pressed with `action` carries once the screen is
+/// rebuilt. A finding's row and a card's 指摘を絞り込む toggle: pressed on,
+/// they carry the clearing action; pressed off, the one for what was on
+/// before (`selected`, `reviewer`).
+fn pressed_again(
+    action: &Action,
+    selected: Option<&str>,
+    reviewer: Option<&PartId>,
+) -> Option<Action> {
+    match action {
+        Action::SelectFinding(Some(_)) => Some(Action::SelectFinding(None)),
+        Action::SelectFinding(None) => {
+            selected.map(|id| Action::SelectFinding(Some(id.to_owned())))
+        }
+        Action::FilterReviewer(Some(_)) => Some(Action::FilterReviewer(None)),
+        Action::FilterReviewer(None) => reviewer.map(|p| Action::FilterReviewer(Some(p.clone()))),
+        other => Some(other.clone()),
+    }
+}
+
+/// An intervention sent and not yet seen in the log: what was sent, to
+/// whom, and how many messages the log had then (only a later message can
+/// be it arriving).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingIntervention {
+    body: String,
+    to: Vec<PartId>,
+    sent_at: usize,
+}
+
+impl PendingIntervention {
+    /// Whether `message` is this intervention, logged.
+    fn arrived_as(&self, message: &review::model::types::Message) -> bool {
+        message.author == review::model::types::Author::User
+            && message.kind == review::model::types::MsgKind::Intervention
+            && message.to == self.to
+            && message.body.trim() == self.body.trim()
     }
 }
 

@@ -18,7 +18,8 @@ const STEPS: [(Phase, &str); 4] = [
     (Phase::Briefing, "配信"),
     (Phase::Reviewing, "レビュー"),
     (Phase::Consolidating, "取りまとめ"),
-    (Phase::Closed, "完了"),
+    // The round's, not the review's: a held review shows it checked.
+    (Phase::Closed, "ラウンド完了"),
 ];
 
 /// How far one brief got, as its badge shows it.
@@ -107,9 +108,11 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
         .background(Role::SurfaceAlt),
     );
 
+    // Wraps, so the steps move under the round label in a narrow pane
+    // instead of running past its edge.
     let top = tree.insert(
         Some(strip),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::wrapping_row(8.0, 6.0).align_items(AlignItems::CENTER),
     );
     let (done, max) = rounds_done(session);
     let current = session.current_round();

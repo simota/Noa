@@ -9,30 +9,52 @@ use review::model::types::{Agreement, Finding, FindingStatus, Session, Severity}
 
 use super::{
     Action, Filters, agreement_key, caption, keep_scroll, note, scroll_column, severity_tone,
-    spacer, status_key, status_tone, tag,
+    status_key, status_tone, tag,
 };
 
-/// The findings `filters` let through, in rank order.
+/// Whether `filters` let `f` through.
+fn passes(session: &Session, filters: &Filters, f: &Finding) -> bool {
+    (filters.severities.is_empty() || filters.severities.contains(&f.severity))
+        && (filters.lenses.is_empty() || filters.lenses.contains(&f.category))
+        && (filters.statuses.is_empty() || filters.statuses.contains(&status_key(f.status)))
+        && (filters.agreements.is_empty()
+            || filters
+                .agreements
+                .contains(&agreement_key(session.tally(f).agreement)))
+        && filters
+            .reviewer
+            .as_ref()
+            .is_none_or(|part| f.origins().contains(part) || f.stances.contains_key(part))
+}
+
+/// The findings `filters` let through, in rank order. A rebuild ranks once,
+/// here, for the list it shows; counts go through [`count`], unranked.
 pub(crate) fn shown<'a>(session: &'a Session, filters: &Filters) -> Vec<&'a Finding> {
-    session
-        .ranked()
+    ranked(session)
         .into_iter()
-        .filter(|f| filters.severities.is_empty() || filters.severities.contains(&f.severity))
-        .filter(|f| filters.lenses.is_empty() || filters.lenses.contains(&f.category))
-        .filter(|f| filters.statuses.is_empty() || filters.statuses.contains(&status_key(f.status)))
-        .filter(|f| {
-            filters.agreements.is_empty()
-                || filters
-                    .agreements
-                    .contains(&agreement_key(session.tally(f).agreement))
-        })
-        .filter(|f| {
-            filters
-                .reviewer
-                .as_ref()
-                .is_none_or(|part| f.origins().contains(part) || f.stances.contains_key(part))
-        })
+        .filter(|f| passes(session, filters, f))
         .collect()
+}
+
+/// How many findings `filters` let through (a count needs no order).
+pub(crate) fn count(session: &Session, filters: &Filters) -> usize {
+    session
+        .findings
+        .iter()
+        .filter(|f| passes(session, filters, f))
+        .count()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread ranked a session's findings.
+    pub(super) static RANKINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn ranked(session: &Session) -> Vec<&Finding> {
+    #[cfg(test)]
+    RANKINGS.with(|n| n.set(n.get() + 1));
+    session.ranked()
 }
 
 fn chip(
@@ -47,7 +69,7 @@ fn chip(
         Some(parent),
         Button::new(label)
             .control_size(ControlSize::Small)
-            .default_button(on),
+            .selected(on),
     );
     actions.push((id, action));
 }
@@ -66,6 +88,38 @@ fn filter_row(tree: &mut UiTree, parent: WidgetId, title: &str) -> WidgetId {
     row
 }
 
+/// How many findings the filters let through, the reviewer filter when one
+/// is on, and 条件をすべて解除: in the tab row, so the filter rows take no
+/// line of their own for them.
+pub(super) fn summary(
+    tree: &mut UiTree,
+    row: WidgetId,
+    session: &Session,
+    filters: &Filters,
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
+    caption(
+        tree,
+        row,
+        format!(
+            "表示 {} / 全 {}",
+            count(session, filters),
+            session.findings.len()
+        ),
+    );
+    if let Some(part) = &filters.reviewer {
+        tag(tree, row, format!("レビュアー: {part}"), Tone::Accent);
+    }
+    chip(
+        tree,
+        row,
+        "条件をすべて解除".into(),
+        false,
+        Action::ClearFilters,
+        actions,
+    );
+}
+
 pub(super) fn insert(
     tree: &mut UiTree,
     host: WidgetId,
@@ -74,19 +128,29 @@ pub(super) fn insert(
     selected: Option<&str>,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
+    // The filters head the scrolled list, so a short pane gives its height
+    // to the findings once scrolled past them.
+    let list = scroll_column(tree, host, 8.0);
+    keep_scroll(tree, list, session, "board");
     let bar = tree.insert(
-        Some(host),
+        Some(list),
         Container::column()
             .gap(4.0)
-            .padding(10.0)
-            .background(Role::SurfaceAlt),
+            .padding(8.0)
+            .background(Role::SurfaceAlt)
+            .radius(8.0),
     );
-    let count =
-        |pred: &dyn Fn(&Finding) -> bool| session.findings.iter().filter(|f| pred(f)).count();
+    // A chip counts what choosing its value alone in its group shows, the
+    // other groups' filters as they are: count and filter always agree.
+    let only = |change: &dyn Fn(&mut Filters)| {
+        let mut alone = filters.clone();
+        change(&mut alone);
+        count(session, &alone)
+    };
 
     let row = filter_row(tree, bar, "重大度");
     for s in Severity::ALL {
-        let n = count(&|f| f.severity == s && f.status.is_live());
+        let n = only(&|f| f.severities = [s].into());
         chip(
             tree,
             row,
@@ -120,7 +184,7 @@ pub(super) fn insert(
     }
     let row = filter_row(tree, bar, "状態");
     for s in FindingStatus::ALL {
-        let n = count(&|f| f.status == s);
+        let n = only(&|f| f.statuses = [status_key(s)].into());
         chip(
             tree,
             row,
@@ -132,10 +196,11 @@ pub(super) fn insert(
     }
     let row = filter_row(tree, bar, "合意度");
     for a in Agreement::ALL {
+        let n = only(&|f| f.agreements = [agreement_key(a)].into());
         chip(
             tree,
             row,
-            a.label().to_owned(),
+            format!("{} {n}", a.label()),
             filters.agreements.contains(&agreement_key(a)),
             Action::ToggleAgreement(a),
             actions,
@@ -143,30 +208,6 @@ pub(super) fn insert(
     }
 
     let shown = shown(session, filters);
-    let foot = tree.insert(
-        Some(bar),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
-    );
-    caption(
-        tree,
-        foot,
-        format!("表示 {} / 全 {}", shown.len(), session.findings.len()),
-    );
-    if let Some(part) = &filters.reviewer {
-        tag(tree, foot, format!("レビュアー: {part}"), Tone::Accent);
-    }
-    spacer(tree, foot);
-    chip(
-        tree,
-        foot,
-        "条件をすべて解除".into(),
-        false,
-        Action::ClearFilters,
-        actions,
-    );
-
-    let list = scroll_column(tree, host, 8.0);
-    keep_scroll(tree, list, session, "board");
     if session.findings.is_empty() {
         note(
             tree,

@@ -2,6 +2,7 @@
 //! capture, model, engine and store (`lib.rs`), fed by the live layer.
 
 mod demo;
+mod installed;
 mod live;
 /// The live session runner (`src/live/`): `ipc` is the Noa port and its
 /// `noa-ipc` implementation, `runner` drives one review against it.
@@ -221,9 +222,11 @@ fn main() -> Result<(), String> {
         } else {
             let waker = setup.waker.clone();
             let channel = live::start(move || waker.wake(), live::startup_link());
+            let waker = setup.waker.clone();
+            let installed = installed::spawn(move || waker.wake());
             match &args.session {
-                Some(dir) => Review::live_stored(channel, dir),
-                None => Review::live(channel),
+                Some(dir) => Review::live_stored(channel, installed, dir),
+                None => Review::live(channel, installed),
             }
         };
         Box::new(screen.with_view(tab, finding.clone()))

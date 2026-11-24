@@ -18,12 +18,13 @@ use noa_gpui_text::TextStore;
 
 use review::model::types::{
     AgentChoice, AgentKind, AgentSetup, BuiltinLens, DEFAULT_MAX_ROUNDS, Head, LensChoice,
-    MAX_MAX_ROUNDS, MAX_PANEL, MIN_PANEL, Millis, ReviewerChoice, RoundNo, Severity, Target,
-    TargetKind,
+    MAX_MAX_ROUNDS, MAX_PANEL, MIN_PANEL, Millis, ReviewerChoice, RoundNo, Session, Severity,
+    Target, TargetKind,
 };
 use review::store::Listed;
 
 use super::{Action, caption, clear_children, gap, spacer, tag};
+use crate::installed::Installed;
 use crate::live::Link;
 
 /// How many past reviews the start view lists.
@@ -49,7 +50,12 @@ pub(super) struct Parts {
     pub(super) document_workdir: WidgetId,
     pub(super) request: WidgetId,
     pub(super) max_rounds: WidgetId,
+    /// Holds the lead's kind menu, so it can be rebuilt for other kinds.
+    lead_host: WidgetId,
     pub(super) lead: WidgetId,
+    /// The kinds the agent menus offer, in menu order: a menu index maps
+    /// to a kind through this list, never through `AgentKind::ALL`.
+    kinds: Vec<AgentKind>,
     pub(super) lead_setup: SetupParts,
     panel_list: WidgetId,
     pub(super) panel: Vec<PanelRow>,
@@ -57,6 +63,97 @@ pub(super) struct Parts {
     pub(super) start_button: WidgetId,
     note: WidgetId,
     past: WidgetId,
+}
+
+impl Parts {
+    pub(super) fn kinds(&self) -> &[AgentKind] {
+        &self.kinds
+    }
+}
+
+/// Which agents are installed, as far as the screen knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Detection {
+    /// The check is still running.
+    Pending,
+    Done(Installed),
+}
+
+impl Detection {
+    /// Every kind installed: what the demo and stored views assume, so
+    /// they stay deterministic.
+    pub(super) fn all_installed() -> Self {
+        Self::Done(Installed::Found(AgentKind::ALL.to_vec()))
+    }
+
+    /// The kinds the agent menus offer: the installed ones, or all of
+    /// them while nothing is known (pending, unknown, none installed; a
+    /// menu cannot be empty, and the start button is off where it matters).
+    pub(super) fn menu_kinds(&self) -> Vec<AgentKind> {
+        match self {
+            Self::Done(Installed::Found(kinds)) if !kinds.is_empty() => kinds.clone(),
+            _ => AgentKind::ALL.to_vec(),
+        }
+    }
+
+    /// A review can be started: the check is done and found an agent (or
+    /// could not tell, and all are offered).
+    pub(super) fn startable(&self) -> bool {
+        match self {
+            Self::Pending => false,
+            Self::Done(Installed::Found(kinds)) => !kinds.is_empty(),
+            Self::Done(Installed::Unknown(_)) => true,
+        }
+    }
+
+    /// Why the start button is off (also what shows in the note), or the
+    /// caveat when it is on.
+    fn note(&self) -> Option<String> {
+        match self {
+            Self::Pending => Some("インストール済みのエージェントを確認しています…".to_owned()),
+            Self::Done(Installed::Unknown(reason)) => Some(format!(
+                "インストール済みエージェントを確認できませんでした（{reason}）。すべて表示しています"
+            )),
+            Self::Done(Installed::Found(kinds)) if kinds.is_empty() => Some(
+                "claude / codex / agy のいずれもログインシェルの PATH に見つかりません".to_owned(),
+            ),
+            Self::Done(Installed::Found(_)) => None,
+        }
+    }
+
+    pub(super) fn blocked_reason(&self) -> String {
+        self.note().unwrap_or_default()
+    }
+
+    /// Why `session` cannot be started again (resumed or given rounds),
+    /// when the check has not finished or an agent it uses is not
+    /// installed; `None` when it can, or when the check could not tell.
+    pub(super) fn resume_blocker(&self, session: &Session) -> Option<String> {
+        match self {
+            Self::Pending => self.note(),
+            Self::Done(Installed::Unknown(_)) => None,
+            Self::Done(Installed::Found(installed)) => {
+                let mut missing = Vec::new();
+                for part in std::iter::once(&session.lead).chain(&session.reviewers) {
+                    if !installed.contains(&part.kind) && !missing.contains(&part.kind) {
+                        missing.push(part.kind);
+                    }
+                }
+                (!missing.is_empty()).then(|| {
+                    format!(
+                        "このレビューは {} を使いますが、インストールされていないため再開できません",
+                        missing.iter().map(|k| k.command()).collect::<Vec<_>>().join(", ")
+                    )
+                })
+            }
+        }
+    }
+}
+
+/// "インストールされていないため除外: codex, agy".
+pub(super) fn left_out_message(kinds: &[AgentKind]) -> String {
+    let names: Vec<&str> = kinds.iter().map(|k| k.command()).collect();
+    format!("インストールされていないため除外: {}", names.join(", "))
 }
 
 /// One reviewer row: agent kind, model, effort, lens, custom lens text, and
@@ -91,11 +188,57 @@ pub(crate) struct Form {
 }
 
 impl Default for Form {
+    /// The clean form while every kind is on offer.
     fn default() -> Self {
-        let row = |kind: AgentKind, lens| ReviewerChoice {
-            agent: kind.into(),
-            lens: LensChoice::Builtin(lens),
-        };
+        Self::for_kinds(&AgentKind::ALL)
+    }
+}
+
+/// The lenses a clean panel gives its rows, in order.
+const DEFAULT_LENSES: [BuiltinLens; 3] = [
+    BuiltinLens::Correctness,
+    BuiltinLens::Security,
+    BuiltinLens::Design,
+];
+
+/// The first built-in lens none of `panel` holds.
+fn unheld_lens(panel: &[ReviewerChoice]) -> BuiltinLens {
+    BuiltinLens::ALL
+        .into_iter()
+        .find(|lens| {
+            !panel
+                .iter()
+                .any(|row| row.lens == LensChoice::Builtin(*lens))
+        })
+        .unwrap_or(BuiltinLens::Correctness)
+}
+
+/// A row of `kind` on the first lens `panel` lacks.
+fn next_row(kind: AgentKind, panel: &[ReviewerChoice]) -> ReviewerChoice {
+    ReviewerChoice {
+        agent: kind.into(),
+        lens: LensChoice::Builtin(unheld_lens(panel)),
+    }
+}
+
+impl Form {
+    /// The clean form for the available `kinds` (not empty): the lead is
+    /// the first, and the panel one row per kind, padded to the minimum
+    /// by repeating the first.
+    pub(crate) fn for_kinds(kinds: &[AgentKind]) -> Self {
+        let first = kinds.first().copied().unwrap_or(AgentKind::ALL[0]);
+        let mut panel: Vec<ReviewerChoice> = kinds
+            .iter()
+            .zip(DEFAULT_LENSES)
+            .map(|(&kind, lens)| ReviewerChoice {
+                agent: kind.into(),
+                lens: LensChoice::Builtin(lens),
+            })
+            .collect();
+        while panel.len() < MIN_PANEL {
+            let row = next_row(first, &panel);
+            panel.push(row);
+        }
         Self {
             kind: TargetKind::Git,
             repo: String::new(),
@@ -109,13 +252,38 @@ impl Default for Form {
             document_workdir: String::new(),
             request: String::new(),
             max_rounds: DEFAULT_MAX_ROUNDS,
-            lead: AgentKind::Claude.into(),
-            panel: vec![
-                row(AgentKind::Claude, BuiltinLens::Correctness),
-                row(AgentKind::Codex, BuiltinLens::Security),
-                row(AgentKind::Agy, BuiltinLens::Design),
-            ],
+            lead: first.into(),
+            panel,
         }
+    }
+
+    /// This form with only the available `kinds` (not empty): reviewers of
+    /// another kind are dropped (the panel is padded back to the minimum
+    /// with the first kind), a lead of another kind becomes the first kind
+    /// on its defaults. Also the kinds left out, in order, once each.
+    fn restricted(mut self, kinds: &[AgentKind]) -> (Self, Vec<AgentKind>) {
+        let mut left_out = Vec::new();
+        let mut note = |kind: AgentKind| {
+            if !left_out.contains(&kind) {
+                left_out.push(kind);
+            }
+        };
+        if !kinds.contains(&self.lead.kind) {
+            note(self.lead.kind);
+            self.lead = kinds[0].into();
+        }
+        self.panel.retain(|row| {
+            let keep = kinds.contains(&row.agent.kind);
+            if !keep {
+                note(row.agent.kind);
+            }
+            keep
+        });
+        while self.panel.len() < MIN_PANEL {
+            let row = next_row(kinds[0], &self.panel);
+            self.panel.push(row);
+        }
+        (self, left_out)
     }
 }
 
@@ -340,11 +508,12 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(lead_col),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
     );
-    let lead = tree.insert(
-        Some(lead_row),
-        PopUpButton::new(AgentKind::ALL.iter().map(|k| k.command())),
-    );
-    let lead_setup = insert_setup(tree, lead_row, AgentKind::ALL[0]);
+    // Nothing is known of what is installed yet: every kind is offered
+    // until the check reports ([`apply_kinds`]).
+    let kinds = AgentKind::ALL.to_vec();
+    let lead_host = tree.insert(Some(lead_row), Container::row());
+    let lead = insert_kind_menu(tree, lead_host, &kinds, kinds[0]);
+    let lead_setup = insert_setup(tree, lead_row, kinds[0]);
 
     let panel_col = section(
         tree,
@@ -352,10 +521,10 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         &format!("レビュアー（{MIN_PANEL}〜{MAX_PANEL}体）・観点"),
     );
     let panel_list = tree.insert(Some(panel_col), Container::column().gap(8.0));
-    let panel = Form::default()
+    let panel = Form::for_kinds(&kinds)
         .panel
         .iter()
-        .map(|choice| insert_row(tree, panel_list, choice))
+        .map(|choice| insert_row(tree, panel_list, &kinds, choice))
         .collect();
     let panel_foot = tree.insert(
         Some(panel_col),
@@ -422,7 +591,9 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         document_workdir,
         request,
         max_rounds,
+        lead_host,
         lead,
+        kinds,
         lead_setup,
         panel_list,
         panel,
@@ -520,7 +691,31 @@ fn lens_labels() -> Vec<&'static str> {
         .collect()
 }
 
-fn insert_row(tree: &mut UiTree, list: WidgetId, choice: &ReviewerChoice) -> PanelRow {
+/// A menu of `kinds`, `selected` picked (the first when it is not one).
+fn insert_kind_menu(
+    tree: &mut UiTree,
+    host: WidgetId,
+    kinds: &[AgentKind],
+    selected: AgentKind,
+) -> WidgetId {
+    tree.insert(
+        Some(host),
+        PopUpButton::new(kinds.iter().map(|k| k.command()))
+            .selected_index(kind_index(kinds, selected)),
+    )
+}
+
+/// Where `kind` is in the menu of `kinds`; the first when it is not.
+fn kind_index(kinds: &[AgentKind], kind: AgentKind) -> usize {
+    kinds.iter().position(|&k| k == kind).unwrap_or(0)
+}
+
+fn insert_row(
+    tree: &mut UiTree,
+    list: WidgetId,
+    kinds: &[AgentKind],
+    choice: &ReviewerChoice,
+) -> PanelRow {
     let host = tree.insert(
         Some(list),
         Container::column()
@@ -533,14 +728,7 @@ fn insert_row(tree: &mut UiTree, list: WidgetId, choice: &ReviewerChoice) -> Pan
         Some(host),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
     );
-    let index = AgentKind::ALL
-        .iter()
-        .position(|&k| k == choice.agent.kind)
-        .unwrap_or(0);
-    let kind = tree.insert(
-        Some(top),
-        PopUpButton::new(AgentKind::ALL.iter().map(|k| k.command())).selected_index(index),
-    );
+    let kind = insert_kind_menu(tree, top, kinds, choice.agent.kind);
     let setup = insert_setup(tree, top, choice.agent.kind);
     set_setup(tree, &setup, choice.agent.kind, &choice.agent.setup);
     spacer(tree, top);
@@ -593,10 +781,9 @@ pub(super) fn add_row(tree: &mut UiTree, parts: &mut Parts) {
     if parts.panel.len() >= MAX_PANEL {
         return;
     }
-    let kind = parts
-        .panel
-        .last()
-        .map_or(AgentKind::ALL[0], |row| selected_kind(tree, row.kind));
+    let kind = parts.panel.last().map_or(parts.kinds[0], |row| {
+        selected_kind(tree, row.kind, &parts.kinds)
+    });
     let held: Vec<usize> = parts
         .panel
         .iter()
@@ -610,6 +797,7 @@ pub(super) fn add_row(tree: &mut UiTree, parts: &mut Parts) {
     let row = insert_row(
         tree,
         parts.panel_list,
+        &parts.kinds,
         &ReviewerChoice {
             agent: kind.into(),
             lens: LensChoice::Builtin(lens),
@@ -646,7 +834,7 @@ pub(super) fn row_changed(
     let Some(row) = parts.panel.iter_mut().find(|row| row.kind == source) else {
         return false;
     };
-    let kind = selected_kind(tree, row.kind);
+    let kind = selected_kind(tree, row.kind, &parts.kinds);
     clear_children(tree, row.setup.host, text);
     let (model, effort) = insert_setup_controls(tree, row.setup.host, kind);
     row.setup.model = model;
@@ -655,15 +843,21 @@ pub(super) fn row_changed(
 }
 
 pub(super) fn lead_kind_changed(tree: &mut UiTree, parts: &mut Parts, text: &mut TextStore) {
-    let kind = selected_kind(tree, parts.lead);
+    let kind = selected_kind(tree, parts.lead, &parts.kinds);
     clear_children(tree, parts.lead_setup.host, text);
     let (model, effort) = insert_setup_controls(tree, parts.lead_setup.host, kind);
     parts.lead_setup.model = model;
     parts.lead_setup.effort = effort;
 }
 
-/// Puts `form` into the start view.
-pub(super) fn fill(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut TextStore) {
+/// Puts `form` into the start view. Entries of a kind the menus do not
+/// offer are left out; those kinds come back.
+pub(super) fn fill(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    form: &Form,
+    text: &mut TextStore,
+) -> Vec<AgentKind> {
     let kind = TargetKind::ALL
         .iter()
         .position(|k| *k == form.kind)
@@ -692,10 +886,8 @@ pub(super) fn fill(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut
     }
     let rounds = f64::from(form.max_rounds);
     tree.update::<NumberInput, _>(parts.max_rounds, |n, cx| n.set_value(cx, rounds));
-    let lead = AgentKind::ALL
-        .iter()
-        .position(|&k| k == form.lead.kind)
-        .unwrap_or(0);
+    let (form, left_out) = form.clone().restricted(&parts.kinds);
+    let lead = kind_index(&parts.kinds, form.lead.kind);
     tree.update::<PopUpButton, _>(parts.lead, |p, cx| p.set_selected(cx, lead));
     lead_kind_changed(tree, parts, text);
     set_setup(tree, &parts.lead_setup, form.lead.kind, &form.lead.setup);
@@ -706,17 +898,26 @@ pub(super) fn fill(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut
         .panel
         .iter()
         .take(MAX_PANEL)
-        .map(|choice| insert_row(tree, parts.panel_list, choice))
+        .map(|choice| insert_row(tree, parts.panel_list, &parts.kinds, choice))
         .collect();
-    while parts.panel.len() < MIN_PANEL {
-        let row = insert_row(
-            tree,
-            parts.panel_list,
-            &Form::default().panel[parts.panel.len()],
-        );
-        parts.panel.push(row);
-    }
     sync_row_buttons(tree, parts);
+    left_out
+}
+
+/// Makes the agent menus offer `kinds` (rebuilt: a menu's entries are
+/// fixed once made) and shows `form` in them; the kinds it had to leave
+/// out come back.
+pub(super) fn apply_kinds(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    kinds: Vec<AgentKind>,
+    form: &Form,
+    text: &mut TextStore,
+) -> Vec<AgentKind> {
+    parts.kinds = kinds;
+    clear_children(tree, parts.lead_host, text);
+    parts.lead = insert_kind_menu(tree, parts.lead_host, &parts.kinds, parts.kinds[0]);
+    fill(tree, parts, form, text)
 }
 
 pub(super) fn actions(parts: &Parts, actions: &mut Vec<(WidgetId, Action)>) {
@@ -727,9 +928,11 @@ pub(super) fn actions(parts: &Parts, actions: &mut Vec<(WidgetId, Action)>) {
     }
 }
 
-fn selected_kind(tree: &UiTree, popup: WidgetId) -> AgentKind {
+/// The kind `popup` shows: its index into the menu's `kinds`.
+fn selected_kind(tree: &UiTree, popup: WidgetId, kinds: &[AgentKind]) -> AgentKind {
     tree.get::<PopUpButton>(popup)
-        .map_or(AgentKind::ALL[0], |p| AgentKind::ALL[p.selected()])
+        .and_then(|p| kinds.get(p.selected()).copied())
+        .unwrap_or(kinds[0])
 }
 
 fn read_setup(tree: &UiTree, parts: &SetupParts, kind: AgentKind) -> AgentSetup {
@@ -745,14 +948,26 @@ fn read_setup(tree: &UiTree, parts: &SetupParts, kind: AgentKind) -> AgentSetup 
     AgentSetup { model, effort }
 }
 
-pub(super) fn rebuild_note(tree: &mut UiTree, parts: &Parts, link: &Link, text: &mut TextStore) {
+pub(super) fn rebuild_note(
+    tree: &mut UiTree,
+    parts: &Parts,
+    link: &Link,
+    detection: &Detection,
+    text: &mut TextStore,
+) {
     clear_children(tree, parts.note, text);
-    let note = match link {
-        Link::Live => return,
-        Link::Connecting => "Noa に接続しています…".to_owned(),
-        Link::Down(why) => format!("Noa に接続できません: {why}"),
-    };
-    super::note(tree, parts.note, note);
+    tree.set_enabled(parts.start_button, detection.startable());
+    let notes = [
+        match link {
+            Link::Live => None,
+            Link::Connecting => Some("Noa に接続しています…".to_owned()),
+            Link::Down(why) => Some(format!("Noa に接続できません: {why}")),
+        },
+        detection.note(),
+    ];
+    for note in notes.into_iter().flatten() {
+        super::note(tree, parts.note, note);
+    }
 }
 
 /// Shows why the last start was refused under the form.
@@ -785,7 +1000,7 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .map_or(DEFAULT_MAX_ROUNDS, |n| {
             n.value().round().clamp(1.0, f64::from(MAX_MAX_ROUNDS)) as RoundNo
         });
-    let kind = selected_kind(tree, parts.lead);
+    let kind = selected_kind(tree, parts.lead, &parts.kinds);
     let lead = AgentChoice {
         kind,
         setup: read_setup(tree, &parts.lead_setup, kind),
@@ -794,7 +1009,7 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .panel
         .iter()
         .map(|row| {
-            let kind = selected_kind(tree, row.kind);
+            let kind = selected_kind(tree, row.kind, &parts.kinds);
             let lens_index = tree
                 .get::<PopUpButton>(row.lens)
                 .map_or(0, PopUpButton::selected);
@@ -988,6 +1203,28 @@ fn dir_path(typed: &str, what: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_form_restricted_to_installed_kinds_says_what_it_left_out() {
+        let row = |kind: AgentKind, lens| ReviewerChoice {
+            agent: kind.into(),
+            lens: LensChoice::Builtin(lens),
+        };
+        let form = Form {
+            lead: AgentKind::Claude.into(),
+            panel: vec![
+                row(AgentKind::Codex, BuiltinLens::Security),
+                row(AgentKind::Claude, BuiltinLens::Correctness),
+                row(AgentKind::Codex, BuiltinLens::Design),
+            ],
+            ..Form::default()
+        };
+        let (form, left_out) = form.restricted(&[AgentKind::Codex]);
+        assert_eq!(left_out, [AgentKind::Claude]);
+        assert_eq!(form.lead.kind, AgentKind::Codex);
+        assert_eq!(form.panel.len(), 2);
+        assert!(form.panel.iter().all(|r| r.agent.kind == AgentKind::Codex));
+    }
 
     #[test]
     fn a_past_review_shows_its_age() {

@@ -1,6 +1,8 @@
 use super::*;
 
-use review::model::types::{LensChoice, TargetKind};
+use review::model::types::{AgentKind, LensChoice, MIN_PANEL, ReviewerChoice, TargetKind};
+
+use crate::installed::Installed;
 use review::store::Store;
 
 fn acts(screen: &Review) -> Vec<Action> {
@@ -166,7 +168,7 @@ fn an_unreadable_log_is_refused() {
 /// Feeds `session` to a live screen as its runner would.
 fn live_with(session: Session) -> (Review, crate::live::FakeLink) {
     let (channel, link) = Channel::fake();
-    let mut screen = Review::live(channel);
+    let mut screen = live_ready(channel);
     link.snapshots
         .send(Snapshot {
             link: Link::Live,
@@ -214,7 +216,7 @@ fn round_controls_and_pane_jumps_reach_the_runner() {
 #[test]
 fn a_refused_start_shows_why_under_the_form() {
     let (channel, link) = Channel::fake();
-    let mut screen = Review::live(channel);
+    let mut screen = live_ready(channel);
     // The form's repository is empty: refused before anything is sent.
     act(&mut screen, Action::Start);
     assert!(commands(&link).is_empty());
@@ -261,7 +263,7 @@ fn ac20_an_unfinished_review_is_resumed_from_its_read_only_view_and_goes_live() 
     let root = std::env::temp_dir().join(format!("noa-review-ui-resume-{}", std::process::id()));
     let dir = stored_unfinished(&root);
     let (channel, link) = Channel::fake();
-    let mut screen = Review::live_stored(channel, &dir);
+    let mut screen = stored_ready(channel, &dir);
     assert!(screen.read_only);
     assert!(acts(&screen).contains(&Action::ResumeShown));
     // Opening it left whatever was on screen before.
@@ -291,7 +293,7 @@ fn ac20_an_unfinished_review_is_resumed_from_its_read_only_view_and_goes_live() 
     // A finished review is not offered it.
     let done = stored_demo(&root);
     let (channel, _link) = Channel::fake();
-    let screen = Review::live_stored(channel, &done);
+    let screen = stored_ready(channel, &done);
     assert!(!acts(&screen).contains(&Action::ResumeShown));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -301,7 +303,7 @@ fn ac23_a_missing_report_is_rewritten_from_the_log_only_when_asked() {
     let root = std::env::temp_dir().join(format!("noa-review-ui-report-{}", std::process::id()));
     let dir = stored_demo(&root);
     let (channel, _link) = Channel::fake();
-    let mut screen = Review::live_stored(channel, &dir);
+    let mut screen = stored_ready(channel, &dir);
     // Viewing writes nothing, even with the report missing.
     assert!(!store::report_path(&dir).exists());
     assert!(acts(&screen).contains(&Action::RegenerateReport));
@@ -315,7 +317,7 @@ fn ac23_a_missing_report_is_rewritten_from_the_log_only_when_asked() {
     assert!(!store::is_busy(&dir), "the log stayed locked");
     // A report that matches the log is not offered again.
     let (channel, _link) = Channel::fake();
-    let screen = Review::live_stored(channel, &dir);
+    let screen = stored_ready(channel, &dir);
     assert!(!acts(&screen).contains(&Action::RegenerateReport));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -435,8 +437,318 @@ fn ac23_viewing_a_stored_review_changes_no_file_in_its_folder() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     let _ = Review::stored(&dir).unwrap();
     let (channel, _link) = Channel::fake();
-    let screen = Review::live_stored(channel, &dir);
+    let screen = stored_ready(channel, &dir);
     assert!(acts(&screen).contains(&Action::RegenerateReport));
     assert_eq!(files_with_times(&dir), before);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A live screen whose check already reported every kind installed.
+fn live_ready(channel: Channel) -> Review {
+    let mut screen = Review::live(channel, installed_all());
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    screen
+}
+
+/// The same, showing the review stored in `dir`.
+fn stored_ready(channel: Channel, dir: &Path) -> Review {
+    let mut screen = Review::live_stored(channel, installed_all(), dir);
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    screen
+}
+
+/// A report that every kind is installed, already delivered.
+fn installed_all() -> std::sync::mpsc::Receiver<Installed> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Installed::Found(AgentKind::ALL.to_vec())).unwrap();
+    rx
+}
+
+/// A live screen still waiting for the installed-agents report, and the
+/// end that delivers it.
+fn live_pending() -> (
+    Review,
+    crate::live::FakeLink,
+    std::sync::mpsc::Sender<Installed>,
+    TextStore,
+) {
+    let (channel, link) = Channel::fake();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let screen = Review::live(channel, rx);
+    (screen, link, tx, TextStore::new(Default::default()))
+}
+
+/// `screen` once the check reported `installed`.
+fn report(
+    screen: &mut Review,
+    tx: &std::sync::mpsc::Sender<Installed>,
+    installed: Installed,
+    text: &mut TextStore,
+) {
+    tx.send(installed).unwrap();
+    screen.poll_live(text);
+}
+
+fn found(kinds: &[AgentKind]) -> Installed {
+    Installed::Found(kinds.to_vec())
+}
+
+/// How many entries `popup` has, by walking down its menu with the
+/// keyboard to the end.
+fn menu_len(screen: &mut Review, popup: WidgetId, text: &mut TextStore) -> usize {
+    screen.tree.set_focus(Some(popup));
+    for _ in 0..AgentKind::ALL.len() + 2 {
+        screen.dispatch(
+            noa_gpui_core::Event::KeyDown {
+                key: noa_gpui_core::Key::ArrowDown,
+                modifiers: Default::default(),
+            },
+            text,
+        );
+    }
+    screen
+        .tree
+        .get::<noa_gpui_core::widgets::PopUpButton>(popup)
+        .unwrap()
+        .selected()
+        + 1
+}
+
+fn press_down(screen: &mut Review, popup: WidgetId, text: &mut TextStore) {
+    screen.tree.set_focus(Some(popup));
+    screen.dispatch(
+        noa_gpui_core::Event::KeyDown {
+            key: noa_gpui_core::Key::ArrowDown,
+            modifiers: Default::default(),
+        },
+        text,
+    );
+}
+
+fn kinds_of(panel: &[ReviewerChoice]) -> Vec<AgentKind> {
+    panel.iter().map(|row| row.agent.kind).collect()
+}
+
+/// A document form that passes the start checks.
+fn document_form() -> start::Form {
+    start::Form {
+        kind: TargetKind::Document,
+        text: "plan".into(),
+        ..start::Form::default()
+    }
+}
+
+#[test]
+fn the_start_button_waits_for_the_installed_check() {
+    let (mut screen, link, tx, mut text) = live_pending();
+    let start_button = screen.start.start_button;
+    assert!(!screen.tree.is_enabled(start_button));
+    // A start that gets through anyway sends nothing.
+    let form = document_form();
+    start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+    act(&mut screen, Action::Start);
+    assert!(commands(&link).is_empty());
+    assert!(!screen.starting);
+
+    report(&mut screen, &tx, found(&[AgentKind::Codex]), &mut text);
+    assert!(screen.tree.is_enabled(start_button));
+    act(&mut screen, Action::Start);
+    assert!(matches!(&commands(&link)[..], [Command::Start { .. }]));
+}
+
+#[test]
+fn the_start_button_stays_off_when_no_agent_is_installed() {
+    let (mut screen, link, tx, mut text) = live_pending();
+    report(&mut screen, &tx, found(&[]), &mut text);
+    assert!(!screen.tree.is_enabled(screen.start.start_button));
+    assert_eq!(
+        screen.detection.blocked_reason(),
+        "claude / codex / agy のいずれもログインシェルの PATH に見つかりません"
+    );
+    let form = document_form();
+    start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+    act(&mut screen, Action::Start);
+    assert!(commands(&link).is_empty());
+}
+
+#[test]
+fn an_unknown_check_offers_every_kind_and_allows_starting() {
+    let (mut screen, _link, tx, mut text) = live_pending();
+    report(
+        &mut screen,
+        &tx,
+        Installed::Unknown("zsh".into()),
+        &mut text,
+    );
+    assert!(screen.tree.is_enabled(screen.start.start_button));
+    assert_eq!(screen.start.kinds(), AgentKind::ALL);
+    let (lead, row) = (screen.start.lead, screen.start.panel[0].kind);
+    assert_eq!(menu_len(&mut screen, lead, &mut text), AgentKind::ALL.len());
+    assert_eq!(menu_len(&mut screen, row, &mut text), AgentKind::ALL.len());
+    assert!(
+        screen
+            .detection
+            .blocked_reason()
+            .contains("すべて表示しています")
+    );
+}
+
+#[test]
+fn menus_offer_only_the_installed_kinds_and_map_by_position() {
+    let (mut screen, link, tx, mut text) = live_pending();
+    report(
+        &mut screen,
+        &tx,
+        found(&[AgentKind::Codex, AgentKind::Agy]),
+        &mut text,
+    );
+    // The untouched form is led by the first installed kind, one row each.
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.lead.kind, AgentKind::Codex);
+    assert_eq!(kinds_of(&form.panel), [AgentKind::Codex, AgentKind::Agy]);
+    let (lead, row) = (screen.start.lead, screen.start.panel[1].kind);
+    assert_eq!(menu_len(&mut screen, lead, &mut text), 2);
+    assert_eq!(menu_len(&mut screen, row, &mut text), 2);
+    // Menu position 1 is agy here, not codex (ALL's second entry).
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.lead.kind, AgentKind::Agy);
+    assert_eq!(form.panel[1].agent.kind, AgentKind::Agy);
+    // A row added takes the kind of the last one.
+    act(&mut screen, Action::AddPanelRow);
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.panel[2].agent.kind, AgentKind::Agy);
+    // Starting sends only installed kinds.
+    let form = document_form();
+    start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+    act(&mut screen, Action::Start);
+    let Some(Command::Start { lead, panel, .. }) = commands(&link).into_iter().next() else {
+        panic!("not started");
+    };
+    assert_eq!(lead.kind, AgentKind::Codex);
+    assert!(
+        kinds_of(&panel)
+            .iter()
+            .all(|k| [AgentKind::Codex, AgentKind::Agy].contains(k))
+    );
+}
+
+#[test]
+fn the_lead_row_offers_only_the_installed_kinds() {
+    let (mut screen, _link, tx, mut text) = live_pending();
+    report(&mut screen, &tx, found(&[AgentKind::Agy]), &mut text);
+    let lead = screen.start.lead;
+    assert_eq!(menu_len(&mut screen, lead, &mut text), 1);
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.lead.kind, AgentKind::Agy);
+    // One kind installed still fills a panel of the minimum size.
+    assert_eq!(kinds_of(&form.panel), [AgentKind::Agy, AgentKind::Agy]);
+    assert_ne!(form.panel[0].lens, form.panel[1].lens);
+    // The lead's pop-up change is read through the offered list.
+    press_down(&mut screen, lead, &mut text);
+    assert_eq!(
+        start::read(&screen.tree, &screen.start).lead.kind,
+        AgentKind::Agy
+    );
+}
+
+#[test]
+fn a_report_after_the_form_was_changed_keeps_what_is_left_and_says_what_went() {
+    let (mut screen, _link, tx, mut text) = live_pending();
+    // The user picked codex for the lead before the check came back.
+    let lead = screen.start.lead;
+    press_down(&mut screen, lead, &mut text);
+    assert_eq!(
+        start::read(&screen.tree, &screen.start).lead.kind,
+        AgentKind::Codex
+    );
+    report(
+        &mut screen,
+        &tx,
+        found(&[AgentKind::Claude, AgentKind::Agy]),
+        &mut text,
+    );
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.lead.kind, AgentKind::Claude, "codex is not installed");
+    assert!(kinds_of(&form.panel).iter().all(|k| *k != AgentKind::Codex));
+    assert!(form.panel.len() >= MIN_PANEL);
+}
+
+#[test]
+fn the_form_a_clean_review_gets_has_a_row_per_available_kind_and_at_least_two() {
+    assert_eq!(kinds_of(&start::Form::default().panel), AgentKind::ALL);
+    let form = start::Form::for_kinds(&[AgentKind::Codex, AgentKind::Agy]);
+    assert_eq!(kinds_of(&form.panel), [AgentKind::Codex, AgentKind::Agy]);
+    assert_eq!(form.lead.kind, AgentKind::Codex);
+    let form = start::Form::for_kinds(&[AgentKind::Agy]);
+    assert_eq!(kinds_of(&form.panel), [AgentKind::Agy, AgentKind::Agy]);
+}
+
+#[test]
+fn a_new_review_starts_from_the_installed_kinds() {
+    let (mut screen, _link, tx, mut text) = live_pending();
+    report(&mut screen, &tx, found(&[AgentKind::Codex]), &mut text);
+    act(&mut screen, Action::NewReview);
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.lead.kind, AgentKind::Codex);
+    assert_eq!(kinds_of(&form.panel), [AgentKind::Codex, AgentKind::Codex]);
+}
+
+#[test]
+fn a_past_review_whose_agent_is_gone_says_so_instead_of_resuming() {
+    let root = std::env::temp_dir().join(format!("noa-review-ui-gone-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let session = store::read_session(&dir).unwrap();
+    let kinds: Vec<AgentKind> = std::iter::once(&session.lead)
+        .chain(&session.reviewers)
+        .map(|p| p.kind)
+        .collect();
+    assert!(kinds.contains(&AgentKind::Codex), "the demo uses codex");
+
+    let (mut screen, link, tx, mut text) = live_pending();
+    // Still checking: nothing is sent.
+    act(&mut screen, Action::ResumePast(dir.clone()));
+    assert!(commands(&link).is_empty());
+    // Codex missing: refused, with its name.
+    report(
+        &mut screen,
+        &tx,
+        found(&[AgentKind::Claude, AgentKind::Agy]),
+        &mut text,
+    );
+    act(&mut screen, Action::ResumePast(dir.clone()));
+    assert!(commands(&link).is_empty());
+    assert!(
+        screen
+            .detection
+            .resume_blocker(&session)
+            .is_some_and(|why| why.contains("codex") && !why.contains("agy"))
+    );
+    // Everything installed: it resumes.
+    screen.detection = start::Detection::all_installed();
+    act(&mut screen, Action::ResumePast(dir.clone()));
+    assert_eq!(commands(&link), [Command::Resume { dir: dir.clone() }]);
+    // A check that could not tell does not hold it back either.
+    screen.detection = start::Detection::Done(Installed::Unknown("x".into()));
+    assert!(screen.detection.resume_blocker(&session).is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_shown_review_whose_agent_is_gone_is_not_resumed_or_extended() {
+    let root = std::env::temp_dir().join(format!("noa-review-ui-gone2-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let (channel, link) = Channel::fake();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut screen = Review::live_stored(channel, rx, &dir);
+    let mut text = TextStore::new(Default::default());
+    let _ = commands(&link);
+    report(&mut screen, &tx, found(&[AgentKind::Claude]), &mut text);
+    act(&mut screen, Action::ResumeShown);
+    act(&mut screen, Action::Extend(1));
+    assert!(commands(&link).is_empty());
+    assert!(!screen.extending);
+    screen.detection = start::Detection::all_installed();
+    act(&mut screen, Action::ResumeShown);
+    assert_eq!(commands(&link), [Command::Resume { dir }]);
     let _ = std::fs::remove_dir_all(root);
 }

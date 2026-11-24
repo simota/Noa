@@ -197,7 +197,7 @@ fn agent_argv(kind: AgentKind, setup: &AgentSetup) -> Vec<String> {
     vec![login_shell(), "-l".into(), "-i".into(), "-c".into(), script]
 }
 
-fn login_shell() -> String {
+pub(crate) fn login_shell() -> String {
     std::env::var("SHELL")
         .ok()
         .filter(|shell| shell.starts_with('/'))

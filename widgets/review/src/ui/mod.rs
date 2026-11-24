@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command as OsCommand;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, LengthPercentage, Overflow, Point as LayoutPoint,
@@ -42,6 +43,7 @@ use review::model::types::{
 };
 use review::store::{self, Listed};
 
+use crate::installed::Installed;
 use crate::live::{Channel, Command, Link, Snapshot};
 
 pub(crate) use start::Form as StartForm;
@@ -204,6 +206,12 @@ pub struct Review {
     /// A start was asked for: a refusal shows under the form.
     starting: bool,
     built: Option<BuiltKey>,
+    /// Which agents are installed: unknown until the background check
+    /// reports (always "all" in the demo and in stored views, which stay
+    /// deterministic and run no shell).
+    detection: start::Detection,
+    /// Where that check reports, until it has.
+    installed: Option<Receiver<Installed>>,
 
     start: start::Parts,
     board: WidgetId,
@@ -228,8 +236,15 @@ impl Review {
         )
     }
 
-    pub fn live(channel: Channel) -> Self {
-        Self::build(Source::Live(channel), Link::Connecting, None)
+    /// The live screen. `installed` delivers which agents the login shell
+    /// has; until it does, the start button waits.
+    pub fn live(channel: Channel, installed: Receiver<Installed>) -> Self {
+        let mut screen = Self::build(Source::Live(channel), Link::Connecting, None);
+        screen.installed = Some(installed);
+        screen.detection = start::Detection::Pending;
+        let mut text = TextStore::new(Default::default());
+        screen.rebuild(&mut text);
+        screen
     }
 
     pub fn of_snapshot(snapshot: Snapshot) -> Self {
@@ -267,8 +282,8 @@ impl Review {
     }
 
     /// The live screen showing the review logged in `dir` read-only.
-    pub fn live_stored(channel: Channel, dir: &Path) -> Self {
-        let mut screen = Self::live(channel);
+    pub fn live_stored(channel: Channel, installed: Receiver<Installed>, dir: &Path) -> Self {
+        let mut screen = Self::live(channel, installed);
         let mut text = TextStore::new(Default::default());
         if let Err(why) = screen.show_stored(dir, &mut text) {
             screen.toast(why);
@@ -342,6 +357,8 @@ impl Review {
             report_stale: false,
             starting: false,
             built: None,
+            detection: start::Detection::all_installed(),
+            installed: None,
             start,
             board,
             left_host,
@@ -387,7 +404,13 @@ impl Review {
             self.rebuild_composer(text);
         } else {
             if !self.starting {
-                start::rebuild_note(&mut self.tree, &self.start, &self.link, text);
+                start::rebuild_note(
+                    &mut self.tree,
+                    &self.start,
+                    &self.link,
+                    &self.detection,
+                    text,
+                );
             }
             start::actions(&self.start, &mut self.actions);
             start::rebuild_past(
@@ -788,7 +811,41 @@ impl Review {
         }
     }
 
+    /// Takes the installed-agents report, once it has arrived: the menus
+    /// then offer only those, and a form still untouched takes them as its
+    /// defaults.
+    fn poll_installed(&mut self, text: &mut TextStore) {
+        let Some(rx) = &self.installed else {
+            return;
+        };
+        let Ok(installed) = rx.try_recv() else {
+            return;
+        };
+        self.installed = None;
+        let before = start::read(&self.tree, &self.start);
+        let clean = start::Form::for_kinds(self.start.kinds());
+        let pristine = before.lead == clean.lead && before.panel == clean.panel;
+        self.detection = start::Detection::Done(installed);
+        let kinds = self.detection.menu_kinds();
+        let form = if pristine {
+            let clean = start::Form::for_kinds(&kinds);
+            start::Form {
+                lead: clean.lead,
+                panel: clean.panel,
+                ..before
+            }
+        } else {
+            before
+        };
+        let left_out = start::apply_kinds(&mut self.tree, &mut self.start, kinds, &form, text);
+        self.built = None;
+        if !left_out.is_empty() {
+            self.toast(start::left_out_message(&left_out));
+        }
+    }
+
     fn poll_live(&mut self, text: &mut TextStore) {
+        self.poll_installed(text);
         let mut latest = None;
         let mut notices = Vec::new();
         let mut released = false;
@@ -870,6 +927,14 @@ impl Review {
         Toast::new(message.into()).show(&mut self.tree);
     }
 
+    /// Why the stored review on screen cannot start its agents again
+    /// (the check is pending, or one of them is not installed).
+    fn agents_blocker(&self) -> Option<String> {
+        self.session
+            .as_ref()
+            .and_then(|session| self.detection.resume_blocker(session))
+    }
+
     fn send_cmd(&mut self, cmd: Command) {
         match &self.source {
             Source::Live(channel) => channel.send(cmd),
@@ -914,6 +979,11 @@ impl Review {
     fn handle_action(&mut self, action: Action, text: &mut TextStore) {
         match action {
             Action::Start => {
+                if !self.detection.startable() {
+                    let why = self.detection.blocked_reason();
+                    start::show_refusal(&mut self.tree, &self.start, &why, text);
+                    return;
+                }
                 let form = start::read(&self.tree, &self.start);
                 let target = match form.target() {
                     Ok(target) => target,
@@ -927,7 +997,13 @@ impl Review {
                     return;
                 }
                 self.starting = true;
-                start::rebuild_note(&mut self.tree, &self.start, &Link::Connecting, text);
+                start::rebuild_note(
+                    &mut self.tree,
+                    &self.start,
+                    &Link::Connecting,
+                    &self.detection,
+                    text,
+                );
                 self.send_cmd(Command::Start {
                     request: form.request,
                     target: Box::new(target),
@@ -955,7 +1031,11 @@ impl Review {
                         self.toast(why);
                     }
                 }
-                _ => self.send_cmd(Command::Resume { dir }),
+                Ok(session) => match self.detection.resume_blocker(&session) {
+                    Some(why) => self.toast(why),
+                    None => self.send_cmd(Command::Resume { dir }),
+                },
+                Err(_) => self.send_cmd(Command::Resume { dir }),
             },
             Action::ShowTab(tab) => {
                 self.tab = tab;
@@ -1036,12 +1116,8 @@ impl Review {
             Action::Close => self.send_cmd(Command::Close),
             Action::NewReview => {
                 self.leave();
-                start::fill(
-                    &mut self.tree,
-                    &mut self.start,
-                    &start::Form::default(),
-                    text,
-                );
+                let form = start::Form::for_kinds(self.start.kinds());
+                start::fill(&mut self.tree, &mut self.start, &form, text);
                 self.rebuild(text);
             }
             Action::FocusPane(part) => self.send_cmd(Command::Focus { part }),
@@ -1053,6 +1129,10 @@ impl Review {
                         self.toast("デモ表示では操作を送信できません");
                         return;
                     }
+                    if let Some(why) = self.agents_blocker() {
+                        self.toast(why);
+                        return;
+                    }
                     self.extending = true;
                     self.send_cmd(Command::ExtendStored { dir, by });
                     self.rebuild(text);
@@ -1061,6 +1141,10 @@ impl Review {
             },
             Action::ResumeShown => {
                 if let Some(dir) = self.stored_dir.clone() {
+                    if let Some(why) = self.agents_blocker() {
+                        self.toast(why);
+                        return;
+                    }
                     self.extending = true;
                     self.send_cmd(Command::Resume { dir });
                     self.rebuild(text);

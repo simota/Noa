@@ -12,27 +12,49 @@ use super::{
     status_key, status_tone, tag,
 };
 
-/// The findings `filters` let through, in rank order.
+/// Whether `filters` let `f` through.
+fn passes(session: &Session, filters: &Filters, f: &Finding) -> bool {
+    (filters.severities.is_empty() || filters.severities.contains(&f.severity))
+        && (filters.lenses.is_empty() || filters.lenses.contains(&f.category))
+        && (filters.statuses.is_empty() || filters.statuses.contains(&status_key(f.status)))
+        && (filters.agreements.is_empty()
+            || filters
+                .agreements
+                .contains(&agreement_key(session.tally(f).agreement)))
+        && filters
+            .reviewer
+            .as_ref()
+            .is_none_or(|part| f.origins().contains(part) || f.stances.contains_key(part))
+}
+
+/// The findings `filters` let through, in rank order. A rebuild ranks once,
+/// here, for the list it shows; counts go through [`count`], unranked.
 pub(crate) fn shown<'a>(session: &'a Session, filters: &Filters) -> Vec<&'a Finding> {
-    session
-        .ranked()
+    ranked(session)
         .into_iter()
-        .filter(|f| filters.severities.is_empty() || filters.severities.contains(&f.severity))
-        .filter(|f| filters.lenses.is_empty() || filters.lenses.contains(&f.category))
-        .filter(|f| filters.statuses.is_empty() || filters.statuses.contains(&status_key(f.status)))
-        .filter(|f| {
-            filters.agreements.is_empty()
-                || filters
-                    .agreements
-                    .contains(&agreement_key(session.tally(f).agreement))
-        })
-        .filter(|f| {
-            filters
-                .reviewer
-                .as_ref()
-                .is_none_or(|part| f.origins().contains(part) || f.stances.contains_key(part))
-        })
+        .filter(|f| passes(session, filters, f))
         .collect()
+}
+
+/// How many findings `filters` let through (a count needs no order).
+pub(crate) fn count(session: &Session, filters: &Filters) -> usize {
+    session
+        .findings
+        .iter()
+        .filter(|f| passes(session, filters, f))
+        .count()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread ranked a session's findings.
+    pub(super) static RANKINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn ranked(session: &Session) -> Vec<&Finding> {
+    #[cfg(test)]
+    RANKINGS.with(|n| n.set(n.get() + 1));
+    session.ranked()
 }
 
 fn chip(
@@ -81,7 +103,7 @@ pub(super) fn summary(
         row,
         format!(
             "表示 {} / 全 {}",
-            shown(session, filters).len(),
+            count(session, filters),
             session.findings.len()
         ),
     );
@@ -123,7 +145,7 @@ pub(super) fn insert(
     let only = |change: &dyn Fn(&mut Filters)| {
         let mut alone = filters.clone();
         change(&mut alone);
-        shown(session, &alone).len()
+        count(session, &alone)
     };
 
     let row = filter_row(tree, bar, "重大度");

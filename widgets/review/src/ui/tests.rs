@@ -1358,3 +1358,32 @@ fn the_smallest_window_shows_as_much_of_the_findings_as_before() {
     }
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// The demo review with its findings repeated up to `n` (ids F1…Fn).
+fn many_findings(n: usize) -> Session {
+    let mut session = crate::demo::session();
+    let base = session.findings.clone();
+    session.findings = (0..n)
+        .map(|i| {
+            let mut f = base[i % base.len()].clone();
+            f.id = format!("F{}", i + 1);
+            f
+        })
+        .collect();
+    session
+}
+
+#[test]
+fn a_rebuild_ranks_the_findings_at_most_once() {
+    // Fifteen chips and the summary count; only the list needs an order.
+    for nothing_shown in [false, true] {
+        let (mut screen, _link) = live_with(many_findings(50));
+        if nothing_shown {
+            screen.filters.severities = [Severity::Info].into();
+        }
+        let mut text = TextStore::new(Default::default());
+        board::RANKINGS.with(|n| n.set(0));
+        screen.rebuild_center(&mut text);
+        assert!(board::RANKINGS.with(|n| n.get()) <= 1);
+    }
+}

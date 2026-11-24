@@ -524,8 +524,10 @@ fn group_exists(pid: i32) -> bool {
 /// waited for no longer than it would be for a next `.pid`). So every
 /// command has an outcome before `done` only when the script is gone.
 ///
-/// While a command's turn is not over, past `watch`'s run limit (counted
-/// from its `.pid` first seen) its process group gets SIGTERM, SIGKILL
+/// While a command's turn is not over and something of its process group
+/// is still left (one first seen gone at a poll past the limit ended by
+/// itself and is not timed out), past `watch`'s run limit (counted from
+/// its `.pid` first seen) its process group gets SIGTERM, SIGKILL
 /// [`RERUN_KILL_GRACE`](crate::model::types::RERUN_KILL_GRACE) later
 /// (again at every poll while any of the group is left); one with no
 /// outcome by then is [`End::TimedOut`], one that had exited keeps its
@@ -619,7 +621,13 @@ pub fn poll(
                 && !(over && watch.decided.contains_key(&n))
             {
                 match watch.term.get(&n) {
-                    None if now.saturating_sub(watch.seen[&n]) >= limits.run => {
+                    // A group already seen gone has nothing left to time
+                    // out: the command ended by itself, and its turn is
+                    // over as above (the last one's only at `done` or the
+                    // start timeout after).
+                    None if !watch.gone.contains_key(&n)
+                        && now.saturating_sub(watch.seen[&n]) >= limits.run =>
+                    {
                         proc.signal(Signal::Term);
                         watch.term.insert(n, now);
                         watch.decided.entry(n).or_insert(End::TimedOut);
@@ -1141,6 +1149,35 @@ mod tests {
         // With `done` there, at once.
         fs::write(dir.join(DONE_FILE), format!("{}\n", request.nonce)).unwrap();
         let status = poll(&dir, &request, &mut Watch::new(LIMITS), 0).unwrap();
+        assert_eq!(status.items[0].end, Some(End::Exited(0)));
+    }
+
+    #[test]
+    fn ac10_the_last_command_found_gone_only_past_its_run_limit_still_waits_for_done() {
+        // Seen running, then first found gone with its `.exit` written and
+        // no `done` at a poll past the run limit: it ended by itself, so
+        // there is nothing to time out, and the run is through only at
+        // `done` or the start timeout after the group was seen gone.
+        let (worktree, dir) = layout("gone-past-limit");
+        let request =
+            write_request(&worktree, &dir, &worktree, &[command("e1", "sleep 2", ".")]).unwrap();
+        let mut child = start(&dir);
+        let mut watch = Watch::new(LIMITS);
+        let started = Instant::now();
+        while !poll(&dir, &request, &mut watch, 0).unwrap().items[0].alive {
+            assert!(started.elapsed() < Duration::from_secs(30), "never ran");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.wait().unwrap();
+        // The script's own files, as they are before it writes `done`.
+        fs::remove_file(dir.join(DONE_FILE)).unwrap();
+        assert_eq!(read_number(&dir, "1.exit").unwrap(), Some(0));
+        let gone_at = LIMITS.run;
+        for now in [gone_at, gone_at + LIMITS.next_start - 1] {
+            let status = poll(&dir, &request, &mut watch, now).unwrap();
+            assert_eq!(status.items[0].end, None, "at {now}");
+        }
+        let status = poll(&dir, &request, &mut watch, gone_at + LIMITS.next_start).unwrap();
         assert_eq!(status.items[0].end, Some(End::Exited(0)));
     }
 

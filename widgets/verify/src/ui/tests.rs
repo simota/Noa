@@ -1687,6 +1687,34 @@ fn row<'a>(screen: &'a Verify, id: &str) -> &'a criteria::Row {
         .unwrap_or_else(|| panic!("no row for {id}"))
 }
 
+/// AC-5, AC-6, L1-2: the only criterion left, though its source could be
+/// removed, offers no 削除 (the engine keeps at least one), and says why.
+#[test]
+fn ac06_the_last_criterion_cannot_be_removed_and_its_button_says_why() {
+    use noa_gpui_core::Widget as _;
+    let tooltip = |screen: &Verify, id: &str| {
+        let remove = widget_for(screen, &Action::RemoveCriterion(id.into())).unwrap();
+        let text = screen
+            .tree
+            .get::<noa_gpui_core::widgets::Button>(remove)
+            .and_then(|b| b.tooltip(noa_gpui_scene::Point::default()));
+        (screen.tree.is_enabled(remove), text.unwrap_or_default())
+    };
+    let mut session = crate::demo::criteria_held();
+    session.criteria.retain(|c| c.id == "AC-3");
+    let (screen, _link) = live_with(session);
+    let (enabled, text) = tooltip(&screen, "AC-3");
+    assert!(!enabled, "{text}");
+    assert!(text.contains("1件以上"), "{text}");
+    // With another criterion beside it, it goes.
+    let mut session = crate::demo::criteria_held();
+    session.criteria.retain(|c| c.id == "AC-3" || c.id == "AC-1");
+    let (screen, _link) = live_with(session);
+    let (enabled, text) = tooltip(&screen, "AC-3");
+    assert!(enabled, "{text}");
+    assert_eq!(text, "この基準を外します");
+}
+
 #[test]
 fn ac06_each_criteria_change_is_sent_as_one_edit() {
     let (mut screen, link) = live_with(crate::demo::criteria_held());

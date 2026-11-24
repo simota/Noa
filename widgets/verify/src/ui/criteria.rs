@@ -310,16 +310,21 @@ pub(super) fn insert(
             down,
             Action::MoveCriterion(c.id.clone(), (i + 1).min(count - 1)),
         ));
-        let remove = tree.insert(
-            Some(top),
-            small("削除").tooltip(if removable(c) {
-                "この基準を外します"
-            } else {
-                "あなたの基準と仕様の基準は削除できません（文言は直せます）"
-            }),
-        );
+        // As the engine takes a removal: its source, and one criterion
+        // always left.
+        let (can_remove, why) = if !removable(c) {
+            (
+                false,
+                "あなたの基準と仕様の基準は削除できません（文言は直せます）",
+            )
+        } else if count <= 1 {
+            (false, "基準は1件以上必要です（最後の基準は削除できません）")
+        } else {
+            (true, "この基準を外します")
+        };
+        let remove = tree.insert(Some(top), small("削除").tooltip(why));
         tree.set_accessible_label(remove, format!("{} を削除", c.id));
-        tree.set_enabled(remove, removable(c));
+        tree.set_enabled(remove, can_remove);
         actions.push((remove, Action::RemoveCriterion(c.id.clone())));
         let (statement_text, how_text) = editor
             .drafts

@@ -1251,3 +1251,62 @@ fn every_filter_count_is_what_choosing_that_value_alone_shows() {
         }
     }
 }
+
+#[test]
+fn keyboard_focus_survives_a_new_state_of_the_review() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    let chip = Action::ToggleSeverity(Severity::Critical);
+    let id = widget_for(&screen, &chip).unwrap();
+    screen.tree.set_focus(Some(id));
+    let mut next = crate::demo::held();
+    next.rev += 1;
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(next)),
+            reply_root: None,
+            session_dir: None,
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    let focused = screen.tree.focused().expect("focus kept");
+    assert_ne!(focused, id, "the screen was rebuilt");
+    assert_eq!(widget_for(&screen, &chip), Some(focused));
+}
+
+#[test]
+fn focus_on_the_second_of_two_alike_buttons_stays_on_the_second() {
+    // A selected finding's row and the thread's 選択を解除 both clear the
+    // selection; focus on the latter stays there through a rebuild.
+    let (mut screen, link) = live_with(crate::demo::held());
+    act(&mut screen, Action::SelectFinding(Some("F2".into())));
+    let clear = Action::SelectFinding(None);
+    let alike: Vec<WidgetId> = screen
+        .actions
+        .iter()
+        .filter(|(_, a)| *a == clear)
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(alike.len(), 2);
+    screen.tree.set_focus(Some(alike[1]));
+    let mut next = crate::demo::held();
+    next.rev += 1;
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(next)),
+            reply_root: None,
+            session_dir: None,
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    let now: Vec<WidgetId> = screen
+        .actions
+        .iter()
+        .filter(|(_, a)| *a == clear)
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(screen.tree.focused(), Some(now[1]));
+}

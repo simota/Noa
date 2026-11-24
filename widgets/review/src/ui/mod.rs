@@ -396,6 +396,41 @@ impl Review {
     }
 
     fn rebuild(&mut self, text: &mut TextStore) {
+        // Rebuilding replaces the widgets, and focus would go with them: it
+        // goes back to the widget that takes the focused one's place.
+        let focused = self.focused_action();
+        self.rebuild_widgets(text);
+        if self.tree.focused().is_none()
+            && let Some((action, nth)) = focused
+        {
+            self.focus_action(&action, nth);
+        }
+    }
+
+    /// The action of the widget with keyboard focus, and which of the
+    /// widgets carrying it (in tree order) that is.
+    fn focused_action(&self) -> Option<(Action, usize)> {
+        let focused = self.tree.focused()?;
+        let at = self.actions.iter().position(|(id, _)| *id == focused)?;
+        let action = self.actions[at].1.clone();
+        let nth = self.actions[..at]
+            .iter()
+            .filter(|(_, a)| *a == action)
+            .count();
+        Some((action, nth))
+    }
+
+    /// Focuses the `nth` widget that carries `action` (the first, when there
+    /// are fewer now).
+    fn focus_action(&mut self, action: &Action, nth: usize) {
+        let mut carrying = self.actions.iter().filter(|(_, a)| a == action);
+        let first = carrying.clone().next().map(|(id, _)| *id);
+        if let Some(id) = carrying.nth(nth).map(|(id, _)| *id).or(first) {
+            self.tree.set_focus(Some(id));
+        }
+    }
+
+    fn rebuild_widgets(&mut self, text: &mut TextStore) {
         self.built = Some(self.built_key());
         self.actions.clear();
         let started = self.session.is_some();
@@ -1272,14 +1307,13 @@ impl Screen for Review {
                 self.filters.reviewer.as_ref(),
             );
             self.handle_action(action, text);
-            // The rebuild replaced the pressed widget and focus went with it:
-            // give it to the widget that took its place.
+            // A toggle pressed from the keyboard now carries another action
+            // (the rebuild could not find it): focus the widget that does.
             if had_focus
                 && self.tree.focused().is_none()
-                && let Some((id, _)) =
-                    again.and_then(|again| self.actions.iter().find(|(_, a)| *a == again))
+                && let Some(again) = again
             {
-                self.tree.set_focus(Some(*id));
+                self.focus_action(&again, 0);
             }
         }
     }

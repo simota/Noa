@@ -188,10 +188,8 @@ pub struct Review {
     tab: CenterTab,
     filters: Filters,
     selected: Option<String>,
-    /// An intervention sent and not yet seen in the log: its text, and how
-    /// many messages the log had when it was sent (only a later message can
-    /// be it arriving).
-    pending_intervention: Option<(String, usize)>,
+    /// An intervention sent and not yet seen in the log.
+    pending_intervention: Option<PendingIntervention>,
     file_dialogs: Vec<FileDialogRequest>,
     /// The session on screen was read from its log: no runner drives it.
     read_only: bool,
@@ -683,16 +681,16 @@ impl Review {
             !session.waits_to_continue(),
             text,
         );
-        if let Some((pending, sent_at)) = &self.pending_intervention
+        if let Some(pending) = &self.pending_intervention
             && session
                 .messages
                 .iter()
-                .skip(*sent_at)
-                .any(|m| m.body.trim() == pending.trim())
+                .skip(pending.sent_at)
+                .any(|m| pending.arrived_as(m))
         {
             // It arrived: the composer is emptied unless a new draft was
             // started meanwhile.
-            if composer::text(&self.tree, &self.composer) == pending.trim() {
+            if composer::text(&self.tree, &self.composer) == pending.body.trim() {
                 composer::clear(&mut self.tree, &self.composer);
             }
             self.pending_intervention = None;
@@ -1140,7 +1138,11 @@ impl Review {
                     return;
                 }
                 let (_, to) = composer::recipient(&self.tree, &self.composer, session);
-                self.pending_intervention = Some((body.clone(), session.messages.len()));
+                self.pending_intervention = Some(PendingIntervention {
+                    body: body.clone(),
+                    to: to.clone(),
+                    sent_at: session.messages.len(),
+                });
                 self.send_cmd(Command::Intervene { to, body });
             }
             Action::Retry => self.send_cmd(Command::Retry),
@@ -1319,6 +1321,26 @@ fn pressed_again(
         Action::FilterReviewer(Some(_)) => Some(Action::FilterReviewer(None)),
         Action::FilterReviewer(None) => reviewer.map(|p| Action::FilterReviewer(Some(p.clone()))),
         other => Some(other.clone()),
+    }
+}
+
+/// An intervention sent and not yet seen in the log: what was sent, to
+/// whom, and how many messages the log had then (only a later message can
+/// be it arriving).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingIntervention {
+    body: String,
+    to: Vec<PartId>,
+    sent_at: usize,
+}
+
+impl PendingIntervention {
+    /// Whether `message` is this intervention, logged.
+    fn arrived_as(&self, message: &review::model::types::Message) -> bool {
+        message.author == review::model::types::Author::User
+            && message.kind == review::model::types::MsgKind::Intervention
+            && message.to == self.to
+            && message.body.trim() == self.body.trim()
     }
 }
 

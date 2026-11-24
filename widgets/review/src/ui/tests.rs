@@ -1146,3 +1146,39 @@ fn the_document_file_can_be_chosen_in_an_open_panel() {
         "/tmp/plan.md"
     );
 }
+
+#[test]
+fn a_lead_summary_with_the_sent_text_does_not_count_as_the_send() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    type_draft(&mut screen, "認可も見てください");
+    act(&mut screen, Action::Send);
+    assert_eq!(commands(&link).len(), 1);
+    // The lead's summary happens to read the same: it is not the user's
+    // instruction arriving, so the draft and the wait stay.
+    let mut next = crate::demo::held();
+    let n = next.messages.len() + 1;
+    next.messages.push(review::model::types::Message {
+        id: review::model::types::MessageId::nth(n),
+        round: 1,
+        author: review::model::types::Author::Part(review::model::types::PartId::new(
+            review::model::types::LEAD_ID,
+        )),
+        kind: review::model::types::MsgKind::Summary,
+        to: Vec::new(),
+        body: "認可も見てください".to_owned(),
+        at: 2,
+    });
+    next.rev += 1;
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(next)),
+            reply_root: None,
+            session_dir: None,
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert_eq!(draft(&screen), "認可も見てください");
+    assert!(screen.pending_intervention.is_some());
+}

@@ -386,18 +386,65 @@ fn named_exactly(root: &Path, rel: &Path) -> Option<fs::Metadata> {
     Some(meta)
 }
 
+/// Whether `path/.git` is a regular file naming one of `repo`'s worktree
+/// records (`<common dir>/worktrees/<name>`) whose own `gitdir` names
+/// `path/.git` back: the folder at `path` is that worktree, not one moved
+/// there, a copy, or a folder holding another worktree's `.git`.
+fn links_back(repo: &Path, path: &Path) -> bool {
+    let dot_git = path.join(".git");
+    let named = |file: &Path| -> Option<PathBuf> {
+        let meta = fs::symlink_metadata(file).ok()?;
+        if !meta.is_file() || meta.len() > 64 * 1024 {
+            return None;
+        }
+        let text = fs::read_to_string(file).ok()?;
+        Some(PathBuf::from(text.lines().next()?.trim()))
+    };
+    let Some(admin) = named(&dot_git).and_then(|line| {
+        line.to_str()?
+            .strip_prefix("gitdir: ")
+            .map(|p| path.join(p))
+    }) else {
+        return false;
+    };
+    let mut cmd = git(repo);
+    cmd.args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    let Ok(common) = run(cmd, b"") else {
+        return false;
+    };
+    let common = PathBuf::from(OsString::from_vec(common.trim_ascii_end().to_vec()));
+    let in_repo = admin
+        .parent()
+        .is_some_and(|parent| same_path(parent, &common.join("worktrees")));
+    let back = named(&admin.join("gitdir")).map(|p| admin.join(p));
+    in_repo && back.is_some_and(|back| same_path(&back, &dot_git))
+}
+
 /// Why `path` is not a detached worktree of `repo` at `head_sha` (named in
 /// the error), as a resume checks it.
 pub fn check(repo: &Path, path: &Path, head_sha: &str) -> Result<(), String> {
     let shown = path.display();
-    if fs::symlink_metadata(path).is_err() {
-        return Err(format!("worktree {shown} がありません"));
+    match fs::symlink_metadata(path) {
+        Err(_) => return Err(format!("worktree {shown} がありません")),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "{shown} はシンボリックリンクです（記録した worktree ではありません）"
+            ));
+        }
+        Ok(_) => {}
     }
     let Some(entry) = entry_at(repo, path)? else {
         return Err(format!(
             "{shown} はこのリポジトリの worktree ではありません"
         ));
     };
+    // Git keeps a registration whose folder was moved away (`prunable`),
+    // and lists it at its old path and HEAD whatever is there now.
+    if entry.prunable {
+        return Err(format!(
+            "worktree {shown} は Git の登録だけが残っています（フォルダが移動されたか、置き換えられました）"
+        ));
+    }
     if let Some(branch) = &entry.branch {
         return Err(format!(
             "worktree {shown} はブランチ {} を取り出しています（detached ではありません）",
@@ -406,6 +453,11 @@ pub fn check(repo: &Path, path: &Path, head_sha: &str) -> Result<(), String> {
     }
     if entry.bare || !entry.detached {
         return Err(format!("worktree {shown} は detached ではありません"));
+    }
+    if !links_back(repo, path) {
+        return Err(format!(
+            "{shown} はこのリポジトリが登録した worktree のフォルダではありません（.git が別の場所を指しているか、ありません）"
+        ));
     }
     match entry.head.as_deref() {
         Some(head) if head == head_sha => Ok(()),
@@ -1143,6 +1195,48 @@ mod tests {
                 .contains("ありません")
         );
         add(&repo, &second, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        check(&repo, &second, &head).unwrap();
+    }
+
+    /// AC-19, L1-3: a registration git still holds for a folder that is no
+    /// longer that worktree (moved away while stopped, a plain folder made
+    /// in its place; or a `.git` file there naming another worktree) is
+    /// refused, though git still lists it at the head.
+    #[test]
+    fn ac19_check_refuses_a_folder_that_is_not_the_registered_worktree() {
+        let repo = repo();
+        let (c, target_dir, path) = setup(&repo, Head::Ref("feat".into()));
+        let head = c.rebuild.head_sha.clone();
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        check(&repo, &path, &head).unwrap();
+
+        // Moved away (as Finder moves it), a plain folder in its place.
+        let moved = path.with_file_name("moved-away");
+        fs::rename(&path, &moved).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("a.txt"), "one\n").unwrap();
+        assert!(
+            sh(&repo, &["worktree", "list", "--porcelain"]).contains("prunable"),
+            "git no longer marks it prunable"
+        );
+        let err = check(&repo, &path, &head).unwrap_err();
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        fs::remove_dir_all(&path).unwrap();
+        fs::rename(&moved, &path).unwrap();
+        check(&repo, &path, &head).unwrap();
+
+        // Its `.git` file naming another worktree of the repository.
+        let second = path.with_file_name("verify-ver-1-codex");
+        add(&repo, &second, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        let own = fs::read(path.join(".git")).unwrap();
+        fs::copy(second.join(".git"), path.join(".git")).unwrap();
+        let err = check(&repo, &path, &head).unwrap_err();
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        // No `.git` there at all.
+        fs::remove_file(path.join(".git")).unwrap();
+        assert!(check(&repo, &path, &head).is_err());
+        fs::write(path.join(".git"), own).unwrap();
+        check(&repo, &path, &head).unwrap();
         check(&repo, &second, &head).unwrap();
     }
 

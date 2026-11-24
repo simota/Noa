@@ -4108,6 +4108,29 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// AC-19, L1-3: a worktree moved away while stopped, a plain folder
+    /// made at its path: git still lists it there (`prunable`), and the
+    /// resume is refused rather than starting a verifier in that folder.
+    #[test]
+    fn ac19_a_resume_refuses_a_plain_folder_left_where_a_worktree_was_moved_from() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_round_one_briefs(&fake, &root);
+        let s = store::read_session(&dir).unwrap();
+        let tree = s.worktrees[&PartId::new("claude")].path.clone();
+        fs::rename(&tree, root.join("moved-away")).unwrap();
+        fs::create_dir_all(tree.join("src")).unwrap();
+        fs::write(tree.join("src/lib.rs"), "pub fn one() -> u32 { 1 }\n").unwrap();
+        let err = open_wired(&fake, Start::Resume { dir: dir.clone() })
+            .err()
+            .unwrap();
+        assert!(err.contains("再開できません"), "{err}");
+        assert!(err.contains("claude"), "{err}");
+        assert!(err.contains(&tree.display().to_string()), "{err}");
+        assert!(!tree.join(".git").exists(), "a verifier's worktree was made there");
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn ac19_a_resume_refuses_a_worktree_that_is_not_detached_at_the_head() {
         let fake = fake();

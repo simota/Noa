@@ -335,7 +335,8 @@ pub fn ingest(
 /// ingest of the same round made (cut short by a crash before it was
 /// logged): a regular file, reached without a link, of the same size and
 /// bytes (so the same digest). Anything else is said, and left as it is.
-fn same_copy(base: &Path, dir: &Path, rel: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Re-run logs are taken back the same way ([`crate::rerun::ingest_logs`]).
+pub(crate) fn same_copy(base: &Path, dir: &Path, rel: &Path, bytes: &[u8]) -> Result<(), String> {
     let (file, size) = open_below(base, dir, rel).map_err(|refused| refused.message(rel))?;
     let (there, over) = fsx::read_capped(file, bytes.len() as u64)
         .map_err(|e| format!("既にあるコピーを読めません: {e}"))?;

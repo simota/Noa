@@ -715,7 +715,10 @@ pub fn check_digests(base: &Path, dir: &Path, request: &RerunRequest) -> Result<
 /// [`crate::model::types::MAX_LOG_BYTES`] with the cut marked.
 ///
 /// The cut copy ends with [`CUT_MARK`]; the source is read without
-/// following a link and the copy created exclusively.
+/// following a link and the copy created exclusively. A file already at
+/// the copy's path (an ingest a crash cut short before `RerunFinished`
+/// was logged) is taken when it is a regular file of the same size and
+/// bytes, and refused, left as it is, otherwise.
 pub fn ingest_logs(
     src_base: &Path,
     dir: &Path,
@@ -743,8 +746,16 @@ pub fn ingest_logs(
                 let folder = to.parent().expect("a log path has a folder");
                 let fd = fsx::open_dir(reply_base, folder, true)
                     .map_err(|e| format!("{name} を保存できません: {e}"))?;
-                fsx::write_new_at(&fd, OsStr::new(&name), &bytes)
-                    .map_err(|e| format!("{name} を保存できません: {e}"))?;
+                match fsx::write_new_at(&fd, OsStr::new(&name), &bytes) {
+                    Ok(()) => {}
+                    // A copy an earlier ingest made and a crash kept from
+                    // being logged: taken when it is this one.
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        evidence::same_copy(reply_base, folder, Path::new(&name), &bytes)
+                            .map_err(|why| format!("{name} を保存できません: {why}"))?;
+                    }
+                    Err(e) => return Err(format!("{name} を保存できません: {e}")),
+                }
                 Ok(Stored {
                     path: store::rerun_log_path(Path::new(""), round, part, item.n),
                     bytes: bytes.len() as u64,
@@ -940,6 +951,47 @@ mod tests {
             }
         ));
         assert!(matches!(outcomes[2], Rerun::Matched { exit: 0, .. }));
+    }
+
+    #[test]
+    fn a_log_copy_left_by_a_crash_before_it_was_logged_is_taken_when_identical() {
+        let (worktree, dir) = layout("again");
+        let request = write_request(
+            &worktree,
+            &dir,
+            &worktree,
+            &[command("e1", "exit 0", "."), command("e2", "exit 0", ".")],
+        )
+        .unwrap();
+        fs::write(dir.join("1.log"), "one\n").unwrap();
+        fs::write(dir.join("2.log"), "two\n").unwrap();
+        let reply_base = temp("rerun-repo");
+        let reply_dir = reply_base.join(".noa/verify/ver-1");
+        let ingest = || {
+            ingest_logs(
+                &worktree,
+                &dir,
+                &reply_base,
+                &reply_dir,
+                1,
+                &part(),
+                &request,
+            )
+        };
+        let first: Vec<Stored> = ingest().into_iter().map(|(_, r)| r.unwrap()).collect();
+        // The copies were made, then the widget stopped before it logged
+        // `RerunFinished`: the next ingest finds them and takes them as
+        // they are, with the same `Stored`.
+        let again: Vec<Stored> = ingest().into_iter().map(|(_, r)| r.unwrap()).collect();
+        assert_eq!(again, first);
+        // A copy holding something else is refused and left as it is.
+        let copy = reply_dir.join(&first[1].path);
+        fs::write(&copy, "TWO\n").unwrap();
+        let third = ingest();
+        assert_eq!(third[0].1.as_ref().unwrap(), &first[0]);
+        let why = third[1].1.as_ref().unwrap_err();
+        assert!(why.contains("別の内容"), "{why}");
+        assert_eq!(fs::read_to_string(&copy).unwrap(), "TWO\n");
     }
 
     #[test]

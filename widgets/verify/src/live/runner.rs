@@ -2030,24 +2030,23 @@ fn open_log(
 
 /// On a resume (L1-10, AC-19): a worktree the log records as made whose
 /// folder is gone is rebuilt from the recipe, and so is one removed with
-/// ワークツリーを削除 while a round is still in progress (the round's
-/// briefs go into it). One removed between rounds is made again by the
-/// engine before the next round. A rebuild that fails refuses the resume.
+/// ワークツリーを削除 (an interrupted verification then rebuilds them on
+/// 再開, L1-3). An extension of an ended verification rebuilds the ones
+/// removed at its close here too: the engine asked for them when it took
+/// the extension, before any runner could make them. A rebuild that fails
+/// refuses the resume; one that failed before is left to 再試行.
 fn rebuild_worktrees(engine: &mut Engine, store: &mut Store) -> Result<(), String> {
     let session = engine.session();
     if session.closed || session.isolation != Isolation::Worktree || session.frozen_at.is_none() {
         return Ok(());
     }
-    let running = session
-        .current_round()
-        .is_some_and(|r| r.phase != Phase::Closed);
     let target = store::target_dir(&engine.reply_dir());
     let mut made = Vec::new();
     for part in session.verifier_ids() {
         let path = worktree::path_for(&session.main_worktree, &session.id, part);
         let needed = match session.worktrees.get(part).map(|t| &t.state) {
             Some(WorktreeState::Made) => fs::symlink_metadata(&path).is_err(),
-            Some(WorktreeState::Removed) => running,
+            Some(WorktreeState::Removed) => true,
             Some(WorktreeState::Failed { .. }) | None => false,
         };
         if needed {
@@ -3383,6 +3382,67 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_finished_verification_is_not_resumed_but_a_full_run_is_extended_with_its_worktrees() {
+        let root = temp_root();
+        let dir = finished_with_a_failure(&root);
+        let fake = fake();
+        let err = open_wired(&fake, Start::Resume { dir: dir.clone() })
+            .err()
+            .unwrap();
+        assert!(err.contains("終了しています"), "{err}");
+        let closed = store::read_session(&dir).unwrap();
+        assert!(
+            closed
+                .worktrees
+                .values()
+                .all(|t| t.state == WorktreeState::Removed && !t.path.exists()),
+            "removed at close"
+        );
+
+        let (mut runner, _actions, _updates) = open_wired(
+            &fake,
+            Start::Extend {
+                dir: dir.clone(),
+                by: 1,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let stored = store::read_session(&dir).unwrap();
+        assert!(!stored.closed);
+        assert_eq!(stored.max_rounds, 2);
+        assert!(stored.verdict().is_none());
+        assert_eq!(
+            fake.0.borrow().spawned,
+            0,
+            "a pane started before the extension"
+        );
+        for tree in stored.worktrees.values() {
+            assert_eq!(tree.state, WorktreeState::Made);
+            assert!(tree.path.join("src/lib.rs").is_file(), "not rebuilt");
+        }
+        assert!(
+            fs::read_to_string(store::report_path(&dir))
+                .unwrap()
+                .contains("（暫定）")
+        );
+        let mut conn = fake.clone();
+        assert!(runner.begin(&mut conn).is_ok());
+        step(&mut runner, &mut conn);
+        assert_eq!(runner.engine.session().rounds.len(), 2, "round 2 started");
+        assert_eq!(
+            fake.0.borrow().spawned,
+            2,
+            "both verifiers, in their worktrees"
+        );
+        let s = runner.engine.session().clone();
+        for part in ["claude", "codex"] {
+            let pane = fake.pane_of(&format!(":{part}"));
+            assert_eq!(fake.cwd(pane), store::verifier_root(&s, &PartId::new(part)));
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn the_agents_panes_close_together_once_the_verification_has_ended() {
         let fake = fake();
         let root = temp_root();
@@ -3576,6 +3636,19 @@ pub(crate) mod tests {
             s.worktrees[&PartId::new("claude")].state,
             WorktreeState::Removed
         );
+        // Put back at a detached HEAD, ワークツリーを削除 takes it now.
+        git(&codex, &["checkout", "-q", "--detach"]);
+        actions.send(Action::RemoveWorktrees).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(notices(&updates), ["1 個のワークツリーを削除しました"]);
+        assert!(!codex.exists());
+        assert_eq!(
+            runner.engine.session().worktrees[&PartId::new("codex")].state,
+            WorktreeState::Removed
+        );
+        actions.send(Action::RemoveWorktrees).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(notices(&updates), [NO_WORKTREES]);
         let _ = fs::remove_dir_all(root);
     }
 

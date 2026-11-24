@@ -480,7 +480,7 @@ impl Review {
         self.stored_dir = Some(dir.to_owned());
         self.stored_free = !store::is_busy(dir);
         self.report_stale = !matches!(self.source, Source::Demo)
-            && report_stale(dir, self.session.as_deref().expect("just set"));
+            && store::report_is_stale(dir, self.session.as_deref().expect("just set"));
         self.rebuild(text);
         Ok(())
     }
@@ -1160,7 +1160,7 @@ impl Review {
                 let Some(dir) = self.stored_dir.clone() else {
                     return;
                 };
-                match regenerate_report(&dir) {
+                match store::rewrite_report(&dir) {
                     Ok(()) => {
                         self.report_stale = false;
                         self.toast("レポートをログから書き直しました");
@@ -1172,24 +1172,6 @@ impl Review {
             }
         }
     }
-}
-
-/// Whether `dir`'s stored report is not what its log gives. A review not
-/// yet consolidated once has no report to compare.
-fn report_stale(dir: &Path, session: &Session) -> bool {
-    let has_report = session.closed || session.rounds.iter().any(|r| r.outcome.is_some());
-    has_report
-        && std::fs::read_to_string(store::report_path(dir)).ok()
-            != Some(export::report_markdown(session))
-}
-
-/// Writes `dir`'s report from its log, holding the log's lock while it
-/// does (a runner that took it up meanwhile is not written under).
-fn regenerate_report(dir: &Path) -> Result<(), String> {
-    let (store, session) = store::Store::open(dir).map_err(|e| e.to_string())?;
-    store::write_report(dir, &export::report_markdown(&session)).map_err(|e| e.to_string())?;
-    drop(store);
-    Ok(())
 }
 
 impl Screen for Review {

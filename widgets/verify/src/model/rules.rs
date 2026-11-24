@@ -160,19 +160,55 @@ impl<'a> History<'a> {
         }
     }
 
-    /// Rule 3: the passes that count for a ruling citing `cited`: each
-    /// verifier's `pass` of any round one of whose commands or files
-    /// `cited` holds and that counts for the criterion.
-    pub fn counted_passes(&self, cited: &[EvidenceKey]) -> Vec<&'a CriterionResult> {
+    /// Every verifier's `pass` on the criterion, of any round.
+    fn passes(&self) -> impl Iterator<Item = &'a CriterionResult> + '_ {
         self.results
             .iter()
             .copied()
             .filter(|r| r.outcome == Outcome::Pass && self.session.is_verifier(&r.part))
-            .filter(|r| {
-                r.evidence
-                    .iter()
-                    .any(|k| cited.contains(k) && self.standing(k) == Standing::Stored)
+    }
+
+    /// The passes a ruling citing `cited` would rest on but for a contest
+    /// (rule 3): each one of whose commands or files `cited` holds and that
+    /// counts for the criterion.
+    fn cited_passes<'c>(
+        &'c self,
+        cited: &'c [EvidenceKey],
+    ) -> impl Iterator<Item = &'a CriterionResult> + 'c {
+        self.passes().filter(|r| {
+            r.evidence
+                .iter()
+                .any(|k| cited.contains(k) && self.standing(k) == Standing::Stored)
+        })
+    }
+
+    /// Rule 3: the passes that count for a ruling citing `cited`: each
+    /// verifier's `pass` of any round one of whose commands or files
+    /// `cited` holds and that counts for the criterion, unless it is
+    /// contested ([`History::contesting`]).
+    pub fn counted_passes(&self, cited: &[EvidenceKey]) -> Vec<&'a CriterionResult> {
+        self.cited_passes(cited)
+            .filter(|r| self.contesting(r).is_empty())
+            .collect()
+    }
+
+    /// Rule 3: the cross-checks that contest `pass` and still stand: each
+    /// a `not_reproduced` about that very result (rule 1) citing evidence
+    /// that counts (rule 2), with no `pass` on the criterion of a later
+    /// round than the check that is not itself contested. Its checker is
+    /// another verifier, as a verifier is never assigned its own result. A
+    /// contested pass counts for no ruling; a `disputed` check contests
+    /// nothing.
+    pub fn contesting(&self, pass: &CriterionResult) -> Vec<&'a CrossCheck> {
+        self.checks
+            .iter()
+            .filter(|c| {
+                self.not_reproduces(c, pass)
+                    && !self.passes().any(|later| {
+                        later.round > c.check.round && self.contesting(later).is_empty()
+                    })
             })
+            .map(|c| c.check)
             .collect()
     }
 
@@ -212,11 +248,12 @@ impl<'a> History<'a> {
         })
     }
 
-    /// Rule 4: whether `check` answers `fail`: a `not_reproduced` about that
-    /// very result, citing evidence that counts for the criterion.
-    fn answers(&self, check: &Check, fail: &CriterionResult) -> bool {
+    /// Whether `check` is a `not_reproduced` about that very `result`
+    /// (rule 1), citing evidence that counts for the criterion (rule 2):
+    /// it answers a fail (rule 4) and contests a pass (rule 3).
+    fn not_reproduces(&self, check: &Check, result: &CriterionResult) -> bool {
         check.check.outcome == CrossOutcome::NotReproduced
-            && check.about.is_some_and(|r| std::ptr::eq(r, fail))
+            && check.about.is_some_and(|r| std::ptr::eq(r, result))
             && check
                 .check
                 .evidence
@@ -230,7 +267,7 @@ impl<'a> History<'a> {
     /// a `not_reproduced` about another result of its verifier.
     pub fn open_fails(&self) -> Vec<OpenFail<'a>> {
         let fails = self.results.iter().copied().filter(|r| {
-            r.outcome == Outcome::Fail && !self.checks.iter().any(|c| self.answers(c, r))
+            r.outcome == Outcome::Fail && !self.checks.iter().any(|c| self.not_reproduces(c, r))
         });
         fails
             .map(|fail| {
@@ -380,6 +417,22 @@ impl<'a> History<'a> {
                 "; {} re-ran matched, but no pass on {criterion} cites {}",
                 keys(&off_pass),
                 if off_pass.len() == 1 { "it" } else { "them" }
+            ));
+        }
+        for pass in self.cited_passes(cited) {
+            let against = self.contesting(pass);
+            if against.is_empty() {
+                continue;
+            }
+            let by: Vec<String> = against
+                .iter()
+                .map(|c| format!("{}'s R{} not_reproduced", c.by, c.round))
+                .collect();
+            why.push_str(&format!(
+                "; {}'s R{} pass is contested by {} and counts for nothing until a later pass that is not contested",
+                pass.part,
+                pass.round,
+                by.join(", ")
             ));
         }
         Some(why)
@@ -923,6 +976,7 @@ mod tests {
         use Step::*;
         const OPEN: &str = "AC-1: verified despite codex's R1 fail, which no not_reproduced cross-check has answered";
         const TWO: &str = "AC-1: verified needs a matched re-run or two independent passes";
+        const CONTESTED: &str = "claude's R1 pass is contested by claude-2's R2 not_reproduced and counts for nothing until a later pass that is not contested";
         const NOT_BACKED: &str = "AC-1: failed needs a cited fail result or reproduced evidence";
         let not_for = |key: &str| {
             format!(
@@ -1097,6 +1151,170 @@ mod tests {
                 &["codex/r1/e1"],
                 Err(format!(
                     "{TWO}; codex/r1/e1 re-ran matched, but no pass on AC-1 cites it"
+                )),
+            ),
+            // When a pass is contested (rules 1 and 3).
+            (
+                "a contested pass is no second source",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                    Chk(2, "claude-2", "claude/AC-1", NotReproduced, &["e1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r1/e1"],
+                Err(format!("{TWO}; {CONTESTED}")),
+            ),
+            (
+                "a contested pass's matched re-run",
+                claude_matched()
+                    .into_iter()
+                    .chain([Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"])])
+                    .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(format!(
+                    "{TWO}; claude's R1 pass is contested by codex's R2 not_reproduced and counts for nothing until a later pass that is not contested"
+                )),
+            ),
+            (
+                "a pass contested on an observation",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                    Chk(2, "claude-2", "claude/AC-1", NotReproduced, &["o1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r1/e1"],
+                Err(format!("{TWO}; {CONTESTED}")),
+            ),
+            (
+                "a pass contested twice",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                    Chk(2, "claude-2", "claude/AC-1", NotReproduced, &["e1"]),
+                    Chk(3, "codex", "claude/AC-1", NotReproduced, &["e2"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r1/e1"],
+                Err(format!(
+                    "{TWO}; claude's R1 pass is contested by claude-2's R2 not_reproduced, codex's R3 not_reproduced and counts for nothing until a later pass that is not contested"
+                )),
+            ),
+            (
+                "a pass only disputed is not contested",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                    Chk(2, "claude-2", "claude/AC-1", Disputed, &[]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a pass reproduced is not contested",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                    Chk(2, "claude-2", "claude/AC-1", Reproduced, &["e1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a not_reproduced whose log was lost contests nothing",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                    Chk(2, "claude-2", "claude/AC-1", NotReproduced, &["e1"]),
+                    Lost("claude-2/r2/e1"),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a not_reproduced with a picture of another criterion contests nothing",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                    Chk(2, "claude-2", "claude/AC-1", NotReproduced, &["f1"]),
+                    Shows("claude-2/r2/f1", &["AC-2"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a not_reproduced about an earlier fail contests no later pass",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Res(2, "codex", "AC-1", Pass, &["e2"]),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["e1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r2/e2"],
+                Ok(()),
+            ),
+            (
+                "a contested pass, then a later pass by another verifier",
+                claude_matched()
+                    .into_iter()
+                    .chain([
+                        Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                        Res(3, "claude-2", "AC-1", Pass, &["e1"]),
+                    ])
+                    .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a contested pass, then a later pass by its own verifier",
+                claude_matched()
+                    .into_iter()
+                    .chain([
+                        Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                        Res(3, "claude", "AC-1", Pass, &["e2"]),
+                    ])
+                    .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a contested pass and another verifier's pass of the round of the check",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                    Res(2, "claude-2", "AC-1", Pass, &["e1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "claude-2/r2/e1"],
+                Err(format!(
+                    "{TWO}; claude's R1 pass is contested by codex's R2 not_reproduced and counts for nothing until a later pass that is not contested"
+                )),
+            ),
+            (
+                "a contested pass, then a later pass that is itself contested",
+                claude_matched()
+                    .into_iter()
+                    .chain([
+                        Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                        Res(2, "claude-2", "AC-1", Pass, &["e1"]),
+                        Chk(3, "codex", "claude-2/AC-1", NotReproduced, &["e2"]),
+                        Res(3, "codex", "AC-1", Pass, &["e3"]),
+                        Chk(4, "claude", "codex/AC-1", NotReproduced, &["e2"]),
+                    ])
+                    .collect(),
+                Verified,
+                &["claude/r1/e1", "claude-2/r2/e1", "codex/r3/e3"],
+                Err(format!(
+                    "{TWO}; claude's R1 pass is contested by codex's R2 not_reproduced and counts for nothing until a later pass that is not contested; claude-2's R2 pass is contested by codex's R3 not_reproduced and counts for nothing until a later pass that is not contested; codex's R3 pass is contested by claude's R4 not_reproduced and counts for nothing until a later pass that is not contested"
                 )),
             ),
             // When a fail is open or answered (rules 1 and 4).

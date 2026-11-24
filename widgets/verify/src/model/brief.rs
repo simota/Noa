@@ -959,6 +959,14 @@ fn section_defects<'a>(
             tally.supporters.len(),
             tally.disputers.len()
         );
+        // The earlier rounds' cross-checks on it, with their evidence: a
+        // reproduction may back a failure (L1-6 rule 6) that a judge in a
+        // new pane rules on. This round's are in the cross-checks section.
+        for check in session.cross_checks.iter().filter(|x| {
+            x.round < round && matches!(&x.subject, Subject::Defect { id } if *id == d.id)
+        }) {
+            write_check(out, session, check, reply_dir);
+        }
     }
     out.push('\n');
 }
@@ -1330,4 +1338,79 @@ pub fn correction_note(to: &PartId, error: &str, reply_path: &Path) -> String {
         "Your {what} could not be used:\n{error}\n\nFix it and write the whole file again at:\n{}\n",
         reply_path.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::types::Phase;
+    use crate::testkit::{self, Rig, VERIFIERS, all_pass, reply_json};
+
+    #[test]
+    fn ac13_a_ruling_brief_lists_an_earlier_rounds_defect_reproduction_with_its_evidence() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &format!(
+                r#"{}, "defects": [{{"id": "1", "claim": "The store loses the last line", "severity": "high",
+                   "category": "regression", "confidence": "high", "repro": "1. kill -9 mid-write\n2. reopen the store",
+                   "evidence": ["e1"]}}]}}"#,
+                all_pass().trim_end_matches('}')
+            ),
+        );
+        rig.reply("codex", &all_pass());
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(&format!(
+            r#"{}, "defect_ops": [{{"op": "add", "id": "D1", "from": ["claude/1"], "claim": "The store loses the last line",
+                 "repro": "1. kill -9 mid-write\n2. reopen the store", "severity": "high", "category": "regression",
+                 "confidence": "high", "status": "open", "rationale": "Seen once."}}], "assign": {{"codex": ["D1"]}}}}"#,
+            testkit::JUDGE_R1.trim_end().trim_end_matches('}')
+        ));
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        // R2: only codex's reproduction of D1 cites the picture of AC-2.
+        rig.deliver();
+        rig.reply("claude", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply(
+            "codex",
+            &reply_json(
+                &[],
+                &[r#"{"id": "p1", "kind": "file", "path": "shots/empty.png", "caption": "the store is empty after reopen", "shows": ["AC-2"]}"#
+                    .to_owned()],
+                r#", "cross_checks": [{"subject": "D1", "outcome": "reproduced", "note": "lost here too", "evidence": ["p1"]}]"#,
+            ),
+        );
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+        // A rationale that names neither the check nor the key.
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "same"},
+              {"criterion": "AC-2", "ruling": "failed", "rationale": "The store is empty.", "evidence": ["codex/r2/p1"]},
+              {"criterion": "AC-3", "ruling": "same"}]}"#,
+        );
+        assert_eq!(rig.round(), 3, "{:?}", rig.rejected("judge"));
+        // R3 brings nothing new; the judge starts in a new pane.
+        rig.deliver();
+        for part in VERIFIERS {
+            rig.reply(part, r#"{"summary": "Nothing assigned."}"#);
+        }
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+        let brief = rig.brief("judge", BriefKind::Work);
+        let defects = &brief[brief.find(RULING_SECTIONS[5]).unwrap()..];
+        let defects = &defects[..defects.find(RULING_SECTIONS[6]).unwrap()];
+        for line in [
+            "- codex R2 cross-check on D1: reproduced — lost here too\n",
+            "  - codex/r2/p1: PNG image shots/empty.png — \"the store is empty after reopen\"\n",
+            "evidence/r2/codex/shots/empty.png (100 bytes, digest ",
+        ] {
+            assert!(defects.contains(line), "{line:?} in\n{defects}");
+        }
+    }
 }

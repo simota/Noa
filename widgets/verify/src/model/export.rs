@@ -441,6 +441,23 @@ fn steps_entry(text: &str) -> String {
     }
 }
 
+/// A note after a list entry's label and `sep` (`" — "`, `": "`): one
+/// line with its spaces collapsed, or several as a code block inside the
+/// entry, as given (a line break may be part of a command: `cd bench`,
+/// then `./open-tab --cold`).
+fn note_entry(sep: &str, text: &str) -> String {
+    let text = text.trim();
+    if text.lines().count() > 1 {
+        format!(
+            "{}{}",
+            sep.trim_end(),
+            crate::model::brief::fenced(text, "  ")
+        )
+    } else {
+        format!("{sep}{}", one_line(text))
+    }
+}
+
 fn rerun_label(rerun: &Rerun) -> String {
     match rerun {
         Rerun::Matched { exit, .. } => format!("一致（{exit}）"),
@@ -544,7 +561,7 @@ fn write_criteria(out: &mut String, session: &Session, base: Option<&Path>) {
             if let Some(r) = session.latest_result(part, &c.id) {
                 let _ = write!(out, "- {part}（R{}）: {}", r.round, r.outcome.label());
                 if !r.note.is_empty() {
-                    let _ = write!(out, " — {}", one_line(&r.note));
+                    out.push_str(&note_entry(" — ", &r.note));
                 }
                 out.push('\n');
             }
@@ -604,9 +621,8 @@ fn write_defects(out: &mut String, session: &Session, base: Option<&Path>) {
             .iter()
             .filter(|c| matches!(&c.subject, Subject::Defect { id } if ids.contains(id.as_str())))
         {
-            if c.evidence.is_empty() {
-                continue;
-            }
+            // A dispute may cite nothing (L1-6); it is listed all the same
+            // (L1-8 item 4).
             let keys: Vec<&str> = c.evidence.iter().map(EvidenceKey::as_str).collect();
             let _ = writeln!(
                 out,
@@ -614,7 +630,11 @@ fn write_defects(out: &mut String, session: &Session, base: Option<&Path>) {
                 c.round,
                 c.by,
                 c.outcome.label(),
-                keys.join(", ")
+                if keys.is_empty() {
+                    "なし".to_owned()
+                } else {
+                    keys.join(", ")
+                }
             );
         }
         if let Some(fix) = d.fix.as_deref().or_else(|| {
@@ -643,12 +663,18 @@ fn write_cross_checks(out: &mut String, session: &Session) {
             c.subject,
             c.outcome.label()
         );
-        if !c.note.is_empty() {
-            let _ = write!(out, " — {}", one_line(&c.note));
+        // A note of several lines goes last, as a block of its own.
+        let note = c.note.trim();
+        let block = note.lines().count() > 1;
+        if !note.is_empty() && !block {
+            let _ = write!(out, " — {}", one_line(note));
         }
         if !c.evidence.is_empty() {
             let keys: Vec<&str> = c.evidence.iter().map(EvidenceKey::as_str).collect();
             let _ = write!(out, " · 証跡: {}", keys.join(", "));
+        }
+        if block {
+            out.push_str(&crate::model::brief::fenced(note, "  "));
         }
         out.push('\n');
     }
@@ -834,10 +860,10 @@ fn write_gaps(out: &mut String, session: &Session) {
                 gaps = true;
                 let _ = writeln!(
                     out,
-                    "- {} を {part} が実行できませんでした（R{}）: {}",
+                    "- {} を {part} が実行できませんでした（R{}）{}",
                     c.id,
                     r.round,
-                    one_line(&r.note)
+                    note_entry(": ", &r.note)
                 );
             }
         }
@@ -1110,12 +1136,12 @@ pub fn fix_task(
         for Check { check, about } in History::of(session, &c.id).checks {
             let _ = writeln!(
                 out,
-                "- {} cross-checked {} (R{}): {} — {}",
+                "- {} cross-checked {} (R{}): {}{}",
                 check.by,
                 check.subject,
                 check.round,
                 check.outcome.name(),
-                one_line(&check.note)
+                note_entry(" — ", &check.note)
             );
             // A reproduced fail: the checker's own run backs the failure
             // too (L1-6 rule 6).
@@ -1146,10 +1172,10 @@ pub fn fix_task(
             };
             let _ = writeln!(
                 out,
-                "- {} reproduced defect {id} (R{}): {}",
+                "- {} reproduced defect {id} (R{}){}",
                 check.by,
                 check.round,
-                one_line(&check.note)
+                note_entry(": ", &check.note)
             );
             if let Some(d) = session.defect(id)
                 && !shown.contains(&id.as_str())
@@ -1952,6 +1978,186 @@ mod tests {
         let ac1 = &task[task.find("### AC-1").unwrap()..];
         let want = "- codex (R1) reported fail:\n  ```\n  Steps:\n  cd bench\n  ./open-tab --cold\n  ```\n";
         assert!(ac1.contains(want), "{want:?} in\n{ac1}");
+    }
+
+    /// Round 3 of a verification whose notes run over several lines:
+    /// codex's R1 fail of AC-1, claude-2's R1 blocked AC-3, claude's R2
+    /// reproduction of codex/AC-1 and codex's R2 reproduction of D1, which
+    /// the judge's R2 ruling of AC-2 failed rests on.
+    fn rig_with_notes_of_several_lines() -> Rig {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &format!(
+                r#"{}, "defects": [{{"id": "1", "claim": "The store loses the last line", "severity": "high",
+                   "category": "regression", "confidence": "high", "repro": "1. kill -9 mid-write\n2. reopen the store",
+                   "evidence": ["e1"]}}]}}"#,
+                all_pass().trim_end_matches('}')
+            ),
+        );
+        rig.reply(
+            "codex",
+            &format!(
+                r#"{{"summary": "Ran it.", "environment": "macOS", "results": [
+                  {{"criterion": "AC-1", "result": "fail", "note": "Steps:\ncd bench\n./open-tab --cold", "evidence": ["e2"]}},
+                  {{"criterion": "AC-2", "result": "pass", "evidence": ["e1"]}},
+                  {{"criterion": "AC-3", "result": "pass", "evidence": ["e1"]}}],
+                  "evidence": [{}, {}]}}"#,
+                cmd("e1", 0, true),
+                cmd("e2", 1, false)
+            ),
+        );
+        rig.reply(
+            "claude-2",
+            &format!(
+                r#"{{"summary": "Ran it.", "environment": "macOS", "results": [
+                  {{"criterion": "AC-1", "result": "pass", "evidence": ["e1"]}},
+                  {{"criterion": "AC-2", "result": "pass", "evidence": ["e1"]}},
+                  {{"criterion": "AC-3", "result": "blocked", "note": "No display here; it needs:\ncargo run -p noa\nopen -a Noa", "evidence": []}}],
+                  "evidence": [{}]}}"#,
+                cmd("e1", 0, true)
+            ),
+        );
+        rig.ingest();
+        rig.rerun_all_matched();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude-2"));
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "failed", "rationale": "codex's test fails", "evidence": ["codex/r1/e2"]},
+              {"criterion": "AC-2", "ruling": "verified", "rationale": "Re-run matched.", "evidence": ["codex/r1/e1"]},
+              {"criterion": "AC-3", "ruling": "verified", "rationale": "Re-run matched.", "evidence": ["claude/r1/e1"]}],
+             "defect_ops": [{"op": "add", "id": "D1", "from": ["claude/1"], "claim": "The store loses the last line",
+                 "repro": "1. kill -9 mid-write\n2. reopen the store", "severity": "high", "category": "regression",
+                 "confidence": "high", "status": "open", "rationale": "Seen once."}],
+             "assign": {"claude": ["codex/AC-1"], "codex": ["D1"]}}"#,
+        );
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &reply_json(
+                &[],
+                &[r#"{"id": "p1", "kind": "file", "path": "shots/home.png", "caption": "the new tab opens in $HOME", "shows": ["AC-1"]}"#
+                    .to_owned()],
+                r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "reproduced", "note": "cd bench\n./open-tab --cold", "evidence": ["p1"]}]"#,
+            ),
+        );
+        rig.reply(
+            "codex",
+            &reply_json(
+                &[],
+                &[r#"{"id": "p2", "kind": "file", "path": "shots/empty.png", "caption": "the store is empty after reopen", "shows": ["AC-2"]}"#
+                    .to_owned()],
+                r#", "cross_checks": [{"subject": "D1", "outcome": "reproduced", "note": "kill -9 mid-write\nreopen the store", "evidence": ["p2"]}]"#,
+            ),
+        );
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(
+            rig.phase(),
+            Phase::Ruling,
+            "{:?} {:?}",
+            rig.rejected("claude"),
+            rig.rejected("codex")
+        );
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "same"},
+              {"criterion": "AC-2", "ruling": "failed", "rationale": "codex reproduced D1", "evidence": ["codex/r2/p2"]},
+              {"criterion": "AC-3", "ruling": "same"}]}"#,
+        );
+        assert_eq!(rig.round(), 3, "{:?}", rig.rejected("judge"));
+        rig
+    }
+
+    #[test]
+    fn ac24_cross_check_notes_of_several_lines_keep_their_line_breaks_in_the_fix_task() {
+        let rig = rig_with_notes_of_several_lines();
+        let task = fix_task(
+            rig.engine.session(),
+            &["AC-1".into(), "AC-2".into()],
+            &[],
+            &BTreeMap::new(),
+        );
+        let ac1 = &task[task.find("### AC-1").unwrap()..task.find("### AC-2").unwrap()];
+        let want = "- claude cross-checked codex/AC-1 (R2): reproduced —\n  ```\n  cd bench\n  ./open-tab --cold\n  ```\n";
+        assert!(ac1.contains(want), "{want:?} in\n{ac1}");
+        let ac2 = &task[task.find("### AC-2").unwrap()..];
+        let want = "- codex reproduced defect D1 (R2):\n  ```\n  kill -9 mid-write\n  reopen the store\n  ```\n";
+        assert!(ac2.contains(want), "{want:?} in\n{ac2}");
+    }
+
+    #[test]
+    fn ac20_notes_of_several_lines_keep_their_line_breaks_in_the_report() {
+        let rig = rig_with_notes_of_several_lines();
+        let report = report_markdown(rig.engine.session(), None);
+        let section = |n: usize| {
+            let rest = &report[report.find(SECTIONS[n]).unwrap()..];
+            &rest[..rest.find(SECTIONS[n + 1]).unwrap()]
+        };
+        let ac1 = &report[report.find("### AC-1").unwrap()..report.find("### AC-2").unwrap()];
+        let want =
+            "- codex（R1）: 失敗 —\n  ```\n  Steps:\n  cd bench\n  ./open-tab --cold\n  ```\n";
+        assert!(ac1.contains(want), "{want:?} in\n{ac1}");
+        let d1 = section(2);
+        let want = "- 再現手順:\n  ```\n  1. kill -9 mid-write\n  2. reopen the store\n  ```\n";
+        assert!(d1.contains(want), "{want:?} in\n{d1}");
+        let checks = section(3);
+        for want in [
+            "- R2 claude → codex/AC-1: 再現 · 証跡: claude/r2/p1\n  ```\n  cd bench\n  ./open-tab --cold\n  ```\n",
+            "- R2 codex → D1: 再現 · 証跡: codex/r2/p2\n  ```\n  kill -9 mid-write\n  reopen the store\n  ```\n",
+        ] {
+            assert!(checks.contains(want), "{want:?} in\n{checks}");
+        }
+        let gaps = gaps_section(&report);
+        let want = "- AC-3 を claude-2 が実行できませんでした（R1）:\n  ```\n  No display here; it needs:\n  cargo run -p noa\n  open -a Noa\n  ```\n";
+        assert!(gaps.contains(want), "{want:?} in\n{gaps}");
+    }
+
+    #[test]
+    fn ac20_a_dispute_citing_no_evidence_is_listed_under_its_defect() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &format!(
+                r#"{}, "defects": [{{"id": "1", "claim": "The store loses the last line", "severity": "high",
+                   "category": "regression", "confidence": "high", "repro": "1. kill -9 2. reopen", "evidence": ["e1"]}}]}}"#,
+                all_pass().trim_end_matches('}')
+            ),
+        );
+        rig.reply("codex", &all_pass());
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(&format!(
+            r#"{}, "defect_ops": [{{"op": "add", "id": "D1", "from": ["claude/1"], "claim": "The store loses the last line",
+                 "repro": "1. kill -9 2. reopen", "severity": "high", "category": "regression",
+                 "confidence": "high", "status": "open", "rationale": "Seen once."}}], "assign": {{"codex": ["D1"]}}}}"#,
+            testkit::JUDGE_R1.trim_end().trim_end_matches('}')
+        ));
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        rig.deliver();
+        rig.reply("claude", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply(
+            "codex",
+            r#"{"summary": "Checked D1.", "cross_checks": [{"subject": "D1", "outcome": "disputed", "note": "この挙動は仕様どおりです", "evidence": []}]}"#,
+        );
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+        let report = report_markdown(rig.engine.session(), None);
+        let defects = &report[report.find(SECTIONS[2]).unwrap()..report.find(SECTIONS[3]).unwrap()];
+        let d1 = &defects[defects.find("### D1").unwrap()..];
+        assert!(
+            d1.contains("- 追試の証跡（R2 codex・異議）: なし\n"),
+            "{d1}"
+        );
     }
 
     #[test]

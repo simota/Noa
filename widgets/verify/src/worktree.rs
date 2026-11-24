@@ -50,20 +50,15 @@ pub fn path_for(main: &Path, id: &SessionId, part: &PartId) -> PathBuf {
     PathBuf::from(dir).join(format!("verify-{id}-{part}"))
 }
 
-/// Git run in `dir` with its output in the C locale, no prompt, no hook (a
-/// checkout into a verifier's worktree must not run the repository's
-/// `post-checkout` hook), and nothing in the environment that points it at
-/// another repository or index ([`capture::clear_repo_env`]).
+/// Git run in `dir` as capture runs it ([`capture::git`]: no `GIT_*`
+/// variable of the widget's, its settings pinned, no hook, so a checkout
+/// into a verifier's worktree runs no `post-checkout` hook), its output
+/// piped. No command here reads a file of the person's checkout; one in
+/// a verifier's worktree (`worktree add`, `apply`) runs the filter
+/// drivers as that checkout's own (L1-1).
 fn git(dir: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    capture::clear_repo_env(&mut cmd)
-        .arg("-C")
-        .arg(dir)
-        .args(["-c", "core.hooksPath=/dev/null"])
-        .env("LC_ALL", "C")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut cmd = capture::git(dir, &capture::Drivers::NONE);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd
 }
 
@@ -852,12 +847,19 @@ mod tests {
         }
         let repo = repo();
         dirty(&repo);
+        // A line changed between others: a hunk of no context would have
+        // to match at the end of the file, and would not apply.
+        fs::write(repo.join("a.txt"), "one\n2\nthree\nfour\nfive\n").unwrap();
         let head = sh(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
         let (c, target_dir, path) = setup(&repo, Head::Worktree);
         assert_eq!(c.rebuild.head_sha, head);
         assert_eq!(c.manifest.repo.as_deref(), Some(repo.as_path()));
         add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
         check(&repo, &path, &head).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("a.txt")).unwrap(),
+            "one\n2\nthree\nfour\nfive\n"
+        );
         assert_eq!(
             fs::read_to_string(path.join("notes/draft.txt")).unwrap(),
             "wip\nmore\n"
@@ -866,26 +868,22 @@ mod tests {
         println!("foreign environment: done");
     }
 
-    #[test]
-    fn ac03_git_takes_no_repository_from_the_widgets_environment() {
-        let other = repo();
-        let index = fs::read(other.join(".git/index")).unwrap();
-        let stray = temp("stray-index").join("index");
-        let out = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "worktree::tests::git_in_a_foreign_environment",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env("NOA_VERIFY_FOREIGN_GIT", "1")
-            .env("GIT_DIR", other.join(".git"))
-            .env("GIT_WORK_TREE", &other)
-            .env("GIT_INDEX_FILE", &stray)
-            .env("GIT_OBJECT_DIRECTORY", other.join(".git/objects"))
-            .output()
-            .unwrap();
+    /// Runs [`git_in_a_foreign_environment`] in a test process of its own
+    /// with `env` added; its output, after checking it passed.
+    fn in_a_foreign_environment(env: &[(&str, &OsStr)]) -> String {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "worktree::tests::git_in_a_foreign_environment",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("NOA_VERIFY_FOREIGN_GIT", "1");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let out = cmd.output().unwrap();
         let shown = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -893,6 +891,43 @@ mod tests {
         );
         assert!(out.status.success(), "{shown}");
         assert!(shown.contains("foreign environment: done"), "{shown}");
+        shown
+    }
+
+    #[test]
+    fn ac03_the_widgets_git_and_diff_variables_leave_the_rebuild_patch_as_it_applies() {
+        // A diff of no context (`GIT_DIFF_OPTS`), an external diff, and
+        // settings from the environment (`GIT_CONFIG_*`, a global file of
+        // the person's) that would change the patch.
+        let global = temp("global-config").join("config");
+        fs::write(
+            &global,
+            "[diff]\n\tcontext = 0\n\tsuppressBlankEmpty = true\n\tnoprefix = true\n",
+        )
+        .unwrap();
+        in_a_foreign_environment(&[
+            ("GIT_DIFF_OPTS", OsStr::new("--unified=0")),
+            ("GIT_EXTERNAL_DIFF", OsStr::new("false")),
+            ("GIT_CONFIG_GLOBAL", global.as_os_str()),
+            ("GIT_CONFIG_COUNT", OsStr::new("1")),
+            ("GIT_CONFIG_KEY_0", OsStr::new("diff.mnemonicPrefix")),
+            ("GIT_CONFIG_VALUE_0", OsStr::new("true")),
+        ]);
+    }
+
+    #[test]
+    fn ac03_git_takes_no_repository_from_the_widgets_environment() {
+        let other = repo();
+        let index = fs::read(other.join(".git/index")).unwrap();
+        let stray = temp("stray-index").join("index");
+        let git_dir = other.join(".git");
+        let objects = other.join(".git/objects");
+        in_a_foreign_environment(&[
+            ("GIT_DIR", git_dir.as_os_str()),
+            ("GIT_WORK_TREE", other.as_os_str()),
+            ("GIT_INDEX_FILE", stray.as_os_str()),
+            ("GIT_OBJECT_DIRECTORY", objects.as_os_str()),
+        ]);
         assert!(!stray.exists(), "the stray index was written");
         assert_eq!(fs::read(other.join(".git/index")).unwrap(), index);
         assert_eq!(

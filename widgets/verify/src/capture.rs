@@ -134,62 +134,122 @@ fn write_file(dest: &Path, root: &Path, rel: &str, bytes: &[u8]) -> io::Result<(
     fsx::write_replace(dest, &path, bytes)
 }
 
-/// The environment variables that pick another repository, index, object
-/// store or way of finding them than `-C <dir>` says (`git rev-parse
-/// --local-env-vars`, plus `GIT_NAMESPACE` and the two that bound
-/// discovery): every git command the widget runs has them cleared, so
-/// that, say, a `GIT_INDEX_FILE` the widget was started with is never
-/// written.
-const REPO_ENV: [&str; 18] = [
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CONFIG",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_IMPLICIT_WORK_TREE",
-    "GIT_GRAFT_FILE",
-    "GIT_INDEX_FILE",
-    "GIT_NO_REPLACE_OBJECTS",
-    "GIT_REPLACE_REF_BASE",
-    "GIT_PREFIX",
-    "GIT_SHALLOW_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_NAMESPACE",
-    "GIT_CEILING_DIRECTORIES",
-    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+/// The settings every git command of capture and worktree runs with,
+/// given in the command's own scope (`GIT_CONFIG_COUNT`), which no file
+/// of the system's, the person's or the repository's overrides: the
+/// output the widget reads and the patches it writes do not depend on
+/// them. Paths unquoted, no color, no hook, no external diff, and every
+/// option that shapes a diff at git's default.
+const PINNED: [(&str, &str); 14] = [
+    ("core.quotePath", "false"),
+    ("core.hooksPath", "/dev/null"),
+    ("color.ui", "never"),
+    ("diff.external", ""),
+    ("diff.noprefix", "false"),
+    ("diff.mnemonicPrefix", "false"),
+    ("diff.relative", "false"),
+    ("diff.renames", "true"),
+    ("diff.algorithm", "myers"),
+    ("diff.indentHeuristic", "true"),
+    ("diff.context", "3"),
+    ("diff.interHunkContext", "0"),
+    ("diff.suppressBlankEmpty", "false"),
+    ("diff.submodule", "short"),
 ];
 
-/// Clears [`REPO_ENV`] from `cmd`'s environment.
-pub(crate) fn clear_repo_env(cmd: &mut Command) -> &mut Command {
-    for var in REPO_ENV {
-        cmd.env_remove(var);
+/// Removes every `GIT_*` variable of the widget's environment from
+/// `cmd`'s: none picks another repository, index or object store than
+/// `-C <dir>` says (`GIT_DIR`, `GIT_INDEX_FILE`, …), changes a diff
+/// (`GIT_DIFF_OPTS`, `GIT_EXTERNAL_DIFF`), adds settings
+/// (`GIT_CONFIG_*`) or reads attributes from elsewhere
+/// (`GIT_ATTR_SOURCE`). The rest of the environment is kept (`PATH`,
+/// `HOME`, what a verifier's checkout gives a filter driver).
+pub(crate) fn clear_git_env(cmd: &mut Command) -> &mut Command {
+    use std::os::unix::ffi::OsStrExt;
+    for (name, _) in std::env::vars_os() {
+        if name.as_bytes().starts_with(b"GIT_") {
+            cmd.env_remove(name);
+        }
     }
     cmd
 }
 
-/// Git with every setting that changes the output it is parsed from pinned.
-fn git(dir: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(dir);
-    for setting in [
-        "core.quotePath=false",
-        "color.ui=never",
-        "diff.noprefix=false",
-        "diff.mnemonicPrefix=false",
-        "diff.relative=false",
-        "diff.external=",
-        "diff.renames=true",
-        "diff.algorithm=myers",
-        "diff.indentHeuristic=true",
-    ] {
-        cmd.args(["-c", setting]);
+/// The filter drivers the settings define (`filter.<driver>.*`, from any
+/// file git reads them from), as they stand when listed.
+#[derive(Debug, Clone)]
+pub(crate) struct Drivers(BTreeSet<String>);
+
+impl Drivers {
+    /// None: for a command that reads no file through git's conversions
+    /// (`rev-parse`, `ls-files`, `config`, `check-attr`, `worktree list`),
+    /// or a verifier's own worktree, whose checkout runs the drivers as
+    /// any checkout does (L1-1).
+    pub(crate) const NONE: Drivers = Drivers(BTreeSet::new());
+
+    /// The drivers the settings of the repository at `dir` define.
+    pub(crate) fn of(dir: &Path) -> Result<Drivers, String> {
+        let mut cmd = git(dir, &Drivers::NONE);
+        cmd.args(["config", "-z", "--name-only", "--get-regexp", r"^filter\."]);
+        // Exit 1: no such setting.
+        let listing = run_capped(cmd, &[0, 1], MAX_LISTING_BYTES).map_err(|e| match e {
+            RunError::TooLarge => "git の設定が大きすぎます".to_owned(),
+            RunError::Failed(why) => why,
+        })?;
+        Ok(Drivers(
+            listing
+                .split(|&b| b == 0)
+                .filter_map(|key| {
+                    let key = String::from_utf8_lossy(key);
+                    let (driver, _) = key.strip_prefix("filter.")?.rsplit_once('.')?;
+                    Some(driver.to_owned())
+                })
+                .collect(),
+        ))
     }
-    clear_repo_env(&mut cmd)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
-        .env_remove("GIT_EXTERNAL_DIFF");
+
+    /// These and `driver`.
+    fn with(&self, driver: Option<&str>) -> Drivers {
+        let mut out = self.clone();
+        out.0.extend(driver.map(str::to_owned));
+        out
+    }
+}
+
+/// Git run in `dir`, the one way capture and worktree run it: no `GIT_*`
+/// variable of the widget's environment ([`clear_git_env`]), the
+/// [`PINNED`] settings, the C locale, no prompt, optional locks off, and
+/// each filter driver of `off` given no `clean`, `smudge` or `process`
+/// command and made optional, so none runs: every command that reads a
+/// file of the person's checkout through git's conversions (a work-tree
+/// diff, `diff --no-index`, `cat-file --filters`) is given the drivers
+/// [`Drivers::of`] lists, and the person's tree is read as its bytes are.
+/// The settings go through the environment, which takes any driver name
+/// as it is (`-c` would split one holding `=`).
+pub(crate) fn git(dir: &Path, off: &Drivers) -> Command {
+    let mut cmd = Command::new("git");
+    clear_git_env(&mut cmd).arg("-C").arg(dir);
+    let mut settings: Vec<(String, &str)> = PINNED
+        .iter()
+        .map(|&(key, value)| (key.to_owned(), value))
+        .collect();
+    for driver in &off.0 {
+        for (name, value) in [
+            ("clean", ""),
+            ("smudge", ""),
+            ("process", ""),
+            ("required", "false"),
+        ] {
+            settings.push((format!("filter.{driver}.{name}"), value));
+        }
+    }
+    cmd.env("GIT_CONFIG_COUNT", settings.len().to_string());
+    for (i, (key, value)) in settings.into_iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{i}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
+    cmd.env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C");
     cmd
 }
 
@@ -266,9 +326,9 @@ impl IndexCopy {
 
 /// [`git`] for a command that reads the index (`diff`, `ls-files`): given
 /// an [`IndexCopy`], which must outlive the command.
-fn git_indexed(dir: &Path) -> Result<(Command, IndexCopy), String> {
+fn git_indexed(dir: &Path, off: &Drivers) -> Result<(Command, IndexCopy), String> {
     let copy = IndexCopy::of(dir)?;
-    let mut cmd = git(dir);
+    let mut cmd = git(dir, off);
     cmd.env("GIT_INDEX_FILE", &copy.path);
     Ok((cmd, copy))
 }
@@ -327,7 +387,7 @@ fn run(cmd: Command, cap: u64) -> Result<Vec<u8>, String> {
 /// One line git prints, its bytes as they are: only the newline git ends
 /// it with is taken off (a path may begin or end with spaces).
 fn git_line(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut cmd = git(dir);
+    let mut cmd = git(dir, &Drivers::NONE);
     cmd.args(args);
     let mut out = run(cmd, 64 * 1024)?;
     if out.last() == Some(&b'\n') {
@@ -457,44 +517,70 @@ struct DiffStat {
 
 /// Reads a unified diff into one [`DiffStat`] per `diff --git` section, in
 /// order. Paths are not read from it: [`parse_raw`] names the sections.
+///
+/// A hunk is read by the line counts of its header (`@@ -a,b +c,d @@`),
+/// not by what its lines look like: a context line is any line but an
+/// added (`+`), a deleted (`-`) or a `\ No newline` one, a blank one
+/// among them however git writes it (`diff.suppressBlankEmpty` leaves out
+/// its space), and the hunk ends when both counts are used up.
 fn parse_sections(diff: &str) -> Vec<DiffStat> {
+    // The `start[,count]` of one side of a hunk header; the count is 1
+    // when left out.
+    fn side(part: &str) -> Option<(u32, u32)> {
+        let (start, count) = part.split_once(',').unwrap_or((part, "1"));
+        Some((start.parse().ok()?, count.parse().ok()?))
+    }
     let mut out: Vec<DiffStat> = Vec::new();
     let mut new_line = 0u32;
-    let mut in_hunk = false;
+    // Lines of the current hunk still to come, old side and new.
+    let (mut old_left, mut new_left) = (0u32, 0u32);
     for line in diff.split('\n') {
-        if line.starts_with("diff --git ") {
-            out.push(DiffStat::default());
-            in_hunk = false;
-            continue;
-        }
-        let Some(stat) = out.last_mut() else {
-            continue;
-        };
-        if let Some(rest) = line.strip_prefix("@@ ") {
-            in_hunk = true;
-            // "@@ -a,b +c,d @@"
-            new_line = rest
-                .split_whitespace()
-                .find_map(|part| part.strip_prefix('+'))
-                .and_then(|c| c.split(',').next())
-                .and_then(|c| c.parse().ok())
-                .unwrap_or(1);
-            continue;
-        }
-        if !in_hunk {
-            continue;
-        }
-        if line.starts_with('+') {
-            stat.additions += 1;
-            match stat.changed.last_mut() {
-                Some((_, end)) if *end + 1 == new_line => *end = new_line,
-                _ => stat.changed.push((new_line, new_line)),
+        if old_left == 0 && new_left == 0 {
+            if line.starts_with("diff --git ") {
+                out.push(DiffStat::default());
+                continue;
             }
-            new_line += 1;
-        } else if line.starts_with('-') {
-            stat.deletions += 1;
-        } else if line.starts_with(' ') {
-            new_line += 1;
+            if out.is_empty() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("@@ ") {
+                let mut parts = rest.split_whitespace();
+                let old = parts
+                    .next()
+                    .and_then(|p| p.strip_prefix('-'))
+                    .and_then(side);
+                let new = parts
+                    .next()
+                    .and_then(|p| p.strip_prefix('+'))
+                    .and_then(side);
+                if let (Some((_, old_count)), Some((start, new_count))) = (old, new) {
+                    (old_left, new_left) = (old_count, new_count);
+                    new_line = start;
+                }
+            }
+            continue;
+        }
+        let stat = out.last_mut().expect("a hunk follows a section header");
+        match line.as_bytes().first() {
+            Some(b'+') => {
+                stat.additions += 1;
+                match stat.changed.last_mut() {
+                    Some((_, end)) if *end + 1 == new_line => *end = new_line,
+                    _ => stat.changed.push((new_line, new_line)),
+                }
+                new_line += 1;
+                new_left = new_left.saturating_sub(1);
+            }
+            Some(b'-') => {
+                stat.deletions += 1;
+                old_left = old_left.saturating_sub(1);
+            }
+            Some(b'\\') => {}
+            _ => {
+                new_line += 1;
+                old_left = old_left.saturating_sub(1);
+                new_left = new_left.saturating_sub(1);
+            }
         }
     }
     out
@@ -630,12 +716,27 @@ fn too_large_diff(bytes: u64) -> String {
     )
 }
 
+/// The options every `git diff` of capture is given, beside [`PINNED`]:
+/// no external diff or text conversion, no color, the whole tree's paths
+/// and git's own file order.
 const DIFF_COMMON: [&str; 5] = [
     "--no-ext-diff",
     "--no-textconv",
     "--no-color",
     "--no-relative",
-    "--find-renames",
+    "-O/dev/null",
+];
+
+/// The shape of every patch capture writes: three lines of context, hunks
+/// joined only where git joins them by default, the default submodule
+/// lines, `a/` and `b/` prefixes. (The patch is read by its hunk counts,
+/// [`parse_sections`], whatever its context.)
+const PATCH_SHAPE: [&str; 5] = [
+    "--unified=3",
+    "--inter-hunk-context=0",
+    "--submodule=short",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
 ];
 
 /// Whether `path` lies in the `.noa/` folder at the top of the repository,
@@ -647,7 +748,7 @@ fn in_noa(path: &str) -> bool {
 
 /// Untracked, non-ignored paths under `paths` (all, when empty).
 fn untracked_paths(repo: &Path, paths: &[String]) -> Result<Vec<String>, String> {
-    let (mut cmd, _index) = git_indexed(repo)?;
+    let (mut cmd, _index) = git_indexed(repo, &Drivers::NONE)?;
     cmd.args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
         .args(paths);
     let mut untracked = nul_fields(&run(cmd, MAX_LISTING_BYTES)?);
@@ -667,10 +768,13 @@ fn diff_view(
     range: &[String],
     untracked: bool,
 ) -> Result<DiffView, String> {
-    let (mut cmd, index) = git_indexed(repo)?;
+    // The work tree is read as its bytes are, by every command below.
+    let off = Drivers::of(repo)?;
+    let (mut cmd, index) = git_indexed(repo, &off)?;
     cmd.arg("diff")
         .args(DIFF_COMMON)
-        .args(["--unified=3", "--src-prefix=a/", "--dst-prefix=b/"])
+        .args(PATCH_SHAPE)
+        .arg("--find-renames")
         .args(range)
         .arg("--")
         .args(&target.paths);
@@ -680,10 +784,10 @@ fn diff_view(
         Err(RunError::Failed(why)) => return Err(why),
     };
     drop(index);
-    let (mut cmd, _index) = git_indexed(repo)?;
+    let (mut cmd, _index) = git_indexed(repo, &off)?;
     cmd.arg("diff")
         .args(DIFF_COMMON)
-        .args(["--raw", "-z", "--no-abbrev"])
+        .args(["--find-renames", "--raw", "-z", "--no-abbrev"])
         .args(range)
         .arg("--")
         .args(&target.paths);
@@ -707,15 +811,11 @@ fn diff_view(
             continue;
         }
         let left = MAX_DIFF_BYTES - patch.len() as u64;
-        let mut cmd = git(repo);
-        cmd.args(["diff", "--no-index"]).args(DIFF_COMMON).args([
-            "--unified=3",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            "--",
-            "/dev/null",
-            path,
-        ]);
+        let mut cmd = git(repo, &off);
+        cmd.args(["diff", "--no-index"])
+            .args(DIFF_COMMON)
+            .args(PATCH_SHAPE)
+            .args(["--", "/dev/null", path]);
         match run_capped(cmd, &[0, 1], left) {
             Ok(more) => patch.extend(more),
             Err(RunError::TooLarge) => return Err(too_large_diff(MAX_DIFF_BYTES)),
@@ -789,31 +889,19 @@ struct RecipeView {
 }
 
 fn recipe_view(repo: &Path, head_sha: &str) -> Result<RecipeView, String> {
-    // Every option that shapes the patch is given, so none of the person's
-    // settings (`diff.context=0` would leave hunks `git apply` refuses)
-    // reaches it: three lines of context, hunks joined only where git
-    // joins them by default, blank context lines written as a space, the
-    // default submodule lines and path order, no external diff or text
-    // conversion, no color.
-    let (mut cmd, _index) = git_indexed(repo)?;
-    cmd.args(["-c", "diff.suppressBlankEmpty=false"])
-        .arg("diff")
-        .args([
-            "--binary",
-            "--unified=3",
-            "--inter-hunk-context=0",
-            "--submodule=short",
-            "-O/dev/null",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--no-relative",
-            "--no-renames",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            head_sha,
-            "--",
-        ]);
+    // None of the person's settings or variables reaches the patch
+    // ([`git`], [`DIFF_COMMON`], [`PATCH_SHAPE`]: `diff.context=0` or
+    // `GIT_DIFF_OPTS=--unified=0` would leave hunks `git apply` refuses),
+    // and the work tree is read as its bytes are, the bytes the manifest
+    // and a verifier's worktree hold (a clean filter's output would not
+    // be).
+    let (mut cmd, _index) = git_indexed(repo, &Drivers::of(repo)?)?;
+    cmd.arg("diff").args(DIFF_COMMON).args(PATCH_SHAPE).args([
+        "--binary",
+        "--no-renames",
+        head_sha,
+        "--",
+    ]);
     let patch = match run_capped(cmd, &[0], MAX_WORKTREE_PATCH_BYTES) {
         Ok(patch) => patch,
         Err(RunError::TooLarge) => {
@@ -1069,9 +1157,10 @@ fn capture_diff(
         bytes: 0,
     };
     // A ref's files are read through git's checkout conversions; which
-    // filter driver each names, and which drivers would run a command.
-    let (drivers, running) = match &target.head {
-        Head::Worktree => (BTreeMap::new(), BTreeSet::new()),
+    // filter driver each names, which drivers would run a command, and
+    // the drivers every read gives none ([`git`]).
+    let (drivers, running, off) = match &target.head {
+        Head::Worktree => (BTreeMap::new(), BTreeSet::new(), Drivers::NONE),
         Head::Ref(_) => {
             let read: Vec<&str> = view
                 .raw
@@ -1086,6 +1175,7 @@ fn capture_diff(
             (
                 filter_drivers(repo, head_sha, &read)?,
                 checkout_filters(repo)?,
+                Drivers::of(repo)?,
             )
         }
     };
@@ -1141,7 +1231,9 @@ fn capture_diff(
             Head::Worktree => read_worktree(repo, &entry.path, MAX_FILE_BYTES),
             Head::Ref(_) => match drivers.get(&entry.path) {
                 Some(driver) if running.contains(driver) => Err(FILTER_REASON.to_owned()),
-                driver => read_checked_out(repo, head_sha, entry, driver.map(String::as_str)),
+                driver => {
+                    read_checked_out(repo, head_sha, entry, &off.with(driver.map(String::as_str)))
+                }
             },
         };
         match read {
@@ -1189,31 +1281,19 @@ fn capture_diff(
 /// (`cat-file --filters`: line endings, `ident` and
 /// `working-tree-encoding`, the attributes read from the head itself),
 /// which is what a verifier's worktree holds and is checked against;
-/// over [`MAX_FILE_BYTES`] it reads as cut. `driver`, the filter driver
-/// its `filter` attribute names, is given no command (only one no
-/// setting gives a `smudge` or `process` command is read so, see
+/// over [`MAX_FILE_BYTES`] it reads as cut. `off` holds the filter
+/// driver its `filter` attribute names with the ones the settings define,
+/// each given no command ([`git`]; only a file whose driver no setting
+/// gives a `smudge` or `process` command is read so, see
 /// [`checkout_filters`]), so no driver runs in the person's checkout
 /// whatever the settings say by then.
 fn read_checked_out(
     repo: &Path,
     head_sha: &str,
     entry: &RawEntry,
-    driver: Option<&str>,
+    off: &Drivers,
 ) -> Result<(Vec<u8>, bool), String> {
-    let mut cmd = git(repo);
-    if let Some(driver) = driver {
-        // Settings from the environment, which take any driver name as it
-        // is (`-c` would split one holding `=`).
-        let settings = [("smudge", ""), ("process", ""), ("required", "false")];
-        cmd.env("GIT_CONFIG_COUNT", settings.len().to_string());
-        for (i, (name, value)) in settings.into_iter().enumerate() {
-            cmd.env(
-                format!("GIT_CONFIG_KEY_{i}"),
-                format!("filter.{driver}.{name}"),
-            )
-            .env(format!("GIT_CONFIG_VALUE_{i}"), value);
-        }
-    }
+    let mut cmd = git(repo, off);
     cmd.arg(format!("--attr-source={head_sha}")).args([
         "cat-file",
         "--filters",
@@ -1251,7 +1331,7 @@ fn filter_drivers(
             .max(1);
         let (chunk, after) = rest.split_at(take);
         rest = after;
-        let mut cmd = git(repo);
+        let mut cmd = git(repo, &Drivers::NONE);
         cmd.arg(format!("--attr-source={head_sha}"))
             .args(["check-attr", "-z", "filter", "--"])
             .args(chunk);
@@ -1276,7 +1356,7 @@ fn filter_drivers(
 /// `filter` attribute names the driver. A setting without a value counts
 /// as one.
 fn checkout_filters(repo: &Path) -> Result<BTreeSet<String>, String> {
-    let mut cmd = git(repo);
+    let mut cmd = git(repo, &Drivers::NONE);
     cmd.args([
         "config",
         "-z",
@@ -1443,7 +1523,7 @@ pub(crate) mod tests {
 
     pub(crate) fn sh(dir: &Path, args: &[&str]) -> String {
         let mut git = Command::new("git");
-        let out = clear_repo_env(&mut git)
+        let out = clear_git_env(&mut git)
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -1655,6 +1735,119 @@ pub(crate) mod tests {
         crate::worktree::add(&repo, &path, &dest, manifest, &captured.rebuild).unwrap();
         assert_eq!(fs::read_to_string(path.join("b.dat")).unwrap(), "payload\n");
         crate::worktree::remove(&repo, &path).unwrap();
+    }
+
+    #[test]
+    fn ac01_the_work_tree_mode_runs_no_clean_filter_in_the_persons_checkout() {
+        let repo = repo();
+        let marker = temp("clean-marker").join("ran");
+        // An upper-casing clean filter that writes a file each time it
+        // runs, required, as git-lfs's is.
+        let clean = format!("touch '{}'; tr a-z A-Z", marker.display());
+        for (key, value) in [
+            ("filter.up.clean", clean.as_str()),
+            ("filter.up.smudge", "cat"),
+            ("filter.up.required", "true"),
+        ] {
+            sh(&repo, &["config", "--add", key, value]);
+        }
+        fs::write(
+            repo.join(".gitattributes"),
+            "up.txt filter=up\nnew-up.txt filter=up\n",
+        )
+        .unwrap();
+        fs::write(repo.join("up.txt"), "hello\n").unwrap();
+        sh(&repo, &["add", ".gitattributes", "up.txt"]);
+        sh(&repo, &["commit", "-q", "-m", "filtered"]);
+        // The person's raw content, changed and untracked.
+        fs::write(repo.join("up.txt"), "hello\nworld\n").unwrap();
+        fs::write(repo.join("new-up.txt"), "fresh\n").unwrap();
+        let _ = fs::remove_file(&marker);
+        let before = index_and_tree(&repo);
+
+        let dest = temp("clean-dest").join("target");
+        let captured = capture(&diff_target(&repo, Head::Worktree), &dest, 0).unwrap();
+        assert!(
+            !marker.exists(),
+            "a clean filter ran in the person's checkout"
+        );
+        assert_eq!(index_and_tree(&repo), before);
+        // The manifest, the diff and the recipe all hold the raw content.
+        let manifest = &captured.manifest;
+        let up = manifest.file("up.txt").unwrap();
+        assert_eq!(up.digest, digest_bytes(b"hello\nworld\n"));
+        let diff = fs::read_to_string(dest.join(DIFF_FILE)).unwrap();
+        assert!(
+            diff.contains("+world\n") && !diff.contains("WORLD"),
+            "{diff}"
+        );
+        assert!(diff.contains("+fresh\n"), "{diff}");
+        let patch = fs::read_to_string(dest.join(WORKTREE_PATCH)).unwrap();
+        assert!(
+            patch.contains("+world\n") && !patch.contains("WORLD"),
+            "{patch}"
+        );
+        // A verifier's worktree is rebuilt as captured.
+        let main = crate::worktree::main_worktree(&repo).unwrap();
+        let path = crate::worktree::path_for(
+            &main,
+            &crate::model::types::SessionId::new("ver-1"),
+            &crate::model::types::PartId::new("claude"),
+        );
+        crate::worktree::add(&repo, &path, &dest, manifest, &captured.rebuild).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("up.txt")).unwrap(),
+            "hello\nworld\n"
+        );
+        crate::worktree::remove(&repo, &path).unwrap();
+    }
+
+    #[test]
+    fn ac01_blank_context_lines_count_whatever_the_persons_diff_settings() {
+        let repo = temp("blank");
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("x.txt"), "a\n\nb\n\nc\nd\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        sh(&repo, &["checkout", "-q", "-b", "feat"]);
+        fs::write(repo.join("x.txt"), "a\n\nb\n\nc\nD\ne\n").unwrap();
+        sh(&repo, &["commit", "-q", "-am", "feat"]);
+        for (key, value) in [
+            ("diff.suppressBlankEmpty", "true"),
+            ("diff.context", "1"),
+            ("diff.interHunkContext", "5"),
+        ] {
+            sh(&repo, &["config", key, value]);
+        }
+        let dest = temp("blank-dest").join("target");
+        let captured = capture(&diff_target(&repo, Head::Ref("feat".into())), &dest, 0).unwrap();
+        let x = captured.manifest.file("x.txt").unwrap();
+        assert_eq!((x.additions, x.deletions), (2, 1));
+        assert_eq!(x.changed, vec![(6, 7)]);
+    }
+
+    #[test]
+    fn hunks_are_read_by_their_counts_whatever_their_context_lines_look_like() {
+        // A blank context line written without its space
+        // (`diff.suppressBlankEmpty`), a deleted line that reads like a
+        // header, and the end-of-file note.
+        let diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,5 +1,5 @@\n a\n\n---- c\n+-- c\n d\n e\n\\ No newline at end of file\ndiff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -2 +2,2 @@\n-q\n+r\n+s\n";
+        let stats = parse_sections(diff);
+        assert_eq!(
+            stats,
+            vec![
+                DiffStat {
+                    additions: 1,
+                    deletions: 1,
+                    changed: vec![(3, 3)],
+                },
+                DiffStat {
+                    additions: 2,
+                    deletions: 1,
+                    changed: vec![(2, 3)],
+                },
+            ]
+        );
     }
 
     #[test]

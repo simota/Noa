@@ -14,10 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Code, Codex and Antigravity (used %, reset, pace and when a window runs
   out, stale values marked with their age) and statistics and graphs read
   from the agents' local logs (sessions, tokens, cost estimate, models,
-  projects, tools, heatmap, limit history). Read-only; writes only under
-  `<data dir>/noa/agent-usage/`. `agent-usage --demo --snapshot=FILE.png`
-  renders it headlessly. `scripts/bundle-macos.sh` ships it as
-  `Noa Agent Usage`.
+  projects, tools, heatmap, limit history). It only reads the agents' logs
+  and credentials; its own files (statistics index, limit history, view
+  prefs) live under `<data dir>/noa/agent-usage/`, or at `--prefs=FILE`.
+  `agent-usage --demo --snapshot=FILE.png` renders it headlessly and writes
+  the PNG to that path. Limits from Codex start a `codex app-server`, which
+  may create its own state under `~/.codex`. `scripts/bundle-macos.sh` ships
+  it as `Noa Agent Usage`.
 - Competition: the start view seats 1–3 judges (agent, model and effort
   per row; `judge` leads, `judge-2` and `judge-3` only score), and a
   rematch fills every judge row. With more than one judge the leaderboard,

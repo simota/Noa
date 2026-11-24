@@ -114,9 +114,6 @@ cp "$BROWSER_BIN" "$CONTENTS/Helpers/Noa Repo Browser"
 cp "$DISCUSSION_BIN" "$CONTENTS/Helpers/Noa Discussion"
 cp "$COMPETITION_BIN" "$CONTENTS/Helpers/Noa Competition"
 cp "$REVIEW_BIN" "$CONTENTS/Helpers/Noa Review"
-  codesign --force --options runtime --timestamp \
-    --entitlements "$ROOT/assets/macos.entitlements.plist" \
-    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Agent Usage"
 cp "$USAGE_BIN" "$CONTENTS/Helpers/Noa Agent Usage"
 cp -RX "$ROOT/assets/wallpapers" "$CONTENTS/Resources/wallpapers"
 
@@ -194,6 +191,9 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Review"
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/assets/macos.entitlements.plist" \
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Agent Usage"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/MacOS/Noa"

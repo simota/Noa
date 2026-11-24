@@ -2,9 +2,10 @@
 //! loop) beside Noa: the agent dashboard (`agent-dashboard.open`), the repo
 //! browser (`repo-browser.open`), the discussion (`discussion.open`), the
 //! competition (`competition.open`), the review (`review.open`) and the agent
-//! usage (`agent-usage.open`). They
-//! read Noa's panes through the control server, so each runs as a process of
-//! its own. Only the review gets an argument: the focused pane's directory.
+//! usage (`agent-usage.open`). Each runs as a process of its own. All but the
+//! agent usage read Noa's panes through the control server; the agent usage
+//! needs neither the server nor `server-enable`. Only the review gets an
+//! argument: the focused pane's directory.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -406,7 +407,13 @@ mod tests {
         );
         assert!(launch_args(REVIEW, None).is_empty());
         assert!(launch_args(REVIEW, Some("relative/dir")).is_empty());
-        for helper in [AGENT_DASHBOARD, REPO_BROWSER, DISCUSSION, COMPETITION] {
+        for helper in [
+            AGENT_DASHBOARD,
+            REPO_BROWSER,
+            DISCUSSION,
+            COMPETITION,
+            AGENT_USAGE,
+        ] {
             assert!(
                 launch_args(helper, Some("/Users/me/src/noa")).is_empty(),
                 "{}",

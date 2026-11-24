@@ -281,7 +281,7 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
             "Run a thorough multi-agent review of a diff, files or a document with blind reviews, cross-examination and a consolidated report, in a window of its own."
         }
         AppCommand::OpenAgentUsage => {
-            "Show the usage limits and log statistics of the coding agents, in a window of its own."
+            "Show Claude Code, Codex and Antigravity usage limits and statistics in a window of its own."
         }
         AppCommand::OpenThemePicker => "Choose a color theme.",
         AppCommand::ToggleProcessMonitor => "Show the processes running in each terminal.",
@@ -1061,6 +1061,17 @@ mod tests {
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
         commands
+    }
+
+    #[test]
+    fn agent_usage_is_found_by_the_name_of_each_agent_it_shows() {
+        for query in ["Claude Code", "Codex", "Antigravity"] {
+            let found: Vec<AppCommand> = command_palette_matches(&default_palette_entries(), query)
+                .iter()
+                .map(|m| m.command)
+                .collect();
+            assert!(found.contains(&AppCommand::OpenAgentUsage), "{query}");
+        }
     }
 
     #[test]

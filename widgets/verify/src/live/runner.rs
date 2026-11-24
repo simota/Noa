@@ -2345,7 +2345,7 @@ pub fn remove_stored_worktrees(dir: &Path) -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -2610,7 +2610,7 @@ mod tests {
     };
 
     /// A fresh folder for one test, canonical (git reports canonical paths).
-    fn temp_root() -> PathBuf {
+    pub(crate) fn temp_root() -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "noa-verify-live-{}-{}",
@@ -2874,6 +2874,64 @@ mod tests {
             .filter(|t| t.contains(rerun::SCRIPT_FILE))
             .count()
     }
+
+    /// A one-round verification of a repository under `root` that ended in
+    /// a verdict: claude's build failed (its log stored, 100 lines), codex
+    /// passed, and the judge ruled AC-1 failed and added defect D1 with
+    /// its repro steps. Returns its store directory, its runner gone.
+    pub(crate) fn finished_with_a_failure(root: &Path) -> PathBuf {
+        let fake = fake();
+        let repo = repo(root);
+        let mut start = new_start(root, state_of(&repo), Isolation::Worktree, false);
+        if let Start::New(new) = &mut start {
+            new.max_rounds = 1;
+        }
+        let (mut runner, _actions, _updates) = rig_on(&fake, start);
+        let mut conn = fake.clone();
+        round_one_briefed(&fake, &mut runner, &mut conn);
+        verifier_reply(&runner, "codex", &passing(false));
+        verifier_reply(&runner, "claude", FAILING);
+        let s = runner.engine.session().clone();
+        let claude = PartId::new("claude");
+        let log =
+            store::part_dir(&store::verifier_reply_dir(&s, &claude), 1, &claude).join("logs/1.log");
+        let lines: String = (1..=100).map(|n| format!("error line {n}\n")).collect();
+        fs::write(log, lines).unwrap();
+        settle(&fake, &mut runner, &mut conn);
+        assert_eq!(
+            runner.engine.session().round(1).unwrap().phase,
+            Phase::Ruling
+        );
+        step(&mut runner, &mut conn);
+        fs::write(
+            store::judge_reply_path(&runner.engine.reply_dir(), 1),
+            JUDGE_FAILED,
+        )
+        .unwrap();
+        settle(&fake, &mut runner, &mut conn);
+        let s = runner.engine.session();
+        assert!(
+            s.closed && s.verdict().is_some(),
+            "{:?}",
+            s.round(1).unwrap().judge_brief.as_ref().map(|b| &b.receipt)
+        );
+        stop(runner)
+    }
+
+    /// claude's round-1 reply: AC-1 fails on `cargo build` (exit 101),
+    /// with a defect.
+    const FAILING: &str = r#"{"summary": "The build fails.", "environment": "test",
+ "results": [{"criterion": "AC-1", "result": "fail", "note": "cargo build exits 101.", "evidence": ["e1"]}],
+ "evidence": [{"id": "e1", "kind": "command", "cmd": "cargo build", "cwd": ".", "exit": 101, "log": "logs/1.log", "rerun": false}],
+ "defects": [{"id": "1", "claim": "one() does not build", "severity": "high", "category": "conformance", "confidence": "high",
+   "repro": "1. cargo build\n2. read the first error", "evidence": ["e1"]}]}"#;
+
+    const JUDGE_FAILED: &str = r#"{"summary": "The build fails.",
+ "rulings": [{"criterion": "AC-1", "ruling": "failed", "rationale": "claude's build exits 101.", "evidence": ["claude/r1/e1"]}],
+ "defect_ops": [{"op": "add", "id": "D1", "from": ["claude/1"], "claim": "one() does not build",
+   "repro": "1. cargo build\n2. read the first error", "severity": "high", "category": "conformance",
+   "confidence": "high", "status": "open", "rationale": "Seen by claude."}],
+ "verdict": {"decision": "fail", "rationale": "AC-1 failed.", "blocking": ["AC-1", "D1"]}}"#;
 
     #[test]
     fn each_connection_reports_the_version_of_its_noa() {

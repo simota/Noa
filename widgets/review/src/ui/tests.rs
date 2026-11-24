@@ -1812,3 +1812,35 @@ fn reviewing_again_leaves_out_agents_that_are_not_installed() {
     assert_eq!(form.lead.kind, AgentKind::Claude);
     let _ = std::fs::remove_dir_all(repo);
 }
+
+// ---- --repo ----
+
+#[test]
+fn the_focused_panes_directory_fills_the_repository_root_and_working_directory() {
+    let (channel, _link) = Channel::fake();
+    let screen = live_ready(channel).with_place(Path::new("/Users/me/src/noa"));
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.repo, "/Users/me/src/noa");
+    assert_eq!(form.root, "/Users/me/src/noa");
+    assert_eq!(form.document_workdir, "/Users/me/src/noa");
+    // The rest stays the clean form.
+    let clean = start::Form::for_kinds(&AgentKind::ALL);
+    assert_eq!(form.panel, clean.panel);
+    assert_eq!(form.kind, clean.kind);
+}
+
+#[test]
+fn the_place_stays_when_the_agent_check_reports_later() {
+    let (screen, _link, tx, mut text) = live_pending();
+    let mut screen = screen.with_place(Path::new("/Users/me/src/noa"));
+    report(&mut screen, &tx, found(&[AgentKind::Codex]), &mut text);
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.repo, "/Users/me/src/noa");
+    assert_eq!(form.root, "/Users/me/src/noa");
+    // The untouched panel took the installed kinds as its defaults.
+    assert!(
+        form.panel
+            .iter()
+            .all(|row| row.agent.kind == AgentKind::Codex)
+    );
+}

@@ -389,7 +389,9 @@ impl App {
     /// toast: the program is a separate process whose stderr nobody sees.
     fn open_helper_program(&mut self, helper: crate::helper_program::HelperProgram) {
         let proxy = self.proxy.clone();
-        let started = crate::helper_program::open(helper, move |message| {
+        let cwd = self.focused_pane_cwd();
+        let args = crate::helper_program::launch_args(helper, cwd.as_deref());
+        let started = crate::helper_program::open(helper, &args, move |message| {
             let _ = proxy.send_event(UserEvent::HelperProgramFailed(message));
         });
         if let Err(message) = started {

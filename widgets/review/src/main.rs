@@ -26,10 +26,12 @@ use noa_gpui_text::TextStore;
 use crate::live::{Link, Snapshot};
 use crate::ui::{CenterTab, Review};
 
-const USAGE: &str = "usage: review [--demo | --demo-start | --demo-held | --session=DIR] \
+const USAGE: &str = "usage: review [--demo | --demo-start | --demo-held | --session=DIR | --repo=DIR] \
                      [--tab=findings|matrix|report] [--finding=ID] \
                      [--snapshot=FILE.png [--size=WxH]]\n  \
                      the live review by default; \
+                     --repo puts DIR (absolute) in the start view's repository, root and \
+                     working directory fields (Noa passes its focused pane's); \
                      --demo shows a canned three-round review, \
                      --demo-start the start view with canned past reviews, \
                      --demo-held the demo held after a round, \
@@ -131,6 +133,9 @@ struct Args {
     demo_start: bool,
     demo_held: bool,
     session: Option<PathBuf>,
+    /// Where the start view's repository, root and working directory
+    /// fields start.
+    repo: Option<PathBuf>,
     tab: Option<CenterTab>,
     finding: Option<String>,
     help: bool,
@@ -148,6 +153,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             // against them.
             out.session =
                 Some(std::path::absolute(dir).map_err(|e| format!("--session={dir}: {e}"))?);
+        } else if let Some(dir) = arg.strip_prefix("--repo=") {
+            let dir = PathBuf::from(dir);
+            if !dir.is_absolute() {
+                return Err(format!("--repo needs an absolute path\n{USAGE}"));
+            }
+            out.repo = Some(dir);
         } else if let Some(tab) = arg.strip_prefix("--tab=") {
             out.tab =
                 Some(CenterTab::parse(tab).ok_or_else(|| format!("unknown tab {tab:?}\n{USAGE}"))?);
@@ -179,6 +190,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--demo, --demo-start, --demo-held and --session do not go together\n{USAGE}"
         ));
     }
+    if sources > 0 && out.repo.is_some() {
+        return Err(format!(
+            "--repo fills the live start view; it does not go with --demo, --demo-start, \
+             --demo-held or --session\n{USAGE}"
+        ));
+    }
     Ok(out)
 }
 
@@ -208,6 +225,10 @@ fn main() -> Result<(), String> {
         } else {
             Review::of_snapshot(first_live_snapshot()?)
         };
+        let screen = match &args.repo {
+            Some(repo) => screen.with_place(repo),
+            None => screen,
+        };
         let mut screen = screen.with_view(tab, finding);
         render_snapshot(path, &mut screen, size)?;
         println!("wrote {}", path.display());
@@ -226,9 +247,10 @@ fn main() -> Result<(), String> {
             let channel = live::start(move || waker.wake(), live::startup_link());
             let waker = setup.waker.clone();
             let installed = installed::spawn(move || waker.wake());
-            match &args.session {
-                Some(dir) => Review::live_stored(channel, installed, dir),
-                None => Review::live(channel, installed),
+            match (&args.session, &args.repo) {
+                (Some(dir), _) => Review::live_stored(channel, installed, dir),
+                (None, Some(repo)) => Review::live(channel, installed).with_place(repo),
+                (None, None) => Review::live(channel, installed),
             }
         };
         Box::new(screen.with_view(tab, finding.clone()))
@@ -294,5 +316,19 @@ mod tests {
         assert!(args(&["--demo", "--demo-start"]).is_err());
         assert!(args(&["--demo-held", "--session=/x"]).is_err());
         assert!(args(&["--what"]).is_err());
+    }
+
+    #[test]
+    fn repo_takes_an_absolute_dir_and_only_for_the_live_view() {
+        let args = |list: &[&str]| parse_args(list.iter().map(|s| s.to_string()));
+        assert_eq!(
+            args(&["--repo=/Users/me/src/noa"]).unwrap().repo,
+            Some(PathBuf::from("/Users/me/src/noa"))
+        );
+        assert!(args(&["--repo=src/noa"]).is_err());
+        assert!(args(&["--repo="]).is_err());
+        for source in ["--demo", "--demo-start", "--demo-held", "--session=/x"] {
+            assert!(args(&["--repo=/r", source]).is_err(), "{source}");
+        }
     }
 }

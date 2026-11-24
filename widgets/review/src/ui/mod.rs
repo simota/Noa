@@ -308,6 +308,23 @@ impl Review {
         screen
     }
 
+    /// Puts `dir` in the start view's repository, root and working
+    /// directory fields (`--repo`: the focused pane's directory, so a
+    /// review of where the person works needs no path typed).
+    pub fn with_place(mut self, dir: &Path) -> Self {
+        let mut text = TextStore::new(Default::default());
+        let place = dir.display().to_string();
+        let form = start::Form {
+            repo: place.clone(),
+            root: place.clone(),
+            document_workdir: place,
+            ..start::read(&self.tree, &self.start)
+        };
+        start::fill(&mut self.tree, &mut self.start, &form, &mut text);
+        self.rebuild(&mut text);
+        self
+    }
+
     /// Picks the center tab and the selected finding (for `--tab` and
     /// `--finding`).
     pub fn with_view(mut self, tab: Option<CenterTab>, finding: Option<String>) -> Self {

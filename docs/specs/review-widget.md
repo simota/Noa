@@ -255,7 +255,7 @@ It is written to `<session dir>/report.md` (temporary file + rename) after every
 - Delivery: every brief paste and its Enter go with `refuseShell`, so nothing is typed into a pane back at its shell (a refused Enter leaves the brief pending); a Noa older than 0.9.12, which ignores the field, is not written to. A brief whose JSON encoding exceeds 128 KiB (the control server takes frames of at most 256 KiB) is written to `r<N>/brief-<part>.md` and the agent is sent a pointer to it.
 - Resume (再開, `Start::Resume`): refused when the log is held elsewhere, the workdir is gone, the log's id does not match its directory, a setup fails `check`, participant ids do not re-derive from the panel, a reply path is not the one the store gives, or the snapshot is missing or its diff/file digests differ from the manifest (「レビュー対象のスナップショットが変更されています」). Agents still in their labelled panes are taken up; the others start anew and get their open brief again. Resuming an ended review opens it read-only.
 - 新しいレビュー leaves the shown review (its runner stops, panes stay) and returns to a clean start view.
-- Command line: `review [--demo | --demo-start | --demo-held | --session=DIR] [--tab=findings|matrix|report] [--finding=ID] [--snapshot=FILE.png [--size=WxH]]`. `--session` shows a stored review read-only (no runner, no agents; a log that cannot be read fails before the window opens); `--demo` a canned three-round review, `--demo-start` the start view with canned past reviews, `--demo-held` the demo held after a round; `--tab` and `--finding` pick the center tab and the selected finding, so every view can be rendered headlessly with `--snapshot`. Mutually exclusive sources are refused as discussion refuses them.
+- Command line: `review [--demo | --demo-start | --demo-held | --session=DIR | --repo=DIR] [--tab=findings|matrix|report] [--finding=ID] [--snapshot=FILE.png [--size=WxH]]`. `--session` shows a stored review read-only (no runner, no agents; a log that cannot be read fails before the window opens); `--demo` a canned three-round review, `--demo-start` the start view with canned past reviews, `--demo-held` the demo held after a round; `--tab` and `--finding` pick the center tab and the selected finding, so every view can be rendered headlessly with `--snapshot`. Mutually exclusive sources are refused as discussion refuses them.
 
 ### L1-8. Noa integration
 
@@ -294,6 +294,10 @@ Added after v1: a review can be run again as it was set up, typically after its 
 - Where: 同じ設定で再レビュー in the board's status bar (the review on screen, running, finished or stored), and 再レビュー on every readable row of 過去のレビュー (an unreadable one has none).
 - What it does: leaves the review on screen as 新しいレビュー does (a running one is interrupted, resumable from the list), and fills the start view from the stored setup: the target (kind; repository, base — empty stays automatic —, head, path filter; root and paths; document text, file and working directory), the lead and every reviewer (kind, model, effort, lens; a custom lens with its text), the round limit (as it ended, after any +N) and the request. Agents that are not installed are left out as for any form, with the usual notice. Nothing starts until レビューを開始.
 - The request: what was asked, followed (after a blank line) by a note when the verdict had live must-fix findings: `（前回のレビュー <id> の総合判定: <decision>）`, a line asking to check whether they were fixed and whether the fix brought new problems, and one line per finding (`- F1 [高] claim（path:line）`). An earlier such note (from a review that was itself a re-review) is cut at its first line, so notes do not pile up. The request stays editable; it reaches every brief as any request does. No log format changes.
+
+### L1-11. Opening where the person works (`--repo`)
+
+Added after v1: when Noa opens the review (View → Review, the palette's Open Review, `review.open`), it passes the focused pane's working directory (a local pane's OSC 7 directory that exists) as `review --repo=DIR`; no other widget gets an argument (`helper_program::launch_args`). The start view's repository (git), root (files) and working directory (document) fields start with `DIR`; the rest of the form is the clean one, and the installed-agents check that reports later keeps them. `--repo` takes an absolute path and goes with neither `--demo*` nor `--session` (refused before a window opens); with `--snapshot` it renders the live start view filled.
 
 ## L2: Detail
 
@@ -452,10 +456,12 @@ Unit tests live beside the modules; golden tests in `tests/`; headless snapshots
 38. AC-38 同じ設定で再レビュー fills the start view so that it gives back the stored target (git with a ref, a filter and a custom lens; files; a typed document with a working directory; a document file), lead, panel and limit; starting it sends a `Start` with them, in two steps (UI tests).
 39. AC-39 The request keeps what was asked and adds the live must-fix findings; a re-review of a re-review has one note; a review without a verdict keeps its request (UI tests).
 40. AC-40 Every readable past row offers 再レビュー, an unreadable one does not; kinds not installed are left out (UI tests).
+41. AC-41 `review --repo=DIR` fills the repository, root and working directory fields and keeps them when the agent check reports; a relative `--repo` and `--repo` with a demo or `--session` exit non-zero (UI, flag and CLI tests). Noa passes `--repo=<focused pane's directory>` to the review only, none when the directory is unknown or relative; the other four widgets start with no argument (noa-app test).
+42. AC-42 (manual) Opening Review from a pane inside a repository shows that repository in the start view.
 
 ## Scope
 
-In scope: L1-1 … L1-10 above.
+In scope: L1-1 … L1-11 above.
 
 Out of scope:
 - Applying fixes inside the widget, or tracking whether a fix request was carried out: 修正を依頼 (L1-9) starts the agent and hands it the findings; the agent works in its own tab.

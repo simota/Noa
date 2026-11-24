@@ -568,6 +568,15 @@ fn ac15_the_judges_assignments_replace_the_default() {
     );
 }
 
+/// Round 1's rulings, each citing the matched commands of two verifiers;
+/// without its closing brace, for [`CLOSE_PASS`].
+const JUDGE_R1_TWO: &str = r#"{"summary": "All three hold.",
+ "rulings": [
+  {"criterion": "AC-1", "ruling": "verified", "rationale": "Re-runs matched.", "evidence": ["claude/r1/e1", "codex/r1/e1"]},
+  {"criterion": "AC-2", "ruling": "verified", "rationale": "Re-runs matched.", "evidence": ["codex/r1/e1", "claude-2/r1/e1"]},
+  {"criterion": "AC-3", "ruling": "verified", "rationale": "Re-runs matched.", "evidence": ["claude-2/r1/e1", "claude/r1/e1"]}
+ ]"#;
+
 const CLOSE_PASS: &str = r#", "verdict": {"decision": "pass", "rationale": "Everything holds.", "blocking": []}, "close": true}"#;
 
 #[test]
@@ -581,8 +590,20 @@ fn ac17_round_one_closes_early_when_every_criterion_has_two_matched_passes() {
     }
     rig.ingest();
     rig.rerun_all_matched();
-    let judge = format!("{}{CLOSE_PASS}", JUDGE_R1.trim_end().trim_end_matches('}'));
-    rig.judge(&judge);
+    // A ruling citing one verifier per criterion meets the standard (one
+    // matched re-run is enough for verified) but rests on one verifier:
+    // no early close.
+    let one = format!("{}{CLOSE_PASS}", JUDGE_R1.trim_end().trim_end_matches('}'));
+    let session = rig.engine.session().clone();
+    let why = crate::model::validate::parse_judge(&one, &session, 1).unwrap_err();
+    assert_eq!(
+        why.problems,
+        [
+            "close: not allowed in round 1 unless every criterion is verified by two verifiers with matched re-runs, its ruling citing each one's matched command"
+        ],
+        "{why}"
+    );
+    rig.judge(&format!("{JUDGE_R1_TWO}{CLOSE_PASS}"));
     let s = rig.engine.session();
     assert!(s.closed, "{:?}", rig.rejected("judge"));
     assert_eq!(
@@ -627,6 +648,73 @@ fn ac17_round_one_may_not_close_with_a_criterion_on_one_matched_pass() {
         .replace("claude-2/r1/e1", "claude/r1/e1");
     let judge = format!("{}{CLOSE_PASS}", judge.trim_end().trim_end_matches('}'));
     rig.judge(&judge);
+    assert!(!rig.engine.session().closed);
+    let why = rig.rejected("judge").unwrap();
+    assert!(why.contains("close: not allowed in round 1"), "{why}");
+}
+
+#[test]
+fn ac17_round_one_may_not_close_on_matched_passes_its_rulings_do_not_cite() {
+    let mut rig = Rig::new(3);
+    testkit::accept_default_criteria(&mut rig);
+    testkit::start_round_one(&mut rig);
+    // The person's screenshot shows every criterion.
+    rig.feed(Input::AttachEvidence {
+        key: EvidenceKey::user(1),
+        body: EvidenceBody::File {
+            path: "all.png".into(),
+            caption: Some("every criterion holds".into()),
+            media: Some(Media::Png),
+            marks: Vec::new(),
+            shows: Vec::new(),
+        },
+        stored: Stored {
+            path: PathBuf::from("evidence/user/1.png"),
+            bytes: 2048,
+            digest: 77,
+        },
+        shows: vec!["AC-1".into(), "AC-2".into(), "AC-3".into()],
+        at: 60,
+    });
+    rig.deliver();
+    // claude and codex pass everything on matched re-runs; claude-2
+    // passes everything on a command it does not re-run.
+    rig.reply("claude", &all_pass());
+    rig.reply("codex", &all_pass());
+    rig.reply(
+        "claude-2",
+        &reply_json(
+            &[
+                ("AC-1", "pass", &["e1"]),
+                ("AC-2", "pass", &["e1"]),
+                ("AC-3", "pass", &["e1"]),
+            ],
+            &[cmd("e1", 0, false)],
+            "",
+        ),
+    );
+    rig.ingest();
+    rig.rerun_all_matched();
+    // Each ruling rests on claude-2 and the person, two sources: verified
+    // holds, but no verifier it rests on has a matched re-run.
+    let ruling = |criterion: &str| {
+        format!(
+            r#"{{"criterion": "{criterion}", "ruling": "verified", "rationale": "claude-2's test and the screenshot.", "evidence": ["claude-2/r1/e1", "user/1"]}}"#
+        )
+    };
+    let rulings = format!(
+        r#"{{"summary": "All three hold.", "rulings": [{}, {}, {}]"#,
+        ruling("AC-1"),
+        ruling("AC-2"),
+        ruling("AC-3"),
+    );
+    let session = rig.engine.session().clone();
+    let open = format!("{rulings}}}");
+    assert!(
+        crate::model::validate::parse_judge(&open, &session, 1).is_ok(),
+        "the rulings alone meet the standard"
+    );
+    rig.judge(&format!("{rulings}{CLOSE_PASS}"));
     assert!(!rig.engine.session().closed);
     let why = rig.rejected("judge").unwrap();
     assert!(why.contains("close: not allowed in round 1"), "{why}");
@@ -1096,8 +1184,7 @@ fn ac17_an_early_close_cut_before_its_session_closed_stays_closed_on_resume() {
     }
     rig.ingest();
     rig.rerun_all_matched();
-    let judge = format!("{}{CLOSE_PASS}", JUDGE_R1.trim_end().trim_end_matches('}'));
-    rig.judge(&judge);
+    rig.judge(&format!("{JUDGE_R1_TWO}{CLOSE_PASS}"));
     assert!(rig.engine.session().closed, "{:?}", rig.rejected("judge"));
     let (engine, out) = resumed_after(&rig, |e| matches!(e, Event::JudgeAccepted { .. }));
     let s = engine.session();

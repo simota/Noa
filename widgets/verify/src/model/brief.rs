@@ -635,15 +635,24 @@ fn write_item(out: &mut String, session: &Session, key: &EvidenceKey, reply_dir:
             rerun,
             ..
         } => {
-            let one = cmd.lines().next().unwrap_or_default();
-            let more = if cmd.lines().count() > 1 { " …" } else { "" };
-            let _ = write!(out, "command `{one}`{more} (cwd {cwd}) exit {exit}");
+            let lines = cmd.lines().count();
+            if lines > 1 {
+                let _ = write!(out, "command of {lines} lines (cwd {cwd}) exit {exit}");
+            } else {
+                let one = cmd.lines().next().unwrap_or_default();
+                let _ = write!(out, "command `{one}` (cwd {cwd}) exit {exit}");
+            }
             match &item.rerun {
                 Some(r) => {
                     let _ = write!(out, "; re-run {}", rerun_text(r));
                 }
                 None if *rerun => out.push_str("; re-run pending"),
                 None => {}
+            }
+            // A command of several lines is shown whole: its first line
+            // alone may not say what it runs (`set -e`).
+            if lines > 1 {
+                out.push_str(&fenced(cmd, "    "));
             }
         }
         EvidenceBody::File {
@@ -693,6 +702,24 @@ fn write_item(out: &mut String, session: &Session, key: &EvidenceKey, reply_dir:
         None => {}
     }
     out.push('\n');
+}
+
+/// `text` as a fenced code block, each line after `indent`, starting with
+/// a newline. The fence is longer than any run of backticks in `text`, so
+/// no line of it ends the block early.
+pub(crate) fn fenced(text: &str, indent: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    let mut out = format!("\n{indent}{fence}");
+    for line in text.lines() {
+        out.push('\n');
+        if !line.is_empty() {
+            out.push_str(indent);
+            out.push_str(line);
+        }
+    }
+    let _ = write!(out, "\n{indent}{fence}");
+    out
 }
 
 /// `mm:ss.f` of a mark.
@@ -1107,7 +1134,7 @@ pub fn judge_brief(
                 "You may set \"close\": true with a \"verdict\" if nothing is left to settle.\n",
             );
         } else {
-            body.push_str("\"close\" is allowed in round 1 only when every criterion is verified by two or more verifiers with re-runs that matched.\n");
+            body.push_str("\"close\" is allowed in round 1 only when every criterion is verified by two or more verifiers with re-runs that matched, its ruling citing each one's matched command.\n");
         }
     }
     body.push('\n');

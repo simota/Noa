@@ -457,8 +457,10 @@ enum RawEvidence {
         caption: Option<String>,
         #[serde(default)]
         marks: Vec<RawMark>,
+        /// `None` when the field is left out; `Some([])` is refused, so an
+        /// empty `shows` never stands for "every criterion that cites it".
         #[serde(default)]
-        shows: Vec<String>,
+        shows: Option<Vec<String>>,
     },
     Observation {
         id: String,
@@ -817,7 +819,16 @@ pub fn parse_reply(
                         }
                     }
                 }
-                let shows: Vec<String> = shows.iter().map(|s| s.trim().to_owned()).collect();
+                if shows.as_ref().is_some_and(Vec::is_empty) {
+                    problems.push(format!(
+                        "{at}.shows is empty; name the criteria it shows, or leave the field out"
+                    ));
+                }
+                let shows: Vec<String> = shows
+                    .iter()
+                    .flatten()
+                    .map(|s| s.trim().to_owned())
+                    .collect();
                 // `shows` ties a picture to criteria (L1-5a); a plain file
                 // is evidence only for what cites it.
                 if !shows.is_empty() && found.is_some() && media == Some(None) {
@@ -1750,7 +1761,7 @@ pub fn parse_judge(
     let last = session.is_last(round);
     if raw.close && rulings_ok && !may_close(session, round, &rulings) {
         problems.push(
-            "close: not allowed in round 1 unless every criterion is verified by two verifiers with matched re-runs"
+            "close: not allowed in round 1 unless every criterion is verified by two verifiers with matched re-runs, its ruling citing each one's matched command"
                 .to_owned(),
         );
     }

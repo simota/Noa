@@ -234,11 +234,26 @@ impl<'a> History<'a> {
     /// Whether `cited` holds a command of a counted pass (rule 3) whose
     /// re-run matched: enough alone for `verified`.
     pub fn matched_rerun_of_a_pass(&self, cited: &[EvidenceKey]) -> bool {
-        self.counted_passes(cited).iter().any(|pass| {
-            pass.evidence.iter().any(|k| {
-                cited.contains(k) && self.standing(k) == Standing::Stored && self.rerun_matched(k)
+        !self.matched_passes(cited).is_empty()
+    }
+
+    /// The verifiers with a pass that counts for a ruling citing `cited`
+    /// (rule 3) and a command of that pass, cited and stored, whose re-run
+    /// matched: the verifiers a round-1 early close counts (L1-4 item 5).
+    /// A verifier the ruling does not cite counts for nothing, however its
+    /// re-runs went.
+    pub fn matched_passes(&self, cited: &[EvidenceKey]) -> BTreeSet<&'a PartId> {
+        self.counted_passes(cited)
+            .into_iter()
+            .filter(|pass| {
+                pass.evidence.iter().any(|k| {
+                    cited.contains(k)
+                        && self.standing(k) == Standing::Stored
+                        && self.rerun_matched(k)
+                })
             })
-        })
+            .map(|pass| &pass.part)
+            .collect()
     }
 
     fn rerun_matched(&self, key: &EvidenceKey) -> bool {
@@ -341,21 +356,6 @@ impl<'a> History<'a> {
                     .defect_checks
                     .iter()
                     .any(|c| c.outcome == reproduced && c.evidence.contains(key)))
-    }
-
-    /// The verifiers whose `pass` on the criterion cites a stored command
-    /// whose re-run matched (L1-4 item 5).
-    pub fn passes_with_matched_reruns(&self) -> BTreeSet<&'a PartId> {
-        self.results
-            .iter()
-            .filter(|r| r.outcome == Outcome::Pass && self.session.is_verifier(&r.part))
-            .filter(|r| {
-                r.evidence
-                    .iter()
-                    .any(|k| self.standing(k) == Standing::Stored && self.rerun_matched(k))
-            })
-            .map(|r| &r.part)
-            .collect()
     }
 
     /// Why a `verified` ruling citing `cited` breaks the standard: it
@@ -749,15 +749,19 @@ pub fn default_assignments(session: &Session, round: RoundNo) -> BTreeMap<PartId
 }
 
 /// Whether round 1 may close early with `rulings`: every criterion
-/// verified by two or more verifiers with re-runs that matched.
+/// verified by two or more verifiers with re-runs that matched, counting
+/// on each criterion only the verifiers its ruling rests on
+/// ([`History::matched_passes`]).
 pub fn early_close_allowed(session: &Session, rulings: &BTreeMap<String, Ruling>) -> bool {
     !session.criteria.is_empty()
         && session.criteria.iter().all(|c| {
-            rulings.get(&c.id).map(|r| r.kind) == Some(RulingKind::Verified)
-                && History::of(session, &c.id)
-                    .passes_with_matched_reruns()
-                    .len()
-                    >= 2
+            rulings.get(&c.id).is_some_and(|r| {
+                r.kind == RulingKind::Verified
+                    && History::of(session, &c.id)
+                        .matched_passes(&r.evidence)
+                        .len()
+                        >= 2
+            })
         })
 }
 

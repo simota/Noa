@@ -99,7 +99,12 @@ Every must criterion holds; the slow cold start (should) and the nested-link def
 - `claude/r1/e1` コマンド `cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 一致（0） · digest `3145b15b544f640b` · 1029 バイト · `evidence/r1/claude/logs/1.log`
   - 再実行のログ: digest `419e46c259bc2dcb` · 1030 バイト · `evidence/r1/claude.rerun/1.log`
 - `claude/r1/e2` 画像（PNG）`shots/new tab.png`「pwd in the new tab shows /tmp」 · digest `56af731184d382ca` · 1036 バイト · `evidence/r1/claude/shots/new tab.png`
-- `claude/r1/e3` コマンド `for i in $(seq 20); do` …（bench） · 終了コード 0 · digest `233e39392ce9da75` · 1029 バイト · `evidence/r1/claude/logs/3.log`
+- `claude/r1/e3` コマンド 3 行（bench） · 終了コード 0 · digest `233e39392ce9da75` · 1029 バイト · `evidence/r1/claude/logs/3.log`
+  ```
+  for i in $(seq 20); do
+    ./bench open-tab
+  done
+  ```
 - `codex/r1/e1` コマンド `cargo test -p app cwd_symlink -- --exact`（.） · 終了コード 101 · 再実行 一致（101） · digest `d91652720290f86e` · 1028 バイト · `evidence/r1/codex/logs/1.log`
   - 再実行のログ: digest `29e17307b368c040` · 1029 バイト · `evidence/r1/codex.rerun/1.log`
 - `codex/r1/e2` 動画（MOV）`video/symlink.mov`「cd into a symlink, Cmd-T, pwd」 · digest `7fbb867bbedf39d4` · 1035 バイト · `evidence/r1/codex/video/symlink.mov`

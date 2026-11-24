@@ -1647,6 +1647,34 @@ fn ac30_only_media_take_shows() {
     );
 }
 
+#[test]
+fn ac30_an_empty_shows_is_refused_rather_than_read_as_left_out() {
+    let rig = round_one();
+    let text = reply_json(
+        &[
+            ("AC-1", "pass", &["f1"]),
+            ("AC-2", "not_tested", &[]),
+            ("AC-3", "not_tested", &[]),
+        ],
+        &[
+            r#"{"id": "f1", "kind": "file", "path": "shots/tab.png", "caption": "pwd in the new tab", "shows": []}"#
+                .to_owned(),
+        ],
+        "",
+    );
+    let files = facts_for(&text);
+    assert_eq!(
+        reply_problems(&rig, "claude", &text, &files),
+        ["evidence[0] (f1).shows is empty; name the criteria it shows, or leave the field out"]
+    );
+    // Left out, the picture is evidence for what cites it.
+    let left_out = text.replace(r#", "shows": []"#, "");
+    assert_eq!(
+        reply_problems(&rig, "claude", &left_out, &files),
+        Vec::<String>::new()
+    );
+}
+
 /// Round 1 where codex fails AC-1 on a stored video `v1` alone, and claude
 /// and claude-2 pass AC-3 each on a stored video `v1` of their own; every
 /// other result passes on a matched re-run of `e1`.

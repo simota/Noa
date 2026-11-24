@@ -418,7 +418,12 @@ exit 101
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-3 [should] Opening a tab stays under 50 ms
 - claude: pass — 31 ms median.
-  - claude/r1/e3: command `for i in $(seq 20); do` … (cwd bench) exit 0
+  - claude/r1/e3: command of 3 lines (cwd bench) exit 0
+    ```
+    for i in $(seq 20); do
+      ./bench open-tab
+    done
+    ```
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
 - codex: blocked — No display in the sandbox.
 - agy: pass
@@ -472,7 +477,7 @@ User interventions:
 - [m1 R1 to codex] Try a cwd behind a symlink too.
 
 1 round(s) left after this one. In "assign", give each verifier the results (<verifier>/<criterion>, never its own) and defects (D<n>) to reproduce or refute next round; with none, every fail and every pass resting on a single verifier is assigned round-robin. Leave "verdict" out unless you close.
-"close" is allowed in round 1 only when every criterion is verified by two or more verifiers with re-runs that matched.
+"close" is allowed in round 1 only when every criterion is verified by two or more verifiers with re-runs that matched, its ruling citing each one's matched command.
 
 ## 9. Your output
 Write ONLY this JSON to the file:
@@ -570,7 +575,12 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 - claude R1: pass — 31 ms median.
-  - claude/r1/e3: command `for i in $(seq 20); do` … (cwd bench) exit 0
+  - claude/r1/e3: command of 3 lines (cwd bench) exit 0
+    ```
+    for i in $(seq 20); do
+      ./bench open-tab
+    done
+    ```
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
 - codex R1: blocked — No display in the sandbox.
 - agy R1: pass
@@ -714,7 +724,12 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 - claude R1: pass — 31 ms median.
-  - claude/r1/e3: command `for i in $(seq 20); do` … (cwd bench) exit 0
+  - claude/r1/e3: command of 3 lines (cwd bench) exit 0
+    ```
+    for i in $(seq 20); do
+      ./bench open-tab
+    done
+    ```
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
 - codex R1: blocked — No display in the sandbox.
 - agy R1: pass
@@ -855,7 +870,12 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 - claude R1: pass — 31 ms median.
-  - claude/r1/e3: command `for i in $(seq 20); do` … (cwd bench) exit 0
+  - claude/r1/e3: command of 3 lines (cwd bench) exit 0
+    ```
+    for i in $(seq 20); do
+      ./bench open-tab
+    done
+    ```
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
 - codex R1: blocked — No display in the sandbox.
 - agy R1: pass

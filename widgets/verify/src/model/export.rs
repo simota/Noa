@@ -215,6 +215,11 @@ fn write_head(out: &mut String, session: &Session) {
         "終了"
     } else if session.waits_to_continue() {
         "停止中"
+    } else if session.phase() == Phase::Closed {
+        // A ruled round of a verification that goes on (one extended past
+        // its limit, say): the next round is being prepared, its worktrees
+        // made or rebuilt, as before round 1.
+        Phase::Briefing.label()
     } else {
         session.phase().label()
     };
@@ -360,15 +365,24 @@ fn write_media_list(out: &mut String, media: &[&Evidence], base: Option<&Path>) 
     }
 }
 
-/// One evidence item on one line: what it is, its exit status and re-run,
-/// digest, size and stored path.
-fn item_line(item: &Evidence) -> String {
+/// One evidence item as the text of a list entry whose marker sits after
+/// `indent`: on its first line what it is, its exit status and re-run,
+/// digest, size and stored path; a command of several lines follows whole,
+/// as a code block inside the entry.
+fn item_entry(item: &Evidence, indent: &str) -> String {
     let mut out = format!("`{}` ", item.key);
+    let mut block = None;
     match &item.body {
         EvidenceBody::Command { cmd, cwd, exit, .. } => {
-            let first = cmd.lines().next().unwrap_or_default();
-            let more = if cmd.lines().count() > 1 { " …" } else { "" };
-            let _ = write!(out, "コマンド `{first}`{more}（{cwd}） · 終了コード {exit}");
+            let lines = cmd.lines().count();
+            if lines > 1 {
+                let _ = write!(out, "コマンド {lines} 行（{cwd}） · 終了コード {exit}");
+                // Its first line alone may not say what it runs (`set -e`).
+                block = Some(crate::model::brief::fenced(cmd, &format!("{indent}  ")));
+            } else {
+                let one = cmd.lines().next().unwrap_or_default();
+                let _ = write!(out, "コマンド `{one}`（{cwd}） · 終了コード {exit}");
+            }
             if let Some(r) = &item.rerun {
                 let _ = write!(out, " · 再実行 {}", rerun_label(r));
             }
@@ -410,6 +424,9 @@ fn item_line(item: &Evidence) -> String {
         }
         None if item.file_path().is_some() => out.push_str(" · 保存なし"),
         None => {}
+    }
+    if let Some(block) = block {
+        out.push_str(&block);
     }
     out
 }
@@ -507,7 +524,7 @@ fn write_criteria(out: &mut String, session: &Session, base: Option<&Path>) {
                 );
                 for key in &r.evidence {
                     if let Some(item) = session.evidence_item(key) {
-                        let _ = writeln!(out, "  - {}", item_line(item));
+                        let _ = writeln!(out, "  - {}", item_entry(item, "  "));
                     }
                 }
             }
@@ -649,7 +666,7 @@ fn write_evidence(out: &mut String, session: &Session) {
     let (first, rest): (Vec<&Evidence>, Vec<&Evidence>) =
         session.evidence.iter().partition(flagged);
     for item in first.into_iter().chain(rest) {
-        let _ = writeln!(out, "- {}", item_line(item));
+        let _ = writeln!(out, "- {}", item_entry(item, ""));
         if let Some(log) = item.rerun.as_ref().and_then(rerun_log) {
             let _ = writeln!(
                 out,
@@ -1254,6 +1271,100 @@ mod tests {
             report.contains("- ▶ [\\[x\\] を押す \\\\ 戻る](evidence/r1/claude/video/key.mov)"),
             "{report}"
         );
+    }
+
+    #[test]
+    fn a_command_of_several_lines_is_shown_whole_to_the_judge_and_in_the_report() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &reply_json(
+                &[
+                    ("AC-1", "pass", &["e1"]),
+                    ("AC-2", "pass", &["e1"]),
+                    ("AC-3", "pass", &["e1"]),
+                ],
+                &[
+                    r#"{"id": "e1", "kind": "command", "cmd": "set -e\ncargo test actual_case", "cwd": ".", "exit": 0, "log": "logs/e1.log", "rerun": true}"#
+                        .to_owned(),
+                ],
+                "",
+            ),
+        );
+        rig.reply("codex", &all_pass());
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        let brief = rig.brief("judge", crate::model::types::BriefKind::Work);
+        assert!(
+            brief.contains(
+                "  - claude/r1/e1: command of 2 lines (cwd .) exit 0; re-run matched (exit 0)\n    ```\n    set -e\n    cargo test actual_case\n    ```\n    stored: "
+            ),
+            "{brief}"
+        );
+        rig.judge(testkit::JUDGE_R1);
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        let report = report_markdown(rig.engine.session(), None);
+        let block = "\n  ```\n  set -e\n  cargo test actual_case\n  ```\n";
+        let evidence = evidence_section(&report);
+        let at = evidence
+            .find("- `claude/r1/e1` コマンド 2 行（.） · 終了コード 0 · 再実行 一致（0） · digest ")
+            .unwrap_or_else(|| panic!("{report}"));
+        let entry = &evidence[at..];
+        let entry = &entry[..entry.find("\n- ").map_or(entry.len(), |end| end + 1)];
+        assert!(entry.contains(block), "{entry}");
+        // Under AC-1, cited by its ruling, one list level down.
+        let ac1 = &report[report.find("### AC-1").unwrap()..];
+        let ac1 = &ac1[..ac1.find("### AC-2").unwrap()];
+        assert!(
+            ac1.contains("\n    ```\n    set -e\n    cargo test actual_case\n    ```\n"),
+            "{ac1}"
+        );
+        // A fence outlasts any run of backticks in the command.
+        assert_eq!(
+            crate::model::brief::fenced("echo ```\nls", "  "),
+            "\n  ````\n  echo ```\n  ls\n  ````"
+        );
+    }
+
+    #[test]
+    fn a_report_written_while_an_extension_rebuilds_the_worktrees_does_not_say_ended() {
+        use crate::engine::Input;
+        let mut rig = Rig::new(1);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        for part in VERIFIERS {
+            rig.reply(part, &all_pass());
+        }
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(&format!(
+            "{}{}",
+            testkit::JUDGE_R1.trim_end().trim_end_matches('}'),
+            r#", "verdict": {"decision": "pass", "rationale": "Holds.", "blocking": []}}"#
+        ));
+        assert!(rig.engine.session().closed, "{:?}", rig.rejected("judge"));
+        let report = report_markdown(rig.engine.session(), None);
+        assert!(report.contains("- ラウンド: 1 / 1・終了\n"), "{report}");
+        for part in VERIFIERS {
+            rig.feed(Input::WorktreeRemoved {
+                part: testkit::p(part),
+            });
+        }
+        let at = rig.tick();
+        rig.feed(Input::UserExtend { by: 1, at });
+        let s = rig.engine.session();
+        assert!(!s.closed && s.verdict().is_none());
+        let report = report_markdown(s, None);
+        assert!(report.contains("- ラウンド: 1 / 2・配信\n"), "{report}");
+        assert!(!report.contains("・終了"), "{report}");
+        testkit::make_worktrees(&mut rig);
+        let report = report_markdown(rig.engine.session(), None);
+        assert!(report.contains("- ラウンド: 2 / 2・配信\n"), "{report}");
     }
 
     /// The `## 証跡一覧` section of `report`.

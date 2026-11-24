@@ -73,7 +73,7 @@ pub const EVIDENCE_STANDARD: [&str; 10] = [
     "Each rule reads the criterion's whole history: every result on it from every verifier and round, every cross-check on one of those results, every cross-check on a defect, and the evidence they cite.",
     "A cross-check of round N on <verifier>/<criterion> is about that verifier's latest result on the criterion as of round N-1, the one its brief named; once the verifier has reported a later result, the later checks on that subject are about the later result.",
     "Evidence is for a criterion when a result on it cites it, or a cross-check about a result on it, or it is media whose shows names it (media with shows is evidence only for the criteria it names). It counts when its file was stored (an observation has no file and counts as text); a command or file missing at ingest counts for nothing. Evidence cited for verified or failed must be evidence for that criterion.",
-    "A pass of any round counts when the ruling cites a command or file of it that counts, unless it is contested. A pass is contested once a not_reproduced cross-check about that very result cites evidence that counts, until a later pass on the criterion (of a round after that check, from any verifier, its own included) that is not itself contested; a contested pass is neither one of two sources nor the pass whose matched re-run is cited. A disputed check contests nothing. Each verifier is one source however many of its passes count; media the person attached (user/<n>) whose shows names the criterion is one more source, so it counts only together with a verifier's pass. A cross-check is no pass, whatever its outcome; only a not_reproduced that contests a pass takes one away.",
+    "A pass of any round counts when the ruling cites a command or file of it that counts, unless it is contested. A pass is contested once a not_reproduced cross-check about that very result cites evidence that counts, until a later pass on the criterion (of a round after that check, from any verifier, its own included) that has a command or file that counts for the criterion and is not itself contested (media whose shows leaves the criterion out does not lift it); a contested pass is neither one of two sources nor the pass whose matched re-run is cited. A disputed check contests nothing. Each verifier is one source however many of its passes count; media the person attached (user/<n>) whose shows names the criterion is one more source, so it counts only together with a verifier's pass. A cross-check is no pass, whatever its outcome; only a not_reproduced that contests a pass takes one away.",
     "A fail of any round is open until a not_reproduced cross-check about that very result cites evidence that counts. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.",
     "verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each); a contested pass gives neither.",
     "failed needs cited evidence that counts and that a fail result on the criterion cites, or a reproduced cross-check about a fail result on it, or a reproduced cross-check on a defect (also one merged since); a cross-check about a pass backs no failure.",
@@ -959,6 +959,14 @@ fn section_defects<'a>(
             tally.supporters.len(),
             tally.disputers.len()
         );
+        // The earlier rounds' cross-checks on it, with their evidence: a
+        // reproduction may back a failure (L1-6 rule 6) that a judge in a
+        // new pane rules on. This round's are in the cross-checks section.
+        for check in session.cross_checks.iter().filter(|x| {
+            x.round < round && matches!(&x.subject, Subject::Defect { id } if *id == d.id)
+        }) {
+            write_check(out, session, check, reply_dir);
+        }
     }
     out.push('\n');
 }
@@ -1065,6 +1073,44 @@ pub fn judge_brief(
         if !any {
             body.push_str("- (no new result this round)\n");
         }
+        // The criterion's history before this round (L1-6 rules 1–3): a
+        // judge in a new pane rules from it, a ruling resting on an earlier
+        // pass included.
+        let earlier: Vec<_> = session
+            .verifier_ids()
+            .flat_map(|part| {
+                session
+                    .results
+                    .iter()
+                    .filter(move |r| &r.part == part && r.criterion == c.id && r.round < round)
+            })
+            .collect();
+        let earlier_checks: Vec<_> = session
+            .cross_checks
+            .iter()
+            .filter(|x| {
+                x.round < round
+                    && matches!(&x.subject, Subject::Result { criterion, .. } if *criterion == c.id)
+            })
+            .collect();
+        if !earlier.is_empty() || !earlier_checks.is_empty() {
+            body.push_str(
+                "Earlier rounds on this criterion (the evidence standard reads these too):\n",
+            );
+        }
+        for r in earlier {
+            let _ = write!(body, "- {} R{}: {}", r.part, r.round, r.outcome.name());
+            if !r.note.is_empty() {
+                let _ = write!(body, " — {}", r.note.trim());
+            }
+            body.push('\n');
+            for key in &r.evidence {
+                write_item(&mut body, session, key, reply_dir);
+            }
+        }
+        for check in earlier_checks {
+            write_check(&mut body, session, check, reply_dir);
+        }
         if let Some(prev) = session.ruling(&c.id) {
             let _ = writeln!(
                 body,
@@ -1073,6 +1119,11 @@ pub fn judge_brief(
                 prev.kind.name(),
                 prev.rationale.trim()
             );
+            // Every key it cites, wherever it came from (a defect's video,
+            // say): a judge in a new pane traces the ruling from here.
+            for key in &prev.evidence {
+                write_item(&mut body, session, key, reply_dir);
+            }
         }
     }
     let attached: Vec<_> = session
@@ -1292,4 +1343,149 @@ pub fn correction_note(to: &PartId, error: &str, reply_path: &Path) -> String {
         "Your {what} could not be used:\n{error}\n\nFix it and write the whole file again at:\n{}\n",
         reply_path.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::types::Phase;
+    use crate::testkit::{self, Rig, VERIFIERS, all_pass, cmd, reply_json};
+
+    #[test]
+    fn ac13_a_ruling_brief_lists_an_earlier_rounds_defect_reproduction_with_its_evidence() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &format!(
+                r#"{}, "defects": [{{"id": "1", "claim": "The store loses the last line", "severity": "high",
+                   "category": "regression", "confidence": "high", "repro": "1. kill -9 mid-write\n2. reopen the store",
+                   "evidence": ["e1"]}}]}}"#,
+                all_pass().trim_end_matches('}')
+            ),
+        );
+        rig.reply("codex", &all_pass());
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        rig.judge(&format!(
+            r#"{}, "defect_ops": [{{"op": "add", "id": "D1", "from": ["claude/1"], "claim": "The store loses the last line",
+                 "repro": "1. kill -9 mid-write\n2. reopen the store", "severity": "high", "category": "regression",
+                 "confidence": "high", "status": "open", "rationale": "Seen once."}}], "assign": {{"codex": ["D1"]}}}}"#,
+            testkit::JUDGE_R1.trim_end().trim_end_matches('}')
+        ));
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        // R2: only codex's reproduction of D1 cites the picture of AC-2.
+        rig.deliver();
+        rig.reply("claude", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply(
+            "codex",
+            &reply_json(
+                &[],
+                &[r#"{"id": "p1", "kind": "file", "path": "shots/empty.png", "caption": "the store is empty after reopen", "shows": ["AC-2"]}"#
+                    .to_owned()],
+                r#", "cross_checks": [{"subject": "D1", "outcome": "reproduced", "note": "lost here too", "evidence": ["p1"]}]"#,
+            ),
+        );
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+        // A rationale that names neither the check nor the key.
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "same"},
+              {"criterion": "AC-2", "ruling": "failed", "rationale": "The store is empty.", "evidence": ["codex/r2/p1"]},
+              {"criterion": "AC-3", "ruling": "same"}]}"#,
+        );
+        assert_eq!(rig.round(), 3, "{:?}", rig.rejected("judge"));
+        // R3 brings nothing new; the judge starts in a new pane.
+        rig.deliver();
+        for part in VERIFIERS {
+            rig.reply(part, r#"{"summary": "Nothing assigned."}"#);
+        }
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+        let brief = rig.brief("judge", BriefKind::Work);
+        let defects = &brief[brief.find(RULING_SECTIONS[5]).unwrap()..];
+        let defects = &defects[..defects.find(RULING_SECTIONS[6]).unwrap()];
+        for line in [
+            "- codex R2 cross-check on D1: reproduced — lost here too\n",
+            "  - codex/r2/p1: PNG image shots/empty.png — \"the store is empty after reopen\"\n",
+            "evidence/r2/codex/shots/empty.png (100 bytes, digest ",
+        ] {
+            assert!(defects.contains(line), "{line:?} in\n{defects}");
+        }
+    }
+
+    #[test]
+    fn ac13_a_ruling_brief_lists_every_key_the_previous_ruling_cites_under_it() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply("claude", &all_pass());
+        // codex fails AC-1 on log e1; only its defect cites the video e2.
+        rig.reply(
+            "codex",
+            &reply_json(
+                &[
+                    ("AC-1", "fail", &["e1"]),
+                    ("AC-2", "pass", &["e3"]),
+                    ("AC-3", "pass", &["e3"]),
+                ],
+                &[
+                    cmd("e1", 1, false),
+                    r#"{"id": "e2", "kind": "file", "path": "video/tab.mov", "caption": "the new tab opens in $HOME",
+                        "marks": [{"t": "00:04", "note": "the tab shows $HOME"}], "shows": ["AC-1"]}"#
+                        .to_owned(),
+                    cmd("e3", 0, true),
+                ],
+                r#", "defects": [{"id": "1", "claim": "New tabs ignore the focused pane's cwd", "severity": "high",
+                   "category": "regression", "confidence": "high", "repro": "1. cd /tmp 2. open a tab", "evidence": ["e2"]}]"#,
+            ),
+        );
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        rig.rerun_all_matched();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+        rig.judge(
+            r#"{"summary": "s", "rulings": [
+              {"criterion": "AC-1", "ruling": "failed", "rationale": "The log fails and the video shows $HOME.", "evidence": ["codex/r1/e1", "codex/r1/e2"]},
+              {"criterion": "AC-2", "ruling": "verified", "rationale": "Re-run matched.", "evidence": ["claude/r1/e1"]},
+              {"criterion": "AC-3", "ruling": "verified", "rationale": "Re-run matched.", "evidence": ["claude-2/r1/e1"]}],
+             "defect_ops": [{"op": "add", "id": "D1", "from": ["codex/1"], "claim": "New tabs ignore the focused pane's cwd",
+                 "repro": "1. cd /tmp 2. open a tab", "severity": "high", "category": "regression",
+                 "confidence": "high", "status": "open", "rationale": "Seen once."}]}"#,
+        );
+        assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+        // R2: claude reproduces codex/AC-1 (assigned round-robin); the
+        // judge starts in a new pane.
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &reply_json(
+                &[],
+                &[cmd("e1", 1, false)],
+                r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "reproduced", "note": "fails here too", "evidence": ["e1"]}]"#,
+            ),
+        );
+        rig.reply("codex", r#"{"summary": "Nothing assigned."}"#);
+        rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+        rig.ingest();
+        assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude"));
+        let brief = rig.brief("judge", BriefKind::Work);
+        let ac1 = &brief[brief.find(RULING_SECTIONS[3]).unwrap()..];
+        let ac1 = &ac1[ac1.find("### AC-1").unwrap()..ac1.find("### AC-2").unwrap()];
+        let ruling = &ac1[ac1.find("Your ruling so far (R1): failed").unwrap()..];
+        for line in [
+            "  - codex/r1/e1: command `cargo test e1` (cwd .) exit 1\n",
+            "evidence/r1/codex/logs/e1.log (100 bytes, digest ",
+            "  - codex/r1/e2: MOV video video/tab.mov — \"the new tab opens in $HOME\" [00:04 the tab shows $HOME]\n",
+            "evidence/r1/codex/video/tab.mov (100 bytes, digest ",
+        ] {
+            assert!(ruling.contains(line), "{line:?} in\n{ruling}");
+        }
+    }
 }

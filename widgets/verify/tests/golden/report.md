@@ -83,11 +83,12 @@ Every must criterion holds; the slow cold start (should) and the nested-link def
 - 判断: claude reproduced it with a nested link.
 - 再現手順: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
 - 証跡: codex/r1/e1
+- 追試の証跡（R2 claude・再現）: claude/r2/e2
 
 ## 追試
 
-- R2 claude → codex/AC-1: 再現せず — cwd_symlink passes in my worktree.
-- R2 claude → D1: 再現 — A link inside a link resolves wrong.
+- R2 claude → codex/AC-1: 再現せず — cwd_symlink passes in my worktree. · 証跡: claude/r2/e1
+- R2 claude → D1: 再現 — A link inside a link resolves wrong. · 証跡: claude/r2/e2
 - R2 agy → codex/AC-5: 異議 — cwd_gone does not exercise quitting at all.
 
 ## 証跡一覧

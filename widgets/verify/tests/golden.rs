@@ -111,6 +111,43 @@ fn ac7_round_one_verifier_briefs_name_no_peer_worktree_or_reply_path() {
 }
 
 #[test]
+fn ac13_the_round_two_ruling_brief_lists_the_earlier_pass_a_verified_ruling_rests_on() {
+    let (briefs, _) = scenario::run();
+    let brief = briefs
+        .split("===== ")
+        .find(|s| s.starts_with("R2 brief to judge"))
+        .unwrap();
+    let ac1 = &brief[brief.find("### AC-1 ").unwrap()..];
+    let ac1 = &ac1[..ac1.find("### AC-2 ").unwrap()];
+    for line in [
+        "Earlier rounds on this criterion (the evidence standard reads these too):",
+        "- claude R1: pass — pwd shows /tmp.",
+        "  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)",
+        "    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log",
+        "- codex R1: fail — With a symlinked cwd the tab opens in $HOME.",
+    ] {
+        assert!(ac1.contains(line), "{line:?} in {ac1}");
+    }
+}
+
+#[test]
+fn ac20_the_report_ties_a_defects_reproduction_to_its_log() {
+    let report = report();
+    let defects = section(&report, SECTIONS[2]);
+    assert!(
+        defects.contains("- 追試の証跡（R2 claude・再現）: claude/r2/e2"),
+        "{defects}"
+    );
+    let checks = section(&report, SECTIONS[3]);
+    assert!(
+        checks.contains(
+            "- R2 claude → D1: 再現 — A link inside a link resolves wrong. · 証跡: claude/r2/e2"
+        ),
+        "{checks}"
+    );
+}
+
+#[test]
 fn ac21_a_reply_breaking_several_rules_gets_one_line_for_each() {
     let (briefs, _) = scenario::run();
     let correction = briefs

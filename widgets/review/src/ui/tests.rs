@@ -1212,3 +1212,42 @@ fn a_copy_that_cannot_be_read_back_is_reported_as_unconfirmed() {
         ["レポートをクリップボードにコピーできませんでした"]
     );
 }
+
+#[test]
+fn every_filter_count_is_what_choosing_that_value_alone_shows() {
+    let mut screen = Review::demo();
+    // Each step adds to the filters before it: none, all cleared, then a
+    // severity, then one reviewer.
+    let steps = [
+        None,
+        Some(Action::ClearFilters),
+        Some(Action::ToggleSeverity(Severity::Critical)),
+        Some(Action::FilterReviewer(Some(PartId::new("codex")))),
+    ];
+    for step in steps {
+        if let Some(action) = step {
+            act(&mut screen, action);
+        }
+        let session = screen.session.clone().unwrap();
+        let only = |change: &dyn Fn(&mut Filters)| {
+            let mut filters = screen.filters.clone();
+            change(&mut filters);
+            board::shown(&session, &filters).len()
+        };
+        for s in Severity::ALL {
+            let n = only(&|f| f.severities = [s].into());
+            let action = Action::ToggleSeverity(s);
+            assert_eq!(button_label(&screen, &action), format!("{} {n}", s.label()));
+        }
+        for s in FindingStatus::ALL {
+            let n = only(&|f| f.statuses = [status_key(s)].into());
+            let action = Action::ToggleStatus(s);
+            assert_eq!(button_label(&screen, &action), format!("{} {n}", s.label()));
+        }
+        for a in Agreement::ALL {
+            let n = only(&|f| f.agreements = [agreement_key(a)].into());
+            let action = Action::ToggleAgreement(a);
+            assert_eq!(button_label(&screen, &action), format!("{} {n}", a.label()));
+        }
+    }
+}

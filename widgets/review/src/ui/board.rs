@@ -86,12 +86,17 @@ pub(super) fn insert(
             .background(Role::SurfaceAlt)
             .radius(8.0),
     );
-    let count =
-        |pred: &dyn Fn(&Finding) -> bool| session.findings.iter().filter(|f| pred(f)).count();
+    // A chip counts what choosing its value alone in its group shows, the
+    // other groups' filters as they are: count and filter always agree.
+    let only = |change: &dyn Fn(&mut Filters)| {
+        let mut alone = filters.clone();
+        change(&mut alone);
+        shown(session, &alone).len()
+    };
 
     let row = filter_row(tree, bar, "重大度");
     for s in Severity::ALL {
-        let n = count(&|f| f.severity == s && f.status.is_live());
+        let n = only(&|f| f.severities = [s].into());
         chip(
             tree,
             row,
@@ -125,7 +130,7 @@ pub(super) fn insert(
     }
     let row = filter_row(tree, bar, "状態");
     for s in FindingStatus::ALL {
-        let n = count(&|f| f.status == s);
+        let n = only(&|f| f.statuses = [status_key(s)].into());
         chip(
             tree,
             row,
@@ -137,8 +142,7 @@ pub(super) fn insert(
     }
     let row = filter_row(tree, bar, "合意度");
     for a in Agreement::ALL {
-        // Counted over live findings, as the severities are.
-        let n = count(&|f| f.status.is_live() && session.tally(f).agreement == a);
+        let n = only(&|f| f.agreements = [agreement_key(a)].into());
         chip(
             tree,
             row,

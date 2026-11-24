@@ -1284,6 +1284,10 @@ pub struct Session {
     pub closed: bool,
     /// The user holds the review after each consolidated round.
     pub hold: bool,
+    /// The round whose lead output gave the review's verdict; cleared when
+    /// rounds are added, so an old verdict is never the current one.
+    #[serde(default)]
+    pub verdict_round: Option<RoundNo>,
 }
 
 impl Session {
@@ -1362,9 +1366,14 @@ impl Session {
         round >= self.max_rounds
     }
 
-    /// The verdict in the latest round's accepted lead output.
+    /// The review's verdict: the lead's, from the round that ended the
+    /// review. `None` while rounds added after it run (or were never run).
     pub fn verdict(&self) -> Option<&Verdict> {
-        self.current_round()?.outcome.as_ref()?.verdict.as_ref()
+        self.round(self.verdict_round?)?
+            .outcome
+            .as_ref()?
+            .verdict
+            .as_ref()
     }
 
     /// Whether the user ended the review without a verdict.
@@ -1480,13 +1489,10 @@ impl Session {
         let mut supporters = Vec::new();
         let mut disputers = Vec::new();
         let mut silent = Vec::new();
-        let mut counted: Vec<&PartId> = self.counted_reviewers();
-        for part in origins.iter().copied().chain(finding.stances.keys()) {
-            if !counted.contains(&part) && self.is_reviewer(part) {
-                counted.push(part);
-            }
-        }
-        for part in counted {
+        // A reviewer failed in the latest round is not counted (L2-4), even
+        // one that opened the finding or took a stance on it earlier; the
+        // thread keeps what it said.
+        for part in self.counted_reviewers() {
             let stance = finding.latest_stance(part).map(|s| s.kind);
             let origin = origins.contains(part);
             match stance {
@@ -1515,24 +1521,23 @@ impl Session {
     }
 
     /// Findings ranked (L2-4): severity, status, confidence, supporters,
-    /// opening round, then their order.
+    /// opening round, then their id (F2 before F10).
     pub fn ranked(&self) -> Vec<&Finding> {
-        let mut out: Vec<(usize, &Finding, usize)> = self
+        let mut out: Vec<(&Finding, usize)> = self
             .findings
             .iter()
-            .enumerate()
-            .map(|(i, f)| (i, f, self.tally(f).supporters.len()))
+            .map(|f| (f, self.tally(f).supporters.len()))
             .collect();
-        out.sort_by(|(ia, a, sa), (ib, b, sb)| {
+        out.sort_by(|(a, sa), (b, sb)| {
             a.severity
                 .cmp(&b.severity)
                 .then(a.status.rank().cmp(&b.status.rank()))
                 .then(a.confidence.cmp(&b.confidence))
                 .then(sb.cmp(sa))
                 .then(a.opened_in.cmp(&b.opened_in))
-                .then(ia.cmp(ib))
+                .then_with(|| natural_cmp(&a.id, &b.id))
         });
-        out.into_iter().map(|(_, f, _)| f).collect()
+        out.into_iter().map(|(f, _)| f).collect()
     }
 
     /// The next free `F<n>` id.
@@ -1579,6 +1584,50 @@ impl Session {
         }
         counts
     }
+}
+
+/// Orders ids as people read them: runs of digits by value, so `F2` comes
+/// before `F10`.
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut a, mut b) = (a, b);
+    loop {
+        let (Some(x), Some(y)) = (a.chars().next(), b.chars().next()) else {
+            return a.len().cmp(&b.len());
+        };
+        let order = if x.is_ascii_digit() && y.is_ascii_digit() {
+            let run = |s: &str| s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+            let (na, nb) = (run(a), run(b));
+            let (da, db) = (
+                a[..na].trim_start_matches('0'),
+                b[..nb].trim_start_matches('0'),
+            );
+            let order = da
+                .len()
+                .cmp(&db.len())
+                .then_with(|| da.cmp(db))
+                .then(na.cmp(&nb));
+            (a, b) = (&a[na..], &b[nb..]);
+            order
+        } else {
+            (a, b) = (&a[x.len_utf8()..], &b[y.len_utf8()..]);
+            x.cmp(&y)
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+}
+
+/// The first `n` characters of `id` (a git object id, shown short); safe
+/// on any text a hand-edited log may hold.
+pub fn short_id(id: &str, n: usize) -> String {
+    id.chars().take(n).collect()
+}
+
+/// Whether `id` looks like a git object id: 4 to 64 hex digits.
+pub fn is_object_id(id: &str) -> bool {
+    (4..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[cfg(test)]

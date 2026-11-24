@@ -385,3 +385,142 @@ fn locations_know_whether_they_touch_the_diff() {
     assert_eq!(locate(&m, &loc("assets/logo.png", None)), (true, None));
     assert_eq!(locate(&m, &loc("lib/other.rs", Some(3))), (false, None));
 }
+
+#[test]
+fn a_deleted_file_and_one_with_lines_only_taken_out_are_in_the_diff() {
+    let mut m = crate::testkit::manifest();
+    let gone = |path: &str, status, deletions| crate::model::types::TargetFile {
+        path: path.into(),
+        status,
+        lines: 0,
+        bytes: 0,
+        additions: 0,
+        deletions,
+        changed: Vec::new(),
+        digest: 0,
+    };
+    m.files.push(gone("old.rs", FileStatus::Deleted, 40));
+    m.files.push(gone("trimmed.rs", FileStatus::Modified, 3));
+    let loc = |path: &str, line| Location {
+        path: path.into(),
+        line,
+        end_line: None,
+    };
+    assert_eq!(locate(&m, &loc("old.rs", None)), (true, Some(true)));
+    assert_eq!(locate(&m, &loc("old.rs", Some(12))), (true, Some(true)));
+    assert_eq!(locate(&m, &loc("trimmed.rs", None)), (true, Some(true)));
+}
+
+/// Round 2 of a two-round review with every reviewer's reply in, F2
+/// withdrawn by agy (who alone raised it).
+fn at_the_last_lead_with_f2_withdrawn() -> Rig {
+    let mut rig = Rig::new(2);
+    through_round_one(&mut rig);
+    rig.deliver();
+    rig.reply("claude", &review(&[], &[("F2", "confirm", "")]));
+    rig.reply("codex", &review(&[], &[("F2", "confirm", "")]));
+    rig.reply(
+        "agy",
+        &review(&[], &[("F1", "confirm", ""), ("F2", "withdraw", "")]),
+    );
+    assert_eq!(
+        rig.engine.session().finding("F2").unwrap().status,
+        FindingStatus::Withdrawn
+    );
+    rig
+}
+
+#[test]
+fn ac10_a_withdrawn_finding_cannot_be_reopened_or_made_a_must_fix() {
+    let rig = at_the_last_lead_with_f2_withdrawn();
+    let problems = lead_problems(
+        &rig,
+        r#"{"summary": "s", "ops": [
+          {"op": "update", "id": "F1", "status": "agreed"},
+          {"op": "update", "id": "F2", "status": "agreed"}
+        ], "verdict": {"decision": "request_changes", "rationale": "r", "must_fix": ["F1", "F2"]}}"#,
+    );
+    assert_eq!(problems.len(), 2, "{problems:#?}");
+    assert!(
+        problems[0].contains("F2 was withdrawn by every reviewer"),
+        "{}",
+        problems[0]
+    );
+    assert!(
+        problems[1].contains("\"F2\" is not a live finding"),
+        "{}",
+        problems[1]
+    );
+    // Other fields may still be edited; it stays withdrawn.
+    assert!(
+        lead_problems(
+            &rig,
+            r#"{"summary": "s", "ops": [
+              {"op": "update", "id": "F1", "status": "agreed"},
+              {"op": "update", "id": "F2", "claim": "Engine knows the store (withdrawn)"}
+            ], "verdict": {"decision": "request_changes", "rationale": "r", "must_fix": ["F1"]}}"#,
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn ac10_the_lead_claim_limit_and_a_raw_finding_placed_in_an_earlier_round() {
+    let rig = at_the_last_lead_with_f2_withdrawn();
+    let long = "x".repeat(MAX_CLAIM + 1);
+    let problems = lead_problems(
+        &rig,
+        &format!(
+            r#"{{"summary": "s", "ops": [
+              {{"op": "update", "id": "F1", "status": "agreed", "claim": "{long}"}},
+              {{"op": "merge", "id": "F1", "from": ["claude/1"]}}
+            ], "verdict": {{"decision": "approve", "rationale": "r", "must_fix": []}}}}"#
+        ),
+    );
+    // The refused update leaves F1 open, which the verdict then names.
+    assert_eq!(problems.len(), 3, "{problems:#?}");
+    assert!(
+        problems[0].contains(&format!("claim has {} characters", MAX_CLAIM + 1)),
+        "{}",
+        problems[0]
+    );
+    assert!(
+        problems[1].contains("raw finding claude/1 was placed in an earlier round (F1)"),
+        "{}",
+        problems[1]
+    );
+    assert!(problems[2].starts_with("F1 still open"), "{}", problems[2]);
+}
+
+#[test]
+fn ac9_a_stance_on_a_merged_finding_points_at_the_finding_it_went_into() {
+    let mut rig = Rig::new(3);
+    through_round_one(&mut rig);
+    rig.deliver();
+    rig.reply("claude", &review(&[], &[("F2", "confirm", "")]));
+    rig.reply("codex", &review(&[], &[("F2", "confirm", "")]));
+    rig.reply("agy", &review(&[], &[("F1", "confirm", "")]));
+    rig.lead(r#"{"summary": "Merged.", "ops": [{"op": "merge", "id": "F1", "from": ["F2"]}]}"#);
+    assert_eq!(rig.round(), 3);
+    let problems = review_problems(&rig, "claude", &review(&[], &[("F2", "dispute", "No.")]));
+    assert_eq!(
+        problems,
+        ["stances[0]: F2 was merged into F1; give the stance on F1"]
+    );
+}
+
+#[test]
+fn a_log_with_a_commit_id_that_is_not_one_does_not_fold_and_ids_shorten_safely() {
+    use crate::model::reduce::{self, Event};
+    use crate::model::types::{is_object_id, short_id};
+    let rig = Rig::new(2);
+    let mut log = rig.log.clone();
+    let Some(Event::Created { manifest, .. }) = log[0].first_mut() else {
+        panic!("no created event");
+    };
+    manifest.head_sha = Some("日本語のコミット名".into());
+    let err = reduce::replay(log.iter().map(Vec::as_slice)).unwrap_err();
+    assert!(err.to_string().contains("is not a git object id"), "{err}");
+    assert!(is_object_id("abc123") && !is_object_id("abc") && !is_object_id("xyz123"));
+    assert_eq!(short_id("日本語のコミット名", 3), "日本語");
+}

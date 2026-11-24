@@ -9,9 +9,9 @@ use std::fmt;
 use serde::Deserialize;
 
 use super::types::{
-    Confidence, Coverage, Decision, FindingStatus, LeadOp, LeadOutput, Location, PartId,
-    RawFinding, RawKey, RoundKind, RoundNo, Session, Severity, Stance, StanceKind, TargetKind,
-    TargetManifest, Verdict,
+    Confidence, Coverage, Decision, FileStatus, FindingStatus, LeadOp, LeadOutput, Location,
+    PartId, RawFinding, RawKey, RoundKind, RoundNo, Session, Severity, Stance, StanceKind,
+    TargetKind, TargetManifest, Verdict,
 };
 
 /// Everything wrong with one piece of agent output, one problem per entry.
@@ -85,8 +85,13 @@ pub fn locate(manifest: &TargetManifest, loc: &Location) -> (bool, Option<bool>)
     match manifest.file(&loc.path) {
         Some(file) => {
             let in_diff = (!file.changed.is_empty() || manifest.merge_base.is_some()).then(|| {
+                // A deleted file is in the diff whole (it is cited by path).
+                if file.status == FileStatus::Deleted {
+                    return true;
+                }
                 let Some(line) = loc.line else {
-                    return !file.changed.is_empty();
+                    // Lines only taken out leave no changed range.
+                    return !file.changed.is_empty() || file.deletions > 0;
                 };
                 let end = loc.end_line.unwrap_or(line);
                 file.changed.iter().any(|&(a, b)| line <= b && end >= a)
@@ -390,6 +395,13 @@ pub fn parse_review(
                     "{at}.finding {id:?} is not a finding; findings: {}",
                     list(session.findings.iter().map(|f| f.id.as_str()))
                 ));
+            } else if let Some(into) = finding
+                .filter(|f| f.status == FindingStatus::Merged)
+                .map(|f| f.merged_into.as_deref().unwrap_or("another finding"))
+            {
+                problems.push(format!(
+                    "{at}: {id} was merged into {into}; give the stance on {into}"
+                ));
             } else if !given.insert(id.clone()) {
                 problems.push(format!("{at}: a second stance on {id}"));
             }
@@ -588,6 +600,18 @@ impl Shadow {
     }
 }
 
+/// The claim rules a lead's add or update shares with a reviewer's.
+fn check_lead_claim(claim: &str, at: &str, problems: &mut Vec<String>) {
+    if claim.is_empty() || !one_line(claim) {
+        problems.push(format!("{at}.claim must be one non-empty line"));
+    } else if claim.chars().count() > MAX_CLAIM {
+        problems.push(format!(
+            "{at}.claim has {} characters; at most {MAX_CLAIM} (put details in the rationale)",
+            claim.chars().count()
+        ));
+    }
+}
+
 /// Checks the lead's JSON for `round` against `session`.
 pub fn parse_lead(
     text: &str,
@@ -729,9 +753,7 @@ pub fn parse_lead(
                     ));
                 }
                 let claim = claim.trim().to_owned();
-                if claim.is_empty() || !one_line(&claim) {
-                    problems.push(format!("{at}.claim must be one non-empty line"));
-                }
+                check_lead_claim(&claim, &at, &mut problems);
                 let rationale = rationale.trim().to_owned();
                 if rationale.is_empty() {
                     problems.push(format!("{at}.rationale is empty"));
@@ -834,10 +856,8 @@ pub fn parse_lead(
                     ));
                 }
                 let claim = claim.map(|c| c.trim().to_owned());
-                if let Some(claim) = &claim
-                    && (claim.is_empty() || !one_line(claim))
-                {
-                    problems.push(format!("{at}.claim must be one non-empty line"));
+                if let Some(claim) = &claim {
+                    check_lead_claim(claim, &at, &mut problems);
                 }
                 let rationale = rationale.map(|r| r.trim().to_owned());
                 let fix = fix.map(|f| f.trim().to_owned());
@@ -853,6 +873,15 @@ pub fn parse_lead(
                     problems.push(format!("{at}: changes nothing; give at least one field"));
                 }
                 let new_status = status_p.and_then(|(_, s)| s);
+                // Withdrawn follows from the reviewers who raised it (each
+                // withdrew); the lead cannot bring it back.
+                if shadow.status.get(&id) == Some(&FindingStatus::Withdrawn)
+                    && new_status.is_some_and(|s| s != FindingStatus::Withdrawn)
+                {
+                    problems.push(format!(
+                        "{at}: {id} was withdrawn by every reviewer who raised it; it cannot be reopened"
+                    ));
+                }
                 if new_status == Some(FindingStatus::Rejected)
                     && rationale.as_deref().is_none_or(str::is_empty)
                 {

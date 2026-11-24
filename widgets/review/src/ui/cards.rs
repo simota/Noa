@@ -5,7 +5,7 @@ use noa_gpui_core::style::AlignItems;
 use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone, Truncation};
 use noa_gpui_core::{UiTree, WidgetId};
 
-use review::model::types::{Millis, PartId, Participant, Session};
+use review::model::types::{Millis, PartId, Participant, Session, short_id};
 
 use super::progress::{delivery, elapsed};
 use super::{Action, caption, card, heading, keep_scroll, note, scroll_column, spacer, tag};
@@ -52,9 +52,9 @@ pub(super) fn insert(
             format!(
                 "{} {} … {} {}",
                 m.base_ref.as_deref().unwrap_or(""),
-                &base[..base.len().min(8)],
+                short_id(base, 8),
                 m.head_ref.as_deref().unwrap_or("作業ツリー"),
-                &head_sha[..head_sha.len().min(8)]
+                short_id(head_sha, 8)
             ),
         );
     }

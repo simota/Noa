@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::types::{
     Brief, Coverage, Finding, FindingStatus, LeadOp, LeadOutput, Message, Millis, PartId,
     Participant, Phase, RawFinding, RawKey, Receipt, ReviewNote, Round, RoundKind, RoundNo,
-    Session, SessionId, Stance, StanceKind, Target, TargetManifest,
+    Session, SessionId, Stance, StanceKind, Target, TargetManifest, is_object_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +159,17 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
     else {
         return err("the log does not start with a created event");
     };
+    for (name, sha) in [
+        ("base", &manifest.base_sha),
+        ("head", &manifest.head_sha),
+        ("merge-base", &manifest.merge_base),
+    ] {
+        if let Some(sha) = sha
+            && !is_object_id(sha)
+        {
+            return err(format!("the {name} commit {sha:?} is not a git object id"));
+        }
+    }
     let mut session = Session {
         id: id.clone(),
         request: request.clone(),
@@ -178,6 +189,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
         rounds: Vec::new(),
         closed: false,
         hold: false,
+        verdict_round: None,
     };
     for event in rest {
         apply_one(&mut session, event)?;
@@ -569,7 +581,12 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
         Event::PhaseChanged { round, phase } => {
             round_mut(session, *round)?.phase = *phase;
         }
-        Event::LeadAccepted { round, output } => apply_lead(session, *round, output)?,
+        Event::LeadAccepted { round, output } => {
+            apply_lead(session, *round, output)?;
+            if output.verdict.is_some() {
+                session.verdict_round = Some(*round);
+            }
+        }
         Event::HoldSet { hold } => session.hold = *hold,
         Event::RoundsExtended { max_rounds, .. } => {
             if let Err(why) = session.extendable() {
@@ -584,6 +601,8 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             }
             session.max_rounds = *max_rounds;
             session.closed = false;
+            // The verdict was for the old limit: the review goes on.
+            session.verdict_round = None;
         }
         Event::SessionClosed => {
             session.closed = true;

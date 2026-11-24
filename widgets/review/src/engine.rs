@@ -704,6 +704,8 @@ impl Engine {
             return rejected(format!("ラウンド上限をこれ以上増やせません（{base}）"));
         };
         self.commit(out, vec![Event::RoundsExtended { max_rounds, at }])?;
+        // The stored report loses its verdict (it is provisional again).
+        out.effects.push(Effect::WriteReport);
         self.next_round(out, at)
     }
 

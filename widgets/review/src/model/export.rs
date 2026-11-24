@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use super::types::{Finding, FindingStatus, Phase, Session, TargetKind};
+use super::types::{Finding, FindingStatus, Phase, Session, TargetKind, short_id};
 
 /// The report's section headings, in order (after the title).
 pub const SECTIONS: [&str; 7] = [
@@ -85,9 +85,7 @@ pub fn report_markdown(session: &Session) -> String {
     if session.target.kind == TargetKind::Git {
         let short = |s: &Option<String>| {
             s.as_deref()
-                .map(|s| &s[..s.len().min(10)])
-                .unwrap_or("?")
-                .to_owned()
+                .map_or_else(|| "?".to_owned(), |s| short_id(s, 10))
         };
         let _ = writeln!(
             out,

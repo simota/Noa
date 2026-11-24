@@ -6,7 +6,8 @@
 //! <repo>/.noa/verify/<id>/         the judge's reply dir
 //!   c/criteria.json  r<N>/judge.json  fix-<n>.md
 //!   target/                        manifest.json, diff.patch, files/, worktree.patch, untracked/, spec.md
-//!   evidence/r<N>/<verifier>/      ingested logs and files, rerun-<n>.log; evidence/r<N>/manifest.md
+//!   evidence/r<N>/<verifier>/      ingested logs and files; evidence/r<N>/manifest.md
+//!   evidence/r<N>/<verifier>.rerun/  the widget's re-run logs, <n>.log
 //!   evidence/user/                 person-attached media
 //! <main>-wt/verify-<id>-<verifier>/.noa/verify/<id>/r<N>/<verifier>/   a verifier's reply dir
 //!   reply.json  logs/  shots/  video/  rerun/
@@ -33,6 +34,13 @@ pub const TARGET_DIR: &str = "target";
 pub const EVIDENCE_DIR: &str = "evidence";
 /// Person-attached media, under [`EVIDENCE_DIR`].
 pub const USER_EVIDENCE_DIR: &str = "user";
+/// Appended to a verifier's id to name the directory its re-run logs are
+/// ingested to, beside the one its reported evidence is ingested to
+/// (`evidence/r<N>/<verifier>.rerun/`). A reported path is relative with no
+/// `..`, so it stays inside `<verifier>/`, and a verifier id is an agent
+/// kind with an optional `-<n>` ([`crate::engine::participants`]), never
+/// holding a `.`: nothing a verifier reports can be stored there.
+pub const RERUN_EVIDENCE_SUFFIX: &str = ".rerun";
 /// The criteria phase's directory, under the judge's reply dir.
 pub const CRITERIA_DIR: &str = "c";
 pub const CRITERIA_FILE: &str = "criteria.json";
@@ -149,6 +157,22 @@ pub fn evidence_dir(reply_dir: &Path) -> PathBuf {
 /// `round` is ingested.
 pub fn round_evidence_dir(reply_dir: &Path, round: RoundNo, part: &PartId) -> PathBuf {
     round_dir(&evidence_dir(reply_dir), round).join(part.as_str())
+}
+
+/// `<reply dir>/evidence/r<round>/<part>.rerun`: where the logs of
+/// `part`'s round-`round` re-runs are ingested, apart from
+/// [`round_evidence_dir`] ([`RERUN_EVIDENCE_SUFFIX`]).
+pub fn rerun_evidence_dir(reply_dir: &Path, round: RoundNo, part: &PartId) -> PathBuf {
+    round_dir(&evidence_dir(reply_dir), round).join(format!("{part}{RERUN_EVIDENCE_SUFFIX}"))
+}
+
+/// `<reply dir>/evidence/r<round>/<part>.rerun/<n>.log`: the stored log of
+/// re-run `n`. With an empty `reply_dir` it is the path a [`Stored`] of it
+/// records (relative to the reply dir).
+///
+/// [`Stored`]: crate::model::types::Stored
+pub fn rerun_log_path(reply_dir: &Path, round: RoundNo, part: &PartId, n: u32) -> PathBuf {
+    rerun_evidence_dir(reply_dir, round, part).join(format!("{n}.log"))
 }
 
 /// `<reply dir>/evidence/user`.
@@ -351,5 +375,30 @@ impl Summary {
     /// `session` (logged in `dir`) as listed, before its lock is looked at.
     pub fn of(_dir: &Path, _session: &Session) -> Summary {
         todo!("U2: Summary::of")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rerun_logs_are_stored_where_no_reported_evidence_can_be() {
+        let part = PartId::new("claude");
+        let reported = round_evidence_dir(Path::new(""), 1, &part);
+        let rerun = rerun_log_path(Path::new(""), 1, &part, 1);
+        assert_eq!(rerun, Path::new("evidence/r1/claude.rerun/1.log"));
+        assert_eq!(
+            rerun_log_path(Path::new("/r"), 2, &PartId::new("codex-2"), 3),
+            Path::new("/r/evidence/r2/codex-2.rerun/3.log")
+        );
+        // A verifier's own `file` evidence named like a re-run log stays
+        // under its own directory.
+        for cited in ["rerun-1.log", "1.log", "rerun/1.log"] {
+            let path = reported.join(cited);
+            assert_ne!(path, rerun, "{cited}");
+            assert!(!path.starts_with(rerun_evidence_dir(Path::new(""), 1, &part)));
+        }
+        assert!(!rerun.starts_with(&reported));
     }
 }

@@ -43,9 +43,11 @@ pub fn inspect(_base: &Path, _dir: &Path, _paths: &[String]) -> Vec<FileFact> {
 }
 
 /// Copies each item from `src_dir` (below `src_base`) to
-/// `<reply_dir>/evidence/r<round>/<part>/<path>` (below `reply_base`),
-/// hashing it. A file gone (or swapped for a link) since validation gives
-/// an error for that item; the others are still copied.
+/// `<reply_dir>/evidence/r<round>/<part>/<path>` (below `reply_base`,
+/// [`crate::store::round_evidence_dir`]; re-run logs go to the sibling
+/// `<part>.rerun/`, [`crate::rerun::ingest_logs`]), hashing it. A file
+/// gone (or swapped for a link) since validation gives an error for that
+/// item; the others are still copied.
 pub fn ingest(
     _src_base: &Path,
     _src_dir: &Path,

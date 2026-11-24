@@ -1032,26 +1032,32 @@ pub struct FileFact {
     pub by_ext: Option<Media>,
 }
 
-/// How a re-run of a `command` item ended (L1-5).
+/// How a re-run of a `command` item ended (L1-5). The outcome and its log
+/// are recorded apart: on every variant `log` is the command's `<n>.log`
+/// as stored ([`crate::store::rerun_log_path`], L1-5 step 5), `None` when
+/// none was written or it could not be stored, so an exit status the
+/// widget saw is kept when the copy failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Rerun {
     /// Same exit status as reported.
     Matched {
         exit: i32,
-        log: Stored,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log: Option<Stored>,
     },
     /// Another exit status (`None`: it ended without one).
     Differed {
         exit: Option<i32>,
-        log: Stored,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log: Option<Stored>,
     },
     TimedOut {
-        log: Stored,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log: Option<Stored>,
     },
     /// Not run, or not run to its end: 共有 mode, pane gone, did not start,
-    /// stopped before it finished, script changed (L1-5 step 5). `log` is
-    /// the command's `<n>.log` when one was written and ingested.
+    /// stopped before it finished, script changed (L1-5 step 5).
     NotRun {
         why: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1963,10 +1969,10 @@ pub struct Session {
     #[serde(default)]
     pub user_criteria: Vec<String>,
     /// The top level of the target's checkout (`capture::repo_root` of
-    /// `target.repo`; a linked worktree when the target is in one): the
-    /// judge runs here, the judge's reply dir is
-    /// `<workdir>/.noa/verify/<id>/`, verifiers run here in 共有 mode, and
-    /// 修正を依頼 opens its agent here.
+    /// `target.repo`; a linked worktree when the target is in one). The
+    /// judge's reply dir is `<workdir>/.noa/verify/<id>/`, and the judge's
+    /// pane starts there, not here (L1-3); verifiers run here in 共有 mode,
+    /// and 修正を依頼 opens its agent here.
     pub workdir: PathBuf,
     /// The repository's main worktree (`worktree::main_worktree`), whose
     /// `<main>-wt/` holds the verifiers' worktrees (L1-3). The same as
@@ -2835,7 +2841,17 @@ mod tests {
                 key: key("claude/r1/e1"),
                 rerun: Rerun::Differed {
                     exit: Some(0),
-                    log: stored("evidence/r1/claude/rerun-1.log"),
+                    log: Some(stored("evidence/r1/claude.rerun/1.log")),
+                },
+            },
+            Event::RerunFinished {
+                key: key("claude/r1/e2"),
+                rerun: Rerun::Matched { exit: 0, log: None },
+            },
+            Event::RerunFinished {
+                key: key("claude/r1/e3"),
+                rerun: Rerun::TimedOut {
+                    log: Some(stored("evidence/r1/claude.rerun/3.log")),
                 },
             },
             Event::RerunFinished {
@@ -2849,7 +2865,7 @@ mod tests {
                 key: key("codex/r1/e2"),
                 rerun: Rerun::NotRun {
                     why: "re-run script was changed".into(),
-                    log: Some(stored("evidence/r1/codex/rerun-2.log")),
+                    log: Some(stored("evidence/r1/codex.rerun/2.log")),
                 },
             },
             Event::EvidenceAttached {
@@ -2887,8 +2903,10 @@ mod tests {
         assert!(line.contains(r#""event":"criteria_accepted""#));
         assert!(line.contains(r#""source":"spec:12""#));
         assert!(line.contains(r#""claude/AC-1""#));
-        // A not-run re-run without a log writes no `log` field.
+        // A re-run without a stored log writes no `log` field, whatever its
+        // outcome.
         assert!(line.contains(r#""outcome":"not_run","why":"共有 mode"}"#));
+        assert!(line.contains(r#""outcome":"matched","exit":0}"#));
     }
 
     #[test]
@@ -3071,7 +3089,7 @@ mod tests {
                     stored: Some(stored("evidence/r1/claude/logs/1.log")),
                     rerun: Some(Rerun::Matched {
                         exit: 0,
-                        log: stored("evidence/r1/claude/rerun-1.log"),
+                        log: Some(stored("evidence/r1/claude.rerun/1.log")),
                     }),
                     attached: None,
                 },

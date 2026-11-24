@@ -175,7 +175,9 @@ pub fn check_digests(_base: &Path, _dir: &Path, _request: &RerunRequest) -> Resu
 }
 
 /// Copies each `<n>.log` of `request` from `dir` (below `src_base`) to
-/// `<reply_dir>/evidence/r<round>/<part>/rerun-<n>.log`, cut at
+/// `<reply_dir>/evidence/r<round>/<part>.rerun/<n>.log`
+/// ([`crate::store::rerun_log_path`], beside and never inside the
+/// directory [`crate::evidence::ingest`] fills), cut at
 /// [`crate::model::types::MAX_LOG_BYTES`] with the cut marked.
 pub fn ingest_logs(
     _src_base: &Path,
@@ -190,8 +192,9 @@ pub fn ingest_logs(
 }
 
 /// The re-run outcome of a command the verifier reported with exit status
-/// `reported`, given how it ended and its stored log (kept also when it
-/// ends `not_run`).
+/// `reported`, given how it ended and its stored log, kept on whatever
+/// outcome it gives (`None` when no log was written or it could not be
+/// stored; the outcome stands either way).
 pub fn outcome(_reported: i32, _end: End, _log: Option<Stored>) -> Rerun {
     todo!("U3: rerun::outcome")
 }

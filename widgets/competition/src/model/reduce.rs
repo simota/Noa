@@ -475,6 +475,21 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             if !session.is_contestant(winner) {
                 return err(format!("unknown contestant {winner}"));
             }
+            if session.is_panel() {
+                // The rules parse_verdict applied when it was accepted.
+                if round_mut(session, *round)?.verdict_brief.is_none() {
+                    return err(format!("round {round} has no verdict brief to answer"));
+                }
+                let top = aggregate::top_set(session, *round);
+                if !top.contains(winner) {
+                    return err(format!(
+                        "round {round}'s verdict names {winner}, outside its highest mean"
+                    ));
+                }
+                if final_verdict.trim().is_empty() {
+                    return err(format!("round {round}'s final verdict is empty"));
+                }
+            }
             let Some(outcome) = round_mut(session, *round)?.outcome.as_mut() else {
                 return err(format!("round {round} has no judgment for a verdict"));
             };
@@ -1113,6 +1128,56 @@ mod tests {
     }
 
     #[test]
+    fn replay_rejects_a_verdict_that_breaks_the_verdict_rules() {
+        let lead = judge_id(0);
+        // R1 (the last of 1): codex 255, claude 224.
+        let mut session = panel_session(Some(1));
+        settle(
+            &mut session,
+            1,
+            &cards(
+                &[("codex", 90), ("claude", 70)],
+                &[("codex", 85), ("claude", 75)],
+                &[("codex", 80), ("claude", 79)],
+            ),
+        )
+        .unwrap();
+        let verdict = |winner: &str, text: &str| Event::VerdictAccepted {
+            round: 1,
+            winner: PartId::new(winner),
+            final_verdict: text.into(),
+        };
+        let rejected = |session: &Session, event: Event| {
+            apply(&mut session.clone(), &[event])
+                .unwrap_err()
+                .to_string()
+        };
+        // No verdict brief issued.
+        let why = rejected(&session, verdict("codex", "codex led."));
+        assert!(why.contains("no verdict brief"), "{why}");
+
+        apply(
+            &mut session,
+            &[Event::VerdictRequested {
+                round: 1,
+                brief: brief_to(&lead, "verdict.json"),
+            }],
+        )
+        .unwrap();
+        // A contestant outside the top set.
+        let why = rejected(&session, verdict("claude", "claude led."));
+        assert!(why.contains("outside its highest mean"), "{why}");
+        // An empty verdict, blank or not.
+        for text in ["", "  \n\t"] {
+            let why = rejected(&session, verdict("codex", text));
+            assert!(why.contains("final verdict is empty"), "{text:?}: {why}");
+        }
+        // Within the rules, it folds.
+        apply(&mut session, &[verdict("codex", "codex led.")]).unwrap();
+        assert_eq!(session.winner, Some(PartId::new("codex")));
+    }
+
+    #[test]
     fn a_tie_the_verdict_broke_keeps_its_winner_first_until_an_amendment_breaks_it() {
         use crate::model::types::Amendment;
         let claude = PartId::new("claude");
@@ -1138,6 +1203,10 @@ mod tests {
             apply(
                 &mut session,
                 &[
+                    Event::VerdictRequested {
+                        round: 1,
+                        brief: brief_to(&judge_id(0), "verdict.json"),
+                    },
                     Event::VerdictAccepted {
                         round: 1,
                         winner: codex.clone(),

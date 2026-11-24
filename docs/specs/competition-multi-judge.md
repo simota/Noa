@@ -235,7 +235,7 @@ impl Round {
 | `ScorecardAccepted { round, judge, output }` | new | `round.scorecards[judge] = output`; error unless `judge` is a judge of a panel session |
 | `JudgeAccepted { round, output }` | same shape | single-judge rounds: exactly today's fold. Panel rounds: error unless every judge has a scorecard. Then applies every scorecard's amendments to that judge's earlier scorecard (score set, breakdown cleared, `AmendNote` on the card's evaluation), recombines each amended round's `outcome` (L2-5), and stores `output` as `outcome` |
 | `VerdictRequested { round, brief }` | new | `round.verdict_brief = Some(brief)`; error unless the round's `outcome` is set and `outcome.close` |
-| `VerdictAccepted { round, winner, final_verdict }` | new | sets `outcome.winner`, `outcome.final_verdict`, `session.winner`; error unless `winner` is a contestant |
+| `VerdictAccepted { round, winner, final_verdict }` | new | sets `outcome.winner`, `outcome.final_verdict`, `session.winner`; error unless `winner` is a contestant and, in a panel session, the round's verdict brief was issued, `winner` is in `aggregate::top_set` for the round and `final_verdict` is not empty after trimming |
 | receipt events, `PhaseChanged`, `MessagePosted`, `WinnerSelected`, `HoldSet`, `RoundsExtended`, `SessionClosed` | — | unchanged (receipts find the verdict brief through `brief_mut`) |
 
 Each batch still bumps `rev` once. The batches that matter, panel session:

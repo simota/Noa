@@ -10,7 +10,11 @@
 //! identity from NUL-separated machine output; files read without
 //! following symbolic links (see `fsx`) and never past their cap. A ref's
 //! files are taken as its checkout gives them, with no filter driver run:
-//! one a driver's command would give is left out ([`FILTER_REASON`]).
+//! one a driver's command would give is left out ([`FILTER_REASON`]). The
+//! only git commands that write (`checkout-index`, `apply`) write into a
+//! scratch folder of the temporary directory, where a work-tree capture
+//! checks that a verifier's worktree would hold the person's bytes
+//! ([`check_rebuild`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -67,6 +71,10 @@ const SUBMODULE_REASON: &str = "サブモジュール（中身は取り込みま
 /// checkout (L1-1).
 pub(crate) const FILTER_REASON: &str =
     "チェックアウト時にフィルタ（git-lfs など）を通すファイル（中身は取り込みません）";
+
+/// Why a work-tree capture refuses the start, before the names of the
+/// files a verifier's worktree would hold other bytes of (L1-1).
+const REBUILD_DIFFERS: &str = "検証者の worktree ではこのファイルが別のバイト列になります（チェックアウト時の改行コードなどの変換のため）。リポジトリの設定どおりの内容にしてから開始してください";
 
 /// What one capture gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,23 +146,31 @@ fn write_file(dest: &Path, root: &Path, rel: &str, bytes: &[u8]) -> io::Result<(
 /// given in the command's own scope (`GIT_CONFIG_COUNT`), which no file
 /// of the system's, the person's or the repository's overrides: the
 /// output the widget reads and the patches it writes do not depend on
-/// them. Paths unquoted, no color, no hook, no external diff, and every
-/// option that shapes a diff at git's default.
-const PINNED: [(&str, &str); 14] = [
+/// them. Paths unquoted, no color, no hook, no file-system monitor (its
+/// hook is a command, and the built-in one a daemon git may start), no
+/// external diff, and every option that shapes a diff at git's default:
+/// no submodule ignored, every rename looked for, and only a file over
+/// git's default 512 MiB taken as binary for its size, far above the
+/// largest text a snapshot holds ([`MAX_FILE_BYTES`]).
+const PINNED: [(&str, &str); 18] = [
     ("core.quotePath", "false"),
     ("core.hooksPath", "/dev/null"),
+    ("core.fsmonitor", "false"),
+    ("core.bigFileThreshold", "512m"),
     ("color.ui", "never"),
     ("diff.external", ""),
     ("diff.noprefix", "false"),
     ("diff.mnemonicPrefix", "false"),
     ("diff.relative", "false"),
     ("diff.renames", "true"),
+    ("diff.renameLimit", "1000"),
     ("diff.algorithm", "myers"),
     ("diff.indentHeuristic", "true"),
     ("diff.context", "3"),
     ("diff.interHunkContext", "0"),
     ("diff.suppressBlankEmpty", "false"),
     ("diff.submodule", "short"),
+    ("diff.ignoreSubmodules", "none"),
 ];
 
 /// Removes every `GIT_*` variable of the widget's environment from
@@ -718,13 +734,18 @@ fn too_large_diff(bytes: u64) -> String {
 
 /// The options every `git diff` of capture is given, beside [`PINNED`]:
 /// no external diff or text conversion, no color, the whole tree's paths
-/// and git's own file order.
-const DIFF_COMMON: [&str; 5] = [
+/// and git's own file order, and what only an option overrides: no
+/// submodule ignored, whatever a `submodule.<name>.ignore` setting says,
+/// and the Myers algorithm, whatever a `diff.<driver>.algorithm` setting
+/// gives a file's `diff` attribute.
+const DIFF_COMMON: [&str; 7] = [
     "--no-ext-diff",
     "--no-textconv",
     "--no-color",
     "--no-relative",
     "-O/dev/null",
+    "--ignore-submodules=none",
+    "--diff-algorithm=myers",
 ];
 
 /// The shape of every patch capture writes: three lines of context, hunks
@@ -885,6 +906,8 @@ fn read_worktree_file(repo: &Path, path: &str, cap: u64) -> Result<(Vec<u8>, boo
 #[derive(PartialEq, Eq)]
 struct RecipeView {
     patch: Vec<u8>,
+    /// The files the patch changes, one entry each.
+    raw: Vec<RawEntry>,
     untracked: Vec<String>,
 }
 
@@ -895,7 +918,14 @@ fn recipe_view(repo: &Path, head_sha: &str) -> Result<RecipeView, String> {
     // and the work tree is read as its bytes are, the bytes the manifest
     // and a verifier's worktree hold (a clean filter's output would not
     // be).
-    let (mut cmd, _index) = git_indexed(repo, &Drivers::of(repo)?)?;
+    let off = Drivers::of(repo)?;
+    let too_large = || {
+        format!(
+            "作業ツリーの変更が大きすぎます（上限 {} MiB）",
+            MAX_WORKTREE_PATCH_BYTES / (1024 * 1024)
+        )
+    };
+    let (mut cmd, _index) = git_indexed(repo, &off)?;
     cmd.arg("diff").args(DIFF_COMMON).args(PATCH_SHAPE).args([
         "--binary",
         "--no-renames",
@@ -904,18 +934,208 @@ fn recipe_view(repo: &Path, head_sha: &str) -> Result<RecipeView, String> {
     ]);
     let patch = match run_capped(cmd, &[0], MAX_WORKTREE_PATCH_BYTES) {
         Ok(patch) => patch,
-        Err(RunError::TooLarge) => {
-            return Err(format!(
-                "作業ツリーの変更が大きすぎます（上限 {} MiB）",
-                MAX_WORKTREE_PATCH_BYTES / (1024 * 1024)
-            ));
-        }
+        Err(RunError::TooLarge) => return Err(too_large()),
+        Err(RunError::Failed(why)) => return Err(why),
+    };
+    let (mut cmd, _index) = git_indexed(repo, &off)?;
+    cmd.arg("diff").args(DIFF_COMMON).args([
+        "--raw",
+        "-z",
+        "--no-abbrev",
+        "--no-renames",
+        head_sha,
+        "--",
+    ]);
+    // A raw entry is at most about twice its section of the patch (a
+    // change of mode only, its path short).
+    let raw = match run_capped(cmd, &[0], 3 * MAX_WORKTREE_PATCH_BYTES) {
+        Ok(raw) => parse_raw(&raw)?,
+        Err(RunError::TooLarge) => return Err(too_large()),
         Err(RunError::Failed(why)) => return Err(why),
     };
     Ok(RecipeView {
         patch,
+        raw,
         untracked: untracked_paths(repo, &[])?,
     })
+}
+
+/// A new folder of the temporary directory, removed with what it holds
+/// when dropped.
+struct Scratch {
+    root: PathBuf,
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+impl Scratch {
+    fn new() -> Result<Scratch, String> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        loop {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let root = std::env::temp_dir().join(format!(
+                "noa-verify-rebuild-{}-{}-{stamp}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&root) {
+                Ok(()) => return Ok(Scratch { root }),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("一時フォルダを作れません: {e}")),
+            }
+        }
+    }
+}
+
+/// Runs `cmd` with `input` on its stdin and its output dropped; why it
+/// failed, from what it printed on stderr.
+fn run_fed(mut cmd: Command, input: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git を起動できません: {e}"))?;
+    let mut stdin = child.stdin.take().expect("piped");
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let mut errors = Vec::new();
+    let mut stderr = child.stderr.take().expect("piped");
+    let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut errors);
+    let _ = io::copy(&mut stderr, &mut io::sink());
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let _ = writer.join();
+    if status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&errors).trim().to_owned())
+    }
+}
+
+/// Whether two open files hold the same bytes, read a part at a time.
+fn same_content(mut a: fs::File, mut b: fs::File) -> io::Result<bool> {
+    // As much of `file` as fills `buf`, or all that is left.
+    fn fill(file: &mut fs::File, buf: &mut [u8]) -> io::Result<usize> {
+        let mut at = 0;
+        while at < buf.len() {
+            match file.read(&mut buf[at..])? {
+                0 => break,
+                n => at += n,
+            }
+        }
+        Ok(at)
+    }
+    if a.metadata()?.len() != b.metadata()?.len() {
+        return Ok(false);
+    }
+    let (mut x, mut y) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    loop {
+        let (n, m) = (fill(&mut a, &mut x)?, fill(&mut b, &mut y)?);
+        if x[..n] != y[..m] {
+            return Ok(false);
+        }
+        if n == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// Whether a verifier's worktree rebuilt from `view` would hold the
+/// person's bytes in every file the work-tree patch writes; `Err` names
+/// each that would hold others, a checkout converting it on the way
+/// (L1-1: `text eol=crlf` on a file edited with LF, `text=auto` on one
+/// edited with CRLF, `ident`, `working-tree-encoding`).
+///
+/// Builds those files in a scratch folder outside the person's checkout
+/// as [`crate::worktree::add`] builds a worktree: the head's
+/// `.gitattributes` files and every file the patch changes or deletes
+/// checked out from the head (into a private index, never the person's),
+/// then the patch applied with `git apply`; no filter driver runs (a
+/// verifier's checkout runs its own, L1-1). The untracked files are
+/// copied as they are, so need no check.
+fn check_rebuild(repo: &Path, head_sha: &str, view: &RecipeView) -> Result<(), String> {
+    use std::os::unix::ffi::OsStringExt;
+    let written: Vec<&str> = view
+        .raw
+        .iter()
+        .filter(|e| e.status != 'D' && matches!(e.new_mode.as_str(), "100644" | "100755"))
+        .map(|e| e.path.as_str())
+        .collect();
+    if written.is_empty() {
+        return Ok(());
+    }
+    let scratch = Scratch::new()?;
+    let tree = scratch.root.join("tree");
+    let index = scratch.root.join("index");
+    fs::create_dir(&tree).map_err(|e| format!("一時フォルダを作れません: {e}"))?;
+    let git_dir = git_line(repo, &["rev-parse", "--absolute-git-dir"])?;
+    let mut git_dir_arg = std::ffi::OsString::from("--git-dir=");
+    git_dir_arg.push(std::ffi::OsString::from_vec(git_dir));
+    let mut work_tree_arg = std::ffi::OsString::from("--work-tree=");
+    work_tree_arg.push(&tree);
+    let off = Drivers::of(repo)?;
+    // Git in the scratch tree, on the person's repository and the private
+    // index.
+    let in_tree = || {
+        let mut cmd = git(&tree, &off);
+        cmd.arg(&git_dir_arg)
+            .arg(&work_tree_arg)
+            .env("GIT_INDEX_FILE", &index);
+        cmd
+    };
+    let cannot = |why: String| format!("検証者の worktree の作り方を確かめられません: {why}");
+
+    let mut cmd = in_tree();
+    cmd.args(["read-tree", head_sha]);
+    run(cmd, 64 * 1024).map_err(cannot)?;
+    let mut cmd = in_tree();
+    cmd.args(["ls-files", "-z", "--", ":(glob,top)**/.gitattributes"]);
+    let mut checkout: BTreeSet<String> = nul_fields(&run(cmd, MAX_LISTING_BYTES).map_err(cannot)?)
+        .into_iter()
+        .collect();
+    checkout.extend(
+        view.raw
+            .iter()
+            .filter(|e| e.old_mode != "000000")
+            .map(|e| e.path.clone()),
+    );
+    let input: Vec<u8> = checkout
+        .iter()
+        .flat_map(|path| path.bytes().chain([0]))
+        .collect();
+    let mut cmd = in_tree();
+    cmd.args(["checkout-index", "-f", "-z", "--stdin"]);
+    run_fed(cmd, &input).map_err(cannot)?;
+    // As `worktree::add` applies it.
+    let mut cmd = in_tree();
+    cmd.args(["apply", "--binary", "--whitespace=nowarn", "-"]);
+    run_fed(cmd, &view.patch)
+        .map_err(|e| format!("{WORKTREE_PATCH} を検証者の worktree に当てられません: {e}"))?;
+
+    let differ: Vec<&str> = written
+        .into_iter()
+        .filter(|path| {
+            let same = safe_relative(path).and_then(|rel| {
+                let ours = fsx::open_read(repo, &repo.join(&rel)).ok()?;
+                let rebuilt = fsx::open_read(&tree, &tree.join(&rel)).ok()?;
+                same_content(ours, rebuilt).ok()
+            });
+            same != Some(true)
+        })
+        .collect();
+    if differ.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{REBUILD_DIFFERS}: {}", differ.join(", ")))
+    }
 }
 
 /// Writes the rebuild recipe of `view` into `dest`: `worktree.patch`, and
@@ -1074,6 +1294,12 @@ fn capture_once(target: &Target, dest: &Path, now: Millis) -> Result<Option<Capt
             untracked: Vec::new(),
         },
     };
+    // Given once the tree is known not to have moved: a file edited since
+    // the recipe was taken would read as one the rebuild cannot give.
+    let rebuilt = match &recipe {
+        Some(recipe) => check_rebuild(&repo, &head_sha, recipe),
+        None => Ok(()),
+    };
     // A work tree is read more than once over (diff, files, recipe): when
     // it moved in between, they may be different versions.
     if worktree {
@@ -1088,6 +1314,7 @@ fn capture_once(target: &Target, dest: &Path, now: Millis) -> Result<Option<Capt
             return Ok(None);
         }
     }
+    rebuilt?;
     Ok(Some(Captured {
         manifest,
         rebuild,
@@ -2231,6 +2458,187 @@ pub(crate) mod tests {
             );
             verify(&dest, m, &c.rebuild, None).unwrap();
         }
+    }
+
+    #[test]
+    fn ac01_a_work_tree_file_a_rebuild_would_give_other_bytes_refuses_the_start_named() {
+        let repo = temp("eol");
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join(".gitattributes"), "a.txt text eol=crlf\n").unwrap();
+        fs::write(repo.join("a.txt"), "one\r\ntwo\r\n").unwrap();
+        fs::write(repo.join("b.txt"), "x\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        let target = |kind| Target {
+            kind,
+            ..diff_target(&repo, Head::Worktree)
+        };
+        // Edited with LF: a checkout, and so `git apply`, writes CRLF.
+        fs::write(repo.join("a.txt"), "one\nthree\n").unwrap();
+        fs::write(repo.join("b.txt"), "y\n").unwrap();
+        let before = index_and_tree(&repo);
+        for kind in [TargetKind::State, TargetKind::Diff] {
+            let dest = temp("eol-dest").join("target");
+            let err = capture(&target(kind), &dest, 0).unwrap_err();
+            assert!(
+                err.contains(REBUILD_DIFFERS) && err.ends_with(": a.txt"),
+                "{kind:?}: {err}"
+            );
+            assert!(!dest.exists(), "a refused capture left its directory");
+        }
+        assert_eq!(index_and_tree(&repo), before);
+        // Kept CRLF, the same edit is rebuilt byte for byte.
+        fs::write(repo.join("a.txt"), "one\r\nthree\r\n").unwrap();
+        let main = crate::worktree::main_worktree(&repo).unwrap();
+        for (kind, id) in [(TargetKind::State, "ver-1"), (TargetKind::Diff, "ver-2")] {
+            let dest = temp("eol-dest").join("target");
+            let captured = capture(&target(kind), &dest, 0).unwrap();
+            let path = crate::worktree::path_for(
+                &main,
+                &crate::model::types::SessionId::new(id),
+                &crate::model::types::PartId::new("claude"),
+            );
+            crate::worktree::add(&repo, &path, &dest, &captured.manifest, &captured.rebuild)
+                .unwrap();
+            assert_eq!(fs::read(path.join("a.txt")).unwrap(), b"one\r\nthree\r\n");
+            assert_eq!(fs::read(path.join("b.txt")).unwrap(), b"y\n");
+            crate::worktree::remove(&repo, &path).unwrap();
+        }
+    }
+
+    #[test]
+    fn ac01_no_fsmonitor_command_runs_in_the_persons_checkout() {
+        let repo = repo();
+        dirty(&repo);
+        let marker = temp("fsmonitor-marker").join("ran");
+        // A monitor hook that leaves a file each time git asks it, then
+        // fails, so git scans the tree itself.
+        let hook = temp("fsmonitor-hook").join("watch.sh");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        sh(
+            &repo,
+            &["config", "core.fsmonitor", &hook.to_string_lossy()],
+        );
+        let before = index_and_tree(&repo);
+        for kind in [TargetKind::Diff, TargetKind::State] {
+            let dest = temp("fsmonitor-dest").join("target");
+            let target = Target {
+                kind,
+                ..diff_target(&repo, Head::Worktree)
+            };
+            capture(&target, &dest, 0).unwrap();
+            assert!(!marker.exists(), "{kind:?}: git ran the fsmonitor hook");
+        }
+        assert_eq!(index_and_tree(&repo), before);
+    }
+
+    #[test]
+    fn ac01_a_submodule_only_change_is_listed_whatever_the_persons_ignore_settings() {
+        for (key, gitmodules) in [
+            ("diff.ignoreSubmodules", false),
+            ("submodule.sub.ignore", true),
+        ] {
+            let repo = temp("gitlink");
+            sh(&repo, &["init", "-q", "-b", "main"]);
+            fs::write(repo.join("x.txt"), "x\n").unwrap();
+            if gitmodules {
+                fs::write(
+                    repo.join(".gitmodules"),
+                    "[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n",
+                )
+                .unwrap();
+            }
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-q", "-m", "base"]);
+            sh(&repo, &["checkout", "-q", "-b", "feat"]);
+            // The only change: a nested repository staged as a gitlink.
+            let sub = repo.join("sub");
+            fs::create_dir(&sub).unwrap();
+            sh(&sub, &["init", "-q", "-b", "main"]);
+            fs::write(sub.join("s.txt"), "s\n").unwrap();
+            sh(&sub, &["add", "."]);
+            sh(&sub, &["commit", "-q", "-m", "s"]);
+            sh(&repo, &["-c", "advice.addEmbeddedRepo=false", "add", "sub"]);
+            sh(&repo, &["config", key, "all"]);
+
+            let dest = temp("gitlink-dest").join("target");
+            let captured = capture(&diff_target(&repo, Head::Worktree), &dest, 0)
+                .unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert_eq!(
+                captured.manifest.omitted,
+                vec![Omitted {
+                    path: "sub".into(),
+                    reason: SUBMODULE_REASON.into()
+                }],
+                "{key}"
+            );
+            let patch = fs::read_to_string(dest.join(WORKTREE_PATCH)).unwrap();
+            assert!(patch.contains("+Subproject commit "), "{key}: {patch}");
+        }
+    }
+
+    #[test]
+    fn ac01_line_counts_do_not_depend_on_the_persons_big_file_threshold() {
+        let repo = repo();
+        // Every file is "big" to git, so it would diff them as binary.
+        sh(&repo, &["config", "core.bigFileThreshold", "1"]);
+        let dest = temp("threshold-dest").join("target");
+        let captured = capture(&diff_target(&repo, Head::Ref("feat".into())), &dest, 0).unwrap();
+        let a = captured.manifest.file("a.txt").unwrap();
+        assert_eq!((a.additions, a.deletions), (2, 1));
+        assert_eq!(a.changed, vec![(2, 2), (4, 4)]);
+        let diff = fs::read_to_string(dest.join(DIFF_FILE)).unwrap();
+        assert!(
+            diff.contains("+TWO\n") && !diff.contains("Binary files"),
+            "{diff}"
+        );
+    }
+
+    #[test]
+    fn ac01_renames_and_line_counts_do_not_depend_on_the_persons_rename_limit_or_driver_algorithm()
+    {
+        let repo = temp("shape");
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        let lines = |range: std::ops::RangeInclusive<u32>| {
+            range.map(|n| format!("{n}\n")).collect::<String>()
+        };
+        fs::write(repo.join("a.txt"), lines(1..=20)).unwrap();
+        fs::write(repo.join("b.txt"), lines(101..=120)).unwrap();
+        // Myers gives 5 added and 2 deleted lines here, histogram 6 and 3.
+        fs::write(repo.join(".gitattributes"), "*.alg diff=alg\n").unwrap();
+        fs::write(repo.join("x.alg"), "b\nc\nd\na\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        sh(&repo, &["checkout", "-q", "-b", "feat"]);
+        sh(&repo, &["mv", "a.txt", "c.txt"]);
+        sh(&repo, &["mv", "b.txt", "d.txt"]);
+        fs::write(repo.join("c.txt"), lines(1..=21)).unwrap();
+        fs::write(repo.join("d.txt"), lines(101..=121)).unwrap();
+        fs::write(repo.join("x.alg"), "a\nd\nc\nb\nb\nd\nd\n").unwrap();
+        sh(&repo, &["commit", "-q", "-am", "feat"]);
+        sh(&repo, &["config", "diff.renameLimit", "1"]);
+        sh(&repo, &["config", "diff.alg.algorithm", "histogram"]);
+
+        let dest = temp("shape-dest").join("target");
+        let captured = capture(&diff_target(&repo, Head::Ref("feat".into())), &dest, 0).unwrap();
+        let m = &captured.manifest;
+        for (to, from) in [("c.txt", "a.txt"), ("d.txt", "b.txt")] {
+            assert_eq!(
+                m.file(to).map(|f| f.status.clone()),
+                Some(FileStatus::Renamed { from: from.into() }),
+                "{m:?}"
+            );
+        }
+        let x = m.file("x.alg").unwrap();
+        assert_eq!((x.additions, x.deletions), (5, 2));
     }
 
     #[test]

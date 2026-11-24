@@ -208,6 +208,21 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     Ok(out)
 }
 
+/// The live window's first screen: with `--session`, the stored
+/// verification read-only, offering nothing that acts on Noa; else the
+/// start view, its repository field holding `--repo`'s folder.
+fn live_screen(
+    args: &Args,
+    channel: live::Channel,
+    installed: std::sync::mpsc::Receiver<installed::Installed>,
+) -> Verify {
+    match (&args.session, &args.repo) {
+        (Some(dir), _) => Verify::session_window(channel, installed, dir),
+        (None, Some(repo)) => Verify::live(channel, installed).with_place(repo),
+        (None, None) => Verify::live(channel, installed),
+    }
+}
+
 fn main() -> Result<(), String> {
     let args = parse_args(std::env::args().skip(1))?;
     if args.help {
@@ -260,11 +275,7 @@ fn main() -> Result<(), String> {
             let channel = live::start(move || waker.wake(), live::startup_link());
             let waker = setup.waker.clone();
             let installed = installed::spawn(move || waker.wake());
-            match (&args.session, &args.repo) {
-                (Some(dir), _) => Verify::live_stored(channel, installed, dir),
-                (None, Some(repo)) => Verify::live(channel, installed).with_place(repo),
-                (None, None) => Verify::live(channel, installed),
-            }
+            live_screen(&args, channel, installed)
         };
         Box::new(screen.with_view(tab, criterion.clone()))
     })
@@ -330,6 +341,74 @@ mod tests {
         assert!(args(&["--demo-held", "--session=/x"]).is_err());
         assert!(args(&["--demo-criteria", "--demo"]).is_err());
         assert!(args(&["--what"]).is_err());
+    }
+
+    #[test]
+    fn a_session_window_offers_nothing_that_acts_on_noa() {
+        use crate::installed::Installed;
+        use crate::live::{Command, OpenPanes};
+        use crate::ui::Action;
+        use noa_gpui_platform::Screen as _;
+
+        let root = std::env::temp_dir().join(format!("noa-verify-main-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join(demo::DONE_ID);
+        let log = demo::log();
+        let mut store = verify::store::Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+        drop(store);
+        let open = |session: bool| {
+            let (channel, link) = live::Channel::fake();
+            let (tx, installed) = std::sync::mpsc::channel();
+            tx.send(Installed::Found(
+                verify::model::types::AgentKind::ALL.to_vec(),
+            ))
+            .unwrap();
+            let mut screen = if session {
+                let args = parse_args([format!("--session={}", dir.display())]).unwrap();
+                live_screen(&args, channel, installed)
+            } else {
+                // The same verification opened from the live window's list.
+                Verify::live_stored(channel, installed, &dir)
+            };
+            let mut text = TextStore::new(Default::default());
+            screen.woken(&mut text);
+            let asked: Vec<Command> = link.commands.try_iter().map(|(_, c)| c).collect();
+            // Noa says three of its panes are open.
+            link.panes
+                .send(OpenPanes {
+                    generation: 1,
+                    dir: dir.clone(),
+                    count: 3,
+                })
+                .unwrap();
+            screen.woken(&mut text);
+            (asked, screen.offered())
+        };
+        let acts_on_noa = |a: &Action| {
+            matches!(
+                a,
+                Action::ClosePanes
+                    | Action::ResumeShown
+                    | Action::Extend(_)
+                    | Action::FocusPane(_)
+                    | Action::RequestFix { .. }
+            )
+        };
+        let (asked, offered) = open(true);
+        assert!(
+            !asked
+                .iter()
+                .any(|c| matches!(c, Command::ProbePanes { .. })),
+            "{asked:?}"
+        );
+        let noa: Vec<&Action> = offered.iter().filter(|a| acts_on_noa(a)).collect();
+        assert!(noa.is_empty(), "{noa:?}");
+        // The live window's own stored view still offers them.
+        let (asked, offered) = open(false);
+        assert!(asked.contains(&Command::ProbePanes { dir: dir.clone() }));
+        assert!(offered.contains(&Action::ClosePanes));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

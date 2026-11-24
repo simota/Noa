@@ -9,12 +9,52 @@ use noa_gpui_core::{Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
 use noa_gpui_core::style::{Size as LayoutSize, auto, length};
-use verify::model::types::{Phase, WorktreeState};
+use verify::model::types::{Phase, Session, WorktreeState};
 
 use super::{
     Action, EXTEND_BY, Source, Verify, caption, cards, clear_children, decision_tone, tag,
 };
 use crate::live::Link;
+
+/// Whether 再試行 has something to take up: exactly what the engine's
+/// `UserRetry` takes (`Engine::user_retry`). The judge's criteria brief
+/// that gave up, while the criteria are not accepted; worktrees that could
+/// not be made, between rounds (round 1 included); a work brief that gave
+/// up without a reply while the round is briefed or verified; the judge's
+/// ruling brief that gave up while the round is ruled.
+pub(super) fn retryable(session: &Session) -> bool {
+    if session.closed {
+        return false;
+    }
+    if let Some(brief) = &session.criteria_brief
+        && !session.criteria_accepted
+    {
+        return brief.receipt.failed.is_some();
+    }
+    let between = session
+        .current_round()
+        .is_none_or(|r| r.phase == Phase::Closed);
+    if session.frozen_at.is_some()
+        && between
+        && session
+            .worktrees
+            .values()
+            .any(|t| matches!(t.state, WorktreeState::Failed { .. }))
+    {
+        return true;
+    }
+    let Some(round) = session.current_round() else {
+        return false;
+    };
+    match round.phase {
+        Phase::Briefing | Phase::Verifying => round
+            .briefs
+            .iter()
+            .any(|b| b.receipt.failed.is_some() && b.receipt.replied.is_none()),
+        Phase::Ruling => round.judge_brief.iter().any(|b| b.receipt.failed.is_some()),
+        _ => false,
+    }
+}
 
 fn small(label: &str) -> Button {
     Button::new(label).control_size(ControlSize::Small)
@@ -191,10 +231,13 @@ impl Verify {
                 Tone::Neutral,
             );
         }
+        let live_window = matches!(self.source, Source::Live(_));
+        // What starts agents or closes panes in Noa: never in a `--session`
+        // window's read-only view.
+        let noa = live_window && !self.noa_viewer();
         let trailing = self.status_trailing;
         let tree = &mut self.tree;
         let actions = &mut self.actions;
-        let live_window = matches!(self.source, Source::Live(_));
         let stored_free = self.read_only
             && self.stored_dir.is_some()
             && self.stored_free
@@ -232,7 +275,9 @@ impl Verify {
                 );
             }
         }
-        if session.extendable().is_ok() && (!self.read_only || (session.closed && stored_free)) {
+        if session.extendable().is_ok()
+            && (!self.read_only || (session.closed && stored_free && noa))
+        {
             caption(
                 tree,
                 trailing,
@@ -253,7 +298,7 @@ impl Verify {
                 tree.set_accessible_label(more, format!("ラウンドを {by} 追加"));
             }
         }
-        if stored_free && !session.closed {
+        if stored_free && noa && !session.closed {
             button(
                 tree,
                 trailing,
@@ -291,16 +336,7 @@ impl Verify {
                 actions,
             );
         }
-        if !self.read_only
-            && !session.closed
-            && session.current_round().is_some_and(|r| {
-                r.briefs
-                    .iter()
-                    .chain(&r.rerun_briefs)
-                    .chain(&r.judge_brief)
-                    .any(|b| b.receipt.failed.is_some() && b.receipt.replied.is_none())
-            })
-        {
+        if !self.read_only && retryable(&session) {
             button(tree, trailing, small("再試行"), Action::Retry, actions);
         }
         button(
@@ -323,7 +359,7 @@ impl Verify {
                 .stored_panes
                 .as_ref()
                 .is_some_and(|(dir, n)| *n > 0 && self.stored_dir.as_ref() == Some(dir));
-        if live_window && session.closed && (!self.read_only || stored_open) {
+        if noa && session.closed && (!self.read_only || stored_open) {
             button(
                 tree,
                 trailing,

@@ -1120,6 +1120,56 @@ fn round_controls_and_pane_jumps_reach_the_runner() {
 }
 
 #[test]
+fn retry_is_offered_exactly_when_the_engine_has_something_to_retry() {
+    use verify::model::types::{Phase, Worktree, WorktreeState};
+    let offers = |session: Session| {
+        let (screen, _link) = live_with(session);
+        acts(&screen).contains(&Action::Retry)
+    };
+    let gave_up = Some("reply rejected 2 times".to_owned());
+    // The judge's criteria, turned down up to the limit before round 1.
+    let mut s = crate::demo::criteria_held();
+    s.criteria_accepted = false;
+    s.criteria_brief.as_mut().unwrap().receipt.failed = gave_up.clone();
+    assert!(offers(s), "the criteria brief");
+    // Round 1's worktrees could not be made (a full disk).
+    let mut s = crate::demo::criteria_held();
+    s.frozen_at = Some(1);
+    s.worktrees.insert(
+        PartId::new("claude"),
+        Worktree {
+            path: PathBuf::from("/w-wt/verify-ver-demo-criteria-claude"),
+            state: WorktreeState::Failed {
+                reason: "No space left on device".into(),
+            },
+        },
+    );
+    assert!(offers(s), "the worktrees");
+    // A verifier that gave up while the round is verified...
+    let mut s = crate::demo::held();
+    let round = s.rounds.last_mut().unwrap();
+    round.phase = Phase::Verifying;
+    round.briefs[0].receipt.replied = None;
+    round.briefs[0].receipt.failed = gave_up.clone();
+    assert!(offers(s.clone()), "a verifier's work brief");
+    // ...is not taken up once the round is ruled: only the judge's is.
+    let round = s.rounds.last_mut().unwrap();
+    round.phase = Phase::Ruling;
+    let judge = round.judge_brief.as_mut().unwrap();
+    judge.receipt.replied = None;
+    assert!(!offers(s.clone()), "nothing the engine retries");
+    s.rounds
+        .last_mut()
+        .unwrap()
+        .judge_brief
+        .as_mut()
+        .unwrap()
+        .receipt
+        .failed = gave_up;
+    assert!(offers(s), "the ruling brief");
+}
+
+#[test]
 fn return_on_a_held_verification_goes_to_the_next_round() {
     let (mut screen, link) = live_with(crate::demo::held());
     press(&mut screen, noa_gpui_core::Key::Enter);

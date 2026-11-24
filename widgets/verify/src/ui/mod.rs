@@ -250,6 +250,9 @@ pub struct Verify {
     dialog_purposes: VecDeque<Purpose>,
     /// The session on screen was read from its log: no runner drives it.
     read_only: bool,
+    /// The window `verify --session=DIR` opened: its read-only views offer
+    /// nothing that acts on Noa ([`Self::noa_viewer`]).
+    viewer: bool,
     past: Vec<Listed>,
     past_root: Option<PathBuf>,
     past_limit: usize,
@@ -369,14 +372,45 @@ impl Verify {
     }
 
     /// The live screen showing the verification logged in `dir`
-    /// read-only.
+    /// read-only, as its list of past verifications opens it.
+    #[cfg(test)]
     pub fn live_stored(channel: Channel, installed: Receiver<Installed>, dir: &Path) -> Self {
+        Self::live_showing(channel, installed, dir, false)
+    }
+
+    /// The window `verify --session=DIR` opens: the verification logged in
+    /// `dir`, read-only, with nothing on it that acts on Noa (L1-7 item 2):
+    /// no ペインをすべて閉じる (Noa is not even asked which of its panes are
+    /// open), 再開, +N or 修正を依頼.
+    pub fn session_window(channel: Channel, installed: Receiver<Installed>, dir: &Path) -> Self {
+        Self::live_showing(channel, installed, dir, true)
+    }
+
+    fn live_showing(
+        channel: Channel,
+        installed: Receiver<Installed>,
+        dir: &Path,
+        viewer: bool,
+    ) -> Self {
         let mut screen = Self::live(channel, installed);
+        screen.viewer = viewer;
         let mut text = TextStore::new(Default::default());
         if let Err(why) = screen.show_stored(dir, &mut text) {
             screen.toast(why);
         }
         screen
+    }
+
+    /// A `--session` window's read-only view: nothing on it starts agents
+    /// or closes panes in Noa.
+    fn noa_viewer(&self) -> bool {
+        self.viewer && self.read_only
+    }
+
+    /// Every action the screen's controls offer now.
+    #[cfg(test)]
+    pub(crate) fn offered(&self) -> Vec<Action> {
+        self.actions.iter().map(|(_, a)| a.clone()).collect()
     }
 
     /// Puts `dir` in the start view's repository field (`--repo`: the
@@ -464,6 +498,7 @@ impl Verify {
             file_dialogs: Vec::new(),
             dialog_purposes: VecDeque::new(),
             read_only: false,
+            viewer: false,
             past: Vec::new(),
             past_root: store::default_root(),
             past_limit: start::PAST_LIMIT,
@@ -684,6 +719,9 @@ impl Verify {
     /// Asks Noa how many panes of the finished stored verification in
     /// `dir` are still open (ペインをすべて閉じる is offered on the answer).
     fn probe_panes(&mut self, dir: &Path) {
+        if self.noa_viewer() {
+            return;
+        }
         if let Source::Live(channel) = &self.source {
             channel.send(Command::ProbePanes {
                 dir: dir.to_owned(),
@@ -893,10 +931,11 @@ impl Verify {
     }
 
     /// What 修正を依頼 offers for `session`: nothing in a headless stored
-    /// view (no Noa to start an agent in), else the installed agents and
-    /// the scopes that hold something, or why it cannot.
+    /// view (no Noa to start an agent in) or a `--session` window's, else
+    /// the installed agents and the scopes that hold something, or why it
+    /// cannot.
     fn fix_offer(&self, session: &Session) -> Option<fix::FixOffer> {
-        if let Source::Snapshot = self.source {
+        if matches!(self.source, Source::Snapshot) || self.noa_viewer() {
             return None;
         }
         // A Noa known to be older than 0.9.13 would let the fix tab take

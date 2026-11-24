@@ -2031,3 +2031,48 @@ fn the_search_opens_on_demand_on_the_findings_tab_and_closing_drops_it() {
     assert!(screen.filters.query.is_empty());
     assert!(rows(&screen) > 1);
 }
+
+// ---- 過去のレビューをさらに表示 ----
+
+#[test]
+fn past_reviews_beyond_the_first_page_can_be_listed() {
+    let root = std::env::temp_dir().join(format!("noa-review-past-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let log = crate::demo::log();
+    let n = start::PAST_LIMIT + 2;
+    for i in 0..n {
+        let dir = root.join(format!("rev-{}", 1_000 + i));
+        let mut store = Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+    }
+    assert_eq!(store::count_sessions(&root), n);
+    let (channel, _link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    screen.past_root = Some(root.clone());
+    screen.refresh_past();
+    screen.rebuild(&mut TextStore::new(Default::default()));
+    let listed = |screen: &Review| {
+        acts(screen)
+            .iter()
+            .filter(|a| matches!(a, Action::ReviewAgain(Some(_))))
+            .count()
+    };
+    assert_eq!(listed(&screen), start::PAST_LIMIT);
+    let text = labels_under(&screen.tree, screen.start.root).join(" ");
+    assert!(
+        text.contains(&format!("全 {n} 件のうち新しい {} 件", start::PAST_LIMIT)),
+        "{text}"
+    );
+    act(&mut screen, Action::MorePast);
+    assert_eq!(listed(&screen), n);
+    assert!(!acts(&screen).contains(&Action::MorePast));
+    // The newest first, the oldest now reached.
+    assert!(screen.past.last().unwrap().dir.ends_with("rev-1000"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_short_past_list_offers_no_more() {
+    let screen = Review::demo_start();
+    assert!(!acts(&screen).contains(&Action::MorePast));
+}

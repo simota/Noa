@@ -201,7 +201,7 @@ Window title 「Noa · 多角レビュー」 (Japanese locale) / "Noa · Multi-A
    - リード: agent / model / effort.
    - レビュアー: 2–6 rows of agent / model / effort / 観点 (pop-up of the six built-ins and カスタム) / custom lens text (shown for カスタム), with 追加 and a remove button per row.
    - ラウンド上限 (1–10, default 3). 開始 and a note that says why the start is refused (empty target, panel size, bad setup, capture error).
-   - 過去のレビュー: the newest 12 under `<data dir>/noa/reviews`: target label, kind, verdict tag, live finding counts by severity (致命的 1 · 高 3 · …), rounds, age, and 完了 / 中断 / 他のウィンドウで実行中; an unreadable log is listed with why. 表示 opens one read-only; 再開 resumes an unfinished one that no window holds.
+   - 過去のレビュー: the newest 12 under `<data dir>/noa/reviews` (when there are more, 「全 N 件のうち新しい M 件」 and さらに 12 件表示 list the next 12, as often as needed; only the listed logs are read): target label, kind, verdict tag, live finding counts by severity (致命的 1 · 高 3 · …), rounds, age, and 完了 / 中断 / 他のウィンドウで実行中; an unreadable log is listed with why. 表示 opens one read-only; 再開 resumes an unfinished one that no window holds.
    - Installed agents: `src/installed.rs` asks the user's login shell (`$SHELL -l -i -c`, as agents are started) once, on a background thread, which of claude / codex / agy it can run. The lead menu, every reviewer row's menu and the default panel offer only those kinds (menu index maps through the offered list); the start button waits for the check and stays off when none is installed, so a started review has only installed kinds. 再開, and +N on a read-only stored review, are refused with the missing kinds named when its lead or a reviewer uses one that is not installed. A failed probe or a non-POSIX shell exit is `Installed::Unknown`: every kind is offered and nothing is blocked. `--demo*` and `--session` assume all installed.
 2. **Board** (a session is on screen):
    - Header: target label and kind tag, status, verdict tag once given; コピー, レポート保存, 新しいレビュー.
@@ -470,6 +470,7 @@ Unit tests live beside the modules; golden tests in `tests/`; headless snapshots
 43. AC-43 Typing in the search narrows the rows and 表示 n / 全 m, keeps the field focused with its text, and 条件をすべて解除 empties it; words match ids, paths and a source's evidence in any case, every word required (UI tests).
 44. AC-44 このファイルの指摘 appears exactly for files a finding points into, opens the board on them, and its chip takes the filter off; chip counts equal what choosing them shows with words and a file on (UI tests).
 45. AC-45 The search is closed by default, opens with ⌘F on the findings tab, focused, hides on the other tabs, and closing it drops the words; the smallest window's first row is where it was (UI tests, including the existing layout test).
+46. AC-46 With more than 12 past reviews the list says how many there are and さらに表示 lists the next ones down to the oldest; a list of 12 or fewer offers no more (UI tests, `store::count_sessions`).
 
 ## Scope
 

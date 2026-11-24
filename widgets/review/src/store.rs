@@ -429,6 +429,28 @@ pub struct Listed {
 /// The newest `limit` reviews under `root`, newest first. Only the listed
 /// logs are read; a log that cannot be read is listed with why.
 pub fn list_sessions(root: &Path, limit: usize) -> Vec<Listed> {
+    session_dirs(root)
+        .into_iter()
+        .take(limit)
+        .map(|dir| {
+            let summary = read_session(&dir)
+                .map(|session| Summary {
+                    busy: is_busy(&dir),
+                    ..Summary::of(&dir, &session)
+                })
+                .map_err(|e| e.to_string());
+            Listed { dir, summary }
+        })
+        .collect()
+}
+
+/// How many reviews `root` holds (no log is read).
+pub fn count_sessions(root: &Path) -> usize {
+    session_dirs(root).len()
+}
+
+/// The review folders under `root` (those with a log), newest first.
+fn session_dirs(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
     };
@@ -445,18 +467,7 @@ pub fn list_sessions(root: &Path, limit: usize) -> Vec<Listed> {
         })
         .collect();
     dirs.sort_by(|a, b| b.cmp(a));
-    dirs.into_iter()
-        .take(limit)
-        .map(|(_, dir)| {
-            let summary = read_session(&dir)
-                .map(|session| Summary {
-                    busy: is_busy(&dir),
-                    ..Summary::of(&dir, &session)
-                })
-                .map_err(|e| e.to_string());
-            Listed { dir, summary }
-        })
-        .collect()
+    dirs.into_iter().map(|(_, dir)| dir).collect()
 }
 
 /// `rev-<millis>` or `rev-<millis>-<n>` as `(millis, n)`, for ordering.

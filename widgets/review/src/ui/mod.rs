@@ -110,6 +110,8 @@ pub enum Action {
     /// Fills the start view to review again what the review shown
     /// (`None`) or the one stored in the folder reviewed, as it was set up.
     ReviewAgain(Option<PathBuf>),
+    /// Lists more of the past reviews.
+    MorePast,
     /// Starts `agent` on fixing the findings of `scope` in a new tab.
     RequestFix {
         agent: AgentKind,
@@ -222,6 +224,10 @@ pub struct Review {
     read_only: bool,
     past: Vec<Listed>,
     past_root: Option<PathBuf>,
+    /// How many past reviews the list shows; さらに表示 raises it.
+    past_limit: usize,
+    /// How many there are in all.
+    past_total: usize,
     /// The log of the read-only review on screen, when it is one.
     stored_dir: Option<PathBuf>,
     /// That log is free to write: no runner holds it.
@@ -428,6 +434,8 @@ impl Review {
             read_only: false,
             past: Vec::new(),
             past_root: store::default_root(),
+            past_limit: start::PAST_LIMIT,
+            past_total: 0,
             stored_dir: None,
             stored_free: false,
             extending: false,
@@ -534,6 +542,7 @@ impl Review {
                 &mut self.tree,
                 &self.start,
                 &self.past,
+                self.past_total,
                 system_now(),
                 &mut self.actions,
                 text,
@@ -543,13 +552,19 @@ impl Review {
     }
 
     fn refresh_past(&mut self) {
-        self.past = match &self.source {
-            Source::Demo => crate::demo::past(),
-            Source::Live(_) | Source::Snapshot => self
-                .past_root
-                .as_deref()
-                .map(|root| store::list_sessions(root, start::PAST_LIMIT))
-                .unwrap_or_default(),
+        (self.past, self.past_total) = match &self.source {
+            Source::Demo => {
+                let past = crate::demo::past();
+                let total = past.len();
+                (past, total)
+            }
+            Source::Live(_) | Source::Snapshot => match self.past_root.as_deref() {
+                Some(root) => (
+                    store::list_sessions(root, self.past_limit),
+                    store::count_sessions(root),
+                ),
+                None => (Vec::new(), 0),
+            },
         };
     }
 
@@ -1431,6 +1446,11 @@ impl Review {
                     self.send_cmd(Command::Resume { dir });
                     self.rebuild(text);
                 }
+            }
+            Action::MorePast => {
+                self.past_limit += start::PAST_LIMIT;
+                self.refresh_past();
+                self.rebuild(text);
             }
             Action::ReviewAgain(dir) => {
                 let session = match &dir {

@@ -1185,6 +1185,7 @@ pub(super) fn rebuild_past(
     tree: &mut UiTree,
     parts: &Parts,
     past: &[Listed],
+    total: usize,
     now: Millis,
     actions: &mut Vec<(WidgetId, Action)>,
     text: &mut TextStore,
@@ -1292,6 +1293,25 @@ pub(super) fn rebuild_past(
         );
         tree.set_accessible_label(again, format!("{} を同じ設定で再レビュー", summary.label));
         actions.push((again, Action::ReviewAgain(Some(dir))));
+    }
+    if total > past.len() {
+        let more = tree.insert(
+            Some(parts.past),
+            Container::row().align_items(AlignItems::CENTER).gap(10.0),
+        );
+        caption(
+            tree,
+            more,
+            format!("全 {total} 件のうち新しい {} 件", past.len()),
+        );
+        let button = tree.insert(
+            Some(more),
+            small(&format!(
+                "さらに {} 件表示",
+                PAST_LIMIT.min(total - past.len())
+            )),
+        );
+        actions.push((button, Action::MorePast));
     }
 }
 

@@ -289,6 +289,7 @@ pub fn run() -> (String, String) {
             manifest: manifest(),
             workdir: None,
             max_rounds: 3,
+            round_cap: review::model::types::MAX_MAX_ROUNDS,
             lead: AgentKind::Claude.into(),
             panel: &panel,
         },

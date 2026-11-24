@@ -93,6 +93,7 @@ impl Rig {
                 manifest: manifest(),
                 workdir: None,
                 max_rounds,
+                round_cap: crate::model::types::MAX_MAX_ROUNDS,
                 lead: AgentChoice::from(AgentKind::Claude),
                 panel,
             },

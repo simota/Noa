@@ -1781,6 +1781,7 @@ fn starting_the_filled_form_starts_the_same_review_in_two_steps() {
             max_rounds,
             lead,
             panel,
+            ..
         },
     ] = started.as_slice()
     else {
@@ -2075,4 +2076,368 @@ fn past_reviews_beyond_the_first_page_can_be_listed() {
 fn a_short_past_list_offers_no_more() {
     let screen = Review::demo_start();
     assert!(!acts(&screen).contains(&Action::MorePast));
+}
+
+// ---- 独立レビュー（codex）の指摘への回帰テスト ----
+
+/// Presses the visible button carrying `action` from the keyboard (focus,
+/// then Space), as a person would.
+fn press_button(screen: &mut Review, action: &Action) {
+    let id = widget_for(screen, action).unwrap_or_else(|| panic!("no button for {action:?}"));
+    assert!(!screen.tree.is_hidden(id), "{action:?} is hidden");
+    screen.tree.set_focus(Some(id));
+    assert_eq!(
+        screen.tree.focused(),
+        Some(id),
+        "{action:?} cannot take focus"
+    );
+    press(screen, noa_gpui_core::Key::Space);
+}
+
+/// ⌘F, as the keyboard sends it.
+fn command_f(screen: &mut Review) {
+    let mut text = TextStore::new(Default::default());
+    noa_gpui_platform::Screen::dispatch(
+        screen,
+        noa_gpui_core::Event::KeyDown {
+            key: noa_gpui_core::Key::Char('f'),
+            modifiers: noa_gpui_core::Modifiers {
+                command: true,
+                meta: true,
+                ..Default::default()
+            },
+        },
+        &mut text,
+    );
+}
+
+#[test]
+fn the_fix_and_review_again_buttons_are_pressable_from_the_keyboard() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    press_button(
+        &mut screen,
+        &Action::RequestFix {
+            agent: AgentKind::Codex,
+            scope: FixScope::MustFix,
+        },
+    );
+    assert!(matches!(
+        commands(&link).as_slice(),
+        [Command::RequestFix(_)]
+    ));
+
+    // 同じ設定で再レビュー, then レビューを開始: two presses.
+    let repo = temp_dir("press");
+    let (mut screen, link) = live_with(demo_in(&repo));
+    press_button(&mut screen, &Action::ReviewAgain(None));
+    press_button(&mut screen, &Action::Start);
+    let started = commands(&link)
+        .into_iter()
+        .filter(|c| matches!(c, Command::Start { .. }))
+        .count();
+    assert_eq!(started, 1);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn a_running_review_says_by_the_fix_buttons_that_reviewers_read_the_work_tree() {
+    let note = "レビュアーは作業ツリーも参照する";
+    let (running, _link) = live_with_dirs(crate::demo::held());
+    assert!(!fix_actions(&running).is_empty());
+    assert!(all_text(&running).contains(note));
+    let (closed, _link) = live_with_dirs(crate::demo::session());
+    assert!(!all_text(&closed).contains(note));
+}
+
+#[test]
+fn a_place_ending_in_a_space_is_reviewed_as_given() {
+    let root = temp_dir("space");
+    std::fs::create_dir_all(root.join("repo")).unwrap();
+    std::fs::create_dir_all(root.join("repo ")).unwrap();
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel).with_place(&root.join("repo "));
+    act(&mut screen, Action::Start);
+    let started: Vec<Command> = commands(&link)
+        .into_iter()
+        .filter(|c| matches!(c, Command::Start { .. }))
+        .collect();
+    let [Command::Start { target, .. }] = started.as_slice() else {
+        panic!("{started:?}");
+    };
+    assert_eq!(target.path.as_deref(), Some(root.join("repo ").as_path()));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn refilling_replaces_only_the_note_it_wrote() {
+    // No verdict: a request that names 前回のレビュー in a sentence stays whole.
+    let mut held = crate::demo::held();
+    held.request = "必ず確認（前回のレビュー で追加した条件も含む）。最後にテストを実行。".into();
+    assert_eq!(start::Form::from_session(&held).request, held.request);
+
+    // A note from an earlier review, with the person's words after it.
+    let session = crate::demo::session();
+    let mut earlier = session.clone();
+    earlier.id = review::model::types::SessionId::new("rev-old");
+    let old_note = start::again_note(&earlier).unwrap();
+    let mut again = session.clone();
+    again.request = format!("依頼A\n\n{old_note}\n最後にテストを実行。");
+    let new_note = start::again_note(&session).unwrap();
+    assert_eq!(
+        start::Form::from_session(&again).request,
+        format!("依頼A\n\n{new_note}\n最後にテストを実行。")
+    );
+    // And with a sentence of the person's that only mentions the mark.
+    again.request = "（前回のレビュー の件も見て）".into();
+    assert_eq!(
+        start::Form::from_session(&again).request,
+        format!("（前回のレビュー の件も見て）\n\n{new_note}")
+    );
+}
+
+#[test]
+fn a_refill_keeps_a_limit_raised_past_ten() {
+    let repo = temp_dir("rounds");
+    let mut session = demo_in(&repo);
+    session.max_rounds = 13;
+    let (mut screen, link) = live_with(session);
+    act(&mut screen, Action::ReviewAgain(None));
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!((form.max_rounds, form.round_cap), (13, 13));
+    act(&mut screen, Action::Start);
+    let started: Vec<Command> = commands(&link)
+        .into_iter()
+        .filter(|c| matches!(c, Command::Start { .. }))
+        .collect();
+    let [
+        Command::Start {
+            max_rounds,
+            round_cap,
+            ..
+        },
+    ] = started.as_slice()
+    else {
+        panic!("{started:?}");
+    };
+    assert_eq!((*max_rounds, *round_cap), (13, 13));
+    // A new review is back to the usual limit.
+    act(&mut screen, Action::NewReview);
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.round_cap, review::model::types::MAX_MAX_ROUNDS);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn a_refilled_panel_keeps_its_lenses_when_the_agent_check_reports_after() {
+    // A review set up with the default panel (claude/正確性, codex/セキュリ
+    // ティ, agy/設計, CLI defaults): refilled, it looks untouched.
+    use review::model::types::{AgentSetup, BuiltinLens, Lens};
+    let repo = temp_dir("late-check");
+    let mut session = demo_in(&repo);
+    session.lead.setup = AgentSetup::default();
+    for (part, lens) in session.reviewers.iter_mut().zip([
+        BuiltinLens::Correctness,
+        BuiltinLens::Security,
+        BuiltinLens::Design,
+    ]) {
+        part.setup = AgentSetup::default();
+        part.lens = Some(Lens::Builtin { id: lens });
+    }
+    let (mut screen, _link, tx, mut text) = live_pending();
+    screen.session = Some(Arc::new(session));
+    screen.rebuild(&mut text);
+    act(&mut screen, Action::ReviewAgain(None));
+    report(
+        &mut screen,
+        &tx,
+        found(&[AgentKind::Codex, AgentKind::Agy]),
+        &mut text,
+    );
+    let form = start::read(&screen.tree, &screen.start);
+    let rows: Vec<(AgentKind, LensChoice)> = form
+        .panel
+        .iter()
+        .map(|r| (r.agent.kind, r.lens.clone()))
+        .collect();
+    // Only claude went; the others kept their lenses.
+    assert_eq!(
+        rows,
+        [
+            (AgentKind::Codex, LensChoice::Builtin(BuiltinLens::Security)),
+            (AgentKind::Agy, LensChoice::Builtin(BuiltinLens::Design)),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn a_filter_that_hides_the_selected_finding_lets_it_go() {
+    let (mut screen, _link) = live_with_dirs(crate::demo::session());
+    act(&mut screen, Action::SelectFinding(Some("F2".into())));
+    act(&mut screen, Action::FilterFile(Some("src/store.rs".into())));
+    assert_eq!(screen.selected, None);
+    assert!(
+        fix_actions(&screen)
+            .iter()
+            .all(|(_, s)| *s != FixScope::Finding("F2".into()))
+    );
+    // A finding the filter keeps stays selected.
+    act(&mut screen, Action::SelectFinding(Some("F1".into())));
+    act(&mut screen, Action::ToggleSeverity(Severity::High));
+    assert_eq!(screen.selected.as_deref(), Some("F1"));
+    // Words that hide it let it go too.
+    let mut text = TextStore::new(Default::default());
+    type_search(&mut screen, "シェル", &mut text);
+    assert_eq!(screen.selected, None);
+}
+
+#[test]
+fn the_tab_row_and_the_header_stay_in_the_pane_at_the_smallest_window() {
+    let long = "crates/noa-app/src/app/helpers/a/rather/long/path/to/its/file.rs";
+    let mut held = Review::demo_held();
+    lay_out(&mut held, SMALLEST);
+    assert_eq!(cut_off(&held, held.tabs_host), vec![]);
+    assert_eq!(cut_off(&held, held.header_host), vec![]);
+    for path in ["src/store.rs", long] {
+        let (mut screen, _link) = live_with(crate::demo::held());
+        act(&mut screen, Action::FilterFile(Some(path.into())));
+        lay_out(&mut screen, SMALLEST);
+        assert_eq!(cut_off(&screen, screen.tabs_host), vec![], "{path}");
+        // 条件をすべて解除 and the chip are inside the pane, pressable.
+        let pane = screen.tree.window_rect(screen.tabs_host).unwrap();
+        for action in [Action::ClearFilters, Action::FilterFile(None)] {
+            let at = screen
+                .tree
+                .window_rect(widget_for(&screen, &action).unwrap())
+                .unwrap();
+            assert!(
+                at.right() <= pane.right() + 0.5,
+                "{action:?} {at:?} {pane:?}"
+            );
+        }
+    }
+    assert!(board::short_path(long).starts_with("…/"));
+    assert!(board::short_path(long).chars().count() <= 32);
+    assert_eq!(board::short_path("src/store.rs"), "src/store.rs");
+}
+
+#[test]
+fn command_f_from_another_tab_goes_to_the_search_and_keeps_its_words() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    command_f(&mut screen);
+    assert!(screen.search_open);
+    assert_eq!(screen.tree.focused(), Some(screen.search));
+    let mut text = TextStore::new(Default::default());
+    screen.dispatch(noa_gpui_core::Event::Text("シェル".into()), &mut text);
+    assert_eq!(screen.filters.query, "シェル");
+    act(&mut screen, Action::ShowTab(CenterTab::Report));
+    command_f(&mut screen);
+    assert_eq!(screen.tab, CenterTab::Findings);
+    assert!(screen.search_open);
+    assert_eq!(screen.filters.query, "シェル");
+    assert_eq!(screen.tree.focused(), Some(screen.search));
+    // Where it shows, ⌘F closes it.
+    command_f(&mut screen);
+    assert!(!screen.search_open);
+    assert!(screen.filters.query.is_empty());
+}
+
+#[test]
+fn reviewing_again_from_far_down_the_list_shows_the_form_with_focus() {
+    let mut screen = Review::demo_start();
+    screen
+        .tree
+        .update::<noa_gpui_core::widgets::ScrollView, _>(screen.start.root, |s, cx| {
+            s.set_offset(cx, 2000.0)
+        });
+    let scrolled = |screen: &Review| {
+        screen
+            .tree
+            .get::<noa_gpui_core::widgets::ScrollView>(screen.start.root)
+            .unwrap()
+            .offset()
+    };
+    assert!(scrolled(&screen) > 0.0);
+    let again = acts(&screen)
+        .into_iter()
+        .find(|a| matches!(a, Action::ReviewAgain(Some(_))))
+        .unwrap();
+    press_button(&mut screen, &again);
+    let offset = screen
+        .tree
+        .get::<noa_gpui_core::widgets::ScrollView>(screen.start.root)
+        .unwrap()
+        .offset();
+    assert_eq!(offset, 0.0);
+    assert_eq!(screen.tree.focused(), Some(screen.start.repo));
+}
+
+#[test]
+fn the_coverage_counts_a_file_as_its_button_does() {
+    // F1 now sits in src/engine.rs; its sources still point into store.rs.
+    let mut session = crate::demo::session();
+    let f1 = session.findings.iter_mut().find(|f| f.id == "F1").unwrap();
+    let raw_path = session_raw_path(&crate::demo::session(), "F1");
+    f1.location = Some(review::model::types::Location {
+        path: "src/engine.rs".into(),
+        line: Some(1),
+        end_line: None,
+    });
+    let (mut screen, _link) = live_with(session);
+    act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+    let labels = labels_under(&screen.tree, screen.center_host);
+    let at = labels.iter().position(|l| *l == raw_path).unwrap();
+    let row: Vec<&String> = labels[at..].iter().take(5).collect();
+    assert!(
+        acts(&screen).contains(&Action::FilterFile(Some(raw_path.clone()))),
+        "{row:?}"
+    );
+    assert!(!row.iter().any(|l| l.as_str() == "指摘なし"), "{row:?}");
+    assert!(row.iter().any(|l| l.contains("高 1")), "{row:?}");
+}
+
+/// The path F's first source points into.
+fn session_raw_path(session: &Session, id: &str) -> String {
+    let f = session.finding(id).unwrap();
+    session
+        .raw_finding(&f.sources[0])
+        .unwrap()
+        .location
+        .as_ref()
+        .unwrap()
+        .path
+        .clone()
+}
+
+#[test]
+fn more_past_reviews_read_only_the_next_page_and_ask_the_lock_again() {
+    let root = std::env::temp_dir().join(format!("noa-review-paging-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let log = crate::demo::held_log();
+    let n = start::PAST_LIMIT + 3;
+    for i in 0..n {
+        let dir = root.join(format!("rev-{}", 2_000 + i));
+        let mut store = Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+    }
+    let (channel, _link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    screen.past_root = Some(root.clone());
+    screen.refresh_past();
+    screen.rebuild(&mut TextStore::new(Default::default()));
+    // The first listed log breaks, and another window takes the second.
+    let first = screen.past[0].dir.clone();
+    std::fs::write(first.join(store::EVENTS_FILE), "broken\n").unwrap();
+    let (_held, _) = Store::open(&screen.past[1].dir).unwrap();
+    act(&mut screen, Action::MorePast);
+    assert_eq!(screen.past.len(), n);
+    // Not read again: its summary is the one listed before.
+    assert!(screen.past[0].summary.is_ok());
+    // Asked again: the held one is busy now.
+    assert!(screen.past[1].summary.as_ref().unwrap().busy);
+    // The oldest page is there, and the unfinished oldest resumes itself.
+    let oldest = screen.past.last().unwrap().dir.clone();
+    assert!(oldest.ends_with("rev-2000"));
+    assert!(acts(&screen).contains(&Action::ResumePast(oldest)));
+    let _ = std::fs::remove_dir_all(root);
 }

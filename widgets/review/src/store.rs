@@ -444,8 +444,20 @@ pub struct Listed {
 /// The newest `limit` reviews under `root`, newest first. Only the listed
 /// logs are read; a log that cannot be read is listed with why.
 pub fn list_sessions(root: &Path, limit: usize) -> Vec<Listed> {
-    session_dirs(root)
-        .into_iter()
+    list_sessions_after(root, None, limit)
+}
+
+/// The next `limit` reviews under `root` after the folder `after` (all
+/// from the newest without one), newest first: a page more of
+/// [`list_sessions`] that reads only its own logs.
+pub fn list_sessions_after(root: &Path, after: Option<&Path>, limit: usize) -> Vec<Listed> {
+    let dirs = session_dirs(root);
+    let start = match after {
+        Some(after) => dirs.iter().position(|d| d == after).map_or(0, |at| at + 1),
+        None => 0,
+    };
+    dirs.into_iter()
+        .skip(start)
         .take(limit)
         .map(|dir| {
             let summary = read_session(&dir)

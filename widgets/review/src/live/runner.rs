@@ -1407,6 +1407,8 @@ pub struct NewReview {
     pub request: String,
     pub target: Target,
     pub max_rounds: RoundNo,
+    /// See [`review::engine::Setup::round_cap`].
+    pub round_cap: RoundNo,
     pub lead: AgentChoice,
     pub panel: Vec<ReviewerChoice>,
     /// The store root (`<data dir>/noa/reviews`).
@@ -1420,6 +1422,7 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
         request,
         target,
         max_rounds,
+        round_cap,
         lead,
         panel,
         root,
@@ -1452,6 +1455,7 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
         manifest,
         workdir,
         max_rounds,
+        round_cap,
         lead,
         panel: &panel,
     };
@@ -1756,6 +1760,7 @@ mod tests {
             request: "Review the migration plan".into(),
             target,
             max_rounds,
+            round_cap: review::model::types::MAX_MAX_ROUNDS,
             lead: AgentKind::Claude.into(),
             panel: panel.into_iter().map(reviewer).collect(),
             root: root.to_owned(),
@@ -2529,6 +2534,7 @@ mod tests {
                 workdir: None,
             },
             max_rounds: 1,
+            round_cap: review::model::types::MAX_MAX_ROUNDS,
             lead: AgentKind::Claude.into(),
             panel: vec![
                 reviewer(AgentKind::Claude.into()),

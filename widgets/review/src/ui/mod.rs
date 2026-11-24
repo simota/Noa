@@ -699,6 +699,17 @@ impl Review {
             tag(&mut self.tree, row, "判定なし", Tone::Neutral);
         }
         let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+        // In the header (the title gives way), not the tab row, which the
+        // smallest window fills: ⌘F works from every tab.
+        let search = self.tree.insert(
+            Some(row),
+            small("検索")
+                .selected(self.search_open)
+                .shortcut(Shortcut::command('f'))
+                .tooltip("指摘を言葉やパスで絞り込みます（⌘F）"),
+        );
+        self.tree.set_accessible_label(search, "指摘を検索");
+        self.actions.push((search, Action::ToggleSearch));
         let copy = self.tree.insert(Some(row), small("コピー"));
         self.actions.push((copy, Action::CopyReport));
         let save = self.tree.insert(Some(row), small("レポート保存…"));
@@ -732,6 +743,15 @@ impl Review {
         let tabs = self.tree.insert(
             Some(self.tabs_host),
             Container::new(Style {
+                // As wide as the pane, so what does not fit wraps.
+                size: LayoutSize {
+                    width: percent(1.0),
+                    height: auto(),
+                },
+                min_size: LayoutSize {
+                    width: length(0.0),
+                    height: auto(),
+                },
                 flex_direction: FlexDirection::Row,
                 // Wraps when the tabs, the findings summary and the
                 // snapshot button do not fit on one line.
@@ -773,16 +793,6 @@ impl Review {
             );
             self.actions.push((btn, Action::ShowTab(tab)));
         }
-        let search = self.tree.insert(
-            Some(tabs),
-            Button::new("検索")
-                .control_size(ControlSize::Small)
-                .selected(self.search_open)
-                .shortcut(Shortcut::command('f'))
-                .tooltip("指摘を言葉やパスで絞り込みます（⌘F）"),
-        );
-        self.tree.set_accessible_label(search, "指摘を検索");
-        self.actions.push((search, Action::ToggleSearch));
         spacer(&mut self.tree, tabs);
         if self.tab == CenterTab::Findings {
             board::summary(
@@ -862,7 +872,12 @@ impl Review {
                 .filter(|(_, n)| *n > 0)
                 .collect(),
         };
-        Some(fix::FixOffer::Offered { kinds, scopes })
+        let running = !self.read_only && !session.closed;
+        Some(fix::FixOffer::Offered {
+            kinds,
+            scopes,
+            running,
+        })
     }
 
     /// The findings a fix request of `scope` takes.
@@ -1068,7 +1083,8 @@ impl Review {
         self.installed = None;
         let before = start::read(&self.tree, &self.start);
         let clean = start::Form::for_kinds(self.start.kinds());
-        let pristine = before.lead == clean.lead && before.panel == clean.panel;
+        let pristine =
+            !self.start.refilled && before.lead == clean.lead && before.panel == clean.panel;
         self.detection = start::Detection::Done(installed);
         let kinds = self.detection.menu_kinds();
         let form = if pristine {
@@ -1167,6 +1183,19 @@ impl Review {
         self.rebuild(text);
     }
 
+    /// Rebuilds after the filters changed: a selected finding they now
+    /// hide is let go, so the thread and 修正を依頼 follow what is shown.
+    fn refilter(&mut self, text: &mut TextStore) {
+        if let (Some(session), Some(id)) = (&self.session, &self.selected)
+            && session
+                .finding(id)
+                .is_none_or(|f| !board::passes(session, &self.filters, f))
+        {
+            self.selected = None;
+        }
+        self.rebuild(text);
+    }
+
     fn toast(&mut self, message: impl Into<String>) {
         Toast::new(message.into()).show(&mut self.tree);
     }
@@ -1252,6 +1281,7 @@ impl Review {
                     request: form.request,
                     target: Box::new(target),
                     max_rounds: form.max_rounds,
+                    round_cap: form.round_cap,
                     lead: form.lead,
                     panel: form.panel,
                 });
@@ -1287,41 +1317,43 @@ impl Review {
             }
             Action::ToggleSeverity(s) => {
                 toggle(&mut self.filters.severities, s);
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::ToggleLens(id) => {
                 toggle(&mut self.filters.lenses, id);
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::ToggleStatus(s) => {
                 toggle(&mut self.filters.statuses, status_key(s));
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::ToggleAgreement(a) => {
                 toggle(&mut self.filters.agreements, agreement_key(a));
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::FilterReviewer(part) => {
                 self.filters.reviewer = part;
                 self.tab = CenterTab::Findings;
-                self.rebuild(text);
+                self.refilter(text);
             }
+            // Closes the search only where it shows; from another tab, or
+            // closed, it opens on the findings tab with its words kept.
             Action::ToggleSearch => {
-                self.search_open = !self.search_open;
-                if self.search_open {
-                    self.tab = CenterTab::Findings;
-                } else {
+                if self.search_open && self.tab == CenterTab::Findings {
+                    self.search_open = false;
                     self.filters.query.clear();
-                }
-                self.rebuild(text);
-                if self.search_open {
+                    self.refilter(text);
+                } else {
+                    self.search_open = true;
+                    self.tab = CenterTab::Findings;
+                    self.refilter(text);
                     self.tree.set_focus(Some(self.search));
                 }
             }
             Action::FilterFile(path) => {
                 self.filters.path = path;
                 self.tab = CenterTab::Findings;
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::ClearFilters => {
                 self.filters = Filters {
@@ -1337,7 +1369,7 @@ impl Review {
                     ..Filters::default()
                 };
                 self.tab = CenterTab::Findings;
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::SelectFinding(id) => {
                 self.selected = id;
@@ -1415,6 +1447,7 @@ impl Review {
                 self.leave();
                 let form = start::Form::for_kinds(self.start.kinds());
                 start::fill(&mut self.tree, &mut self.start, &form, text);
+                self.start.refilled = false;
                 self.rebuild(text);
             }
             Action::FocusPane(part) => self.send_cmd(Command::Focus { part }),
@@ -1447,9 +1480,25 @@ impl Review {
                     self.rebuild(text);
                 }
             }
+            // Reads only the next page; the listed ones keep their
+            // summaries, and whether another window holds them is asked
+            // again.
             Action::MorePast => {
-                self.past_limit += start::PAST_LIMIT;
-                self.refresh_past();
+                if let (Source::Live(_) | Source::Snapshot, Some(root)) =
+                    (&self.source, self.past_root.clone())
+                {
+                    for listed in &mut self.past {
+                        if let Ok(summary) = &mut listed.summary {
+                            summary.busy = store::is_busy(&listed.dir);
+                        }
+                    }
+                    let after = self.past.last().map(|l| l.dir.clone());
+                    let next =
+                        store::list_sessions_after(&root, after.as_deref(), start::PAST_LIMIT);
+                    self.past.extend(next);
+                    self.past_total = store::count_sessions(&root);
+                    self.past_limit = self.past.len().max(start::PAST_LIMIT);
+                }
                 self.rebuild(text);
             }
             Action::ReviewAgain(dir) => {
@@ -1468,6 +1517,9 @@ impl Review {
                     self.leave();
                 }
                 let left_out = start::fill(&mut self.tree, &mut self.start, &form, text);
+                // Set by the person: the agent check that reports later
+                // only drops kinds that are not installed.
+                self.start.refilled = true;
                 if !left_out.is_empty() {
                     self.toast(start::left_out_message(&left_out));
                 }
@@ -1476,6 +1528,7 @@ impl Review {
                     session.id
                 ));
                 self.rebuild(text);
+                start::show_top(&mut self.tree, &self.start, form.kind);
             }
             Action::RequestFix { agent, scope } => {
                 let Some(session) = self.session.clone() else {
@@ -1550,7 +1603,7 @@ impl Screen for Review {
         {
             if self.filters.query != *query {
                 self.filters.query = query.clone();
-                self.rebuild(text);
+                self.refilter(text);
             }
             return;
         }

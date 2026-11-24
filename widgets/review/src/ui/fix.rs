@@ -38,6 +38,9 @@ pub(super) enum FixOffer {
     Offered {
         kinds: Vec<AgentKind>,
         scopes: Vec<(FixScope, usize)>,
+        /// The review is still running: its reviewers read the work tree
+        /// the fix changes.
+        running: bool,
     },
     Unavailable(String),
 }
@@ -55,7 +58,20 @@ pub(super) fn insert(
             note(tree, c, why.clone());
             return;
         }
-        FixOffer::Offered { kinds, scopes } => (kinds, scopes),
+        FixOffer::Offered {
+            kinds,
+            scopes,
+            running,
+        } => {
+            if *running {
+                note(
+                    tree,
+                    c,
+                    "レビューの実行中です。レビュアーは作業ツリーも参照するため、修正が見えることがあります（判定はスナップショットに基づきます）",
+                );
+            }
+            (kinds, scopes)
+        }
     };
     if scopes.is_empty() {
         note(tree, c, "依頼できる指摘はありません");

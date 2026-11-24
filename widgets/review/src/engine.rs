@@ -399,6 +399,10 @@ pub struct Setup<'a> {
     pub manifest: TargetManifest,
     pub workdir: Option<PathBuf>,
     pub max_rounds: RoundNo,
+    /// The highest `max_rounds` accepted: `MAX_MAX_ROUNDS` for a review
+    /// set up afresh; a review set up again from a stored one may keep the
+    /// limit that one reached with +N (rounds are added without a cap).
+    pub round_cap: RoundNo,
     pub lead: AgentChoice,
     pub panel: &'a [ReviewerChoice],
 }
@@ -426,8 +430,9 @@ impl Engine {
         if let Err(why) = check_panel(&setup.lead, setup.panel) {
             return rejected(why);
         }
-        if !(1..=MAX_MAX_ROUNDS).contains(&setup.max_rounds) {
-            return rejected(format!("ラウンド上限は1〜{MAX_MAX_ROUNDS}です"));
+        let cap = setup.round_cap.max(MAX_MAX_ROUNDS);
+        if !(1..=cap).contains(&setup.max_rounds) {
+            return rejected(format!("ラウンド上限は1〜{cap}です"));
         }
         if setup.manifest.files.is_empty() && setup.manifest.omitted.is_empty() {
             return rejected("レビュー対象が空です");

@@ -147,6 +147,7 @@ impl Driver {
                 // As a git review's: the repository's top level.
                 workdir: Some(PathBuf::from("/Users/demo/repos/noa")),
                 max_rounds: 3,
+                round_cap: review::model::types::MAX_MAX_ROUNDS,
                 lead: AgentChoice {
                     kind: AgentKind::Claude,
                     setup: AgentSetup {
@@ -407,6 +408,14 @@ pub fn log() -> Vec<Vec<review::model::reduce::Event>> {
     round_one(&mut d);
     round_two(&mut d);
     round_three(&mut d);
+    d.log
+}
+
+/// The held demo's event log (unfinished), for tests that need it on disk.
+#[cfg(test)]
+pub fn held_log() -> Vec<Vec<review::model::reduce::Event>> {
+    let mut d = Driver::new("rev-demo-held", true);
+    round_one(&mut d);
     d.log
 }
 

@@ -40,6 +40,9 @@ pub enum Command {
         request: String,
         target: Box<Target>,
         max_rounds: RoundNo,
+        /// The highest limit this start may ask for: `MAX_MAX_ROUNDS`, or a
+        /// review set up again with the limit it had after +N.
+        round_cap: RoundNo,
         lead: AgentChoice,
         panel: Vec<ReviewerChoice>,
     },
@@ -239,6 +242,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     request,
                     target,
                     max_rounds,
+                    round_cap,
                     lead,
                     panel,
                 },
@@ -252,6 +256,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     request,
                     target: *target,
                     max_rounds,
+                    round_cap,
                     lead,
                     panel,
                     root,

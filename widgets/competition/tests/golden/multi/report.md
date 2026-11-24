@@ -32,7 +32,7 @@ claude wins </script><!-- on the highest mean (87.3); judge-2 preferred codex
 
 - **claude** (81.0/100 · judge 80 / judge-2 82 / judge-3 81 · 差 2): claude entry for round 1 <with markup>
 - **codex** (84.3/100 · judge 85 / judge-2 80 / judge-3 88 · 差 8): codex entry for round 1 <with markup>
-- **agy** (66.7/100 · judge 60 / judge-2 78 / judge-3 62 · 差 18): agy entry for round 1 <with markup>
+- **agy** (66.7/100 · judge 60 / judge-2 78 / judge-3 62 · ⚠ 差 18): agy entry for round 1 <with markup>
 
 ### Round 2 (相互閲覧)
 

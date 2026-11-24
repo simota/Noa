@@ -1045,3 +1045,10 @@ fn copying_the_report_says_whether_it_reached_the_clipboard() {
         ["レポートをクリップボードにコピーできませんでした"]
     );
 }
+
+#[test]
+fn the_matrix_fits_the_smallest_window() {
+    let mut screen = Review::demo().with_view(Some(CenterTab::Matrix), None);
+    lay_out(&mut screen, SMALLEST);
+    assert_eq!(cut_off(&screen, screen.center_host), vec![]);
+}

@@ -249,6 +249,14 @@ pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
         kind: p.kind,
         setup: p.setup.clone(),
     };
+    // The ids below are derived from the log's own judge count, so its
+    // bound is checked here, as a new session's is.
+    let judge_count = session.judges().count();
+    if judge_count > MAX_JUDGES {
+        return Err(format!(
+            "ログの審判が{judge_count}人います（審判は1〜{MAX_JUDGES}人です）"
+        ));
+    }
     for part in session.judges().chain(&session.contestants) {
         part.setup.check(part.kind)?;
     }
@@ -1955,6 +1963,38 @@ mod tests {
         let one = create(std::slice::from_ref(&agy)).unwrap();
         assert!(!one.session().is_panel());
         assert_eq!(one.session().judge.id.as_str(), JUDGE_ID);
+    }
+
+    #[test]
+    fn check_resumable_refuses_more_judges_than_a_panel_takes() {
+        let dir = Path::new("/tmp/competitions/comp-crowd");
+        let seats = participants(
+            &vec![AgentKind::Agy.into(); MAX_JUDGES + 1],
+            &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+        );
+        let ids: Vec<&str> = std::iter::once(&seats.judge)
+            .chain(&seats.co_judges)
+            .map(|j| j.id.as_str())
+            .collect();
+        assert_eq!(ids, ["judge", "judge-2", "judge-3", "judge-4"]);
+        let session = reduce::replay([vec![Event::Created {
+            id: SessionId::new("comp-crowd"),
+            request: "x".into(),
+            workdir: None,
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            judge: seats.judge,
+            co_judges: seats.co_judges,
+            contestants: seats.contestants,
+            at: 1,
+        }]])
+        .unwrap();
+        let err = check_resumable(&session, dir).unwrap_err();
+        assert!(err.contains("審判") && err.contains('4'), "{err}");
+        // One fewer is a panel it takes.
+        let mut three = session.clone();
+        three.co_judges.pop();
+        assert_eq!(check_resumable(&three, dir), Ok(()));
     }
 
     #[test]

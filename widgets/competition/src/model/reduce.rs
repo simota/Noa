@@ -1,7 +1,7 @@
 //! The event log and its fold: a session is `create` of the first batch,
 //! then `apply` of every later one. Each batch bumps `rev` once.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -257,6 +257,8 @@ fn accept_combined(
     // Per corrected round, per entry: "<judge>: <reason>" in seat order.
     let mut reasons: BTreeMap<RoundNo, BTreeMap<PartId, Vec<String>>> = BTreeMap::new();
     let judges: Vec<PartId> = session.judges().map(|j| j.id.clone()).collect();
+    // Every (round, judge) card an amendment touched, re-ranked once below.
+    let mut amended: BTreeSet<(RoundNo, PartId)> = BTreeSet::new();
     for judge in &judges {
         for amendment in &cards[judge].amendments {
             if amendment.round >= round {
@@ -288,10 +290,7 @@ fn accept_combined(
                 by_round: round,
                 reason: amendment.reason.clone(),
             });
-            // The card is re-ranked by its scores, ties in its own order.
-            let evaluations = &card.evaluations;
-            card.ranking
-                .sort_by_key(|p| std::cmp::Reverse(evaluations.get(p).map_or(0, |e| e.score)));
+            amended.insert((amendment.round, judge.clone()));
             reasons
                 .entry(amendment.round)
                 .or_default()
@@ -299,6 +298,18 @@ fn accept_combined(
                 .or_default()
                 .push(format!("{judge}: {}", amendment.reason));
         }
+    }
+    // Each amended card is re-ranked by its scores once, after all of its
+    // amendments, ties keeping the card's ranking from before them, so the
+    // order the amendments are listed in cannot change it.
+    for (no, judge) in &amended {
+        let card = round_mut(session, *no)?
+            .scorecards
+            .get_mut(judge)
+            .expect("an amended card exists");
+        let evaluations = &card.evaluations;
+        card.ranking
+            .sort_by_key(|p| std::cmp::Reverse(evaluations.get(p).map_or(0, |e| e.score)));
     }
     for (no, reasons) in &reasons {
         let corrected = session.round(*no).map(|r| &r.scorecards);
@@ -989,6 +1000,53 @@ mod tests {
         .unwrap();
         judge_next(&mut cut, 2);
         assert!(settle(&mut cut, 2, &r2).is_err());
+    }
+
+    #[test]
+    fn amendments_to_one_card_rerank_it_once_whatever_their_order() {
+        use crate::model::types::Amendment;
+        let claude = PartId::new("claude");
+        let codex = PartId::new("codex");
+        let amend = |part: &PartId| Amendment {
+            round: 1,
+            part: part.clone(),
+            score: 70,
+            reason: "tie".into(),
+        };
+        for order in [
+            [claude.clone(), codex.clone()],
+            [codex.clone(), claude.clone()],
+        ] {
+            let mut session = panel_session(Some(3));
+            let r1 = cards(
+                &[("claude", 90), ("codex", 80)],
+                &[("claude", 70), ("codex", 70)],
+                &[("claude", 70), ("codex", 70)],
+            );
+            settle(&mut session, 1, &r1).unwrap();
+            judge_next(&mut session, 2);
+            let mut r2 = cards(
+                &[("claude", 80), ("codex", 80)],
+                &[("claude", 80), ("codex", 80)],
+                &[("claude", 80), ("codex", 80)],
+            );
+            r2.get_mut(&judge_id(0)).unwrap().amendments = order.iter().map(amend).collect();
+            settle(&mut session, 2, &r2).unwrap();
+
+            let round = session.round(1).unwrap();
+            // Every score is 70 now: the lead's card keeps its own order,
+            // and the combined tie follows it.
+            assert_eq!(
+                round.scorecards[&judge_id(0)].ranking,
+                [claude.clone(), codex.clone()],
+                "amended in order {order:?}"
+            );
+            assert_eq!(
+                round.outcome.as_ref().unwrap().ranking,
+                [claude.clone(), codex.clone()],
+                "amended in order {order:?}"
+            );
+        }
     }
 
     #[test]

@@ -12,9 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent Usage (`widgets/agent-usage`): View → Agent Usage (and the command
   palette's Open Agent Usage) opens a window with the usage limits of Claude
   Code, Codex and Antigravity (used %, reset, pace and when a window runs
-  out, stale values marked with their age) and statistics and graphs read
-  from the agents' local logs (sessions, tokens, cost estimate, models,
-  projects, tools, heatmap, limit history). It only reads the agents' logs
+  out, stale values marked with their age, and a history of used % it
+  records itself from live fetches) and statistics and graphs read from the
+  agents' local logs (sessions, tokens, cost estimate, models, projects,
+  tools, heatmap). It only reads the agents' logs
   and credentials; its own files (statistics index, limit history, view
   prefs) live under `<data dir>/noa/agent-usage/`, or at `--prefs=FILE`.
   `agent-usage --demo --snapshot=FILE.png` renders it headlessly and writes

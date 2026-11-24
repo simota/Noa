@@ -107,6 +107,8 @@ pub enum Action {
     Continue,
     /// Give the discussion this many more rounds.
     Extend(RoundNo),
+    /// Close every participant's pane of the ended discussion in Noa.
+    ClosePanes,
 }
 
 /// The round counts the "+N ラウンド" buttons offer.
@@ -127,6 +129,7 @@ impl Action {
                 | Action::Implement(_)
                 | Action::SetHold(_)
                 | Action::Continue
+                | Action::ClosePanes
         )
     }
 }
@@ -667,6 +670,15 @@ impl Discussion {
                 Some(self.status_leading),
                 Badge::text("終了").tone(Tone::Neutral),
             );
+            if !self.read_only() {
+                let close = self.tree.insert(
+                    Some(self.status_trailing),
+                    Button::new("ペインをすべて閉じる")
+                        .control_size(ControlSize::Small)
+                        .tooltip("司会とパネリストのペインを Noa でまとめて閉じます"),
+                );
+                self.actions.push((close, Action::ClosePanes));
+            }
         } else if !self.read_only() {
             let end = self.tree.insert(
                 Some(self.status_trailing),
@@ -919,6 +931,7 @@ impl Discussion {
                 Command::Focus { part: part.clone() },
                 format!("{} のペインを表示します", part_name(&part)),
             ),
+            Action::ClosePanes => self.send(Command::ClosePanes, "ペインをすべて閉じます"),
         }
     }
 

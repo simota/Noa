@@ -71,6 +71,8 @@ pub enum Command {
     Extend {
         by: RoundNo,
     },
+    /// Closes the agents' panes of the ended review on screen.
+    ClosePanes,
     /// Gives the stored review in `dir` `by` more rounds and goes on
     /// with it: a finished one that ran out of rounds continues.
     ExtendStored {
@@ -340,6 +342,7 @@ fn forwarded(cmd: Command) -> Option<Action> {
         Command::SetHold { hold } => Action::SetHold { hold },
         Command::Continue => Action::Continue,
         Command::Extend { by } => Action::Extend { by },
+        Command::ClosePanes => Action::ClosePanes,
         Command::Start { .. }
         | Command::Resume { .. }
         | Command::ExtendStored { .. }

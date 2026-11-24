@@ -110,6 +110,8 @@ pub trait Noa {
     /// Brings `pane` to the front of its window and gives it keyboard focus
     /// (`noa.focusPane`).
     fn focus(&mut self, pane: u64) -> Result<(), NoaError>;
+    /// Closes `pane` (`noa.closePane`).
+    fn close_pane(&mut self, pane: u64) -> Result<(), NoaError>;
 }
 
 /// Opens connections to Noa; the runner calls it again after a lost one.
@@ -302,6 +304,10 @@ impl Noa for IpcNoa {
 
     fn focus(&mut self, pane: u64) -> Result<(), NoaError> {
         self.client.focus_pane(pane).map_err(noa_error)
+    }
+
+    fn close_pane(&mut self, pane: u64) -> Result<(), NoaError> {
+        self.client.close_pane(pane).map_err(noa_error)
     }
 }
 

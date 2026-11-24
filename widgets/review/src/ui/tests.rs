@@ -949,6 +949,25 @@ fn ending_a_review_asks_first_and_return_keeps_it_running() {
     assert_eq!(commands(&link), vec![Command::Close]);
 }
 
+#[test]
+fn the_agents_panes_close_together_once_the_review_has_ended() {
+    let (screen, _link) = live_with(crate::demo::held());
+    assert!(!acts(&screen).contains(&Action::ClosePanes));
+    let finished = crate::demo::session();
+    assert!(finished.closed);
+    let (mut screen, link) = live_with(finished);
+    assert!(acts(&screen).contains(&Action::ClosePanes));
+    act(&mut screen, Action::ClosePanes);
+    assert_eq!(commands(&link), vec![Command::ClosePanes]);
+    lay_out(&mut screen, SMALLEST);
+    assert_eq!(cut_off(&screen, screen.status_trailing), vec![]);
+    // A stored review has no runner and no panes of its own.
+    let root = std::env::temp_dir().join(format!("noa-review-ui-panes-{}", std::process::id()));
+    let stored = Review::stored(&stored_demo(&root)).unwrap();
+    assert!(!acts(&stored).contains(&Action::ClosePanes));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn draft(screen: &Review) -> String {
     composer::text(&screen.tree, &screen.composer)
 }

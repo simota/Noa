@@ -2414,3 +2414,185 @@ fn the_start_view_scrolls_back_to_the_top_when_filled_again() {
         .offset();
     assert_eq!(offset, 0.0);
 }
+
+// ---- more of review's, adapted ----
+
+#[test]
+fn a_shown_verification_whose_agent_is_gone_is_not_resumed_or_extended() {
+    let root = temp("gone-shown");
+    let dir = stored_unfinished(&root);
+    let (channel, link) = Channel::fake();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut screen = Verify::live_stored(channel, rx, &dir);
+    let mut text = TextStore::new(Default::default());
+    let _ = commands(&link);
+    report(&mut screen, &tx, found(&[AgentKind::Claude]), &mut text);
+    act(&mut screen, Action::ResumeShown);
+    act(&mut screen, Action::Extend(1));
+    assert!(commands(&link).is_empty());
+    assert!(!screen.extending);
+    screen.detection = start::Detection::all_installed();
+    act(&mut screen, Action::ResumeShown);
+    assert_eq!(commands(&link), [Command::Resume { dir }]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn viewing_a_stored_verification_changes_no_file_in_its_folder() {
+    let root = temp("ro-files");
+    let dir = stored_demo(&root);
+    // A stale report and a stray file are kept as they are.
+    std::fs::write(store::report_path(&dir), "old report").unwrap();
+    std::fs::write(dir.join("stray.json"), "{}").unwrap();
+    let before = files_with_times(&dir);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = Verify::stored(&dir).unwrap();
+    let (channel, _link) = Channel::fake();
+    let screen = stored_ready(channel, &dir);
+    assert!(acts(&screen).contains(&Action::RegenerateReport));
+    assert_eq!(files_with_times(&dir), before);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_change_that_could_not_be_read_is_read_at_a_later_look() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp("unread-change");
+    let dir = stored_unfinished(&root);
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    rewrite_log(&dir, &held_finished_log());
+    let log = dir.join(store::EVENTS_FILE);
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    look_again(&mut screen);
+    assert!(!screen.session.as_ref().unwrap().closed);
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    look_again(&mut screen);
+    assert!(screen.session.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumeShown));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_report_written_before_the_writer_let_go_is_no_longer_offered_again() {
+    let root = temp("late-report");
+    let dir = stored_demo(&root);
+    let (held, session) = Store::open(&dir).unwrap();
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(screen.report_stale);
+    store::write_report(&dir, &store::report_text(&session)).unwrap();
+    drop(held);
+    look_again(&mut screen);
+    assert!(screen.stored_free);
+    assert!(!acts(&screen).contains(&Action::RegenerateReport));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn page_to_the_end(screen: &mut Verify, limit: usize) {
+    for _ in 0..limit {
+        if !acts(screen).contains(&Action::MorePast) {
+            return;
+        }
+        act(screen, Action::MorePast);
+    }
+    panic!("さらに表示 never went away");
+}
+
+#[test]
+fn more_past_verifications_reread_a_changed_log_and_ask_the_lock_again() {
+    let n = start::PAST_LIMIT + 3;
+    let root = stored_many("paging", &crate::demo::held_log(), 2_000, n);
+    let (mut screen, _link) = past_screen(&root);
+    let first = screen.past[0].dir.clone();
+    assert!(!screen.past[0].summary.as_ref().unwrap().closed);
+    rewrite_log(&first, &held_finished_log());
+    let (_held, _) = Store::open(&screen.past[1].dir).unwrap();
+    act(&mut screen, Action::MorePast);
+    assert_eq!(screen.past.len(), n);
+    assert!(screen.past[0].summary.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumePast(first)));
+    assert!(screen.past[1].summary.as_ref().unwrap().busy);
+    let oldest = screen.past.last().unwrap().dir.clone();
+    assert!(oldest.ends_with("ver-2000"));
+    assert!(acts(&screen).contains(&Action::ResumePast(oldest)));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn past_verifications_added_or_gone_between_pages_end_without_gaps_or_doubles() {
+    let log = crate::demo::log();
+    let n = 2 * start::PAST_LIMIT + 1;
+    let root = stored_many("paging-new", &log, 3_000, n);
+    let (mut screen, _link) = past_screen(&root);
+    stored_log(&root, "ver-9999", &log);
+    page_to_the_end(&mut screen, 5);
+    let dirs: Vec<PathBuf> = screen.past.iter().map(|l| l.dir.clone()).collect();
+    assert_eq!(dirs.len(), n + 1);
+    assert_eq!(screen.past_total, n + 1);
+    let unique: BTreeSet<_> = dirs.iter().collect();
+    assert_eq!(unique.len(), dirs.len());
+    let _ = std::fs::remove_dir_all(&root);
+
+    let root = stored_many("paging-gone", &log, 4_000, n);
+    let (mut screen, _link) = past_screen(&root);
+    let last = screen.past.last().unwrap().dir.clone();
+    std::fs::remove_dir_all(&last).unwrap();
+    page_to_the_end(&mut screen, 5);
+    let dirs: Vec<PathBuf> = screen.past.iter().map(|l| l.dir.clone()).collect();
+    assert_eq!(dirs.len(), n - 1);
+    assert!(!dirs.contains(&last));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn focus_on_the_second_of_two_alike_buttons_stays_on_the_second() {
+    // A selected criterion's row and the thread's 選択を解除 both clear the
+    // selection; focus on the latter stays there through a rebuild.
+    let (mut screen, link) = live_with(crate::demo::held());
+    act(&mut screen, Action::SelectCriterion(Some("AC-2".into())));
+    let clear = Action::SelectCriterion(None);
+    let alike = |screen: &Verify| -> Vec<WidgetId> {
+        screen
+            .actions
+            .iter()
+            .filter(|(_, a)| *a == clear)
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    assert_eq!(alike(&screen).len(), 2);
+    screen.tree.set_focus(Some(alike(&screen)[1]));
+    let mut next = crate::demo::held();
+    next.rev += 1;
+    link.snapshots.send(snapshot(next, None, 0)).unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert_eq!(screen.tree.focused(), Some(alike(&screen)[1]));
+}
+
+#[test]
+fn a_new_draft_survives_resending_an_instruction_already_in_the_log() {
+    let earlier = "AC-2 も見て";
+    let (mut screen, link) = live_with(with_intervention(crate::demo::held(), earlier));
+    type_draft(&mut screen, earlier);
+    act(&mut screen, Action::Send);
+    assert_eq!(commands(&link).len(), 1);
+    type_draft(&mut screen, "次は AC-5 も");
+    act(&mut screen, Action::ShowTab(CenterTab::Defects));
+    assert_eq!(draft(&screen), "次は AC-5 も");
+}
+
+#[test]
+fn a_filter_that_hides_the_selected_defect_lets_it_go() {
+    let (mut screen, _link) = live_with_dirs(crate::demo::session(), Path::new(REPLY));
+    act(&mut screen, Action::SelectDefect(Some("D2".into())));
+    act(&mut screen, Action::ToggleSeverity(Severity::High));
+    assert_eq!(screen.selected, None);
+    assert!(
+        fix_actions(&screen)
+            .iter()
+            .all(|(_, s)| *s != FixScope::Defect("D2".into()))
+    );
+    act(&mut screen, Action::SelectDefect(Some("D1".into())));
+    act(&mut screen, Action::ToggleCategory("conformance".into()));
+    assert_eq!(screen.selected, Some(Selected::Defect("D1".into())));
+}

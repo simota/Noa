@@ -1168,14 +1168,8 @@ impl Verify {
             if snapshot.session.is_some() {
                 self.starting = false;
             }
-            // A new verification opens on its criteria.
-            let new_id = match (&self.session, &snapshot.session) {
-                (Some(before), Some(next)) => before.id != next.id,
-                (None, Some(_)) => true,
-                _ => false,
-            };
-            if new_id {
-                self.tab = CenterTab::Criteria;
+            // Drafts typed for another verification's criteria go.
+            if snapshot.session.as_ref().map(|s| &s.id) != self.session.as_ref().map(|s| &s.id) {
                 self.editor.reset();
             }
             self.session = snapshot.session;

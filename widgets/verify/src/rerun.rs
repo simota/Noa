@@ -216,7 +216,8 @@ impl Proc {
     /// can tell: [`Proc::group_left`] says no for a command it checked at
     /// first sight; for a pid it never took for the run's command, no
     /// process may be in a group of that id (one there may be another's:
-    /// the turn then waits for the script, or the run's limit).
+    /// the turn then waits for the script, or the run's limit, at which it
+    /// is taken as gone).
     fn group_gone(&self) -> bool {
         if self.sid.is_some() {
             !self.group_left()
@@ -226,11 +227,10 @@ impl Proc {
     }
 
     /// Sends `signal` to its process group, checked just before as still
-    /// the command's ([`Proc::group_left`]); nothing otherwise.
-    fn signal(&self, signal: Signal) {
-        if self.group_left() {
-            let _ = kill_group(self.pid, signal);
-        }
+    /// the command's ([`Proc::group_left`]), and says whether it was sent:
+    /// not for a group already gone, nor one never the command's.
+    fn signal(&self, signal: Signal) -> bool {
+        self.group_left() && kill_group(self.pid, signal).is_ok()
     }
 }
 
@@ -509,6 +509,19 @@ fn group_exists(pid: i32) -> bool {
     found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// What a test runs inside [`poll`] ([`AFTER_READS`]).
+#[cfg(test)]
+type Hook = Box<dyn FnMut(u32)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Called by [`poll`] with a command's `n` right after it read that
+    /// command's `.exit` and `.nocwd`: lets a test change what the command
+    /// does at that point of a poll, which no timing can place.
+    static AFTER_READS: std::cell::RefCell<Option<Hook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// What `dir` shows of `request`'s commands at `now`, each with its
 /// outcome once it has one (L1-5 steps 3–4), timed by `watch`.
 ///
@@ -529,9 +542,12 @@ fn group_exists(pid: i32) -> bool {
 /// itself and is not timed out), past `watch`'s run limit (counted from
 /// its `.pid` first seen) its process group gets SIGTERM, SIGKILL
 /// [`RERUN_KILL_GRACE`](crate::model::types::RERUN_KILL_GRACE) later
-/// (again at every poll while any of the group is left); one with no
-/// outcome by then is [`End::TimedOut`], one that had exited keeps its
-/// status, and either is given once nothing of its group is left. No next
+/// (again at every poll while any of the group is left). Only one still
+/// running when the SIGTERM is sent is [`End::TimedOut`]: a group found
+/// gone by then gets no signal (it ended by itself), and an `.exit` read
+/// in the same poll, or before, keeps its status (only what it left in
+/// its group was killed). Either is given once its turn is over as above,
+/// the last command's only at `done` or the start timeout after. No next
 /// `.pid` within the next-start limit after one command's outcome was
 /// given ends that command and every later one [`End::NotRun`] ("re-run
 /// did not finish"), or gives the outcome of one whose `.exit` came
@@ -540,7 +556,8 @@ fn group_exists(pid: i32) -> bool {
 /// A command's pid is read once, when its `.pid` is first seen, and
 /// checked then against the `run.sh` pid beside it: it must lead a process
 /// group of its own in that script's session. A pid that does not is
-/// never the run's command (taken as gone, never signalled), and a later
+/// never the run's command (never signalled, and taken as gone once no
+/// process is in a group of its id, or at its run limit), and a later
 /// rewrite of the file is not read. Before each signal the process is
 /// checked again (still leading its group, in the same session), or, its
 /// leader gone, its group must still have members. An outcome once given
@@ -577,8 +594,14 @@ pub fn poll(
         let alive = proc.is_some_and(|proc| proc.leads());
         // Read after the liveness check: the subshell writes them before
         // it ends, so a process found gone has written one by now if ever.
-        let exit = read_number(dir, &format!("{n}.exit"))?;
+        let mut exit = read_number(dir, &format!("{n}.exit"))?;
         let no_cwd = read_small(dir, dir, &format!("{n}.nocwd"), 64)?.is_some();
+        #[cfg(test)]
+        AFTER_READS.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook(n);
+            }
+        });
         if !watch.ended.contains_key(&n) {
             if let Entry::Vacant(slot) = watch.decided.entry(n) {
                 let end = if let Some(code) = exit {
@@ -610,36 +633,53 @@ pub fn poll(
                 .items
                 .get(i + 1)
                 .is_some_and(|next| watch.procs.contains_key(&next.n));
-            let mut over = done.is_some()
-                || next_seen
-                || watch
-                    .gone
-                    .get(&n)
+            let said = done.is_some() || next_seen || (proc.is_none() && overdue);
+            // Nothing of its group left ends the turn of all but the last
+            // command, whose turn only `done` ends, or the start timeout
+            // after (the script gone without writing it).
+            let gone_over = |gone: &BTreeMap<u32, Millis>| {
+                gone.get(&n)
                     .is_some_and(|&at| !last || now.saturating_sub(at) >= limits.next_start)
-                || (proc.is_none() && overdue);
+            };
+            let mut over = said || gone_over(&watch.gone);
             if let Some(proc) = proc
                 && !(over && watch.decided.contains_key(&n))
             {
                 match watch.term.get(&n) {
                     // A group already seen gone has nothing left to time
                     // out: the command ended by itself, and its turn is
-                    // over as above (the last one's only at `done` or the
-                    // start timeout after).
+                    // over as above.
                     None if !watch.gone.contains_key(&n)
                         && now.saturating_sub(watch.seen[&n]) >= limits.run =>
                     {
-                        proc.signal(Signal::Term);
-                        watch.term.insert(n, now);
-                        watch.decided.entry(n).or_insert(End::TimedOut);
+                        if proc.signal(Signal::Term) {
+                            watch.term.insert(n, now);
+                            // Timed out only if it still ran when the signal
+                            // was sent: a status that has appeared by now,
+                            // in this same poll, wins.
+                            exit = read_number(dir, &format!("{n}.exit"))?;
+                            let end = exit.map_or(End::TimedOut, End::Exited);
+                            watch.decided.entry(n).or_insert(end);
+                        } else if proc.sid.is_none() {
+                            // Never the run's command, so never signalled:
+                            // taken as gone at its limit.
+                            watch.gone.insert(n, now);
+                        }
+                        // Otherwise its group went in this poll: it ended
+                        // by itself, and the next poll reads how.
                     }
                     Some(&at) if now.saturating_sub(at) >= RERUN_KILL_GRACE => {
                         proc.signal(Signal::Kill);
                     }
                     _ => {}
                 }
-                // Killed: over once nothing of its group is left (at once for
-                // a pid never the run's command, which is never signalled).
-                over |= watch.term.contains_key(&n) && !proc.group_left();
+                // Killed: seen gone once nothing of its group is left, its
+                // turn then over as for one that ended by itself.
+                if watch.term.contains_key(&n) && !watch.gone.contains_key(&n) && !proc.group_left()
+                {
+                    watch.gone.insert(n, now);
+                }
+                over = said || gone_over(&watch.gone);
             }
             if let Some(end) = watch.decided.get(&n).filter(|_| over) {
                 watch.ended.insert(n, (end.clone(), now));
@@ -1181,6 +1221,99 @@ mod tests {
         assert_eq!(status.items[0].end, Some(End::Exited(0)));
     }
 
+    /// A command `run.sh` would have started as `dir`'s `<n>.pid`: `sleep
+    /// 30` leading a process group of its own, with the test standing in
+    /// as the `run.sh` beside it (same session, another group), so each
+    /// step happens at a time the test picks.
+    fn fake_command(dir: &Path, n: u32) -> Child {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = format!("{} {}\n", child.id(), std::process::id());
+        fs::write(dir.join(format!("{n}.pid")), pid).unwrap();
+        child
+    }
+
+    #[test]
+    fn ac10_the_last_command_killed_past_its_limit_still_waits_for_done() {
+        let (worktree, dir) = layout("last-killed");
+        let request = write_request(
+            &worktree,
+            &dir,
+            &worktree,
+            &[command("e1", "sleep 30", ".")],
+        )
+        .unwrap();
+        let mut child = fake_command(&dir, 1);
+        let limits = Limits {
+            run: 1_000,
+            next_start: 10_000,
+        };
+        let mut watch = Watch::new(limits);
+        assert!(poll(&dir, &request, &mut watch, 0).unwrap().items[0].alive);
+        // Past its limit it gets SIGTERM, and nothing of its group is left
+        // after; `run.sh` has not written `done`, so the run is not through.
+        let status = poll(&dir, &request, &mut watch, limits.run).unwrap();
+        assert_eq!(status.items[0].end, None);
+        child.wait().unwrap();
+        for now in [limits.run + 1, limits.run + limits.next_start - 1] {
+            let status = poll(&dir, &request, &mut watch, now).unwrap();
+            assert_eq!(status.items[0].end, None, "at {now}");
+        }
+        let mut no_done = watch.clone();
+        // `done`: through at once.
+        fs::write(dir.join(DONE_FILE), format!("{}\n", request.nonce)).unwrap();
+        let now = limits.run + limits.next_start - 1;
+        let status = poll(&dir, &request, &mut watch, now).unwrap();
+        assert_eq!(status.items[0].end, Some(End::TimedOut));
+        // A `run.sh` gone without writing it: the start timeout after the
+        // group was seen gone.
+        fs::remove_file(dir.join(DONE_FILE)).unwrap();
+        let now = limits.run + 1 + limits.next_start;
+        let status = poll(&dir, &request, &mut no_done, now).unwrap();
+        assert_eq!(status.items[0].end, Some(End::TimedOut));
+    }
+
+    #[test]
+    fn ac10_an_exit_status_that_appears_in_the_poll_that_kills_wins() {
+        // At the poll past the limit, right after `poll` read no `.exit`,
+        // the command writes status 0 and either ends, its group gone (no
+        // signal is sent), or still runs as the SIGTERM is sent.
+        for ends in [true, false] {
+            let (worktree, dir) = layout("exit-at-kill");
+            let commands = [command("e1", "exit 0", "."), command("e2", "exit 0", ".")];
+            let request = write_request(&worktree, &dir, &worktree, &commands).unwrap();
+            let mut child = Some(fake_command(&dir, 1));
+            let limits = Limits {
+                run: 1_000,
+                next_start: 10_000,
+            };
+            let mut watch = Watch::new(limits);
+            assert!(poll(&dir, &request, &mut watch, 0).unwrap().items[0].alive);
+            let mut ending = if ends { child.take() } else { None };
+            let exit = dir.join("1.exit");
+            AFTER_READS.set(Some(Box::new(move |n| {
+                if n == 1 {
+                    if let Some(mut child) = ending.take() {
+                        child.kill().unwrap();
+                        child.wait().unwrap();
+                    }
+                    fs::write(&exit, "0\n").unwrap();
+                }
+            })));
+            poll(&dir, &request, &mut watch, limits.run).unwrap();
+            AFTER_READS.take();
+            if let Some(mut child) = child {
+                // Ended by the SIGTERM.
+                child.wait().unwrap();
+            }
+            let status = poll(&dir, &request, &mut watch, limits.run + 1).unwrap();
+            assert_eq!(status.items[0].end, Some(End::Exited(0)), "ends: {ends}");
+        }
+    }
+
     #[test]
     fn ac10_the_timeout_kill_works_whatever_sh_starts_the_script() {
         // macOS's `/bin/sh` (bash), dash, which turns job control off
@@ -1251,7 +1384,8 @@ mod tests {
 
         // A `.pid` naming the bystander from the start, beside no `run.sh`
         // or one of another session: never the run's command, stopped at
-        // once and never signalled.
+        // once, taken as gone at its limit and never signalled; as the last
+        // command, its turn ends at `done` or the start timeout after.
         let mut stranger = std::process::Command::new("sleep");
         stranger.arg("30");
         // SAFETY: `setsid` is async-signal-safe and touches no memory.
@@ -1269,14 +1403,17 @@ mod tests {
             let request =
                 write_request(&worktree, &dir, &worktree, &[command("e1", "exit 0", ".")]).unwrap();
             fs::write(dir.join("1.pid"), content).unwrap();
-            let mut watch = Watch::new(Limits {
+            let limits = Limits {
                 run: 0,
                 next_start: 10_000,
-            });
+            };
+            let mut watch = Watch::new(limits);
             let status = poll(&dir, &request, &mut watch, 0).unwrap();
             assert!(!status.items[0].alive);
+            assert_eq!(status.items[0].end, None);
+            let status = poll(&dir, &request, &mut watch, limits.next_start).unwrap();
             assert_eq!(status.items[0].end, Some(End::NotRun(STOPPED.into())));
-            poll(&dir, &request, &mut watch, RERUN_KILL_GRACE * 2).unwrap();
+            poll(&dir, &request, &mut watch, RERUN_KILL_GRACE * 3).unwrap();
             std::thread::sleep(Duration::from_millis(100));
             assert!(
                 bystander.try_wait().unwrap().is_none(),

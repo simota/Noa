@@ -2,202 +2,443 @@
 //! ruling): what each ruling needs, the verdict's consistency with the
 //! rulings, the default cross-check assignments (L1-4 item 4) and when
 //! round 1 may close early (L1-4 item 5). Pure.
+//!
+//! The standard reads a criterion's whole history, gathered once into a
+//! [`History`]: every result on the criterion, every cross-check on one of
+//! those results with the one result it is about, every cross-check on a
+//! defect, and what each evidence item is to the criterion. L1-6's rule 1
+//! is [`Check::about`], set in [`History::of`]; rules 2–6 are `History`'s
+//! methods, in L1-6's order and words; what `verified` and `failed` need
+//! (`History::refuse_verified`, `History::refuse_failed`, called by
+//! [`check_ruling`]) only combines them. A rule changes in L1-6, in the
+//! ruling brief's [`EVIDENCE_STANDARD`](crate::model::brief::EVIDENCE_STANDARD)
+//! and here, together.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::types::{
-    CrossCheck, CrossOutcome, Decision, Defect, Evidence, EvidenceBody, EvidenceKey, Media,
-    Outcome, PartId, Priority, Rerun, RoundNo, Ruling, RulingKind, Session, Severity, Subject,
-    USER_EVIDENCE_OWNER, Verdict,
+    CriterionResult, CrossCheck, CrossOutcome, Decision, Defect, Evidence, EvidenceBody,
+    EvidenceKey, Media, Outcome, PartId, Priority, Rerun, RoundNo, Ruling, RulingKind, Session,
+    Severity, Subject, USER_EVIDENCE_OWNER, Verdict,
 };
 
-/// Whether `item` is a command or a file, as opposed to an observation.
-fn is_command_or_file(item: &Evidence) -> bool {
-    matches!(
-        item.body,
-        EvidenceBody::Command { .. } | EvidenceBody::File { .. }
-    )
+/// One criterion's history (L1-6): every result on it from every verifier
+/// and round, every cross-check on one of those results with the result it
+/// is about, every cross-check on a defect, and, through
+/// [`History::standing`], what each evidence item is to the criterion.
+pub struct History<'a> {
+    session: &'a Session,
+    criterion: &'a str,
+    /// Every result on the criterion, from every verifier and round, in the
+    /// order recorded.
+    pub results: Vec<&'a CriterionResult>,
+    /// Every cross-check whose subject is a result on the criterion, with
+    /// the result it is about (rule 1), in the order recorded.
+    pub checks: Vec<Check<'a>>,
+    /// Every cross-check on a defect: one backs a failure through the
+    /// evidence it cites (rule 6), whatever became of the defect since.
+    pub defect_checks: Vec<&'a CrossCheck>,
+    /// What the results and the checks above cite.
+    cited: BTreeSet<&'a EvidenceKey>,
 }
 
-/// Whether `item` counts toward the standard as stored evidence: a command
-/// or a file whose file the widget stored (at ingest, or attached). One
-/// whose file was gone before ingest counts for nothing (L1-6).
-fn is_backed(item: &Evidence) -> bool {
-    is_command_or_file(item) && item.stored.is_some()
+/// A cross-check on a result, and the one result it is about.
+#[derive(Debug, Clone, Copy)]
+pub struct Check<'a> {
+    pub check: &'a CrossCheck,
+    /// Rule 1: its subject's latest result on the criterion as of the round
+    /// before the check, the result the check's brief named
+    /// (`- codex/AC-1: pass (R2)`). `None` only for a subject with no result
+    /// then, which validation does not let through.
+    pub about: Option<&'a CriterionResult>,
 }
 
-/// Whether `item` counts toward the standard at all: an observation, or a
-/// command or file whose file the widget stored (L1-6).
-fn counts(item: &Evidence) -> bool {
-    item.file_path().is_none() || item.stored.is_some()
+/// What an evidence item is to one criterion (rule 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// No item has the key.
+    Unknown,
+    /// Not evidence for the criterion: nothing on it cites the item, or the
+    /// item is media whose `shows` leaves the criterion out.
+    Elsewhere,
+    /// Evidence for the criterion whose file was missing at ingest: it
+    /// counts for nothing.
+    Unstored,
+    /// Evidence for the criterion that counts: an observation (text, with
+    /// no file to store).
+    Observation,
+    /// Evidence for the criterion that counts: a command or a file the
+    /// widget stored.
+    Stored,
 }
 
-fn is_matched_command(item: &Evidence) -> bool {
-    is_backed(item)
-        && matches!(item.body, EvidenceBody::Command { .. })
-        && matches!(item.rerun, Some(Rerun::Matched { .. }))
-}
-
-/// Whether `key` is evidence for `criterion` (L1-6): cited by a result on
-/// it, or by a cross-check whose subject is a result on it, or a media
-/// item whose `shows` names it. A media item with `shows` is evidence only
-/// for the criteria it names (L1-5a), whoever cites it.
-fn belongs(session: &Session, criterion: &str, key: &EvidenceKey) -> bool {
-    if let Some(Evidence {
-        body: EvidenceBody::File { shows, .. },
-        ..
-    }) = session.evidence_item(key)
-        && !shows.is_empty()
-    {
-        return shows.iter().any(|s| s == criterion);
+impl Standing {
+    /// Whether the item counts for the criterion (rule 2).
+    pub fn counts(self) -> bool {
+        matches!(self, Standing::Observation | Standing::Stored)
     }
-    session
-        .results
-        .iter()
-        .any(|r| r.criterion == criterion && r.evidence.contains(key))
-        || session.cross_checks.iter().any(|c| {
-            matches!(&c.subject, Subject::Result { criterion: on, .. } if on == criterion)
-                && c.evidence.contains(key)
-        })
 }
 
-/// Whether `key` counts for `criterion`: it counts at all (stored, or an
-/// observation) and is evidence for that criterion, so a media item whose
-/// `shows` leaves the criterion out counts for nothing there (L1-6).
-fn counts_for(session: &Session, criterion: &str, key: &EvidenceKey) -> bool {
-    session.evidence_item(key).is_some_and(counts) && belongs(session, criterion, key)
+/// A `fail` that no cross-check answered (rule 4), with why the
+/// `not_reproduced` checks on its subject did not.
+pub struct OpenFail<'a> {
+    pub fail: &'a CriterionResult,
+    /// `not_reproduced` checks on its subject, from its round on, that are
+    /// about another result of its verifier.
+    pub about_other: Vec<Check<'a>>,
+    /// Cited by `not_reproduced` checks about it, but not stored.
+    pub unstored: Vec<&'a EvidenceKey>,
+    /// Cited by those checks, but media whose `shows` leaves the criterion
+    /// out.
+    pub elsewhere: Vec<&'a EvidenceKey>,
 }
 
-/// The independent sources behind `criterion` being met that the ruling
-/// cites in `cited`: each verifier with a `pass` on it in any round whose
-/// stored command or file evidence for that pass is cited (L1-6: a pass
-/// counts while its evidence is stored, also after a later report), and
-/// the person, when `cited` holds media they attached showing it (it
-/// counts only beside a verifier's pass, since one source is never
-/// enough).
-fn independent_passes(
-    session: &Session,
-    criterion: &str,
-    cited: &[EvidenceKey],
-) -> BTreeSet<String> {
-    let mut sources: BTreeSet<String> = session
-        .results
-        .iter()
-        .filter(|r| {
-            r.criterion == criterion && r.outcome == Outcome::Pass && session.is_verifier(&r.part)
-        })
-        .filter(|r| {
-            r.evidence
-                .iter()
-                .any(|k| cited.contains(k) && session.evidence_item(k).is_some_and(is_backed))
-        })
-        .map(|r| r.part.to_string())
-        .collect();
-    let attached = cited.iter().filter(|k| k.is_user()).any(|k| {
-        session.evidence_item(k).is_some_and(|e| {
-            is_backed(e)
-                && matches!(&e.body, EvidenceBody::File { shows, .. } if shows.iter().any(|s| s == criterion))
-        })
-    });
-    if attached {
-        sources.insert(USER_EVIDENCE_OWNER.to_owned());
+impl<'a> History<'a> {
+    pub fn of(session: &'a Session, criterion: &'a str) -> Self {
+        let results: Vec<&CriterionResult> = session
+            .results
+            .iter()
+            .filter(|r| r.criterion == criterion)
+            .collect();
+        let checks: Vec<Check> = session
+            .cross_checks
+            .iter()
+            .filter_map(|check| match &check.subject {
+                Subject::Result {
+                    part,
+                    criterion: on,
+                } if on == criterion => Some(Check {
+                    check,
+                    about: session.result_as_of(part, criterion, check.round.saturating_sub(1)),
+                }),
+                _ => None,
+            })
+            .collect();
+        let defect_checks = session
+            .cross_checks
+            .iter()
+            .filter(|c| matches!(c.subject, Subject::Defect { .. }))
+            .collect();
+        let cited = results
+            .iter()
+            .flat_map(|r| &r.evidence)
+            .chain(checks.iter().flat_map(|c| &c.check.evidence))
+            .collect();
+        History {
+            session,
+            criterion,
+            results,
+            checks,
+            defect_checks,
+            cited,
+        }
     }
-    sources
-}
 
-/// A `fail` on a criterion that nothing has answered, and why the
-/// `not_reproduced` checks on it did not.
-struct OpenFail<'a> {
-    part: &'a PartId,
-    round: RoundNo,
-    /// Cited by those checks, but not stored (gone before ingest).
-    unstored: Vec<&'a EvidenceKey>,
-    /// Cited by those checks, but media whose `shows` leaves the
-    /// criterion out.
-    elsewhere: Vec<&'a EvidenceKey>,
-}
+    /// Rule 2: an item is evidence for the criterion when a result on it or
+    /// a check about one cites it, or it is media whose `shows` names it
+    /// (media with `shows` is evidence only for the criteria it names,
+    /// whoever cites it); it counts when its file was stored (an
+    /// observation has none).
+    pub fn standing(&self, key: &EvidenceKey) -> Standing {
+        let Some(item) = self.session.evidence_item(key) else {
+            return Standing::Unknown;
+        };
+        let evidence_for = match &item.body {
+            EvidenceBody::File { shows, .. } if !shows.is_empty() => {
+                shows.iter().any(|s| s == self.criterion)
+            }
+            _ => self.cited.contains(key),
+        };
+        if !evidence_for {
+            Standing::Elsewhere
+        } else if matches!(item.body, EvidenceBody::Observation { .. }) {
+            Standing::Observation
+        } else if item.stored.is_some() {
+            Standing::Stored
+        } else {
+            Standing::Unstored
+        }
+    }
 
-/// The first `fail` result on `criterion`, from any round, that no later
-/// `not_reproduced` cross-check on it answers (L1-6). A check answers it
-/// when it cites evidence that counts for that same criterion
-/// ([`counts_for`]); a later result of the same verifier, whatever it is,
-/// answers nothing.
-fn unanswered_fail<'a>(session: &'a Session, criterion: &str) -> Option<OpenFail<'a>> {
-    session
-        .results
-        .iter()
-        .filter(|r| r.criterion == criterion && r.outcome == Outcome::Fail)
-        .find_map(|fail| {
-            let mut open = OpenFail {
-                part: &fail.part,
-                round: fail.round,
-                unstored: Vec::new(),
-                elsewhere: Vec::new(),
-            };
-            for check in session.cross_checks.iter().filter(|c| {
-                c.round > fail.round
-                    && c.outcome == CrossOutcome::NotReproduced
-                    && matches!(&c.subject, Subject::Result { part, criterion: on }
-                        if *part == fail.part && on == criterion)
-            }) {
-                if check
-                    .evidence
+    /// Rule 3: the passes that count for a ruling citing `cited`: each
+    /// verifier's `pass` of any round one of whose commands or files
+    /// `cited` holds and that counts for the criterion.
+    pub fn counted_passes(&self, cited: &[EvidenceKey]) -> Vec<&'a CriterionResult> {
+        self.results
+            .iter()
+            .copied()
+            .filter(|r| r.outcome == Outcome::Pass && self.session.is_verifier(&r.part))
+            .filter(|r| {
+                r.evidence
                     .iter()
-                    .any(|k| counts_for(session, criterion, k))
-                {
-                    return None;
-                }
-                for key in &check.evidence {
-                    let list = if session.evidence_item(key).is_some_and(counts) {
-                        &mut open.elsewhere
-                    } else {
-                        &mut open.unstored
-                    };
-                    if !list.contains(&key) {
-                        list.push(key);
+                    .any(|k| cited.contains(k) && self.standing(k) == Standing::Stored)
+            })
+            .collect()
+    }
+
+    /// Rule 3: the independent sources a ruling citing `cited` rests on:
+    /// each verifier with a counted pass, however many, and the person
+    /// when `cited` holds media they attached that is stored evidence for
+    /// the criterion.
+    pub fn sources(&self, cited: &[EvidenceKey]) -> BTreeSet<&'a str> {
+        let mut sources: BTreeSet<&str> = self
+            .counted_passes(cited)
+            .into_iter()
+            .map(|r| r.part.as_str())
+            .collect();
+        if cited
+            .iter()
+            .any(|k| k.is_user() && self.standing(k) == Standing::Stored)
+        {
+            sources.insert(USER_EVIDENCE_OWNER);
+        }
+        sources
+    }
+
+    /// Whether `cited` holds a command of a counted pass (rule 3) whose
+    /// re-run matched: enough alone for `verified`.
+    pub fn matched_rerun_of_a_pass(&self, cited: &[EvidenceKey]) -> bool {
+        self.counted_passes(cited).iter().any(|pass| {
+            pass.evidence.iter().any(|k| {
+                cited.contains(k) && self.standing(k) == Standing::Stored && self.rerun_matched(k)
+            })
+        })
+    }
+
+    fn rerun_matched(&self, key: &EvidenceKey) -> bool {
+        self.session.evidence_item(key).is_some_and(|e| {
+            matches!(e.body, EvidenceBody::Command { .. })
+                && matches!(e.rerun, Some(Rerun::Matched { .. }))
+        })
+    }
+
+    /// Rule 4: whether `check` answers `fail`: a `not_reproduced` about that
+    /// very result, citing evidence that counts for the criterion.
+    fn answers(&self, check: &Check, fail: &CriterionResult) -> bool {
+        check.check.outcome == CrossOutcome::NotReproduced
+            && check.about.is_some_and(|r| std::ptr::eq(r, fail))
+            && check
+                .check
+                .evidence
+                .iter()
+                .any(|k| self.standing(k).counts())
+    }
+
+    /// Rule 4: every `fail` of any round that no `not_reproduced` about it
+    /// answered, oldest first. Nothing else answers one: not a later
+    /// result of its verifier, not a `disputed` or `reproduced` check, not
+    /// a `not_reproduced` about another result of its verifier.
+    pub fn open_fails(&self) -> Vec<OpenFail<'a>> {
+        let fails = self.results.iter().copied().filter(|r| {
+            r.outcome == Outcome::Fail && !self.checks.iter().any(|c| self.answers(c, r))
+        });
+        fails
+            .map(|fail| {
+                let mut open = OpenFail {
+                    fail,
+                    about_other: Vec::new(),
+                    unstored: Vec::new(),
+                    elsewhere: Vec::new(),
+                };
+                for c in &self.checks {
+                    let on_its_subject = matches!(&c.check.subject,
+                        Subject::Result { part, .. } if *part == fail.part);
+                    if c.check.outcome != CrossOutcome::NotReproduced
+                        || !on_its_subject
+                        || c.check.round < fail.round
+                    {
+                        continue;
+                    }
+                    if !c.about.is_some_and(|r| std::ptr::eq(r, fail)) {
+                        open.about_other.push(*c);
+                        continue;
+                    }
+                    for key in &c.check.evidence {
+                        let list = match self.standing(key) {
+                            Standing::Unstored => &mut open.unstored,
+                            Standing::Elsewhere => &mut open.elsewhere,
+                            _ => continue,
+                        };
+                        if !list.contains(&key) {
+                            list.push(key);
+                        }
                     }
                 }
-            }
-            Some(open)
-        })
-}
+                open
+            })
+            .collect()
+    }
 
-/// Whether `check` reproduced a `fail` result on `criterion` (as that
-/// result stood before the check's round).
-fn reproduces_fail(session: &Session, criterion: &str, check: &CrossCheck) -> bool {
-    check.outcome == CrossOutcome::Reproduced
-        && matches!(&check.subject, Subject::Result { part, criterion: on }
-            if on == criterion
-                && session
-                    .result_as_of(part, criterion, check.round.saturating_sub(1))
-                    .is_some_and(|r| r.outcome == Outcome::Fail))
-}
+    /// Rule 5: each `fail` that a `reproduced` cross-check about it
+    /// reproduced, with that check: confirmed, whatever comes later.
+    pub fn confirmed_fails(&self) -> Vec<(&'a CriterionResult, &'a CrossCheck)> {
+        self.checks
+            .iter()
+            .filter(|c| c.check.outcome == CrossOutcome::Reproduced)
+            .filter_map(|c| {
+                c.about
+                    .filter(|r| r.outcome == Outcome::Fail)
+                    .map(|r| (r, c.check))
+            })
+            .collect()
+    }
 
-/// The first `reproduced` cross-check on a `fail` result on `criterion`:
-/// a failure another verifier confirmed.
-fn reproduced_fail<'a>(session: &'a Session, criterion: &str) -> Option<(&'a PartId, &'a PartId)> {
-    session.cross_checks.iter().find_map(|c| match &c.subject {
-        Subject::Result { part, .. } if reproduces_fail(session, criterion, c) => {
-            Some((&c.by, part))
+    /// Rule 6: whether `key` backs the criterion failing: it counts for the
+    /// criterion, and a `fail` result on it cites it, or a `reproduced`
+    /// check about a `fail` result on it, or a `reproduced` check on a
+    /// defect. A check about a `pass` backs no failure, whatever its
+    /// outcome.
+    pub fn backs_failure(&self, key: &EvidenceKey) -> bool {
+        let reproduced = CrossOutcome::Reproduced;
+        self.standing(key).counts()
+            && (self
+                .results
+                .iter()
+                .any(|r| r.outcome == Outcome::Fail && r.evidence.contains(key))
+                || self.checks.iter().any(|c| {
+                    c.check.outcome == reproduced
+                        && c.about.is_some_and(|r| r.outcome == Outcome::Fail)
+                        && c.check.evidence.contains(key)
+                })
+                || self
+                    .defect_checks
+                    .iter()
+                    .any(|c| c.outcome == reproduced && c.evidence.contains(key)))
+    }
+
+    /// The verifiers whose `pass` on the criterion cites a stored command
+    /// whose re-run matched (L1-4 item 5).
+    pub fn passes_with_matched_reruns(&self) -> BTreeSet<&'a PartId> {
+        self.results
+            .iter()
+            .filter(|r| r.outcome == Outcome::Pass && self.session.is_verifier(&r.part))
+            .filter(|r| {
+                r.evidence
+                    .iter()
+                    .any(|k| self.standing(k) == Standing::Stored && self.rerun_matched(k))
+            })
+            .map(|r| &r.part)
+            .collect()
+    }
+
+    /// Why a `verified` ruling citing `cited` breaks the standard: it
+    /// needs a cited command or file, no open fail (rule 4), no confirmed
+    /// fail (rule 5), and a matched re-run of a counted pass's command or
+    /// two sources (rule 3).
+    fn refuse_verified(&self, cited: &[EvidenceKey]) -> Option<String> {
+        let criterion = self.criterion;
+        let items: Vec<&Evidence> = cited
+            .iter()
+            .filter_map(|k| self.session.evidence_item(k))
+            .collect();
+        if !items.is_empty()
+            && items
+                .iter()
+                .all(|e| matches!(e.body, EvidenceBody::Observation { .. }))
+        {
+            return Some(format!(
+                "{criterion}: an observation alone never makes a criterion verified; cite a command or a file"
+            ));
         }
-        _ => None,
-    })
+        if let Some(open) = self.open_fails().first() {
+            return Some(open.refusal(criterion));
+        }
+        if let Some((fail, check)) = self.confirmed_fails().first() {
+            return Some(format!(
+                "{criterion}: verified despite {}'s R{} fail, which {} reproduced in R{}",
+                fail.part, fail.round, check.by, check.round
+            ));
+        }
+        if self.matched_rerun_of_a_pass(cited) || self.sources(cited).len() >= 2 {
+            return None;
+        }
+        let mut why =
+            format!("{criterion}: verified needs a matched re-run or two independent passes");
+        let unstored: Vec<&EvidenceKey> = cited
+            .iter()
+            .filter(|k| self.standing(k) == Standing::Unstored)
+            .collect();
+        if !unstored.is_empty() {
+            why.push_str(&format!(
+                "; {} was not stored (gone before ingest) and counts for nothing",
+                keys(&unstored)
+            ));
+        }
+        let off_pass: Vec<&EvidenceKey> = cited
+            .iter()
+            .filter(|k| {
+                self.standing(k) == Standing::Stored
+                    && self.rerun_matched(k)
+                    && !self
+                        .results
+                        .iter()
+                        .any(|r| r.outcome == Outcome::Pass && r.evidence.contains(k))
+            })
+            .collect();
+        if !off_pass.is_empty() {
+            why.push_str(&format!(
+                "; {} re-ran matched, but no pass on {criterion} cites {}",
+                keys(&off_pass),
+                if off_pass.len() == 1 { "it" } else { "them" }
+            ));
+        }
+        Some(why)
+    }
+
+    /// Why a `failed` ruling citing `cited` breaks the standard: it needs
+    /// one item that backs the criterion failing (rule 6).
+    fn refuse_failed(&self, cited: &[EvidenceKey]) -> Option<String> {
+        (!cited.iter().any(|k| self.backs_failure(k))).then(|| {
+            format!(
+                "{}: failed needs a cited fail result or reproduced evidence",
+                self.criterion
+            )
+        })
+    }
 }
 
-/// Whether `key` (evidence for `criterion`) backs it failing: cited by a
-/// `fail` result on it, or by a `reproduced` cross-check that reproduced a
-/// `fail` result on it or a defect; a reproduced pass backs no failure. A
-/// command or file whose file was not stored backs nothing.
-fn backs_failure(session: &Session, criterion: &str, key: &EvidenceKey) -> bool {
-    session.evidence_item(key).is_some_and(counts)
-        && (session.results.iter().any(|r| {
-            r.criterion == criterion && r.outcome == Outcome::Fail && r.evidence.contains(key)
-        }) || session.cross_checks.iter().any(|c| {
-            c.evidence.contains(key)
-                && (reproduces_fail(session, criterion, c)
-                    || (c.outcome == CrossOutcome::Reproduced
-                        && matches!(c.subject, Subject::Defect { .. })))
-        }))
+impl OpenFail<'_> {
+    /// The refusal of a `verified` ruling while this fail is open: its
+    /// verifier and round, then why each `not_reproduced` on its subject
+    /// did not answer it.
+    fn refusal(&self, criterion: &str) -> String {
+        let mut why = format!(
+            "{criterion}: verified despite {}'s R{} fail, which no not_reproduced cross-check has answered",
+            self.fail.part, self.fail.round
+        );
+        for c in &self.about_other {
+            if let Some(r) = c.about {
+                why.push_str(&format!(
+                    "; {}'s R{} not_reproduced is about {}'s R{} {}",
+                    c.check.by,
+                    c.check.round,
+                    r.part,
+                    r.round,
+                    r.outcome.name()
+                ));
+            }
+        }
+        if !self.unstored.is_empty() {
+            why.push_str(&format!(
+                "; {} was not stored (gone before ingest) and counts for nothing",
+                keys(&self.unstored)
+            ));
+        }
+        if !self.elsewhere.is_empty() {
+            why.push_str(&format!(
+                "; {} is not evidence for {criterion} (its shows leaves {criterion} out)",
+                keys(&self.elsewhere)
+            ));
+        }
+        why
+    }
+}
+
+fn keys(list: &[&EvidenceKey]) -> String {
+    list.iter()
+        .map(|k| k.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Why `ruling` on criterion `criterion` in `round` breaks the evidence
@@ -209,116 +450,56 @@ pub fn check_ruling(
     criterion: &str,
     ruling: &Ruling,
 ) -> Result<(), String> {
-    for key in &ruling.evidence {
-        if session.evidence_item(key).is_none() {
-            return Err(format!(
-                "{criterion}: cited evidence {:?} does not exist (cite keys as <verifier>/r<N>/<id> or user/<n>)",
-                key.as_str()
-            ));
-        }
+    let history = History::of(session, criterion);
+    if let Some(key) = ruling
+        .evidence
+        .iter()
+        .find(|k| history.standing(k) == Standing::Unknown)
+    {
+        return Err(format!(
+            "{criterion}: cited evidence {:?} does not exist (cite keys as <verifier>/r<N>/<id> or user/<n>)",
+            key.as_str()
+        ));
     }
-    if matches!(ruling.kind, RulingKind::Verified | RulingKind::Failed)
+    let on_evidence = matches!(ruling.kind, RulingKind::Verified | RulingKind::Failed);
+    if on_evidence
         && let Some(key) = ruling
             .evidence
             .iter()
-            .find(|k| !belongs(session, criterion, k))
+            .find(|k| history.standing(k) == Standing::Elsewhere)
     {
         return Err(format!(
             "{criterion}: cited evidence {key} is not evidence for {criterion} (cite what a result or a cross-check on {criterion} cites, or media whose shows names it)"
         ));
     }
-    let cited: Vec<&Evidence> = ruling
-        .evidence
-        .iter()
-        .filter_map(|k| session.evidence_item(k))
-        .collect();
-    match ruling.kind {
-        RulingKind::Verified => {
-            if !cited.is_empty() && !cited.iter().any(|e| is_command_or_file(e)) {
-                return Err(format!(
-                    "{criterion}: an observation alone never makes a criterion verified; cite a command or a file"
-                ));
-            }
-            if let Some(open) = unanswered_fail(session, criterion) {
-                let keys = |list: &[&EvidenceKey]| -> String {
-                    list.iter()
-                        .map(|k| k.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                let mut why = format!(
-                    "{criterion}: verified despite {}'s R{} fail, which no not_reproduced cross-check has answered",
-                    open.part, open.round
-                );
-                if !open.unstored.is_empty() {
-                    why.push_str(&format!(
-                        "; {} was not stored (gone before ingest) and counts for nothing",
-                        keys(&open.unstored)
-                    ));
-                }
-                if !open.elsewhere.is_empty() {
-                    why.push_str(&format!(
-                        "; {} is not evidence for {criterion} (its shows leaves {criterion} out)",
-                        keys(&open.elsewhere)
-                    ));
-                }
-                return Err(why);
-            }
-            if let Some((by, part)) = reproduced_fail(session, criterion) {
-                return Err(format!(
-                    "{criterion}: verified despite {part}'s fail, which {by} reproduced"
-                ));
-            }
-            let matched = cited.iter().any(|e| is_matched_command(e));
-            if !matched && independent_passes(session, criterion, &ruling.evidence).len() < 2 {
-                let unstored: Vec<&str> = cited
-                    .iter()
-                    .filter(|e| is_command_or_file(e) && e.stored.is_none())
-                    .map(|e| e.key.as_str())
-                    .collect();
-                return Err(if unstored.is_empty() {
-                    format!(
-                        "{criterion}: verified needs a matched re-run or two independent passes"
-                    )
-                } else {
-                    format!(
-                        "{criterion}: verified needs a matched re-run or two independent passes; {} was not stored (gone before ingest) and counts for nothing",
-                        unstored.join(", ")
-                    )
-                });
-            }
-        }
-        RulingKind::Failed => {
-            if !ruling
-                .evidence
-                .iter()
-                .any(|k| backs_failure(session, criterion, k))
-            {
-                return Err(format!(
-                    "{criterion}: failed needs a cited fail result or reproduced evidence"
-                ));
-            }
-        }
-        RulingKind::Inconclusive | RulingKind::NotApplicable => {
-            if ruling.rationale.trim().is_empty() {
-                return Err(format!(
-                    "{criterion}: {} needs a rationale",
-                    ruling.kind.name()
-                ));
-            }
-        }
+    let refusal = match ruling.kind {
+        RulingKind::Verified => history.refuse_verified(&ruling.evidence),
+        RulingKind::Failed => history.refuse_failed(&ruling.evidence),
+        RulingKind::Inconclusive | RulingKind::NotApplicable => ruling
+            .rationale
+            .trim()
+            .is_empty()
+            .then(|| format!("{criterion}: {} needs a rationale", ruling.kind.name())),
+    };
+    if let Some(why) = refusal {
+        return Err(why);
     }
     // A video cannot be watched by the judge: a ruling resting on videos
     // alone rests on their captions and marks, and says which (L1-5a).
-    let backed: Vec<&&Evidence> = cited.iter().filter(|e| is_backed(e)).collect();
-    if matches!(ruling.kind, RulingKind::Verified | RulingKind::Failed)
+    let stored: Vec<&Evidence> = ruling
+        .evidence
+        .iter()
+        .filter(|k| history.standing(k) == Standing::Stored)
+        .filter_map(|k| session.evidence_item(k))
+        .collect();
+    if on_evidence
         && ruling.rationale.trim().is_empty()
-        && !backed.is_empty()
-        && backed
+        && !stored.is_empty()
+        && stored
             .iter()
             .all(|e| e.media().is_some_and(Media::is_video))
     {
-        let keys: Vec<&str> = backed.iter().map(|e| e.key.as_str()).collect();
+        let keys: Vec<&str> = stored.iter().map(|e| e.key.as_str()).collect();
         return Err(format!(
             "{criterion}: {} rests on video evidence alone ({}); its rationale must name the caption and marks it relied on",
             ruling.kind.name(),
@@ -520,16 +701,748 @@ pub fn early_close_allowed(session: &Session, rulings: &BTreeMap<String, Ruling>
     !session.criteria.is_empty()
         && session.criteria.iter().all(|c| {
             rulings.get(&c.id).map(|r| r.kind) == Some(RulingKind::Verified)
-                && session
-                    .latest_with(&c.id, Outcome::Pass)
-                    .into_iter()
-                    .filter(|r| {
-                        r.evidence
-                            .iter()
-                            .filter_map(|k| session.evidence_item(k))
-                            .any(is_matched_command)
-                    })
-                    .count()
+                && History::of(session, &c.id)
+                    .passes_with_matched_reruns()
+                    .len()
                     >= 2
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::types::{Attachment, Confidence, DefectStatus, Stored};
+    use crate::testkit::{self, Rig, p};
+
+    /// One step of a criterion's history. Evidence ids are a reply's own
+    /// (`e1`): an `e…` id is a command, `o…` an observation, `f…` an image,
+    /// each stored unless [`Step::Lost`].
+    enum Step {
+        /// A result: round, verifier, criterion, outcome, evidence ids.
+        Res(
+            RoundNo,
+            &'static str,
+            &'static str,
+            Outcome,
+            &'static [&'static str],
+        ),
+        /// A cross-check: round, by, subject (`codex/AC-1` or `D1`),
+        /// outcome, evidence ids.
+        Chk(
+            RoundNo,
+            &'static str,
+            &'static str,
+            CrossOutcome,
+            &'static [&'static str],
+        ),
+        /// The command's re-run matched.
+        Matched(&'static str),
+        /// The item's file was gone before ingest.
+        Lost(&'static str),
+        /// The media item's `shows`.
+        Shows(&'static str, &'static [&'static str]),
+        /// The person attached `user/<n>` showing these criteria.
+        Attach(u32, &'static [&'static str]),
+        /// The judge opened this defect.
+        Opened(&'static str),
+        /// The judge merged the first defect into the second.
+        Merged(&'static str, &'static str),
+    }
+
+    /// The default panel (claude, codex, claude-2) and criteria (AC-1 …
+    /// AC-3), round 1 started, nothing reported yet.
+    fn base() -> Session {
+        let mut rig = Rig::new(4);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.engine.session().clone()
+    }
+
+    fn item<'s>(session: &'s mut Session, key: &str) -> &'s mut Evidence {
+        session
+            .evidence_item_mut(&testkit::key(key))
+            .unwrap_or_else(|| panic!("no evidence {key}"))
+    }
+
+    /// The keys of `part`'s `ids` in `round`, each item made on first use.
+    fn cite(
+        session: &mut Session,
+        round: RoundNo,
+        part: &str,
+        ids: &[&str],
+        exit: i32,
+    ) -> Vec<EvidenceKey> {
+        let mut keys = Vec::new();
+        for id in ids {
+            let key = EvidenceKey::reported(&p(part), round, id);
+            if session.evidence_item(&key).is_none() {
+                let (body, path) = match &id[..1] {
+                    "e" => {
+                        let log = format!("logs/{id}.log");
+                        let body = EvidenceBody::Command {
+                            cmd: format!("cargo test {id}"),
+                            cwd: ".".into(),
+                            exit,
+                            log: log.clone(),
+                            rerun: false,
+                        };
+                        (body, Some(log))
+                    }
+                    "o" => (
+                        EvidenceBody::Observation {
+                            text: "seen".into(),
+                        },
+                        None,
+                    ),
+                    "f" => {
+                        let path = format!("shots/{id}.png");
+                        let body = EvidenceBody::File {
+                            path: path.clone(),
+                            caption: Some("what it shows".into()),
+                            media: Some(Media::Png),
+                            marks: Vec::new(),
+                            shows: Vec::new(),
+                        };
+                        (body, Some(path))
+                    }
+                    other => panic!("no evidence kind {other:?}"),
+                };
+                session.evidence.push(Evidence {
+                    key: key.clone(),
+                    body,
+                    stored: path.map(|path| testkit::stored_for(round, &p(part), &path)),
+                    rerun: None,
+                    attached: None,
+                });
+            }
+            keys.push(key);
+        }
+        keys
+    }
+
+    fn defect(id: &str) -> Defect {
+        Defect {
+            id: id.into(),
+            claim: format!("claim {id}"),
+            repro: "1. run".into(),
+            location: None,
+            in_target: true,
+            in_diff: None,
+            severity: Severity::High,
+            category: "falsify".into(),
+            confidence: Confidence::High,
+            status: DefectStatus::Open,
+            merged_into: None,
+            rationale: "seen".into(),
+            fix: None,
+            sources: Vec::new(),
+            opened_in: 1,
+            changed_rev: 0,
+            history: Vec::new(),
+        }
+    }
+
+    fn history(steps: &[Step]) -> Session {
+        let mut session = base();
+        for step in steps {
+            match *step {
+                Step::Res(round, part, criterion, outcome, ids) => {
+                    let exit = if outcome == Outcome::Fail { 1 } else { 0 };
+                    let evidence = cite(&mut session, round, part, ids, exit);
+                    session.results.push(CriterionResult {
+                        round,
+                        part: p(part),
+                        criterion: criterion.into(),
+                        outcome,
+                        note: "noted".into(),
+                        evidence,
+                    });
+                }
+                Step::Chk(round, by, subject, outcome, ids) => {
+                    let evidence = cite(&mut session, round, by, ids, 0);
+                    session.cross_checks.push(CrossCheck {
+                        round,
+                        by: p(by),
+                        subject: Subject::parse(subject).unwrap(),
+                        outcome,
+                        note: "noted".into(),
+                        evidence,
+                    });
+                }
+                Step::Matched(key) => {
+                    let e = item(&mut session, key);
+                    let EvidenceBody::Command { exit, rerun, .. } = &mut e.body else {
+                        panic!("{key} is not a command");
+                    };
+                    *rerun = true;
+                    e.rerun = Some(Rerun::Matched {
+                        exit: *exit,
+                        log: None,
+                    });
+                }
+                Step::Lost(key) => item(&mut session, key).stored = None,
+                Step::Shows(key, criteria) => {
+                    let EvidenceBody::File { shows, .. } = &mut item(&mut session, key).body else {
+                        panic!("{key} is not a file");
+                    };
+                    *shows = criteria.iter().map(|c| c.to_string()).collect();
+                }
+                Step::Attach(n, criteria) => session.evidence.push(Evidence {
+                    key: EvidenceKey::user(n),
+                    body: EvidenceBody::File {
+                        path: format!("shot-{n}.png"),
+                        caption: Some("the person's shot".into()),
+                        media: Some(Media::Png),
+                        marks: Vec::new(),
+                        shows: criteria.iter().map(|c| c.to_string()).collect(),
+                    },
+                    stored: Some(Stored {
+                        path: format!("evidence/user/{n}.png").into(),
+                        bytes: 100,
+                        digest: 1,
+                    }),
+                    rerun: None,
+                    attached: Some(Attachment { round: 1, at: 1 }),
+                }),
+                Step::Opened(id) => session.defects.push(defect(id)),
+                Step::Merged(from, into) => {
+                    let d = session.defect_mut(from).unwrap();
+                    d.status = DefectStatus::Merged;
+                    d.merged_into = Some(into.into());
+                }
+            }
+        }
+        session
+    }
+
+    #[test]
+    fn ac13_each_multi_round_history_gets_the_decision_the_standard_gives() {
+        use CrossOutcome::{Disputed, NotReproduced, Reproduced};
+        use Outcome::{Blocked, Fail, Pass};
+        use RulingKind::{Failed, Verified};
+        use Step::*;
+        const OPEN: &str = "AC-1: verified despite codex's R1 fail, which no not_reproduced cross-check has answered";
+        const TWO: &str = "AC-1: verified needs a matched re-run or two independent passes";
+        const NOT_BACKED: &str = "AC-1: failed needs a cited fail result or reproduced evidence";
+        let not_for = |key: &str| {
+            format!(
+                "AC-1: cited evidence {key} is not evidence for AC-1 (cite what a result or a cross-check on AC-1 cites, or media whose shows names it)"
+            )
+        };
+        // claude passes AC-1 on a command whose re-run matched: on its own
+        // enough for verified, once nothing stands against AC-1.
+        let claude_matched = || {
+            [
+                Res(1, "claude", "AC-1", Pass, &["e1"]),
+                Matched("claude/r1/e1"),
+            ]
+        };
+        /// A history's name and steps, a ruling on AC-1 (its kind and the
+        /// evidence it cites) and what the standard says to it.
+        type Case = (
+            &'static str,
+            Vec<Step>,
+            RulingKind,
+            &'static [&'static str],
+            Result<(), String>,
+        );
+        let cases: Vec<Case> = vec![
+            // When a pass counts (rule 3).
+            (
+                "one pass whose command re-ran matched",
+                claude_matched().into(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "one pass, not re-run",
+                vec![Res(1, "claude", "AC-1", Pass, &["e1"])],
+                Verified,
+                &["claude/r1/e1"],
+                Err(TWO.into()),
+            ),
+            (
+                "two verifiers' passes",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "one verifier's passes in two rounds are one source",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(2, "claude", "AC-1", Pass, &["e1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "claude/r2/e1"],
+                Err(TWO.into()),
+            ),
+            (
+                "two verifiers' passes of different rounds",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(2, "codex", "AC-1", Pass, &["e1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r2/e1"],
+                Ok(()),
+            ),
+            (
+                "a pass whose log was lost",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                    Lost("codex/r1/e1"),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r1/e1"],
+                Err(format!(
+                    "{TWO}; codex/r1/e1 was not stored (gone before ingest) and counts for nothing"
+                )),
+            ),
+            (
+                "a matched re-run whose log was lost",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Matched("claude/r1/e1"),
+                    Lost("claude/r1/e1"),
+                ],
+                Verified,
+                &["claude/r1/e1"],
+                Err(format!(
+                    "{TWO}; claude/r1/e1 was not stored (gone before ingest) and counts for nothing"
+                )),
+            ),
+            (
+                "a pass on another criterion",
+                vec![
+                    Res(1, "claude", "AC-2", Pass, &["e1"]),
+                    Matched("claude/r1/e1"),
+                ],
+                Verified,
+                &["claude/r1/e1"],
+                Err(not_for("claude/r1/e1")),
+            ),
+            (
+                "a pass's picture that shows another criterion",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1", "f1"]),
+                    Shows("claude/r1/f1", &["AC-2"]),
+                    Res(1, "codex", "AC-1", Pass, &["e1"]),
+                ],
+                Verified,
+                &["claude/r1/f1", "codex/r1/e1"],
+                Err(not_for("claude/r1/f1")),
+            ),
+            (
+                "the person's picture beside one pass",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Attach(1, &["AC-1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "user/1"],
+                Ok(()),
+            ),
+            (
+                "the person's picture alone",
+                vec![Attach(1, &["AC-1"])],
+                Verified,
+                &["user/1"],
+                Err(TWO.into()),
+            ),
+            (
+                "the person's picture of another criterion",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Attach(1, &["AC-2"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "user/1"],
+                Err(not_for("user/1")),
+            ),
+            (
+                "an observation alone",
+                vec![Res(1, "claude", "AC-1", Pass, &["e1", "o1"])],
+                Verified,
+                &["claude/r1/o1"],
+                Err(
+                    "AC-1: an observation alone never makes a criterion verified; cite a command or a file"
+                        .into(),
+                ),
+            ),
+            (
+                "a reproduced cross-check about a pass is no second pass",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Chk(2, "codex", "claude/AC-1", Reproduced, &["e1"]),
+                ],
+                Verified,
+                &["claude/r1/e1", "codex/r2/e1"],
+                Err(TWO.into()),
+            ),
+            (
+                "the matched re-run of a fail's command, the fail answered",
+                vec![
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Matched("codex/r1/e1"),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["e1"]),
+                ],
+                Verified,
+                &["codex/r1/e1"],
+                Err(format!(
+                    "{TWO}; codex/r1/e1 re-ran matched, but no pass on AC-1 cites it"
+                )),
+            ),
+            // When a fail is open or answered (rules 1 and 4).
+            (
+                "a fail nobody checked",
+                [Res(1, "codex", "AC-1", Fail, &["e1"])]
+                    .into_iter()
+                    .chain(claude_matched())
+                    .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(OPEN.into()),
+            ),
+            (
+                "a fail answered by a not_reproduced about it",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["e1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a fail answered by an observation",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["o1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a fail whose answer's log was lost",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["e1"]),
+                    Lost("claude-2/r2/e1"),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(format!(
+                    "{OPEN}; claude-2/r2/e1 was not stored (gone before ingest) and counts for nothing"
+                )),
+            ),
+            (
+                "a fail answered with a picture of another criterion",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["f1"]),
+                    Shows("claude-2/r2/f1", &["AC-2"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(format!(
+                    "{OPEN}; claude-2/r2/f1 is not evidence for AC-1 (its shows leaves AC-1 out)"
+                )),
+            ),
+            (
+                "a fail only disputed",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", Disputed, &[]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(OPEN.into()),
+            ),
+            (
+                "fail then pass by the same verifier",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Res(2, "codex", "AC-1", Pass, &["e1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(OPEN.into()),
+            ),
+            (
+                "fail then blocked by the same verifier",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Res(2, "codex", "AC-1", Blocked, &[]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(OPEN.into()),
+            ),
+            (
+                "fail then pass, checked in the round of the pass (about the fail)",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Res(2, "codex", "AC-1", Pass, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["e1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "fail then pass, checked a round later (about the pass)",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Res(2, "codex", "AC-1", Pass, &["e1"]),
+                    Chk(3, "claude-2", "codex/AC-1", NotReproduced, &["e1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(format!(
+                    "{OPEN}; claude-2's R3 not_reproduced is about codex's R2 pass"
+                )),
+            ),
+            (
+                "two fails by one verifier, only the later one checked",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Res(2, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(3, "claude-2", "codex/AC-1", NotReproduced, &["e1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(format!(
+                    "{OPEN}; claude-2's R3 not_reproduced is about codex's R2 fail"
+                )),
+            ),
+            (
+                "pass then fail, checked in the round of the fail (about the pass)",
+                claude_matched()
+                    .into_iter()
+                    .chain([
+                        Res(2, "claude", "AC-1", Fail, &["e1"]),
+                        Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                    ])
+                    .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(
+                    "AC-1: verified despite claude's R2 fail, which no not_reproduced cross-check has answered; codex's R2 not_reproduced is about claude's R1 pass"
+                        .into(),
+                ),
+            ),
+            (
+                "pass then fail, checked a round later (about the fail)",
+                claude_matched()
+                    .into_iter()
+                    .chain([
+                        Res(2, "claude", "AC-1", Fail, &["e1"]),
+                        Chk(3, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                    ])
+                    .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a reproduced fail stays against the criterion once answered",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", Reproduced, &["e1"]),
+                    Chk(3, "claude", "codex/AC-1", NotReproduced, &["e1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err("AC-1: verified despite codex's R1 fail, which claude-2 reproduced in R2".into()),
+            ),
+            (
+                "a reproduced check about a later pass confirms no fail",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["e1"]),
+                    Res(2, "codex", "AC-1", Pass, &["e2"]),
+                    Chk(3, "claude-2", "codex/AC-1", Reproduced, &["e1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            // When a fail backs failed (rule 6).
+            (
+                "a fail's stored evidence",
+                vec![Res(1, "codex", "AC-1", Fail, &["e1"])],
+                Failed,
+                &["codex/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a fail whose log was lost",
+                vec![Res(1, "codex", "AC-1", Fail, &["e1"]), Lost("codex/r1/e1")],
+                Failed,
+                &["codex/r1/e1"],
+                Err(NOT_BACKED.into()),
+            ),
+            (
+                "a pass's evidence",
+                vec![Res(1, "claude", "AC-1", Pass, &["e1"])],
+                Failed,
+                &["claude/r1/e1"],
+                Err(NOT_BACKED.into()),
+            ),
+            (
+                "another criterion's fail",
+                vec![Res(1, "codex", "AC-2", Fail, &["e1"])],
+                Failed,
+                &["codex/r1/e1"],
+                Err(not_for("codex/r1/e1")),
+            ),
+            (
+                "a reproduced check about a fail",
+                vec![
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", Reproduced, &["e1"]),
+                ],
+                Failed,
+                &["claude-2/r2/e1"],
+                Ok(()),
+            ),
+            (
+                "a reproduced check about the fail, made as its verifier turned to pass",
+                vec![
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Res(2, "codex", "AC-1", Pass, &["e2"]),
+                    Chk(2, "claude-2", "codex/AC-1", Reproduced, &["e1"]),
+                ],
+                Failed,
+                &["claude-2/r2/e1"],
+                Ok(()),
+            ),
+            (
+                "a reproduced check about the later pass",
+                vec![
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Res(2, "codex", "AC-1", Pass, &["e2"]),
+                    Chk(3, "claude-2", "codex/AC-1", Reproduced, &["e1"]),
+                ],
+                Failed,
+                &["claude-2/r3/e1"],
+                Err(NOT_BACKED.into()),
+            ),
+            (
+                "a not_reproduced about a pass",
+                vec![
+                    Res(1, "claude", "AC-1", Pass, &["e1"]),
+                    Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                ],
+                Failed,
+                &["codex/r2/e1"],
+                Err(NOT_BACKED.into()),
+            ),
+            (
+                "a reproduced defect, on a picture of the criterion",
+                vec![
+                    Opened("D1"),
+                    Chk(2, "codex", "D1", Reproduced, &["f1"]),
+                    Shows("codex/r2/f1", &["AC-1"]),
+                ],
+                Failed,
+                &["codex/r2/f1"],
+                Ok(()),
+            ),
+            (
+                "a reproduced defect merged into another since",
+                vec![
+                    Opened("D1"),
+                    Opened("D2"),
+                    Chk(2, "codex", "D1", Reproduced, &["f1"]),
+                    Shows("codex/r2/f1", &["AC-1"]),
+                    Merged("D1", "D2"),
+                ],
+                Failed,
+                &["codex/r2/f1"],
+                Ok(()),
+            ),
+            (
+                "a defect not reproduced",
+                vec![
+                    Opened("D1"),
+                    Chk(2, "codex", "D1", NotReproduced, &["f1"]),
+                    Shows("codex/r2/f1", &["AC-1"]),
+                ],
+                Failed,
+                &["codex/r2/f1"],
+                Err(NOT_BACKED.into()),
+            ),
+            (
+                "a reproduced defect, on a picture of another criterion",
+                vec![
+                    Opened("D1"),
+                    Chk(2, "codex", "D1", Reproduced, &["f1"]),
+                    Shows("codex/r2/f1", &["AC-2"]),
+                ],
+                Failed,
+                &["codex/r2/f1"],
+                Err(not_for("codex/r2/f1")),
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (name, steps, kind, cited, want) in cases {
+            let session = history(&steps);
+            let ruling = Ruling {
+                round: 4,
+                kind,
+                rationale: "as cited".into(),
+                evidence: cited.iter().map(|k| testkit::key(k)).collect(),
+            };
+            let got = check_ruling(&session, 4, "AC-1", &ruling);
+            if got != want {
+                wrong.push(format!("{name}:\n  want {want:?}\n   got {got:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
 }

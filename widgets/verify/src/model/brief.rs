@@ -68,15 +68,16 @@ pub const RULING_SECTIONS: [&str; 9] = [
 pub const RERUN_SECTIONS: [&str; 1] = ["## Re-run"];
 
 /// The evidence standard, as the ruling brief states it (L1-6 rules).
-pub const EVIDENCE_STANDARD: [&str; 9] = [
-    "Every criterion gets one ruling per round; \"ruling\": \"same\" carries the previous one over unchanged.",
-    "Evidence cited for verified or failed belongs to that criterion: cited by a result on it, by a cross-check whose subject is a result on it, or media whose shows names it.",
-    "Evidence whose file was not stored (missing at ingest) counts for nothing.",
-    "verified needs at least one cited command evidence whose re-run matched, or pass results from two different verifiers each citing command or file evidence (cite one item of each; a pass of any round counts while that evidence is stored); and no unanswered fail result or reproduced refutation on that criterion. A fail result of any round stays open until a later not_reproduced cross-check on it cites evidence that counts for that same criterion (media whose shows leaves the criterion out does not); a later blocked, not_tested or pass result of the same verifier does not answer it.",
-    "failed needs at least one cited fail result, or evidence of a reproduced cross-check that reproduced a fail result on it (or a defect); a reproduced pass backs no failure.",
+pub const EVIDENCE_STANDARD: [&str; 10] = [
+    "Every criterion gets one ruling per round; \"ruling\": \"same\" carries the previous one over unchanged. Cited evidence keys exist.",
+    "Each rule reads the criterion's whole history: every result on it from every verifier and round, every cross-check on one of those results, every cross-check on a defect, and the evidence they cite.",
+    "A cross-check of round N on <verifier>/<criterion> is about that verifier's latest result on the criterion as of round N-1, the one its brief named; once the verifier has reported a later result, the later checks on that subject are about the later result.",
+    "Evidence is for a criterion when a result on it cites it, or a cross-check about a result on it, or it is media whose shows names it (media with shows is evidence only for the criteria it names). It counts when its file was stored (an observation has no file and counts as text); a command or file missing at ingest counts for nothing. Evidence cited for verified or failed must be evidence for that criterion.",
+    "A pass of any round counts when the ruling cites a command or file of it that counts. Each verifier is one source however many of its passes count; media the person attached (user/<n>) whose shows names the criterion is one more source, so it counts only together with a verifier's pass. A cross-check is no pass, whatever its outcome, and takes none away.",
+    "A fail of any round is open until a not_reproduced cross-check about that very result cites evidence that counts. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.",
+    "verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each).",
+    "failed needs cited evidence that counts and that a fail result on the criterion cites, or a reproduced cross-check about a fail result on it, or a reproduced cross-check on a defect (also one merged since); a cross-check about a pass backs no failure.",
     "inconclusive and not_applicable need a rationale.",
-    "Cited evidence keys exist; an observation alone never satisfies verified.",
-    "Media the person attached (user/<n>) counts as one independent source for verified only together with a verifier's pass on the same criterion.",
     "Defect ops: every raw defect of this round goes into exactly one add or merge \"from\", or one dismiss.",
 ];
 

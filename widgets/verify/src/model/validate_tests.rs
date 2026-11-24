@@ -1534,6 +1534,69 @@ fn ac13_a_later_blocked_result_of_the_same_verifier_answers_no_fail() {
 }
 
 #[test]
+fn ac13_a_not_reproduced_about_a_later_pass_answers_no_earlier_fail() {
+    // R1: codex fails AC-1, claude passes it on a matched re-run. Nobody is
+    // assigned codex's fail in R2, where codex turns it into a pass.
+    let mut rig = ruled_round(4);
+    rig.judge(&judge_json(
+        &good_rulings(),
+        "open",
+        r#", "assign": {"claude": ["codex/AC-3"]}"#,
+    ));
+    assert_eq!(rig.round(), 2, "{:?}", rig.rejected("judge"));
+    rig.deliver();
+    rig.reply(
+        "claude",
+        r#"{"summary": "s", "cross_checks": [{"subject": "codex/AC-3", "outcome": "disputed", "note": "not looked at"}]}"#,
+    );
+    rig.reply(
+        "codex",
+        &reply_json(&[("AC-1", "pass", &["e1"])], &[cmd("e1", 0, false)], ""),
+    );
+    rig.reply("claude-2", r#"{"summary": "Nothing assigned."}"#);
+    rig.ingest();
+    assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("codex"));
+    let same = |c: &str| format!(r#"{{"criterion": "{c}", "ruling": "same"}}"#);
+    rig.judge(&format!(
+        r#"{{"summary": "s", "rulings": [{}, {}, {}], "assign": {{"claude-2": ["codex/AC-1"]}}}}"#,
+        ruling("AC-1", "inconclusive", "codex changed its mind", &[]),
+        same("AC-2"),
+        same("AC-3")
+    ));
+    assert_eq!(rig.round(), 3, "{:?}", rig.rejected("judge"));
+    // R3: claude-2 is asked about codex's R2 pass, and cannot reproduce it.
+    let brief = rig.brief("claude-2", crate::model::types::BriefKind::Work);
+    assert!(brief.contains("- codex/AC-1: pass (R2)"), "{brief}");
+    rig.deliver();
+    rig.reply("claude", r#"{"summary": "Nothing assigned."}"#);
+    rig.reply("codex", r#"{"summary": "Nothing assigned."}"#);
+    rig.reply(
+        "claude-2",
+        &reply_json(
+            &[],
+            &[cmd("e1", 1, false)],
+            r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "not_reproduced", "note": "fails here", "evidence": ["e1"]}]"#,
+        ),
+    );
+    rig.ingest();
+    assert_eq!(rig.phase(), Phase::Ruling, "{:?}", rig.rejected("claude-2"));
+    // That answers the R2 pass, not the R1 fail: no check was ever about
+    // the fail, so another matched re-run does not make AC-1 verified.
+    let text = format!(
+        r#"{{"summary": "s", "rulings": [{}, {}, {}]}}"#,
+        ruling("AC-1", "verified", "matched", &["claude/r1/e1"]),
+        same("AC-2"),
+        same("AC-3")
+    );
+    assert_eq!(
+        judge_problems(&rig, &text),
+        [
+            "AC-1: verified despite codex's R1 fail, which no not_reproduced cross-check has answered; claude-2's R3 not_reproduced is about codex's R2 pass"
+        ]
+    );
+}
+
+#[test]
 fn ac13_passes_of_every_round_whose_evidence_is_stored_count() {
     // Round 1 verified AC-3 on claude's and codex's passes; codex passes it
     // again on another log in round 2. The round-1 passes still count.

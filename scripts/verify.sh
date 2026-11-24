@@ -66,8 +66,8 @@ sys.exit(1 if bad else 0)'
 # their own, outside the workspace. Each is
 # built with its tests everywhere; the tests run on macOS only, because some
 # expect the text widths of macOS's system fonts. The exception is
-# widgets/agent-usage's library tests (no font-dependent test), which also run
-# on Linux.
+# widgets/agent-usage (no font-dependent test, and it ships on Linux too),
+# whose tests run everywhere.
 dashboard=widgets/agent-dashboard/Cargo.toml
 browser=widgets/repo-browser/Cargo.toml
 discussion=widgets/discussion/Cargo.toml
@@ -79,12 +79,9 @@ widget_check() {
   [ "$os" = Darwin ] || return 0
   cargo test --manifest-path "$1" --locked
 }
-# agent-usage: the library tests also run on Linux; the UI tests (fonts) only on macOS.
 usage_check() {
-  if [ "$os" = Darwin ]; then widget_check "$1"; else
-    cargo build --manifest-path "$1" --locked --all-targets || return
-    cargo test --manifest-path "$1" --locked --lib
-  fi
+  cargo build --manifest-path "$1" --locked --all-targets || return
+  cargo test --manifest-path "$1" --locked
 }
 # The packages a widget is built from by path: itself and the Noa crates it uses.
 widget_uses() {

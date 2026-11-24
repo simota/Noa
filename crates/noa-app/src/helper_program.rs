@@ -138,11 +138,20 @@ pub(crate) fn open(
     Ok(())
 }
 
-/// `Contents/Helpers` of the app bundle whose `Contents/MacOS` holds Noa.
-/// Helpers outside `Contents/MacOS` do not take Noa.app as their main bundle,
-/// so the program gets no `com.simota.noa` identity of its own.
+/// Where an installed Noa keeps its helpers, given the directory of Noa's
+/// executable. On macOS, `Contents/Helpers` of the app bundle whose
+/// `Contents/MacOS` holds Noa: helpers outside `Contents/MacOS` do not take
+/// Noa.app as their main bundle, so the program gets no `com.simota.noa`
+/// identity of its own. Elsewhere, `<prefix>/libexec/noa` beside the
+/// `<prefix>/bin` that holds Noa (where `scripts/package-linux.sh` and its
+/// `install.sh` put them).
 fn helpers_dir(exe_dir: &Path) -> Option<PathBuf> {
-    Some(exe_dir.parent()?.join("Helpers"))
+    let prefix = exe_dir.parent()?;
+    Some(if cfg!(target_os = "macos") {
+        prefix.join("Helpers")
+    } else {
+        prefix.join("libexec").join("noa")
+    })
 }
 
 /// Reads `stream` to its end, keeping only the last [`STDERR_TAIL`] bytes.
@@ -178,8 +187,7 @@ fn exit_message(title: &str, status: ExitStatus, stderr_tail: &[u8]) -> Option<S
     })
 }
 
-/// `helper` in `helpers` (where `scripts/bundle-macos.sh` puts the agent
-/// dashboard in `Noa.app`), else the first of `dev_dirs` that holds one.
+/// `helper` under its bundled name in `helpers` (see [`helpers_dir`]), else the first of `dev_dirs` that holds one.
 fn locate(helper: HelperProgram, helpers: Option<&Path>, dev_dirs: &[PathBuf]) -> Option<PathBuf> {
     helpers
         .map(|dir| dir.join(helper.bundled))
@@ -428,10 +436,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn the_helpers_dir_is_beside_the_macos_dir() {
         assert_eq!(
             helpers_dir(Path::new("/Applications/Noa.app/Contents/MacOS")),
             Some(PathBuf::from("/Applications/Noa.app/Contents/Helpers"))
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn the_helpers_dir_is_libexec_noa_beside_bin() {
+        assert_eq!(
+            helpers_dir(Path::new("/home/u/.local/bin")),
+            Some(PathBuf::from("/home/u/.local/libexec/noa"))
         );
     }
 

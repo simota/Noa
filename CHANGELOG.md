@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agent-usage --demo --snapshot=FILE.png` renders it headlessly and writes
   the PNG to that path. Limits from Codex start a `codex app-server`, which
   may create its own state under `~/.codex`. `scripts/bundle-macos.sh` ships
-  it as `Noa Agent Usage`.
+  it as `Noa Agent Usage`; on Linux, `scripts/package-linux.sh` ships it in
+  `libexec/noa/` and Noa looks for it there.
 - Competition: the start view seats 1–3 judges (agent, model and effort
   per row; `judge` leads, `judge-2` and `judge-3` only score), and a
   rematch fills every judge row. With more than one judge the leaderboard,

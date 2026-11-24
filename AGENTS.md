@@ -62,7 +62,7 @@ when no GPU adapter is available.
   on Linux, as before. It also builds `widgets/agent-dashboard`,
   `widgets/repo-browser`, `widgets/discussion`, `widgets/competition`,
   `widgets/review` and `widgets/agent-usage`, crates outside the workspace, with their tests; the tests run only on macOS (some expect the
-  widths of macOS's system fonts), except `widgets/agent-usage`'s library tests, which run on Linux too. `scripts/verify.sh` runs the same check when
+  widths of macOS's system fonts), except `widgets/agent-usage`'s, which run on Linux too. `scripts/verify.sh` runs the same check when
   a change reaches one of these crates or the Noa crates it uses by path.
 - A failing check is named in the output; its full log is
   `.verify/<check>.log`, and timings are in `.verify/timings`.

@@ -5,8 +5,8 @@
 #   scripts/package-linux.sh debug      # debug build   -> target/debug/Noa-<ver>-linux-<arch>.tar.gz
 #
 # The tarball unpacks to a single Noa-<ver>-linux-<arch>/ directory laid out as
-# an XDG prefix (bin/, share/applications, share/icons/hicolor, share/metainfo)
-# plus an install.sh that copies it into a prefix (default ~/.local).
+# an XDG prefix (bin/, libexec/noa/ for the agent usage widget,
+# share/applications, share/icons/hicolor, share/metainfo) plus an install.sh that copies it into a prefix (default ~/.local).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -42,13 +42,18 @@ case "$TARGET_ROOT" in
 esac
 export CARGO_TARGET_DIR="$TARGET_ROOT"
 
+# The agent usage widget (its own workspace, widgets/agent-usage) builds into
+# the same target dir and ships in libexec/noa, where Noa looks for helpers.
+USAGE_MANIFEST=widgets/agent-usage/Cargo.toml
 case "$MODE" in
   release)
     cargo build --release -p noa
+    cargo build --release --locked --manifest-path "$USAGE_MANIFEST"
     PROFILE_DIR="$TARGET_ROOT/release"
     ;;
   debug)
     cargo build -p noa
+    cargo build --locked --manifest-path "$USAGE_MANIFEST"
     PROFILE_DIR="$TARGET_ROOT/debug"
     ;;
   *)
@@ -63,6 +68,7 @@ ARCHIVE="$PROFILE_DIR/$NAME.tar.gz"
 
 rm -rf "$STAGE" "$ARCHIVE"
 install -Dm755 "$PROFILE_DIR/Noa" "$STAGE/bin/Noa"
+install -Dm755 "$PROFILE_DIR/agent-usage" "$STAGE/libexec/noa/Noa Agent Usage"
 install -Dm644 "dist/linux/$APP_ID.desktop" "$STAGE/share/applications/$APP_ID.desktop"
 install -Dm644 "dist/linux/$APP_ID.metainfo.xml" "$STAGE/share/metainfo/$APP_ID.metainfo.xml"
 for icon in dist/linux/icons/*/"$APP_ID.png"; do
@@ -73,7 +79,7 @@ install -Dm644 LICENSE "$STAGE/LICENSE"
 install -Dm755 dist/linux/install.sh "$STAGE/install.sh"
 
 if [ "$MODE" = release ]; then
-  strip "$STAGE/bin/Noa" 2>/dev/null || true
+  strip "$STAGE/bin/Noa" "$STAGE/libexec/noa/Noa Agent Usage" 2>/dev/null || true
 fi
 
 # Reproducible-ish archive: fixed mtimes, sorted entries, numeric owner.

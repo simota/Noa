@@ -186,7 +186,10 @@ pub struct Review {
     tab: CenterTab,
     filters: Filters,
     selected: Option<String>,
-    pending_intervention: Option<String>,
+    /// An intervention sent and not yet seen in the log: its text, and how
+    /// many messages the log had when it was sent (only a later message can
+    /// be it arriving).
+    pending_intervention: Option<(String, usize)>,
     file_dialogs: Vec<FileDialogRequest>,
     /// The session on screen was read from its log: no runner drives it.
     read_only: bool,
@@ -678,15 +681,19 @@ impl Review {
             !session.waits_to_continue(),
             text,
         );
-        if let Some(pending) = &self.pending_intervention
+        if let Some((pending, sent_at)) = &self.pending_intervention
             && session
                 .messages
                 .iter()
-                .rev()
+                .skip(*sent_at)
                 .any(|m| m.body.trim() == pending.trim())
         {
+            // It arrived: the composer is emptied unless a new draft was
+            // started meanwhile.
+            if composer::text(&self.tree, &self.composer) == pending.trim() {
+                composer::clear(&mut self.tree, &self.composer);
+            }
             self.pending_intervention = None;
-            composer::clear(&mut self.tree, &self.composer);
         }
         self.actions.push((self.composer.send, Action::Send));
     }
@@ -1118,7 +1125,7 @@ impl Review {
                     return;
                 }
                 let (_, to) = composer::recipient(&self.tree, &self.composer, session);
-                self.pending_intervention = Some(body.clone());
+                self.pending_intervention = Some((body.clone(), session.messages.len()));
                 self.send_cmd(Command::Intervene { to, body });
             }
             Action::Retry => self.send_cmd(Command::Retry),

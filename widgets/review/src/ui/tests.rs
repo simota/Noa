@@ -933,3 +933,70 @@ fn ending_a_review_asks_first_and_return_keeps_it_running() {
     assert!(screen.close_alert.is_none());
     assert_eq!(commands(&link), vec![Command::Close]);
 }
+
+fn draft(screen: &Review) -> String {
+    composer::text(&screen.tree, &screen.composer)
+}
+
+fn type_draft(screen: &mut Review, body: &str) {
+    screen
+        .tree
+        .update::<noa_gpui_core::widgets::TextArea, _>(screen.composer.area, |a, cx| {
+            a.set_text(cx, body)
+        });
+}
+
+fn with_intervention(mut session: Session, body: &str) -> Session {
+    let n = session.messages.len() + 1;
+    session.messages.push(review::model::types::Message {
+        id: review::model::types::MessageId::nth(n),
+        round: 1,
+        author: review::model::types::Author::User,
+        kind: review::model::types::MsgKind::Intervention,
+        to: Vec::new(),
+        body: body.to_owned(),
+        at: 1,
+    });
+    session
+}
+
+#[test]
+fn a_new_draft_survives_resending_an_instruction_already_in_the_log() {
+    let earlier = "認可も見てください";
+    let (mut screen, link) = live_with(with_intervention(crate::demo::held(), earlier));
+    type_draft(&mut screen, earlier);
+    act(&mut screen, Action::Send);
+    assert_eq!(commands(&link).len(), 1);
+    // The next draft, then a tab switch with no new snapshot: the earlier
+    // message in the log is not this send arriving.
+    type_draft(&mut screen, "次はテストも");
+    act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+    assert_eq!(draft(&screen), "次はテストも");
+}
+
+#[test]
+fn a_sent_draft_clears_when_it_reaches_the_log_unless_rewritten() {
+    for (rewrite, left) in [(None, ""), (Some("別の下書き"), "別の下書き")] {
+        let (mut screen, link) = live_with(crate::demo::held());
+        type_draft(&mut screen, "認可も見てください");
+        act(&mut screen, Action::Send);
+        if let Some(text) = rewrite {
+            type_draft(&mut screen, text);
+        }
+        assert_eq!(commands(&link).len(), 1);
+        let mut next = with_intervention(crate::demo::held(), "認可も見てください");
+        next.rev += 1;
+        link.snapshots
+            .send(Snapshot {
+                link: Link::Live,
+                session: Some(Arc::new(next)),
+                reply_root: None,
+                session_dir: None,
+                generation: 0,
+            })
+            .unwrap();
+        screen.poll_live(&mut TextStore::new(Default::default()));
+        assert_eq!(draft(&screen), left);
+        assert_eq!(screen.pending_intervention, None);
+    }
+}

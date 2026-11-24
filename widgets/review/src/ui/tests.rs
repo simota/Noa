@@ -319,3 +319,64 @@ fn ac23_a_missing_report_is_rewritten_from_the_log_only_when_asked() {
     assert!(!acts(&screen).contains(&Action::RegenerateReport));
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Every label's and tag's text in `root`'s subtree, in tree order.
+fn labels_under(tree: &UiTree, root: WidgetId) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if let Some(label) = tree.get::<noa_gpui_core::widgets::Label>(id) {
+            out.push(label.text().to_owned());
+        } else if let Some(tag) = tree.get::<noa_gpui_core::widgets::Tag>(id) {
+            out.push(tag.text().to_owned());
+        }
+        stack.extend(tree.children(id).iter().rev());
+    }
+    out
+}
+
+#[test]
+fn an_ended_review_lists_raw_findings_the_lead_never_consolidated_on_its_board() {
+    let mut session = crate::demo::held();
+    let mut raw = session.raw[0].clone();
+    raw.key = review::model::types::RawKey {
+        part: PartId::new("agy"),
+        id: "9".into(),
+    };
+    raw.round = 2;
+    raw.claim = "未整理のままの指摘".into();
+    session.raw.push(raw);
+    let (screen, _link) = live_with(session.clone());
+    let shown = labels_under(&screen.tree, screen.center_host);
+    assert!(
+        !shown.iter().any(|l| l.contains("未整理のままの指摘")),
+        "listed while live"
+    );
+    session.closed = true;
+    let (screen, _link) = live_with(session);
+    let shown = labels_under(&screen.tree, screen.center_host);
+    assert!(
+        shown
+            .iter()
+            .any(|l| l.contains("取りまとめられずに終わった指摘 1 件")),
+        "{shown:#?}"
+    );
+    assert!(
+        shown.iter().any(|l| l == "未整理のままの指摘"),
+        "{shown:#?}"
+    );
+}
+
+#[test]
+fn the_matrix_always_has_its_other_row_and_greys_every_lens_nobody_holds() {
+    let mut session = crate::demo::held();
+    // A finding in a lens nobody holds.
+    let unheld = session.unheld_lenses()[0];
+    session.findings[0].category = unheld.id().to_owned();
+    let (mut screen, _link) = live_with(session);
+    act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+    let shown = labels_under(&screen.tree, screen.center_host);
+    assert!(shown.iter().any(|l| l == "その他"), "{shown:#?}");
+    let tags = shown.iter().filter(|l| *l == "担当なし").count();
+    assert_eq!(tags, 6 - 3, "every unheld lens is tagged: {shown:#?}");
+}

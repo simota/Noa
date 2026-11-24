@@ -1394,6 +1394,16 @@ impl Session {
     }
 
     /// The finding (or dismissal) a raw finding went to, if any.
+    /// The raw findings in no finding and not dismissed: those of a round
+    /// the lead has not consolidated (yet, or ever, when the review ended
+    /// first). Nothing a reviewer wrote is dropped without a trace.
+    pub fn unplaced(&self) -> Vec<&RawFinding> {
+        self.raw
+            .iter()
+            .filter(|r| self.placement(&r.key).is_none())
+            .collect()
+    }
+
     pub fn placement(&self, key: &RawKey) -> Option<&str> {
         self.findings
             .iter()

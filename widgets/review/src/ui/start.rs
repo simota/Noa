@@ -119,8 +119,13 @@ impl Default for Form {
     }
 }
 
-fn words(text: &str) -> Vec<String> {
-    text.split_whitespace().map(str::to_owned).collect()
+/// One path per line, blank lines left out: a path may hold spaces.
+fn lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 impl Form {
@@ -143,22 +148,18 @@ impl Form {
                     "" => Head::Worktree,
                     other => Head::Ref(other.to_owned()),
                 },
-                paths: words(&self.filter),
+                paths: lines(&self.filter),
                 ..blank
             },
             TargetKind::Files => Target {
                 path: Some(dir_path(&self.root, "ルートのフォルダ")?),
-                paths: self
-                    .paths
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
+                paths: lines(&self.paths),
                 ..blank
             },
             TargetKind::Document => {
-                let text = Some(self.text.trim().to_owned()).filter(|t| !t.is_empty());
+                // Kept byte for byte (leading blank lines and indentation
+                // move every line number); only emptiness looks past blanks.
+                let text = Some(self.text.clone()).filter(|t| !t.trim().is_empty());
                 let path = match (&text, self.document_file.trim()) {
                     (None, file) if !file.is_empty() => Some(expand(file)?),
                     _ => None,
@@ -283,11 +284,10 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(head_col),
         TextField::new("作業ツリー（未コミットを含む）", 300.0),
     );
-    let filter = field(
-        tree,
-        git,
-        "パスの絞り込み（任意・空白区切り）",
-        "例: crates/noa-app src/",
+    caption(tree, git, "パスの絞り込み（任意・1行に1つ）");
+    let filter = tree.insert(
+        Some(git),
+        TextArea::new("例: crates/noa-app\ndocs/release notes.md").min_lines(2),
     );
 
     let files = tree.insert(Some(target), Container::column().gap(6.0));
@@ -674,7 +674,6 @@ pub(super) fn fill(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut
         (parts.repo, &form.repo),
         (parts.base, &form.base),
         (parts.head, &form.head),
-        (parts.filter, &form.filter),
         (parts.root_dir, &form.root),
         (parts.document_file, &form.document_file),
         (parts.document_workdir, &form.document_workdir),
@@ -683,6 +682,7 @@ pub(super) fn fill(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut
         tree.update::<TextField, _>(id, |f, cx| f.set_text(cx, value));
     }
     for (id, value) in [
+        (parts.filter, &form.filter),
         (parts.paths, &form.paths),
         (parts.text, &form.text),
         (parts.request, &form.request),
@@ -816,7 +816,7 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         repo: field(parts.repo),
         base: field(parts.base),
         head: field(parts.head),
-        filter: field(parts.filter),
+        filter: area(parts.filter),
         root: field(parts.root_dir),
         paths: area(parts.paths),
         text: area(parts.text),
@@ -1006,14 +1006,14 @@ mod tests {
         let git = Form {
             repo: dir_text.clone(),
             head: "feat/x".into(),
-            filter: "src/  docs/".into(),
+            filter: "src/\n\n docs/release notes.md \n".into(),
             ..Form::default()
         };
         let target = git.target().unwrap();
         assert_eq!(target.kind, TargetKind::Git);
         assert_eq!(target.head, Head::Ref("feat/x".into()));
         assert_eq!(target.base, None);
-        assert_eq!(target.paths, ["src/", "docs/"]);
+        assert_eq!(target.paths, ["src/", "docs/release notes.md"]);
         assert!(
             Form::default()
                 .target()
@@ -1031,15 +1031,16 @@ mod tests {
 
         let doc = Form {
             kind: TargetKind::Document,
-            text: "  plan  ".into(),
+            text: "\n  plan\n".into(),
             document_workdir: dir_text,
             ..Form::default()
         };
         let target = doc.target().unwrap();
-        assert_eq!(target.text.as_deref(), Some("plan"));
+        assert_eq!(target.text.as_deref(), Some("\n  plan\n"), "kept as typed");
         assert_eq!(target.workdir.as_deref(), Some(dir.as_path()));
         let empty = Form {
             kind: TargetKind::Document,
+            text: " \n\t\n".into(),
             ..Form::default()
         };
         assert!(empty.target().is_err());

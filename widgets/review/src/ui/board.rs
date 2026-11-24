@@ -178,6 +178,7 @@ pub(super) fn insert(
                 _ => "指摘はありません。",
             },
         );
+        unplaced(tree, list, session);
         return;
     }
     if shown.is_empty() {
@@ -268,5 +269,49 @@ pub(super) fn insert(
         }
         let origins: Vec<String> = f.origins().iter().map(|p| p.to_string()).collect();
         caption(tree, bottom, format!("提起: {}", origins.join(", ")));
+    }
+    unplaced(tree, list, session);
+}
+
+/// An ended review's raw findings the lead never consolidated, listed
+/// under the board (they are in no finding, so no filter shows them).
+fn unplaced(tree: &mut UiTree, list: WidgetId, session: &Session) {
+    let raws = session.unplaced();
+    if !session.closed || raws.is_empty() {
+        return;
+    }
+    note(
+        tree,
+        list,
+        format!(
+            "取りまとめられずに終わった指摘 {} 件（リードの取りまとめ前に終了しました）",
+            raws.len()
+        ),
+    );
+    for raw in raws {
+        let row = tree.insert(
+            Some(list),
+            Container::column()
+                .gap(4.0)
+                .padding(10.0)
+                .background(Role::Surface)
+                .border(1.0, Role::Separator)
+                .radius(8.0),
+        );
+        let top = tree.insert(
+            Some(row),
+            Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+        );
+        tag(tree, top, raw.key.to_string(), Tone::Neutral);
+        tag(tree, top, raw.severity.label(), severity_tone(raw.severity));
+        caption(tree, top, format!("R{}", raw.round));
+        tree.insert(
+            Some(row),
+            Label::new(raw.claim.clone())
+                .font_size(12.5)
+                .wrap(true)
+                .max_lines(2)
+                .truncation(Truncation::Tail),
+        );
     }
 }

@@ -342,6 +342,22 @@ pub fn report_markdown(session: &Session) -> String {
         gaps = true;
         let _ = writeln!(out, "- スナップショット外: {}（{}）", o.path, o.reason);
     }
+    for raw in session.unplaced() {
+        gaps = true;
+        let state = if session.closed {
+            "取りまとめられずに終わった指摘"
+        } else {
+            "取りまとめ待ちの指摘"
+        };
+        let _ = writeln!(
+            out,
+            "- {state}: {}（R{}・{}）{}",
+            raw.key,
+            raw.round,
+            raw.severity.label(),
+            one_line(&raw.claim)
+        );
+    }
     for (round, part, why) in failures(session) {
         gaps = true;
         let _ = writeln!(out, "- R{round} で {part} が返答できませんでした: {why}");
@@ -358,9 +374,133 @@ pub fn report_markdown(session: &Session) -> String {
         match (&round.outcome, round.phase) {
             (Some(outcome), _) => out.push_str(&one_line(&outcome.summary)),
             (None, Phase::Closed) => out.push_str("（取りまとめなし）"),
+            (None, _) if session.closed => out.push_str("（中断）"),
             (None, _) => out.push_str("（進行中）"),
         }
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::Input;
+    use crate::model::types::{AgentKind, BuiltinLens};
+    use crate::testkit::{self, Rig, blind, review, through_round_one};
+
+    /// The body of `section` (up to the next heading) in `report`.
+    fn section<'a>(report: &'a str, section: &str) -> &'a str {
+        let start = report.find(section).unwrap() + section.len();
+        let rest = &report[start..];
+        rest[..rest.find("\n## ").unwrap_or(rest.len())].trim()
+    }
+
+    fn assert_sections_in_order(report: &str) {
+        let mut at = 0;
+        for heading in SECTIONS {
+            let found = report[at..]
+                .find(heading)
+                .unwrap_or_else(|| panic!("{heading} missing"));
+            at += found + heading.len();
+        }
+    }
+
+    #[test]
+    fn ac22_a_review_ended_by_the_user_before_any_finding() {
+        let mut rig = Rig::new(3);
+        rig.feed(Input::UserClose);
+        let report = report_markdown(rig.engine.session());
+        assert_sections_in_order(&report);
+        assert!(report.starts_with("# レビュー結果\n"), "{report}");
+        assert_eq!(section(&report, SECTIONS[0]), "判定なし（ユーザーが終了）");
+        assert_eq!(section(&report, SECTIONS[1]), "（指摘はありません）");
+        for empty in [SECTIONS[3], SECTIONS[4]] {
+            assert_eq!(section(&report, empty), "（ありません）", "{empty}");
+        }
+        assert_eq!(
+            section(&report, SECTIONS[6]),
+            "- R1（独立レビュー）: （中断）"
+        );
+    }
+
+    #[test]
+    fn ac22_a_review_with_every_lens_held_and_every_file_covered_has_no_gaps() {
+        let panel: Vec<_> = BuiltinLens::ALL
+            .into_iter()
+            .map(|lens| testkit::reviewer(AgentKind::Claude, lens))
+            .collect();
+        let mut rig = Rig::with(1, &panel);
+        rig.deliver();
+        let ids: Vec<String> = rig
+            .engine
+            .session()
+            .reviewer_ids()
+            .map(|p| p.to_string())
+            .collect();
+        for id in &ids {
+            rig.reply(id, &blind(&[]));
+        }
+        rig.lead(r#"{"summary": "Nothing.", "verdict": {"decision": "approve", "rationale": "Clean.", "must_fix": []}}"#);
+        let mut session = rig.engine.session().clone();
+        assert!(session.closed && session.verdict().is_some());
+        session.manifest.omitted.clear();
+        let report = report_markdown(&session);
+        assert_sections_in_order(&report);
+        assert_eq!(section(&report, SECTIONS[5]), "（ありません）");
+        assert!(section(&report, SECTIONS[0]).starts_with("**"), "{report}");
+    }
+
+    #[test]
+    fn raw_findings_a_review_ended_on_before_the_lead_consolidated_them_are_reported() {
+        let mut rig = Rig::new(3);
+        rig.deliver();
+        rig.reply(
+            "claude",
+            &blind(&[("1", "src/store.rs", 128, "high", "correctness")]),
+        );
+        rig.reply(
+            "codex",
+            &blind(&[("1", "src/store.rs", 130, "medium", "security")]),
+        );
+        rig.reply("agy", &blind(&[]));
+        rig.feed(Input::UserClose);
+        let s = rig.engine.session();
+        assert_eq!(s.unplaced().len(), 2);
+        let gaps = section(&report_markdown(s), SECTIONS[5]).to_owned();
+        assert!(
+            gaps.contains("- 取りまとめられずに終わった指摘: claude/1（R1・"),
+            "{gaps}"
+        );
+        assert!(
+            gaps.contains("- 取りまとめられずに終わった指摘: codex/1（R1・"),
+            "{gaps}"
+        );
+    }
+
+    #[test]
+    fn ac22_an_extended_review_reports_as_provisional_again() {
+        let mut rig = Rig::new(2);
+        through_round_one(&mut rig);
+        rig.deliver();
+        for part in ["claude", "codex"] {
+            rig.reply(part, &review(&[], &[("F2", "confirm", "")]));
+        }
+        rig.reply("agy", &review(&[], &[("F1", "confirm", "")]));
+        rig.lead(
+            r#"{"summary": "Done.", "ops": [
+              {"op": "update", "id": "F1", "status": "agreed"},
+              {"op": "update", "id": "F2", "status": "agreed"}
+            ], "verdict": {"decision": "request_changes", "rationale": "F1.", "must_fix": ["F1"]}}"#,
+        );
+        assert!(report_markdown(rig.engine.session()).starts_with("# レビュー結果\n"));
+        rig.feed(Input::UserExtend { by: 1, at: 500 });
+        let report = report_markdown(rig.engine.session());
+        assert!(report.starts_with("# レビュー結果（暫定）"), "{report}");
+        assert_eq!(
+            section(&report, SECTIONS[0]),
+            "まだ判定はありません（最終ラウンドで出ます）。"
+        );
+        assert!(section(&report, SECTIONS[6]).contains("- R3（"), "{report}");
+    }
 }

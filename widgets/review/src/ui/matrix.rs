@@ -11,6 +11,8 @@ use review::model::types::{Session, Severity, covers};
 use super::{Action, caption, heading, keep_scroll, note, scroll_column, severity_tone, tag};
 
 const LENS_COL: f32 = 230.0;
+/// The category of findings outside every lens (その他).
+const OTHER: &str = "other";
 const CELL: f32 = 58.0;
 
 fn cell_box(tree: &mut UiTree, parent: WidgetId, width: f32) -> WidgetId {
@@ -78,26 +80,34 @@ pub(super) fn insert(
         .iter()
         .filter(|f| f.status.is_live())
         .collect();
-    let mut rows: Vec<(String, String, bool)> = session
+    // L1-5: the panel's lenses, その他 (always), then lenses nobody holds,
+    // greyed and tagged whether or not a finding landed in them.
+    let held = |id: &str| {
+        id == OTHER
+            || session
+                .reviewers
+                .iter()
+                .any(|p| p.lens.as_ref().is_some_and(|l| l.id() == id))
+    };
+    let mut rows: Vec<(String, String)> = session
         .panel_lenses()
         .iter()
-        .map(|l| (l.id().to_owned(), l.label(), true))
+        .map(|l| (l.id().to_owned(), l.label()))
         .collect();
-    for f in &live {
-        if !rows.iter().any(|(id, _, _)| *id == f.category) {
-            rows.push((
-                f.category.clone(),
-                session.category_label(&f.category),
-                true,
-            ));
+    let add = |rows: &mut Vec<(String, String)>, id: &str| {
+        if !rows.iter().any(|(have, _)| have == id) {
+            rows.push((id.to_owned(), session.category_label(id)));
         }
+    };
+    add(&mut rows, OTHER);
+    for f in &live {
+        add(&mut rows, &f.category);
     }
     for lens in session.unheld_lenses() {
-        if !rows.iter().any(|(id, _, _)| id == lens.id()) {
-            rows.push((lens.id().to_owned(), lens.label().to_owned(), false));
-        }
+        add(&mut rows, lens.id());
     }
-    for (id, label, held) in rows {
+    for (id, label) in rows {
+        let held = held(&id);
         let row = tree.insert(
             Some(grid),
             Container::row().gap(2.0).align_items(AlignItems::CENTER),
@@ -114,11 +124,7 @@ pub(super) fn insert(
                 .color(if held { Role::Text } else { Role::Muted })
                 .truncation(Truncation::Tail),
         );
-        let held_by_panel = session
-            .reviewers
-            .iter()
-            .any(|p| p.lens.as_ref().is_some_and(|l| l.id() == id));
-        if !held_by_panel {
+        if !held {
             tag(tree, line, "担当なし", Tone::Neutral);
         }
         let mut total = 0;

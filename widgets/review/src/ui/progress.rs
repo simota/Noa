@@ -75,10 +75,12 @@ fn duration(ms: Millis) -> String {
 
 /// Rounds finished, and the round limit when there is one.
 fn rounds_done(session: &Session) -> (u32, Option<u32>) {
+    // A round is done once the lead's consolidation of it was taken in; a
+    // review ended part way through a round does not count that round.
     let done = session
         .rounds
         .iter()
-        .filter(|r| r.phase == Phase::Closed)
+        .filter(|r| r.outcome.is_some())
         .count() as u32;
     (done, Some(session.max_rounds))
 }
@@ -112,6 +114,9 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
     let (done, max) = rounds_done(session);
     let current = session.current_round();
     let round_label = match (current, max) {
+        (Some(r), _) if session.closed && r.outcome.is_none() => {
+            format!("終了 · R{} で中断", r.no)
+        }
         _ if session.closed => format!("終了 · 全{}ラウンド", session.rounds.len()),
         (Some(r), Some(max)) => format!("ラウンド {} / {max} · {}", r.no, r.kind.label()),
         (Some(r), None) => format!("ラウンド {}（上限なし）", r.no),
@@ -122,7 +127,7 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
         Label::new(round_label).font_size(13.0).weight(600),
     );
     if let Some(max) = max.filter(|m| *m > 0) {
-        let value = if session.closed { max } else { done.min(max) };
+        let value = done.min(max);
         tree.insert(
             Some(top),
             ProgressBar::new(BAR_WIDTH)
@@ -199,8 +204,10 @@ fn steps(tree: &mut UiTree, parent: WidgetId, round: &Round, closed: bool) {
         if i > 0 {
             caption(tree, parent, "›");
         }
-        let (text, tone) = if closed || i < at || round.phase == Phase::Closed {
+        let (text, tone) = if i < at || round.phase == Phase::Closed {
             (format!("✓ {name}"), Tone::Success)
+        } else if i == at && closed {
+            (format!("中断 {name}"), Tone::Warning)
         } else if i == at {
             (format!("● {name}"), Tone::Accent)
         } else {
@@ -250,6 +257,23 @@ mod tests {
             failed: failed.then(|| "gone".to_owned()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_review_ended_part_way_through_a_round_counts_only_its_consolidated_rounds() {
+        let mut session = crate::demo::held();
+        let mut second = session.rounds[0].clone();
+        second.no = 2;
+        second.outcome = None;
+        second.phase = Phase::Reviewing;
+        session.rounds.push(second);
+        session.closed = true;
+        assert_eq!(rounds_done(&session), (1, Some(session.max_rounds)));
+        let report = review::model::export::report_markdown(&session);
+        assert!(
+            report.contains("- R2（独立レビュー）: （中断）"),
+            "{report}"
+        );
     }
 
     #[test]

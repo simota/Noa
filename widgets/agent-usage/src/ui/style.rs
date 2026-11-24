@@ -1,11 +1,11 @@
 //! Colours, layout helpers and number formatting shared by both tabs.
 
 use noa_gpui_core::style::{
-    AlignItems, Dimension, FlexDirection, JustifyContent, LengthPercentage, Rect as LayoutRect,
-    Size as LayoutSize, auto, length, percent,
+    AlignItems, Dimension, FlexDirection, FlexWrap, JustifyContent, LengthPercentage,
+    Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{Container, Label};
-use noa_gpui_core::{Paint, Role, Style, UiTree, WidgetId};
+use noa_gpui_core::{Paint, PaintCx, Role, Style, UiTree, Widget, WidgetId};
 use noa_gpui_scene::Color;
 
 use agent_usage::model::{Agent, Severity};
@@ -86,6 +86,55 @@ pub fn row(gap_px: f32) -> Style {
         ..Default::default()
     }
 }
+
+/// A row whose children move to the next line when they do not fit side by
+/// side; each child keeps at least its `flex_basis` while there is room.
+pub fn wrap_row(gap_px: f32) -> Style {
+    Style {
+        flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::Wrap,
+        gap: gap(gap_px),
+        flex_shrink: 0.0,
+        ..Default::default()
+    }
+}
+
+/// A child of a [`wrap_row`]: `basis` wide where it fits, then a share of
+/// the line's spare width by `grow`; it shrinks only on a line of its own.
+pub fn wrap_item(basis: f32, grow: f32) -> Style {
+    Style {
+        flex_grow: grow,
+        flex_shrink: 1.0,
+        flex_basis: length(basis),
+        min_size: LayoutSize {
+            width: length(0.0),
+            height: length(0.0),
+        },
+        ..Default::default()
+    }
+}
+
+/// A layout box drawn at `opacity` with everything in it: the 50 % of the
+/// rows of a stale card (L1-2.4).
+pub struct Faded {
+    pub style: Style,
+    pub opacity: f32,
+}
+
+impl Widget for Faded {
+    fn style(&self) -> Style {
+        self.style.clone()
+    }
+
+    fn paint(&mut self, _cx: &mut PaintCx) {}
+
+    fn opacity(&self) -> f32 {
+        self.opacity
+    }
+}
+
+/// The opacity of a stale card's rows.
+pub const STALE_OPACITY: f32 = 0.5;
 
 /// A rounded card on the surface colour.
 pub fn card(tree: &mut UiTree, parent: WidgetId, style: Style) -> WidgetId {

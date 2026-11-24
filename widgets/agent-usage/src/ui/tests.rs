@@ -511,3 +511,366 @@ fn refresh_key_calls_every_source() {
     screen.dispatch(Event::PointerUp { pos, button }, &mut text);
     assert_eq!(&calls.borrow()[..2], &["limits", "stats"]);
 }
+
+/// The screen at the window's minimum size.
+const MIN_WINDOW: Size = Size::new(960.0, 640.0);
+
+fn screen_at(
+    sources: Vec<UsageSource>,
+    prefs: Prefs,
+    size: Size,
+) -> (AgentUsage, Rc<RefCell<Vec<&'static str>>>, TextStore) {
+    let (mut screen, calls, mut text) = screen_with(sources, prefs, None);
+    screen.prepare(size, &mut text);
+    (screen, calls, text)
+}
+
+fn window_rect(tree: &UiTree, id: WidgetId) -> noa_gpui_scene::Rect {
+    let origin = tree.window_origin(id).unwrap();
+    let size = tree.layout(id).unwrap().rect;
+    noa_gpui_scene::Rect::new(origin.x, origin.y, size.width, size.height)
+}
+
+/// Widgets under `root` that stick out of their parent sideways (so are cut
+/// off), except the content of the views in `scrolls`, which scroll sideways.
+fn cut_off(tree: &UiTree, root: WidgetId, scrolls: &[WidgetId]) -> Vec<String> {
+    let mut out = Vec::new();
+    let parent = window_rect(tree, root);
+    for child in tree.children(root) {
+        let r = window_rect(tree, *child);
+        if !scrolls.contains(&root) && (r.x < parent.x - 0.5 || r.right() > parent.right() + 0.5) {
+            let what = labels_under(tree, *child);
+            out.push(format!("{what:?} {r:?} in {parent:?}"));
+        }
+        out.extend(cut_off(tree, *child, scrolls));
+    }
+    out
+}
+
+fn scroll_of(screen: &AgentUsage, name: &str) -> WidgetId {
+    screen
+        .stats_scrolls
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, id)| *id)
+        .unwrap()
+}
+
+fn wheel(screen: &mut AgentUsage, text: &mut TextStore, at: WidgetId, dx: f32, dy: f32) {
+    let r = window_rect(&screen.tree, at);
+    let pos = noa_gpui_scene::Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0);
+    screen.dispatch(Event::PointerMove { pos }, text);
+    screen.dispatch(
+        Event::Wheel {
+            pos,
+            delta: noa_gpui_scene::Point::new(dx, dy),
+        },
+        text,
+    );
+    screen.prepare(MIN_WINDOW, text);
+}
+
+#[test]
+fn every_part_of_both_tabs_is_reachable_at_minimum_width() {
+    let stats_prefs = Prefs {
+        tab: Tab::Stats,
+        agent: AgentFilter::All,
+        ..Prefs::default()
+    };
+    let (mut screen, _, mut text) = screen_at(demo::sources(demo::now()), stats_prefs, MIN_WINDOW);
+    let scrolls: Vec<WidgetId> = screen.stats_scrolls.iter().map(|(_, id)| *id).collect();
+    assert_eq!(scrolls.len(), 5, "every table scrolls sideways");
+    // Nothing outside a table is cut off: the KPIs and the share legend wrap.
+    let cut = cut_off(&screen.tree, screen.stats_host, &scrolls);
+    assert!(cut.is_empty(), "{cut:#?}");
+    for kpi in ["キャッシュ読取", "推定コスト"] {
+        let labels = labels_under(&screen.tree, screen.stats_host);
+        assert!(labels.iter().any(|l| l.contains(kpi)), "{kpi}");
+    }
+
+    // The agent table is wider than its card: a sideways wheel brings its
+    // last columns (reasoning, cost, workers) into view.
+    let agents = scroll_of(&screen, "agents");
+    // Down the page with the wheel until the table is in the window.
+    let host = screen.stats_host;
+    let below = window_rect(&screen.tree, agents).y - 200.0;
+    wheel(&mut screen, &mut text, host, 0.0, -below);
+    let view = window_rect(&screen.tree, agents);
+    assert!(
+        view.y > 0.0 && view.bottom() < MIN_WINDOW.height,
+        "{view:?}"
+    );
+    let last_cell = |screen: &AgentUsage| {
+        let body = screen.tree.children(agents)[0];
+        let header = screen.tree.children(body)[0];
+        let cells = screen.tree.children(header);
+        window_rect(&screen.tree, cells[cells.len() - 1])
+    };
+    assert!(
+        last_cell(&screen).right() > view.right() + 1.0,
+        "starts cut off"
+    );
+    let page_before = screen
+        .tree
+        .get::<ScrollView>(screen.stats_host)
+        .unwrap()
+        .scroll_position();
+    wheel(&mut screen, &mut text, agents, -2000.0, 0.0);
+    let x = screen
+        .tree
+        .get::<ScrollView>(agents)
+        .unwrap()
+        .scroll_position()
+        .x;
+    assert!(x > 0.0, "the table moved sideways");
+    assert!(
+        last_cell(&screen).right() <= view.right() + 0.5,
+        "{:?} in {view:?}",
+        last_cell(&screen)
+    );
+    let table = labels_under(&screen.tree, agents);
+    for column in ["推論", "推定コスト", "ワーカー"] {
+        assert!(has(&table, column), "{column}");
+    }
+    // A plain wheel over the table still scrolls the page, not the table.
+    wheel(&mut screen, &mut text, agents, 0.0, -120.0);
+    let page_after = screen
+        .tree
+        .get::<ScrollView>(screen.stats_host)
+        .unwrap()
+        .scroll_position();
+    assert!(
+        page_after.y > page_before.y,
+        "{page_before:?} → {page_after:?}"
+    );
+    assert_eq!(
+        screen
+            .tree
+            .get::<ScrollView>(agents)
+            .unwrap()
+            .scroll_position()
+            .x,
+        x
+    );
+    // The tab is rebuilt every minute: the table stays where it was scrolled.
+    screen.press('r', &mut text);
+    screen.prepare(MIN_WINDOW, &mut text);
+    let rebuilt = scroll_of(&screen, "agents");
+    assert_ne!(rebuilt, agents);
+    let kept = screen
+        .tree
+        .get::<ScrollView>(rebuilt)
+        .unwrap()
+        .scroll_position()
+        .x;
+    assert!(kept > 0.0, "sideways position kept across the rebuild");
+
+    // The limits tab has no sideways scrolling: nothing in it is cut off.
+    let (screen, _, _) = screen_at(demo::sources(demo::now()), Prefs::default(), MIN_WINDOW);
+    let cut = cut_off(&screen.tree, screen.limits_host, &[]);
+    assert!(cut.is_empty(), "{cut:#?}");
+}
+
+/// The Codex-only report of a machine without Codex logs: the ctl journals
+/// still counted two workers.
+fn codex_without_logs() -> StatsReport {
+    use agent_usage::stats::types::{Availability, Counts};
+    let now = demo::now();
+    let mut report = StatsReport::empty((now - 86_400, now));
+    let counts = Counts {
+        workers: 2,
+        ..Counts::empty()
+    };
+    report.total = counts.clone();
+    report.per_agent = vec![(
+        Agent::Codex,
+        counts,
+        Availability::Missing("no logs found".into()),
+    )];
+    report
+}
+
+#[test]
+fn missing_logs_show_dashes_but_journal_workers_still_count() {
+    let report = codex_without_logs();
+    let kpis = stats::kpis(&report);
+    for title in [
+        "セッション",
+        "ターン",
+        "メッセージ",
+        "ツール呼び出し",
+        "稼働時間",
+        "総トークン",
+        "推定コスト",
+    ] {
+        let k = kpis.iter().find(|k| k.0 == title).unwrap();
+        assert_eq!(k.1, stats::DASH, "{title}: {k:?}");
+    }
+    let tokens = kpis.iter().find(|k| k.0 == "総トークン").unwrap();
+    assert_eq!(tokens.2, "Codex: no logs found");
+    let rows = stats::agent_rows(&report);
+    assert_eq!(rows[0][1], stats::DASH, "sessions");
+    assert_eq!(rows[0][5], stats::DASH, "active time");
+    assert_eq!(rows[0][13], "2", "workers come from the journals");
+    // agy alone still says it records no tokens.
+    let now = demo::now();
+    let agy = demo::report(
+        Period::Days7,
+        AgentFilter::One(Agent::Agy),
+        now,
+        &demo::tz(),
+    );
+    assert_eq!(
+        stats::unavailable_reason(&agy, "トークン"),
+        "agy はトークンを記録しません"
+    );
+    assert!(stats::logs_known(&agy));
+}
+
+#[test]
+fn project_cost_says_what_it_leaves_out() {
+    let now = demo::now();
+    let tz = demo::tz();
+    // Claude (priced) and Codex (unpriced) share every project.
+    let all = demo::report(Period::Days7, AgentFilter::All, now, &tz);
+    let rows = stats::project_rows(&all);
+    assert!(!rows.is_empty());
+    for row in &rows {
+        assert!(
+            row[4].starts_with('$') && row[4].contains("一部未計上"),
+            "{row:?}"
+        );
+    }
+    // Claude alone is priced in full.
+    let claude = demo::report(Period::Days7, AgentFilter::One(Agent::Claude), now, &tz);
+    for row in stats::project_rows(&claude) {
+        assert!(!row[4].contains("未計上"), "{row:?}");
+    }
+}
+
+#[test]
+fn values_going_stale_say_why_and_redraw_without_new_data() {
+    let now = demo::now();
+    // Only Claude is current; its 5h window resets 20 s from now.
+    let mut s = demo::sources(now);
+    s[0].windows[0].resets_at = Some(now + 20);
+    s[1] = UsageSource::placeholder(Agent::Codex);
+    s[2] = UsageSource::placeholder(Agent::Agy);
+    let (mut screen, _, mut text) = screen_with(s.clone(), Prefs::default(), None);
+    assert!(summary_of(&screen).starts_with("Claude Code 7d 61%"));
+    // Half a minute later, within the same minute, a tick with no new data.
+    screen.clock = Clock::fixed(now + 30, demo::tz());
+    screen.woken(&mut text);
+    screen.prepare(window(), &mut text);
+    assert_eq!(summary_of(&screen), "現在値なし");
+    let labels = card_labels(&screen, Agent::Claude);
+    assert!(has(&labels, "古い値: 5h がリセット済み"), "{labels:?}");
+    assert!(
+        gauges_under(&screen.tree, card_of(&screen, Agent::Claude))
+            .iter()
+            .all(|g| g.2)
+    );
+
+    // Older than `stale_after` (900 s) with no note: the age is the reason.
+    let mut s = demo::sources(now);
+    s[0].last_updated = Some(now - 890);
+    let (mut screen, _, mut text) = screen_with(s, Prefs::default(), None);
+    assert!(
+        card_labels(&screen, Agent::Claude)
+            .iter()
+            .all(|l| !l.contains("古い値"))
+    );
+    screen.clock = Clock::fixed(now + 30, demo::tz());
+    screen.woken(&mut text);
+    screen.prepare(window(), &mut text);
+    let labels = card_labels(&screen, Agent::Claude);
+    assert!(has(&labels, "古い値 · 15分前"), "{labels:?}");
+    assert!(has(&labels, "古い値: 取得から15分経過"), "{labels:?}");
+}
+
+#[test]
+fn notes_and_buckets_show_without_windows() {
+    let now = demo::now();
+    // Codex: no window, no spend, only the credit balance.
+    let mut s = demo::sources(now);
+    s[1].windows.clear();
+    s[1].notes = vec!["Credit balance 42".into()];
+    // Claude: only the scoped bucket.
+    s[0].windows.clear();
+    s[0].spend = None;
+    let (screen, _, _) = screen_with(s, Prefs::default(), None);
+    let codex = card_labels(&screen, Agent::Codex);
+    assert!(has(&codex, "Credit balance 42"), "{codex:?}");
+    let claude = card_labels(&screen, Agent::Claude);
+    assert!(
+        has(&claude, "Sonnet 7d") && has(&claude, "22%"),
+        "{claude:?}"
+    );
+    assert_eq!(
+        gauges_under(&screen.tree, card_of(&screen, Agent::Claude)).len(),
+        1
+    );
+    // A first fetch that failed, then a refresh the source deferred.
+    let mut s = demo::sources(now);
+    s[0] = UsageSource {
+        state: SourceState::Error("Token expired (launch Claude Code to renew)".into()),
+        notes: vec!["Refresh deferred (next request in 2m)".into()],
+        ..UsageSource::placeholder(Agent::Claude)
+    };
+    let (screen, _, _) = screen_with(s, Prefs::default(), None);
+    let claude = card_labels(&screen, Agent::Claude);
+    assert!(
+        has(&claude, "Token expired (launch Claude Code to renew)")
+            && has(&claude, "Refresh deferred (next request in 2m)"),
+        "{claude:?}"
+    );
+}
+
+fn gauge_ids(tree: &UiTree, id: WidgetId) -> Vec<WidgetId> {
+    let own = tree.get::<Gauge>(id).map(|_| id);
+    own.into_iter()
+        .chain(tree.children(id).iter().flat_map(|c| gauge_ids(tree, *c)))
+        .collect()
+}
+
+/// The alpha of everything drawn inside `rect`.
+fn alphas_in(tree: &UiTree, rect: noa_gpui_scene::Rect) -> Vec<f32> {
+    use noa_gpui_scene::DrawCommand;
+    let inside = |r: &noa_gpui_scene::Rect| {
+        r.x >= rect.x - 0.5
+            && r.y >= rect.y - 0.5
+            && r.right() <= rect.right() + 0.5
+            && r.bottom() <= rect.bottom() + 0.5
+    };
+    tree.display_list()
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            DrawCommand::Quad { rect, color, .. } | DrawCommand::Text { rect, color, .. }
+                if inside(rect) =>
+            {
+                Some(color.a)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn stale_rows_and_gauges_are_drawn_at_half_opacity() {
+    let (screen, _, _) = screen_at(demo::sources(demo::now()), Prefs::default(), window());
+    let tree = &screen.tree;
+    for (agent, stale) in [(Agent::Agy, true), (Agent::Claude, false)] {
+        for gauge in gauge_ids(tree, card_of(&screen, agent)) {
+            // The gauge's row: label, gauge, percent and reset.
+            let row = tree.parent(gauge).unwrap();
+            let alphas = alphas_in(tree, window_rect(tree, row));
+            assert!(alphas.len() >= 4, "{agent:?}: {alphas:?}");
+            if stale {
+                assert!(alphas.iter().all(|a| *a <= 0.5 + 1e-3), "{alphas:?}");
+            } else {
+                assert!(alphas.iter().any(|a| *a > 0.99), "{alphas:?}");
+            }
+        }
+    }
+}

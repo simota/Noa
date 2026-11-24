@@ -23,7 +23,8 @@ pub struct Gauge {
     /// 0..=1, `None` when the window length or reset is unknown.
     pub tick: Option<f64>,
     pub color: Paint,
-    /// Stale: the fill and the tick are drawn in the muted colour.
+    /// Stale: the fill and the tick are drawn in the muted colour (the row
+    /// around it is drawn at half opacity).
     pub dimmed: bool,
 }
 
@@ -35,6 +36,11 @@ pub fn tick_x(bar: Rect, tick: f64) -> f32 {
 /// The bar's filled width for `used` percent.
 pub fn fill_width(bar: Rect, used: f64) -> f32 {
     bar.width * (used / 100.0).clamp(0.0, 1.0) as f32
+}
+
+/// The corner radius of a fill `w` wide: round ends, never wider than it.
+pub fn fill_radius(bar: Rect, w: f32) -> f32 {
+    (bar.height / 2.0).min(w / 2.0)
 }
 
 impl Gauge {
@@ -80,10 +86,12 @@ impl Widget for Gauge {
         } else {
             cx.color(self.color)
         };
+        // The fill keeps its true width: a sliver under the bar's height gets
+        // smaller corners instead of growing to a circle.
         let w = fill_width(bar, self.used);
         if w > 0.0 {
-            let filled = Rect::new(bar.x, bar.y, w.max(bar.height), bar.height);
-            cx.rounded_rect(filled, bar.height / 2.0, fill, Border::default());
+            let filled = Rect::new(bar.x, bar.y, w, bar.height);
+            cx.rounded_rect(filled, fill_radius(bar, w), fill, Border::default());
         }
         if let Some(tick) = self.tick {
             let x = tick_x(bar, tick);
@@ -385,20 +393,29 @@ impl Widget for ShareBar {
     }
 }
 
-/// Chart categories (labels) and the time each one starts for the limit
-/// history of `range`: hourly for a day or less, every 3 h for up to 8
-/// days, every 12 h for up to 31 days, then daily.
+/// At most this many history bins: about one per two pixels of the chart.
+pub const MAX_HISTORY_BINS: i64 = 400;
+
+/// Bin lengths to choose from, shortest first: 5 min (half the history's
+/// gap of two polls, so every gap leaves an empty bin) up to a day.
+const HISTORY_STEPS: [i64; 11] = [
+    300, 600, 900, 1200, 1800, 3600, 7200, 10_800, 21_600, 43_200, 86_400,
+];
+
+/// The bin length for `range`: the shortest step that keeps the bins within
+/// [`MAX_HISTORY_BINS`] (whole days past the last step).
+pub fn history_step(range: (Unix, Unix)) -> i64 {
+    let span = (range.1 - range.0).max(1);
+    let bins = |step: i64| (span + step - 1) / step;
+    HISTORY_STEPS
+        .into_iter()
+        .find(|step| bins(*step) <= MAX_HISTORY_BINS)
+        .unwrap_or_else(|| (bins(MAX_HISTORY_BINS) + 86_399) / 86_400 * 86_400)
+}
+
+/// The start of each chart category of the limit history over `range`.
 pub fn history_bins(range: (Unix, Unix)) -> Vec<Unix> {
-    let span = (range.1 - range.0).max(3600);
-    let step = if span <= 86_400 {
-        3600
-    } else if span <= 8 * 86_400 {
-        3 * 3600
-    } else if span <= 31 * 86_400 {
-        12 * 3600
-    } else {
-        86_400
-    };
+    let step = history_step(range);
     let mut bins = Vec::new();
     let mut t = range.0;
     while t < range.1 {
@@ -408,20 +425,39 @@ pub fn history_bins(range: (Unix, Unix)) -> Vec<Unix> {
     bins
 }
 
-/// One value per bin: the last finite point inside it, `NAN` when none (so
-/// a gap in the samples breaks the line).
-pub fn bin_series(series: &Series, bins: &[Unix], end: Unix) -> Vec<f64> {
+/// One value per bin, from the series' points in time order: the last
+/// finite point in the bin; for a bin with no point, the line between its
+/// neighbours where they are finite and at most `max_gap` apart; `NAN`
+/// otherwise, so the line breaks at a gap. A gap is either the `NAN` marker
+/// `history::series` puts into it or neighbours more than `max_gap` apart;
+/// with bins of half `max_gap` (see [`history_step`]) every gap leaves at
+/// least one empty bin. The last bin includes `end`, the newest sample.
+pub fn bin_series(series: &Series, bins: &[Unix], end: Unix, max_gap: i64) -> Vec<f64> {
+    let points = &series.points;
     bins.iter()
         .enumerate()
         .map(|(i, start)| {
-            let stop = bins.get(i + 1).copied().unwrap_or(end);
-            series
-                .points
-                .iter()
-                .filter(|(t, v)| *t >= *start && *t < stop && v.is_finite())
-                .map(|(_, v)| *v)
-                .next_back()
-                .unwrap_or(f64::NAN)
+            let stop = bins.get(i + 1).copied();
+            let lo = points.partition_point(|(t, _)| t < start);
+            let hi = match stop {
+                Some(stop) => points.partition_point(|(t, _)| *t < stop),
+                None => points.partition_point(|(t, _)| *t <= end),
+            };
+            let inside = &points[lo..hi];
+            if let Some((_, v)) = inside.iter().rev().find(|(_, v)| v.is_finite()) {
+                return *v;
+            }
+            let (Some(stop), true) = (stop, inside.is_empty()) else {
+                return f64::NAN;
+            };
+            match (lo.checked_sub(1).map(|j| points[j]), points.get(hi)) {
+                (Some((pt, pv)), Some(&(qt, qv)))
+                    if pv.is_finite() && qv.is_finite() && qt - pt <= max_gap =>
+                {
+                    pv + (qv - pv) * (stop - pt) as f64 / (qt - pt) as f64
+                }
+                _ => f64::NAN,
+            }
         })
         .collect()
 }
@@ -527,16 +563,116 @@ mod tests {
 
     #[test]
     fn history_bins_break_where_samples_are_missing() {
-        let bins = history_bins((0, 86_400));
-        assert_eq!(bins.len(), 24);
+        // Two polls of 300 s.
+        const MAX_GAP: i64 = 600;
+        // "Today" at 02:00: 10 % at 00:55, the history's gap marker at
+        // 01:05, 20 % at 01:15 and the newest sample, 90 %, at 02:00.
+        let range = (0, 2 * 3600);
+        let bins = history_bins(range);
+        assert_eq!(bins.len(), 24, "5-minute bins");
         let s = Series {
             label: "Claude 5h".into(),
-            points: vec![(100, 10.0), (200, 12.0), (7300, f64::NAN), (7400, 30.0)],
+            points: vec![
+                (55 * 60, 10.0),
+                (65 * 60, f64::NAN),
+                (75 * 60, 20.0),
+                (120 * 60, 90.0),
+            ],
         };
-        let v = bin_series(&s, &bins, 86_400);
-        assert_eq!(v[0], 12.0);
-        assert!(v[1].is_nan());
-        assert_eq!(v[2], 30.0);
-        assert_eq!(history_bins((0, 7 * 86_400)).len(), 56);
+        let v = bin_series(&s, &bins, range.1, MAX_GAP);
+        let finite: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+        assert_eq!(finite, vec![10.0, 20.0, 90.0], "the newest sample is kept");
+        let at = |minute: usize| v[minute / 5];
+        assert_eq!(at(55), 10.0);
+        // The 20 minutes between 00:55 and 01:15 break the line.
+        assert!(at(60).is_nan() && at(65).is_nan() && at(70).is_nan());
+        assert_eq!(at(75), 20.0);
+        assert!(at(80).is_nan());
+        assert_eq!(*v.last().unwrap(), 90.0);
+        // Any gap over two polls (600 s) leaves an empty bin for a day.
+        for t0 in (0..3600).step_by(37) {
+            let s = Series {
+                label: "x".into(),
+                points: vec![(t0, 1.0), (t0 + 601, 2.0)],
+            };
+            let v = bin_series(&s, &history_bins((0, 86_400)), 86_400, MAX_GAP);
+            let first = v.iter().position(|x| *x == 1.0).unwrap();
+            let second = v.iter().position(|x| *x == 2.0).unwrap();
+            assert!(v[first + 1].is_nan(), "gap at {t0} not broken: {v:?}");
+            assert!(second - first >= 2, "gap at {t0} not broken: {v:?}");
+        }
+        // Samples closer than that never break the line, though they leave
+        // bins without a sample of their own: 10-minute samples, and a poll
+        // that came late.
+        let s = Series {
+            label: "x".into(),
+            points: (0..=12)
+                .map(|k| (k * 600, k as f64))
+                .chain([(7799, 13.0), (8101, 14.0)])
+                .collect(),
+        };
+        let v = bin_series(&s, &history_bins((0, 3 * 3600)), 3 * 3600, MAX_GAP);
+        let last = v.iter().rposition(|x| x.is_finite()).unwrap();
+        assert!(v[..=last].iter().all(|x| x.is_finite()), "{v:?}");
+        // The empty bin takes the line's value at its end.
+        assert_eq!(v[1], 1.0);
+        assert_eq!(v[2], 1.0);
+        assert_eq!(v[3], 2.0);
+        // 7800..8100 has no sample: 13 at 7799 and 14 at 8101, read at 8100.
+        assert!((v[26] - (13.0 + 301.0 / 302.0)).abs() < 1e-9, "{}", v[26]);
+        // Longer periods take longer bins, never more than the cap.
+        assert_eq!(history_step((0, 86_400)), 300);
+        assert_eq!(history_step((0, 7 * 86_400)), 1800);
+        assert_eq!(history_step((0, 30 * 86_400)), 7200);
+        assert_eq!(history_step((0, 400 * 86_400)), 86_400);
+        assert_eq!(history_step((0, 1000 * 86_400)), 3 * 86_400);
+        for days in [1, 7, 30, 400, 1000] {
+            assert!(history_bins((0, days * 86_400)).len() as i64 <= MAX_HISTORY_BINS);
+        }
+    }
+
+    #[test]
+    fn low_gauge_fill_keeps_its_width() {
+        // 12 % of the 40 px minimum gauge is 4.8 px, not the bar's height.
+        let mut tree = noa_gpui_core::UiTree::new();
+        let host = tree.insert(
+            None,
+            noa_gpui_core::widgets::Container::new(Style {
+                size: LayoutSize {
+                    width: length(40.0),
+                    height: length(GAUGE_HEIGHT),
+                },
+                ..Default::default()
+            }),
+        );
+        tree.insert(
+            Some(host),
+            Gauge {
+                used: 12.0,
+                tick: None,
+                color: Paint::Fixed(Color::hex(0x0a84ff)),
+                dimmed: false,
+            },
+        );
+        let mut text = TextStore::new(Default::default());
+        let list = tree
+            .prepare(noa_gpui_scene::Size::new(40.0, GAUGE_HEIGHT), &mut text)
+            .unwrap();
+        let fills: Vec<(f32, f32)> = list
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                noa_gpui_scene::DrawCommand::Quad {
+                    rect,
+                    radius,
+                    color,
+                    ..
+                } if *color == Color::hex(0x0a84ff) => Some((rect.width, radius[0])),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills.len(), 1, "{fills:?}");
+        assert!((fills[0].0 - 4.8).abs() < 1e-4, "{fills:?}");
+        assert!(fills[0].1 <= 2.4 + 1e-4, "{fills:?}");
     }
 }

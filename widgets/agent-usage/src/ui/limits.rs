@@ -2,7 +2,7 @@
 //! order Claude Code, Codex, Antigravity) with a gauge per window, and the
 //! limit history chart.
 
-use noa_gpui_core::style::{FlexDirection, Rect as LayoutRect, Size as LayoutSize, length};
+use noa_gpui_core::style::{Rect as LayoutRect, length};
 use noa_gpui_core::widgets::{Chart, ChartSeries, Container, Label, Tag, Tone};
 use noa_gpui_core::{Paint, Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Color;
@@ -16,13 +16,17 @@ use agent_usage::time::{Tz, local};
 
 use super::charts::{Dot, Gauge, bin_series, history_bins};
 use super::style::{
-    self, AGY, CLAUDE, CODEX, GREEN, ORANGE, RED, caption, cell, gap, heading, severity_paint,
+    self, AGY, CLAUDE, CODEX, Faded, GREEN, ORANGE, RED, STALE_OPACITY, caption, cell, gap,
+    heading, severity_paint,
 };
 
 const LABEL_W: f32 = 96.0;
 const PERCENT_W: f32 = 42.0;
 const RESET_W: f32 = 84.0;
 const ROW_FONT: f32 = 12.0;
+/// A card's width before the row shares out what is left; under three of
+/// these side by side, the cards wrap.
+const CARD_BASIS: f32 = 340.0;
 
 pub struct Input<'a> {
     pub sources: &'a [UsageSource],
@@ -94,14 +98,12 @@ pub fn build(tree: &mut UiTree, parent: WidgetId, input: &Input) {
             .weight(600),
     );
 
+    // Side by side where three fit, else wrapped two and one.
     let row = tree.insert(
         Some(parent),
         Container::new(Style {
-            flex_direction: FlexDirection::Row,
             align_items: noa_gpui_core::style::AlignItems::START,
-            gap: gap(style::GUTTER),
-            flex_shrink: 0.0,
-            ..Default::default()
+            ..style::wrap_row(style::GUTTER)
         }),
     );
     for agent in Agent::ALL {
@@ -112,20 +114,36 @@ pub fn build(tree: &mut UiTree, parent: WidgetId, input: &Input) {
     history_card(tree, parent, input);
 }
 
+/// Why a stale card's values are old, from the source's own data: a window
+/// that reset after they were read, or their age past `stale_after`. `None`
+/// when neither holds (the source marked them stale; its notes say why).
+pub fn stale_reason(s: &UsageSource, now: Unix) -> Option<String> {
+    let last = s.last_updated?;
+    let reset: Vec<&str> = s
+        .windows
+        .iter()
+        .filter(|w| w.resets_at.is_some_and(|r| r <= now && last < r))
+        .map(|w| w.label.as_str())
+        .collect();
+    if !reset.is_empty() {
+        Some(format!("古い値: {} がリセット済み", reset.join("・")))
+    } else if now - last > s.stale_after {
+        Some(format!(
+            "古い値: 取得から{}経過",
+            style::duration((now - last) as u64)
+        ))
+    } else {
+        None
+    }
+}
+
 fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dyn Tz) -> WidgetId {
     let card = style::card(
         tree,
         parent,
         Style {
-            flex_grow: 1.0,
-            flex_shrink: 1.0,
-            flex_basis: length(0.0),
-            min_size: LayoutSize {
-                width: length(0.0),
-                height: length(0.0),
-            },
             gap: gap(8.0),
-            ..Default::default()
+            ..style::wrap_item(CARD_BASIS, 1.0)
         },
     );
     let state = s.aged_state(now);
@@ -157,27 +175,36 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
     } else {
         ""
     };
-    let (age, reason): (Option<String>, Option<String>) = match &state {
-        SourceState::Ok => (
-            s.last_updated
-                .map(|t| format!("{log}{}に取得", style::ago(t, now))),
-            None,
-        ),
-        SourceState::Stale { since } => (
+    // The lines under the header saying why the values are old or missing;
+    // the source's notes are one of them for a stale card, else under the rows.
+    let mut reasons: Vec<String> = Vec::new();
+    let mut notes_shown = false;
+    let age = match &state {
+        SourceState::Ok => s
+            .last_updated
+            .map(|t| format!("{log}{}に取得", style::ago(t, now))),
+        SourceState::Stale { since } => {
+            reasons.extend(stale_reason(s, now));
+            if !s.notes.is_empty() {
+                reasons.push(s.notes.join(" · "));
+                notes_shown = true;
+            }
+            if reasons.is_empty() {
+                reasons.push("古い値: 最後に取得できた値です".to_owned());
+            }
             Some(if log.is_empty() {
                 format!("古い値 · {}", style::ago(*since, now))
             } else {
                 format!("{log}{}", style::ago(*since, now))
-            }),
-            (!s.notes.is_empty()).then(|| s.notes.join(" · ")),
-        ),
-        SourceState::Error(why) => (
+            })
+        }
+        SourceState::Error(why) => {
+            reasons.push(why.clone());
             s.last_updated
                 .filter(|_| !s.windows.is_empty())
-                .map(|t| format!("古い値 · {}", style::ago(t, now))),
-            Some(why.clone()),
-        ),
-        SourceState::Unconfigured => (Some("未設定".to_owned()), None),
+                .map(|t| format!("古い値 · {}", style::ago(t, now)))
+        }
+        SourceState::Unconfigured => Some("未設定".to_owned()),
     };
     if let Some(age) = age {
         tree.insert(
@@ -185,18 +212,18 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
             Label::new(age).font_size(11.0).color(Role::Muted),
         );
     }
-    let dimmed = state != SourceState::Ok;
-    if let Some(reason) = &reason {
-        let color = if matches!(state, SourceState::Error(_)) && s.windows.is_empty() {
-            Paint::Fixed(RED)
-        } else {
-            Paint::Role(Role::Muted)
-        };
+    let has_rows = !s.windows.is_empty() || !s.buckets.is_empty() || s.spend.is_some();
+    let reason_color = if matches!(state, SourceState::Error(_)) && !has_rows {
+        Paint::Fixed(RED)
+    } else {
+        Paint::Role(Role::Muted)
+    };
+    for reason in &reasons {
         tree.insert(
             Some(card),
             Label::new(reason.clone())
                 .font_size(11.5)
-                .color(color)
+                .color(reason_color)
                 .wrap(true),
         );
     }
@@ -210,19 +237,38 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
         );
         return card;
     }
-    if s.windows.is_empty() && s.spend.is_none() {
-        if reason.is_none() {
-            caption(tree, card, "取得した枠はありません");
-        }
-        return card;
+    if !has_rows && reasons.is_empty() {
+        caption(tree, card, "取得した枠はありません");
     }
 
-    // Scoped buckets go under the 7d row (or last, without one).
+    // Values that are not current: every row at half opacity (L1-2.4).
+    let dimmed = state != SourceState::Ok;
+    let opacity = if dimmed { STALE_OPACITY } else { 1.0 };
+    let bucket_rows = |tree: &mut UiTree, indent: f32| {
+        for b in &s.buckets {
+            gauge_row(
+                tree,
+                card,
+                &b.label,
+                indent,
+                Gauge {
+                    used: b.used_percent,
+                    tick: None,
+                    color: severity_paint(Severity::from_used(b.used_percent)),
+                    dimmed,
+                },
+                "",
+                opacity,
+            );
+        }
+    };
+    // Scoped buckets go under the 7d row, else the last window; with no
+    // window at all they are rows of their own.
     let weekly = s
         .windows
         .iter()
         .position(|w| w.label == "7d" || w.id.ends_with("7d"))
-        .unwrap_or(s.windows.len().saturating_sub(1));
+        .or(s.windows.len().checked_sub(1));
     for (i, w) in s.windows.iter().enumerate() {
         let severity = w.severity(now);
         gauge_row(
@@ -237,29 +283,23 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
                 dimmed,
             },
             &format::resets_in(w.resets_at, now, tz),
-            dimmed,
+            opacity,
         );
         if let Some(line) = pace_line(w, now, tz) {
-            sub_line(tree, card, line, if dimmed { None } else { Some(severity) });
+            sub_line(
+                tree,
+                card,
+                line,
+                if dimmed { None } else { Some(severity) },
+                opacity,
+            );
         }
-        if i == weekly {
-            for b in &s.buckets {
-                gauge_row(
-                    tree,
-                    card,
-                    &b.label,
-                    12.0,
-                    Gauge {
-                        used: b.used_percent,
-                        tick: None,
-                        color: severity_paint(Severity::from_used(b.used_percent)),
-                        dimmed,
-                    },
-                    "",
-                    dimmed,
-                );
-            }
+        if Some(i) == weekly {
+            bucket_rows(tree, 12.0);
         }
+    }
+    if weekly.is_none() {
+        bucket_rows(tree, 0.0);
     }
     if let Some(spend) = &s.spend {
         gauge_row(
@@ -274,11 +314,11 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
                 dimmed,
             },
             "",
-            dimmed,
+            opacity,
         );
-        sub_line(tree, card, spend.detail.clone(), None);
+        sub_line(tree, card, spend.detail.clone(), None, opacity);
     }
-    if reason.is_none() {
+    if !notes_shown {
         for note in &s.notes {
             tree.insert(
                 Some(card),
@@ -292,6 +332,8 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
     card
 }
 
+/// One window, bucket or spend: label, gauge, percent and reset, drawn at
+/// `opacity`.
 fn gauge_row(
     tree: &mut UiTree,
     parent: WidgetId,
@@ -299,13 +341,22 @@ fn gauge_row(
     indent: f32,
     gauge: Gauge,
     reset: &str,
-    dimmed: bool,
+    opacity: f32,
 ) {
-    let row = tree.insert(Some(parent), Container::new(style::row(8.0)));
-    let text = if dimmed { Role::Muted } else { Role::Text };
+    let row = tree.insert(
+        Some(parent),
+        Faded {
+            style: style::row(8.0),
+            opacity,
+        },
+    );
     let name = Label::new(label.to_owned())
         .font_size(ROW_FONT)
-        .color(if indent > 0.0 { Role::Muted } else { text });
+        .color(if indent > 0.0 {
+            Role::Muted
+        } else {
+            Role::Text
+        });
     if indent > 0.0 {
         let host = tree.insert(
             Some(row),
@@ -332,8 +383,7 @@ fn gauge_row(
         true,
         Label::new(format::percent(used))
             .font_size(ROW_FONT)
-            .weight(600)
-            .color(text),
+            .weight(600),
     );
     cell(
         tree,
@@ -346,26 +396,35 @@ fn gauge_row(
     );
 }
 
-/// A line under a row, lined up with the gauge.
-fn sub_line(tree: &mut UiTree, parent: WidgetId, text: String, severity: Option<Severity>) {
+/// A line under a row, lined up with the gauge, drawn at `opacity`.
+fn sub_line(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    text: String,
+    severity: Option<Severity>,
+    opacity: f32,
+) {
     let host = tree.insert(
         Some(parent),
-        Container::new(Style {
-            padding: LayoutRect {
-                left: length(LABEL_W + 8.0),
-                right: length(0.0),
-                top: length(0.0),
-                bottom: length(0.0),
+        Faded {
+            style: Style {
+                padding: LayoutRect {
+                    left: length(LABEL_W + 8.0),
+                    right: length(0.0),
+                    top: length(0.0),
+                    bottom: length(0.0),
+                },
+                margin: LayoutRect {
+                    left: length(0.0),
+                    right: length(0.0),
+                    top: length(-4.0),
+                    bottom: length(0.0),
+                },
+                flex_shrink: 0.0,
+                ..Default::default()
             },
-            margin: LayoutRect {
-                left: length(0.0),
-                right: length(0.0),
-                top: length(-4.0),
-                bottom: length(0.0),
-            },
-            flex_shrink: 0.0,
-            ..Default::default()
-        }),
+            opacity,
+        },
     );
     let color = match severity {
         Some(s) => severity_paint(s),
@@ -432,22 +491,34 @@ pub fn filter_label(filter: AgentFilter) -> &'static str {
     }
 }
 
-/// The chart's category labels for the history bins.
+/// The chart's category labels for the history bins: the clock time within
+/// one day ("9:05", or "9時" for whole hours), the date and time over several
+/// days ("11/18 9:30"), the date alone for whole-day bins.
 pub fn bin_labels(bins: &[Unix], tz: &dyn Tz) -> Vec<String> {
-    let step = if bins.len() > 1 {
-        bins[1] - bins[0]
-    } else {
-        3600
+    let step = match bins {
+        [a, b, ..] => b - a,
+        _ => 3600,
+    };
+    let one_day = match (bins.first(), bins.last()) {
+        (Some(a), Some(b)) => local(*a, tz).date == local(*b, tz).date,
+        _ => true,
     };
     bins.iter()
         .map(|t| {
             let l = local(*t, tz);
-            // Several days of sub-day bins: the date at midnight, the hour
-            // otherwise, so the labels stay short enough to show often.
-            if step >= 86_400 || (bins.len() > 25 && l.hour == 0) {
-                format!("{}/{}", l.date.month, l.date.day)
-            } else {
+            let date = format!("{}/{}", l.date.month, l.date.day);
+            let minute = (t + i64::from(tz.offset_secs(*t))).rem_euclid(3600) / 60;
+            let clock = if step % 3600 == 0 {
                 format!("{}時", l.hour)
+            } else {
+                format!("{}:{minute:02}", l.hour)
+            };
+            if step >= 86_400 {
+                date
+            } else if one_day {
+                clock
+            } else {
+                format!("{date} {clock}")
             }
         })
         .collect()
@@ -472,8 +543,11 @@ fn history_card(tree: &mut UiTree, parent: WidgetId, input: &Input) {
         .iter()
         .filter(|s| s.points.iter().any(|(_, v)| v.is_finite()))
         .map(|s| {
-            ChartSeries::new(s.label.clone(), bin_series(s, &bins, input.range.1))
-                .color(series_color(&s.label))
+            ChartSeries::new(
+                s.label.clone(),
+                bin_series(s, &bins, input.range.1, super::MAX_GAP),
+            )
+            .color(series_color(&s.label))
         })
         .collect();
     if series.is_empty() {

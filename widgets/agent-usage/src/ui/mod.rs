@@ -22,7 +22,9 @@ use noa_gpui_core::widgets::{
     Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SegmentMode,
     SegmentedControl, SelectionChanged,
 };
-use noa_gpui_core::{Appearance, Event, Key, Message, Role, Style, Theme, UiTree, WidgetId};
+use noa_gpui_core::{
+    Appearance, Event, Key, Message, Role, Style, Theme, UiTree, Widget, WidgetId,
+};
 use noa_gpui_platform::Screen;
 use noa_gpui_text::TextStore;
 
@@ -37,8 +39,10 @@ use agent_usage::time::{self, FixedTz, SystemTz, Tz};
 use prefs::{FILTERS, PERIODS, Prefs, PrefsStore, Tab, cycle};
 use style::{GUTTER, fill, full, gap};
 
-/// Seconds between the limit polls; a gap of two breaks the history line.
+/// Seconds between the limit polls.
 const POLL_SECS: i64 = 300;
+/// Samples further apart than two polls break the history line.
+const MAX_GAP: i64 = 2 * POLL_SECS;
 
 /// Where the screen's data comes from.
 pub trait Feed {
@@ -128,7 +132,7 @@ impl Feed for LiveFeed {
 
     fn limit_series(&self, range: (Unix, Unix)) -> Vec<Series> {
         match &self.history {
-            Some(h) => history::series(h.samples(range.0), range, 2 * POLL_SECS),
+            Some(h) => history::series(h.samples(range.0), range, MAX_GAP),
             None => Vec::new(),
         }
     }
@@ -248,6 +252,11 @@ pub struct AgentUsage {
     stats_host: WidgetId,
     /// The minute the shown tab was built for (ages and "today" move).
     built_minute: Option<Unix>,
+    /// Each source's state, aged, when the tab was built: a value going stale
+    /// (its age or a reset) rebuilds the cards within the minute.
+    built_states: Vec<SourceState>,
+    /// The statistics tables' sideways scroll views, kept across rebuilds.
+    stats_scrolls: stats::Scrolls,
 }
 
 impl AgentUsage {
@@ -346,6 +355,8 @@ impl AgentUsage {
             limits_host,
             stats_host,
             built_minute: None,
+            built_states: Vec::new(),
+            stats_scrolls: Vec::new(),
         };
         // Nothing is laid out yet: any store serves the first build.
         screen.poll(true, &mut TextStore::new(Default::default()));
@@ -385,9 +396,16 @@ impl AgentUsage {
             changed = true;
         }
         let minute = now / 60;
-        if changed || self.built_minute != Some(minute) {
+        if changed
+            || self.built_minute != Some(minute)
+            || self.built_states != self.aged_states(now)
+        {
             self.rebuild(text);
         }
+    }
+
+    fn aged_states(&self, now: Unix) -> Vec<SourceState> {
+        self.sources.iter().map(|s| s.aged_state(now)).collect()
     }
 
     fn period_range(&self) -> (Unix, Unix) {
@@ -422,6 +440,7 @@ impl AgentUsage {
     fn rebuild(&mut self, text: &mut TextStore) {
         let now = self.clock.now();
         self.built_minute = Some(now / 60);
+        self.built_states = self.aged_states(now);
         let shown = self.prefs.tab;
         self.tree.set_hidden(self.limits_host, shown != Tab::Limits);
         self.tree.set_hidden(self.stats_host, shown != Tab::Stats);
@@ -453,14 +472,30 @@ impl AgentUsage {
                 );
             }
             Tab::Stats => {
+                // The tables are rebuilt every minute: keep where each one
+                // was scrolled sideways.
+                let saved: Vec<(&str, String)> = self
+                    .stats_scrolls
+                    .iter()
+                    .filter_map(|(name, id)| {
+                        let view = self.tree.get::<ScrollView>(*id)?;
+                        Some((*name, view.save_state()?))
+                    })
+                    .collect();
                 clear(&mut self.tree, self.stats_host, text);
-                stats::build(
+                self.stats_scrolls = stats::build(
                     &mut self.tree,
                     self.stats_host,
                     &self.report,
                     self.prefs.period,
                     self.prefs.agent,
                 );
+                for (name, id) in &self.stats_scrolls {
+                    if let Some((_, state)) = saved.iter().find(|(n, _)| n == name) {
+                        self.tree
+                            .update::<ScrollView, _>(*id, |view, cx| view.restore_state(cx, state));
+                    }
+                }
             }
         }
     }

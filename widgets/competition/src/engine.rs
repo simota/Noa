@@ -7,18 +7,23 @@
 //! all submissions and snapshots into `r<N>/judge.json`) -> Closed, then the
 //! next round. Every `reveal_interval` completed rounds (default 5), the next
 //! round is `RoundKind::Reveal` so contestants can inspect peers' work.
+//!
+//! A judge panel (2–3 judges) scores in `Judging` in parallel, each judge
+//! alone into `r<N>/<judge>.json`; the round settles on the mean once every
+//! scorecard is in. In a deciding round (the last, or one the lead closes)
+//! the lead then names the winner in `r<N>/verdict.json`, still in `Judging`.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::model::brief;
 use crate::model::reduce::{self, Event, ReduceError};
 use crate::model::types::{
     AgentChoice, ArtifactFile, Author, Brief, MAX_JUDGES, MAX_PANEL, Message, Millis, MsgKind,
     PartId, Participant, Phase, Role, RoundKind, RoundNo, Session, SessionId, Submission, judge_id,
 };
 use crate::model::validate;
+use crate::model::{aggregate, brief};
 use crate::store;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,11 +379,6 @@ impl Engine {
                 return rejected(why);
             }
         }
-        // #TODO(agent): Unit 2 lifts this, once the engine runs a panel's
-        // rounds (per-judge briefs, combining, the verdict step).
-        if setup.judges.len() > 1 {
-            return rejected("複数の審判にはまだ対応していません");
-        }
         let Seats {
             judge,
             co_judges,
@@ -650,7 +650,7 @@ impl Engine {
         };
         // A resumed session: briefs out before it stopped get their full
         // time again from now, as the agents may have worked meanwhile.
-        for brief in round.briefs.iter().chain(&round.judge_brief) {
+        for brief in round.briefs.iter().chain(round.judge_briefs()) {
             if brief.receipt.sent.is_some() && brief.receipt.replied.is_none() {
                 self.waiting.insert(brief.to.clone(), Some(now));
             }
@@ -669,14 +669,22 @@ impl Engine {
                 Self::send(out, round.no, brief);
             }
         }
-        match (round.phase, &round.judge_brief) {
-            (Phase::Judging, Some(brief)) if brief.receipt.failed.is_none() => {
-                Self::watch(out, round.no, brief);
-                if brief.receipt.sent.is_none() {
-                    Self::send(out, round.no, brief);
+        match round.phase {
+            // Every judge brief still open: each judge whose scorecard is
+            // in is left alone, and a round waiting for its verdict has the
+            // verdict brief in the lead's place.
+            Phase::Judging => {
+                for brief in round.judge_briefs() {
+                    if brief.receipt.failed.is_some() || brief.receipt.replied.is_some() {
+                        continue;
+                    }
+                    Self::watch(out, round.no, brief);
+                    if brief.receipt.sent.is_none() {
+                        Self::send(out, round.no, brief);
+                    }
                 }
             }
-            (Phase::Closed, _) => return self.next_round(out, now),
+            Phase::Closed => return self.next_round(out, now),
             _ => {}
         }
         self.advance(out)
@@ -804,6 +812,9 @@ impl Engine {
     }
 
     fn judge_round(&mut self, out: &mut Output, no: RoundNo) -> Result<(), EngineError> {
+        if self.session.is_panel() {
+            return self.judge_round_by_panel(out, no);
+        }
         let reply_dir = self.reply_dir();
         let path = store::judge_reply_path(&reply_dir, no, &self.session.judge.id);
         let brief = brief::judge_brief(&self.session, no, &reply_dir, &path);
@@ -824,6 +835,29 @@ impl Engine {
         {
             Self::watch(out, no, brief);
             Self::send(out, no, brief);
+        }
+        Ok(())
+    }
+
+    /// A panel's judging: every judge gets its own brief in one batch, and
+    /// all of them go out at once; each scores alone.
+    fn judge_round_by_panel(&mut self, out: &mut Output, no: RoundNo) -> Result<(), EngineError> {
+        let reply_dir = self.reply_dir();
+        let mut batch = vec![Event::PhaseChanged {
+            round: no,
+            phase: Phase::Judging,
+        }];
+        for judge in self.session.judges() {
+            let path = store::judge_reply_path(&reply_dir, no, &judge.id);
+            let brief = brief::scorecard_brief(&self.session, no, &judge.id, &reply_dir, &path);
+            batch.push(Event::BriefIssued { round: no, brief });
+        }
+        self.commit(out, batch)?;
+        if let Some(round) = self.session.current_round() {
+            for brief in round.judge_briefs() {
+                Self::watch(out, no, brief);
+                Self::send(out, no, brief);
+            }
         }
         Ok(())
     }
@@ -869,7 +903,7 @@ impl Engine {
         };
         let no = round.no;
         let mut due = Vec::new();
-        for brief in round.briefs.iter().chain(&round.judge_brief) {
+        for brief in round.briefs.iter().chain(round.judge_briefs()) {
             if self.open_brief(no, &brief.to).is_none() {
                 continue;
             }
@@ -967,7 +1001,17 @@ impl Engine {
                 }],
             )?;
         }
-        if self.is_judge(part) {
+        if self.is_judge(part) && self.session.is_panel() {
+            if self
+                .session
+                .round(round)
+                .is_some_and(|r| r.verdict_brief.is_some())
+            {
+                self.verdict_reply(out, round, &brief, content, at)?;
+            } else {
+                self.scorecard_reply(out, round, &brief, content, at)?;
+            }
+        } else if self.is_judge(part) {
             match validate::parse_judge(content, &self.session, round) {
                 Ok(output) => {
                     let mut batch = vec![
@@ -1061,6 +1105,137 @@ impl Engine {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// A panel judge's scorecard. Accepted alone while other judges are
+    /// still scoring; the last one also settles the round: the combined
+    /// judgment, the lead's overview as the round's judgment and, in a
+    /// deciding round, the request for the lead's verdict, else the round's
+    /// close and the next round.
+    fn scorecard_reply(
+        &mut self,
+        out: &mut Output,
+        round: RoundNo,
+        brief: &Brief,
+        content: &str,
+        at: Millis,
+    ) -> Result<(), EngineError> {
+        let judge = &brief.to;
+        let output = match validate::parse_scorecard(content, &self.session, round, judge) {
+            Ok(output) => output,
+            Err(error) => return self.reject_reply(out, round, brief, content, error.to_string()),
+        };
+        let mut batch = vec![
+            Event::ReplyAccepted {
+                round,
+                to: judge.clone(),
+                at,
+            },
+            Event::ScorecardAccepted {
+                round,
+                judge: judge.clone(),
+                output,
+            },
+        ];
+        let mut with_card = self.session.clone();
+        reduce::apply(&mut with_card, &batch)?;
+        // `open_brief` found the brief, so the round exists.
+        let cards = &with_card.round(round).expect("the judged round").scorecards;
+        if !aggregate::missing_scorecards(&with_card, cards).is_empty() {
+            return self.commit(out, batch);
+        }
+        let combined = aggregate::combine(&with_card, round, cards);
+        let deciding = combined.close;
+        let lead = self.session.judge.id.clone();
+        batch.push(Event::JudgeAccepted {
+            round,
+            output: combined.clone(),
+        });
+        batch.push(Event::MessagePosted {
+            message: Message {
+                id: self.session.next_message_id(0),
+                round,
+                author: Author::Part(lead.clone()),
+                kind: MsgKind::Judgment,
+                to: Vec::new(),
+                body: combined.overview,
+                at,
+            },
+        });
+        if deciding {
+            // The verdict brief is written from the round as combined.
+            let mut combined_session = self.session.clone();
+            reduce::apply(&mut combined_session, &batch)?;
+            let path = store::verdict_reply_path(&self.reply_dir(), round);
+            let brief = brief::verdict_brief(&combined_session, round, &path);
+            batch.push(Event::VerdictRequested { round, brief });
+            self.commit(out, batch)?;
+            out.effects.push(Effect::RefreshViewer);
+            if let Some(brief) = self.open_brief(round, &lead) {
+                Self::watch(out, round, brief);
+                Self::send(out, round, brief);
+            }
+        } else {
+            batch.push(Event::PhaseChanged {
+                round,
+                phase: Phase::Closed,
+            });
+            self.commit(out, batch)?;
+            out.effects.push(Effect::RefreshViewer);
+            self.next_round(out, at)?;
+        }
+        Ok(())
+    }
+
+    /// The panel lead's verdict: the winner among the highest means and
+    /// the final verdict close the competition.
+    fn verdict_reply(
+        &mut self,
+        out: &mut Output,
+        round: RoundNo,
+        brief: &Brief,
+        content: &str,
+        at: Millis,
+    ) -> Result<(), EngineError> {
+        let verdict = match validate::parse_verdict(content, &self.session, round) {
+            Ok(verdict) => verdict,
+            Err(error) => return self.reject_reply(out, round, brief, content, error.to_string()),
+        };
+        let lead = brief.to.clone();
+        let body = format!("優勝: {}\n\n{}", verdict.winner, verdict.final_verdict);
+        self.commit(
+            out,
+            vec![
+                Event::ReplyAccepted {
+                    round,
+                    to: lead.clone(),
+                    at,
+                },
+                Event::VerdictAccepted {
+                    round,
+                    winner: verdict.winner,
+                    final_verdict: verdict.final_verdict,
+                },
+                Event::MessagePosted {
+                    message: Message {
+                        id: self.session.next_message_id(0),
+                        round,
+                        author: Author::Part(lead),
+                        kind: MsgKind::FinalVerdict,
+                        to: Vec::new(),
+                        body,
+                        at,
+                    },
+                },
+                Event::PhaseChanged {
+                    round,
+                    phase: Phase::Closed,
+                },
+                Event::SessionClosed,
+            ],
+        )?;
+        out.effects.push(Effect::RefreshViewer);
         Ok(())
     }
 
@@ -1165,6 +1340,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::model::types::{AgentKind, AgentSetup, ArtifactKind, JUDGE_ID};
+    use crate::model::types::{Author, MsgKind};
 
     fn run_one_round(engine: &mut Engine, round: RoundNo, close: bool) {
         for part in [PartId::new("claude"), PartId::new("codex")] {
@@ -1956,9 +2132,11 @@ mod tests {
         };
         let err = create(&[agy.clone(), agy.clone(), bad]).unwrap_err();
         assert!(err.contains("ultra"), "{err}");
-        // #TODO(agent): Unit 2 lifts this: until then a panel is refused.
+        // One to three judges, ids by seat whatever the kinds.
         for n in 2..=MAX_JUDGES {
-            assert!(create(&vec![agy.clone(); n]).is_err(), "{n} judges");
+            let panel = create(&vec![agy.clone(); n]).unwrap();
+            let ids: Vec<&str> = panel.session().judges().map(|j| j.id.as_str()).collect();
+            assert_eq!(ids, ["judge", "judge-2", "judge-3"][..n], "{n} judges");
         }
         let one = create(std::slice::from_ref(&agy)).unwrap();
         assert!(!one.session().is_panel());
@@ -2087,5 +2265,831 @@ mod tests {
         verdict.rounds[0].verdict_brief.as_mut().unwrap().reply_path =
             store::verdict_reply_path(dir, 1);
         assert_eq!(check_resumable(&verdict, dir), Ok(()));
+    }
+    // ---- A judge panel: agy leads, two claude judges score. ----
+
+    const PANEL_DIR: &str = "/tmp/comp-panel";
+
+    fn seat(n: usize) -> PartId {
+        judge_id(n)
+    }
+
+    impl Logged {
+        /// A competition of claude and codex judged by a panel of three
+        /// (agy leads; two claude judges, on opus and sonnet), started.
+        fn panel(max_rounds: Option<RoundNo>) -> Self {
+            let claude = |model: &str| AgentChoice {
+                kind: AgentKind::Claude,
+                setup: AgentSetup {
+                    model: Some(model.into()),
+                    effort: None,
+                },
+            };
+            let setup = Setup {
+                request: "Design a music player UI",
+                max_rounds,
+                reveal_interval: 5,
+                workdir: None,
+                judges: &[AgentKind::Agy.into(), claude("opus"), claude("sonnet")],
+                panel: &[AgentKind::Claude.into(), AgentKind::Codex.into()],
+            };
+            let (engine, out) = Engine::create_in(
+                SessionId::new("comp-panel"),
+                setup,
+                Path::new(PANEL_DIR),
+                Config::default(),
+                1,
+            )
+            .unwrap();
+            let mut logged = Logged {
+                engine,
+                log: out.batches,
+            };
+            logged.feed(Input::Start { now: 2 });
+            logged.folds();
+            logged
+        }
+
+        /// Feeds `input` and checks the log still folds to the session.
+        fn step(&mut self, input: Input) -> Output {
+            let out = self.feed(input);
+            self.folds();
+            out
+        }
+
+        fn current(&self) -> &crate::model::types::Round {
+            self.engine.session().current_round().unwrap()
+        }
+
+        /// Both contestants take round `no`'s brief and submit.
+        fn compete(&mut self, no: RoundNo) -> Output {
+            let mut last = Output::default();
+            for part in ["claude", "codex"] {
+                let at = no as u64 * 1_000;
+                self.step(Input::Sent {
+                    round: no,
+                    part: PartId::new(part),
+                    at,
+                });
+                last = self.step(Input::ReplyFileWritten {
+                    round: no,
+                    part: PartId::new(part),
+                    content: format!("# Summary: {part} R{no}\n\nDetails from {part} R{no}."),
+                    artifacts: vec![],
+                    at: at + 10,
+                });
+            }
+            last
+        }
+
+        /// The judge in seat `n` takes its round-`no` brief.
+        fn sent(&mut self, no: RoundNo, n: usize) {
+            self.step(Input::Sent {
+                round: no,
+                part: seat(n),
+                at: no as u64 * 1_000 + 20,
+            });
+        }
+
+        /// The judge in seat `n` writes `content` as its round-`no` reply.
+        fn write(&mut self, no: RoundNo, n: usize, content: &str) -> Output {
+            self.step(Input::ReplyFileWritten {
+                round: no,
+                part: seat(n),
+                content: content.to_owned(),
+                artifacts: vec![],
+                at: no as u64 * 1_000 + 30 + n as u64,
+            })
+        }
+
+        /// Every judge takes its brief and scores (seat, claude, codex).
+        fn score_all(&mut self, no: RoundNo, scores: [(u8, u8); 3]) -> Output {
+            let mut last = Output::default();
+            for (n, (claude, codex)) in scores.into_iter().enumerate() {
+                self.sent(no, n);
+                last = self.write(no, n, &card_json(n, no, claude, codex, ""));
+            }
+            last
+        }
+    }
+
+    /// Seat `n`'s scorecard for round `no`. Every text names its judge
+    /// (`[by judge-2]`), so a brief that quotes one is easy to spot.
+    fn card_json(n: usize, no: RoundNo, claude: u8, codex: u8, extra: &str) -> String {
+        let by = seat(n);
+        let (first, second) = if codex >= claude {
+            ("codex", "claude")
+        } else {
+            ("claude", "codex")
+        };
+        format!(
+            r#"{{
+  "overview": "[by {by}] R{no} overview",
+  "evaluations": {{
+    "claude": {{ "score": {claude}, "strengths": "[by {by}] claude strengths", "feedback": "[by {by}] claude feedback" }},
+    "codex": {{ "score": {codex}, "strengths": "[by {by}] codex strengths", "feedback": "[by {by}] codex feedback" }}
+  }},
+  "ranking": ["{first}", "{second}"]{extra}
+}}"#
+        )
+    }
+
+    fn sent_to(out: &Output) -> Vec<PartId> {
+        out.effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::SendBrief { part, .. } => Some(part.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn body_to<'a>(out: &'a Output, to: &PartId) -> &'a str {
+        out.effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::SendBrief { part, body, .. } if part == to => Some(body.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("nothing sent to {to}: {out:?}"))
+    }
+
+    fn event_names(batch: &[Event]) -> Vec<String> {
+        batch
+            .iter()
+            .map(|e| {
+                let json = serde_json::to_value(e).unwrap();
+                json["event"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_judge_is_briefed_in_one_batch() {
+        let mut l = Logged::panel(Some(3));
+        let out = l.compete(1);
+        let judging = out.batches.last().unwrap();
+        assert_eq!(
+            event_names(judging),
+            [
+                "phase_changed",
+                "brief_issued",
+                "brief_issued",
+                "brief_issued"
+            ]
+        );
+        assert_eq!(sent_to(&out), [seat(0), seat(1), seat(2)]);
+        let dir = Path::new(PANEL_DIR);
+        let watched: Vec<PathBuf> = out
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::WatchReply { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let paths: Vec<PathBuf> = (0..3)
+            .map(|n| store::judge_reply_path(dir, 1, &seat(n)))
+            .collect();
+        assert_eq!(watched, paths);
+        let round = l.current();
+        assert_eq!(round.phase, Phase::Judging);
+        for n in 0..3 {
+            let brief = round.brief(&seat(n)).unwrap();
+            assert_eq!(brief.reply_path, paths[n]);
+            // Each brief names its own reply path, and no other judge's.
+            for (m, path) in paths.iter().enumerate() {
+                let named = brief.body.contains(&path.display().to_string());
+                assert_eq!(named, m == n, "{} names {}", seat(n), path.display());
+            }
+            assert!(brief.body.contains(&format!(
+                "Judging panel: judge (lead), judge-2, judge-3. You are {}.",
+                seat(n)
+            )));
+        }
+        // Each judge runs in its own pane.
+        for n in 0..3 {
+            l.step(Input::PaneSpawned {
+                part: seat(n),
+                pane_id: 40 + n as u64,
+            });
+        }
+        let panes: Vec<Option<u64>> = l.engine.session().judges().map(|j| j.pane_id).collect();
+        assert_eq!(panes, [Some(40), Some(41), Some(42)]);
+    }
+
+    #[test]
+    fn the_round_settles_only_after_every_judge() {
+        let mut l = Logged::panel(Some(3));
+        l.compete(1);
+        for n in 0..3 {
+            l.sent(1, n);
+        }
+        // The lead and judge-3 score; judge-2 has not yet.
+        for (n, claude, codex) in [(0, 70, 90), (2, 75, 80)] {
+            let out = l.write(1, n, &card_json(n, 1, claude, codex, ""));
+            assert_eq!(
+                event_names(out.batches.last().unwrap()),
+                ["reply_accepted", "scorecard_accepted"]
+            );
+            assert!(sent_to(&out).is_empty());
+        }
+        let round = l.current();
+        assert_eq!((round.no, round.phase), (1, Phase::Judging));
+        assert!(round.outcome.is_none());
+        assert_eq!(round.scorecards.len(), 2);
+
+        let out = l.write(1, 1, &card_json(1, 1, 80, 81, ""));
+        assert_eq!(event_names(&out.batches[0]), ["brief_started"]);
+        assert_eq!(
+            event_names(&out.batches[1]),
+            [
+                "reply_accepted",
+                "scorecard_accepted",
+                "judge_accepted",
+                "message_posted",
+                "phase_changed"
+            ]
+        );
+        assert!(matches!(
+            out.batches[2][0],
+            Event::RoundStarted { no: 2, .. }
+        ));
+        let session = l.engine.session();
+        let r1 = session.round(1).unwrap();
+        assert_eq!(r1.phase, Phase::Closed);
+        let outcome = r1.outcome.as_ref().unwrap();
+        // claude 70/80/75 → 75.0; codex 90/81/80 → 83.7, rounded 84.
+        assert_eq!(outcome.evaluations[&PartId::new("codex")].score, 84);
+        assert_eq!(outcome.evaluations[&PartId::new("claude")].score, 75);
+        assert_eq!(
+            outcome.ranking,
+            [PartId::new("codex"), PartId::new("claude")]
+        );
+        assert_eq!(outcome.overview, "[by judge] R1 overview");
+        assert_eq!(
+            session.score_label(1, &PartId::new("codex")).as_deref(),
+            Some("83.7")
+        );
+        let judgment = session
+            .messages
+            .iter()
+            .find(|m| m.kind == MsgKind::Judgment)
+            .unwrap();
+        assert_eq!(judgment.author, Author::Part(seat(0)));
+        assert_eq!(judgment.body, "[by judge] R1 overview");
+        assert_eq!(session.current_round().unwrap().no, 2);
+    }
+
+    #[test]
+    fn a_rejected_judge_reply_is_corrected_alone() {
+        let mut l = Logged::panel(Some(3));
+        l.compete(1);
+        for n in 0..3 {
+            l.sent(1, n);
+        }
+        let receipts = |l: &Logged| -> Vec<crate::model::types::Receipt> {
+            (0..3)
+                .map(|n| l.current().brief(&seat(n)).unwrap().receipt.clone())
+                .collect()
+        };
+        let before = receipts(&l);
+        let bad = card_json(1, 1, 70, 80, r#", "close": true"#);
+        for attempt in 1..=Config::default().max_retries {
+            let out = l.write(1, 1, &bad);
+            let path = store::judge_reply_path(Path::new(PANEL_DIR), 1, &seat(1));
+            assert!(
+                out.effects
+                    .contains(&Effect::ClearReply { path: path.clone() })
+            );
+            assert_eq!(sent_to(&out), [seat(1)]);
+            let note = body_to(&out, &seat(1));
+            assert!(
+                note.contains("close: only the lead judge (judge)"),
+                "{note}"
+            );
+            assert!(note.contains(&path.display().to_string()), "{note}");
+            let now = receipts(&l);
+            assert_eq!(now[1].retries, attempt);
+            assert_eq!(now[1].rejected_digest, Some(store::digest(&bad)));
+            assert_eq!((&now[0], &now[2]), (&before[0], &before[2]));
+            l.sent(1, 1);
+        }
+        // Out of retries: judge-2's brief alone fails.
+        let out = l.write(1, 1, &bad);
+        assert!(sent_to(&out).is_empty());
+        let now = receipts(&l);
+        assert!(now[1].failed.is_some());
+        assert!(now[0].failed.is_none() && now[2].failed.is_none());
+        assert_eq!((&now[0], &now[2]), (&before[0], &before[2]));
+        // The others still score.
+        for n in [0, 2] {
+            l.write(1, n, &card_json(n, 1, 70, 80, ""));
+        }
+        assert_eq!(l.current().scorecards.len(), 2);
+        assert_eq!(l.current().phase, Phase::Judging);
+    }
+
+    #[test]
+    fn a_failed_judge_holds_the_round_until_retried() {
+        let mut l = Logged::panel(Some(3));
+        l.compete(1);
+        for n in 0..2 {
+            l.sent(1, n);
+        }
+        // judge-3's pane cannot be reached: every send fails.
+        for _ in 0..=Config::default().max_retries {
+            l.step(Input::SendFailed {
+                round: 1,
+                part: seat(2),
+                error: "agent pane exited repeatedly".into(),
+            });
+        }
+        assert!(
+            l.current()
+                .brief(&seat(2))
+                .unwrap()
+                .receipt
+                .failed
+                .is_some()
+        );
+        for n in 0..2 {
+            l.write(1, n, &card_json(n, 1, 70, 80, ""));
+        }
+        // No round is settled without a judge.
+        let round = l.current();
+        assert_eq!((round.no, round.phase), (1, Phase::Judging));
+        assert!(round.outcome.is_none());
+        let out = l.step(Input::Tick { now: 10_000_000 });
+        assert!(out.batches.is_empty(), "{out:?}");
+
+        let out = l.step(Input::UserRetry);
+        assert_eq!(
+            out.batches,
+            vec![vec![Event::BriefReset {
+                round: 1,
+                to: seat(2)
+            }]]
+        );
+        assert_eq!(sent_to(&out), [seat(2)]);
+        l.sent(1, 2);
+        l.write(1, 2, &card_json(2, 1, 72, 78, ""));
+        let r1 = l.engine.session().round(1).unwrap();
+        assert_eq!(r1.phase, Phase::Closed);
+        assert!(r1.outcome.is_some());
+        assert_eq!(l.engine.session().rounds.len(), 2);
+    }
+
+    #[test]
+    fn the_lead_writes_the_verdict_after_the_combined_scores() {
+        let mut l = Logged::panel(Some(1));
+        l.compete(1);
+        let out = l.score_all(1, [(70, 90), (80, 81), (75, 80)]);
+        assert_eq!(
+            event_names(out.batches.last().unwrap()),
+            [
+                "reply_accepted",
+                "scorecard_accepted",
+                "judge_accepted",
+                "message_posted",
+                "verdict_requested"
+            ]
+        );
+        let verdict_path = store::verdict_reply_path(Path::new(PANEL_DIR), 1);
+        assert!(out.effects.contains(&Effect::WatchReply {
+            round: 1,
+            part: seat(0),
+            path: verdict_path.clone(),
+        }));
+        let body = body_to(&out, &seat(0));
+        for line in [
+            "## 2. Combined scores (mean of 3 judges)",
+            "1. codex — mean 83.7 (judge 90, judge-2 81, judge-3 80; spread 10)",
+            "2. claude — mean 75.0 (judge 70, judge-2 80, judge-3 75; spread 10)",
+            "Highest mean: codex",
+            "[by judge-2] R1 overview",
+            "[by judge-3] R1 overview",
+            r#"{"winner": "<one of: codex>""#,
+        ] {
+            assert!(body.contains(line), "missing {line:?} in\n{body}");
+        }
+        assert!(body.contains(&verdict_path.display().to_string()));
+        let session = l.engine.session();
+        assert!(!session.closed && session.winner.is_none());
+        assert_eq!(session.current_round().unwrap().phase, Phase::Judging);
+        let err = l
+            .try_feed(Input::UserExtend { by: 1, at: 5_000 })
+            .unwrap_err();
+        assert!(err.contains("最終講評の待機中です"), "{err}");
+
+        l.step(Input::Sent {
+            round: 1,
+            part: seat(0),
+            at: 5_000,
+        });
+        // The lead cannot crown an entry the mean did not put first.
+        let out = l.write(1, 0, r#"{"winner": "claude", "final_verdict": "claude"}"#);
+        assert!(out.effects.contains(&Effect::ClearReply {
+            path: verdict_path.clone()
+        }));
+        assert!(body_to(&out, &seat(0)).contains("does not have the highest mean"));
+        assert!(!l.engine.session().closed);
+
+        let verdict = "codex led on every judge's card but judge-2's, by 1 point.";
+        let out = l.write(
+            1,
+            0,
+            &format!(r#"{{"winner": "codex", "final_verdict": "{verdict}"}}"#),
+        );
+        assert_eq!(
+            event_names(out.batches.last().unwrap()),
+            [
+                "reply_accepted",
+                "verdict_accepted",
+                "message_posted",
+                "phase_changed",
+                "session_closed"
+            ]
+        );
+        let session = l.engine.session();
+        assert!(session.closed);
+        assert_eq!(session.winner, Some(PartId::new("codex")));
+        assert_eq!(session.final_verdict(), Some(verdict));
+        let message = session.messages.last().unwrap();
+        assert_eq!(
+            (message.kind, &message.author, message.body.as_str()),
+            (
+                MsgKind::FinalVerdict,
+                &Author::Part(seat(0)),
+                format!("優勝: codex\n\n{verdict}").as_str()
+            )
+        );
+
+        // A tied top: the lead picks either.
+        let mut l = Logged::panel(Some(1));
+        l.compete(1);
+        l.score_all(1, [(80, 81), (81, 80), (80, 80)]);
+        let brief = &l.current().verdict_brief.as_ref().unwrap().body;
+        assert!(
+            brief.contains("Tied for the highest mean: codex, claude"),
+            "{brief}"
+        );
+        l.step(Input::Sent {
+            round: 1,
+            part: seat(0),
+            at: 5_000,
+        });
+        // The lead ranked codex first, but may name claude as well.
+        l.write(
+            1,
+            0,
+            r#"{"winner": "claude", "final_verdict": "claude by a hair"}"#,
+        );
+        assert_eq!(l.engine.session().winner, Some(PartId::new("claude")));
+    }
+
+    #[test]
+    fn a_co_judges_close_is_refused_and_the_leads_goes_to_the_verdict() {
+        let mut l = Logged::panel(Some(3));
+        l.compete(1);
+        for n in 0..3 {
+            l.sent(1, n);
+        }
+        let out = l.write(1, 2, &card_json(2, 1, 70, 80, r#", "close": true"#));
+        assert!(body_to(&out, &seat(2)).contains("close: only the lead judge"));
+        l.sent(1, 2);
+        l.write(1, 2, &card_json(2, 1, 70, 80, ""));
+        l.write(1, 1, &card_json(1, 1, 72, 79, ""));
+        // The lead asks to end early, before the limit.
+        let out = l.write(1, 0, &card_json(0, 1, 71, 85, r#", "close": true"#));
+        assert!(matches!(
+            out.batches.last().unwrap().last(),
+            Some(Event::VerdictRequested { round: 1, .. })
+        ));
+        let body = body_to(&out, &seat(0));
+        assert!(
+            body.contains("You asked to end the competition early"),
+            "{body}"
+        );
+        assert_eq!(l.engine.session().rounds.len(), 1);
+        l.step(Input::Sent {
+            round: 1,
+            part: seat(0),
+            at: 5_000,
+        });
+        l.write(1, 0, r#"{"winner": "codex", "final_verdict": "codex"}"#);
+        let session = l.engine.session();
+        assert!(session.closed);
+        assert_eq!(session.winner, Some(PartId::new("codex")));
+        assert_eq!(
+            session.extendable(),
+            Err("ラウンド上限の前に終了したコンペです")
+        );
+    }
+
+    #[test]
+    fn a_held_panel_waits_after_the_combined_judgment() {
+        let mut l = Logged::panel(Some(3));
+        l.step(Input::UserSetHold { hold: true, at: 3 });
+        l.compete(1);
+        l.sent(1, 0);
+        l.write(1, 0, &card_json(0, 1, 70, 80, ""));
+        assert!(!l.engine.session().waits_to_continue());
+        l.score_all(1, [(70, 80), (70, 80), (70, 80)]);
+        let session = l.engine.session();
+        assert_eq!(session.rounds.len(), 1);
+        assert_eq!(session.round(1).unwrap().phase, Phase::Closed);
+        assert!(session.waits_to_continue());
+        let out = l.step(Input::UserContinue { at: 9_000 });
+        assert_eq!(l.engine.session().rounds.len(), 2);
+        assert_eq!(sends(&out), 2);
+    }
+
+    #[test]
+    fn an_intervention_during_judging_reaches_the_verdict_and_next_briefs() {
+        let mut l = Logged::panel(Some(2));
+        l.compete(1);
+        // Posted after the judge briefs went out: not in them.
+        l.step(Input::UserIntervention {
+            to: vec![],
+            body: "Prefer keyboard control".into(),
+            at: 1_500,
+        });
+        for n in 0..3 {
+            let body = &l.current().brief(&seat(n)).unwrap().body;
+            assert!(!body.contains("Prefer keyboard control"));
+        }
+        l.score_all(1, [(70, 80), (72, 79), (74, 78)]);
+        let r2 = l.engine.session().round(2).unwrap();
+        for brief in &r2.briefs {
+            assert!(
+                brief.body.contains("Prefer keyboard control"),
+                "{}",
+                brief.to
+            );
+        }
+        l.compete(2);
+        let r2 = l.current();
+        for n in 0..3 {
+            let body = &r2.brief(&seat(n)).unwrap().body;
+            assert!(body.contains("Prefer keyboard control"), "{}", seat(n));
+        }
+        for n in 0..3 {
+            l.sent(2, n);
+        }
+        l.step(Input::UserIntervention {
+            to: vec![seat(0)],
+            body: "Weigh accessibility in the verdict".into(),
+            at: 2_500,
+        });
+        for n in 0..3 {
+            l.write(2, n, &card_json(n, 2, 70, 80, ""));
+        }
+        let verdict = &l.current().verdict_brief.as_ref().unwrap().body;
+        assert!(
+            verdict.contains("to judge] Weigh accessibility in the verdict"),
+            "{verdict}"
+        );
+        assert!(
+            verdict.contains("to everyone] Prefer keyboard control"),
+            "{verdict}"
+        );
+    }
+
+    #[test]
+    fn a_panel_extended_after_its_verdict_has_a_new_verdict_step() {
+        let mut l = Logged::panel(Some(1));
+        l.compete(1);
+        l.score_all(1, [(70, 80), (72, 79), (74, 78)]);
+        l.step(Input::Sent {
+            round: 1,
+            part: seat(0),
+            at: 5_000,
+        });
+        l.write(1, 0, r#"{"winner": "codex", "final_verdict": "codex"}"#);
+        assert!(l.engine.session().closed);
+        assert_eq!(l.engine.session().extendable(), Ok(()));
+
+        let out = l.step(Input::UserExtend { by: 1, at: 6_000 });
+        assert_eq!(sends(&out), 2);
+        let session = l.engine.session();
+        assert!(!session.closed);
+        assert_eq!(session.winner, None);
+        // The verdict stays with its round.
+        let r1 = session.round(1).unwrap().outcome.as_ref().unwrap();
+        assert_eq!(r1.winner, Some(PartId::new("codex")));
+
+        l.compete(2);
+        for n in 0..3 {
+            let body = &l.current().brief(&seat(n)).unwrap().body;
+            let lead = n == 0;
+            assert_eq!(
+                body.contains("This is the FINAL round"),
+                lead,
+                "{}",
+                seat(n)
+            );
+        }
+        let out = l.score_all(2, [(85, 80), (84, 79), (80, 81)]);
+        assert!(matches!(
+            out.batches.last().unwrap().last(),
+            Some(Event::VerdictRequested { round: 2, .. })
+        ));
+        assert!(body_to(&out, &seat(0)).contains("Highest mean: claude"));
+        l.step(Input::Sent {
+            round: 2,
+            part: seat(0),
+            at: 9_000,
+        });
+        l.write(2, 0, r#"{"winner": "claude", "final_verdict": "claude"}"#);
+        let session = l.engine.session();
+        assert!(session.closed);
+        assert_eq!(session.winner, Some(PartId::new("claude")));
+        assert_eq!(session.final_verdict(), Some("claude"));
+    }
+
+    #[test]
+    fn resume_mid_judging_briefs_only_judges_without_a_scorecard() {
+        let mut l = Logged::panel(Some(3));
+        l.compete(1);
+        // The lead scored; judge-2 took its brief; judge-3's never went out.
+        l.sent(1, 0);
+        l.write(1, 0, &card_json(0, 1, 70, 80, ""));
+        l.sent(1, 1);
+        let stored = reduce::replay(&l.log).unwrap();
+        let mut resumed = Engine::resume(stored, Path::new(PANEL_DIR), Config::default());
+        let out = resumed.handle(Input::Start { now: 50_000 }).unwrap();
+        assert!(out.batches.is_empty(), "{out:?}");
+        assert_eq!(sent_to(&out), [seat(2)]);
+        let watched: Vec<&PartId> = out
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::WatchReply { part, .. } => Some(part),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(watched, [&seat(1), &seat(2)]);
+        // judge-2's brief was lost with its pane: it goes out again as it
+        // was, without counting a retry.
+        let out = resumed
+            .handle(Input::Redeliver {
+                round: 1,
+                part: seat(1),
+            })
+            .unwrap();
+        assert!(out.batches.is_empty());
+        let brief = resumed.session().round(1).unwrap().brief(&seat(1)).unwrap();
+        assert_eq!(body_to(&out, &seat(1)), brief.body);
+        assert_eq!(brief.receipt.retries, 0);
+        // The lead's accepted card is not asked for again.
+        let out = resumed
+            .handle(Input::Redeliver {
+                round: 1,
+                part: seat(0),
+            })
+            .unwrap();
+        assert!(out.effects.is_empty());
+        // judge-2 has its full time again from the resume.
+        let start = Config::default().start_timeout;
+        let out = resumed
+            .handle(Input::Tick {
+                now: 50_000 + start - 1,
+            })
+            .unwrap();
+        assert!(out.batches.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn resume_while_the_verdict_is_pending_sends_it() {
+        let mut l = Logged::panel(Some(1));
+        l.compete(1);
+        l.score_all(1, [(70, 80), (72, 79), (74, 78)]);
+        let verdict_path = store::verdict_reply_path(Path::new(PANEL_DIR), 1);
+        // Stopped before the verdict brief went out.
+        let stored = reduce::replay(&l.log).unwrap();
+        let mut resumed = Engine::resume(stored, Path::new(PANEL_DIR), Config::default());
+        let out = resumed.handle(Input::Start { now: 50_000 }).unwrap();
+        assert_eq!(sent_to(&out), [seat(0)]);
+        let verdict = resumed
+            .session()
+            .round(1)
+            .unwrap()
+            .verdict_brief
+            .clone()
+            .unwrap();
+        assert_eq!(body_to(&out, &seat(0)), verdict.body);
+        assert_eq!(
+            out.effects
+                .iter()
+                .filter(|e| matches!(e, Effect::WatchReply { .. }))
+                .collect::<Vec<_>>(),
+            [&Effect::WatchReply {
+                round: 1,
+                part: seat(0),
+                path: verdict_path.clone(),
+            }]
+        );
+        // Stopped after it went out: watched, not pasted again.
+        l.step(Input::Sent {
+            round: 1,
+            part: seat(0),
+            at: 5_000,
+        });
+        let stored = reduce::replay(&l.log).unwrap();
+        let mut resumed = Engine::resume(stored, Path::new(PANEL_DIR), Config::default());
+        let out = resumed.handle(Input::Start { now: 50_000 }).unwrap();
+        assert_eq!(
+            out.effects,
+            [Effect::WatchReply {
+                round: 1,
+                part: seat(0),
+                path: verdict_path,
+            }]
+        );
+        resumed
+            .handle(Input::ReplyFileWritten {
+                round: 1,
+                part: seat(0),
+                content: r#"{"winner": "codex", "final_verdict": "codex"}"#.into(),
+                artifacts: vec![],
+                at: 60_000,
+            })
+            .unwrap();
+        assert!(resumed.session().closed);
+        assert_eq!(resumed.session().winner, Some(PartId::new("codex")));
+    }
+
+    /// The v0.9.15 log cut after round 2's judge brief went out resumes as
+    /// that version did: the brief is watched, sent again only when its
+    /// pane was lost, and the judge's reply writes the very lines the full
+    /// log holds.
+    #[test]
+    fn a_single_judge_log_cut_while_judging_resumes_as_before() {
+        const FULL: &str = include_str!("model/testdata/single-judge-v0.9.15.events.jsonl");
+        const CUT: &str = include_str!("model/testdata/single-judge-v0.9.15-judging.events.jsonl");
+        let dir = Path::new("/tmp/competitions/comp-1790000000000");
+        let read = |text: &str| -> Vec<Vec<Event>> {
+            text.lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        };
+        let session = reduce::replay(read(CUT)).unwrap();
+        assert!(!session.is_panel());
+        let judge = PartId::new(JUDGE_ID);
+        let mut engine = Engine::resume(session, dir, Config::default());
+        let out = engine
+            .handle(Input::Start {
+                now: 1_790_000_250_000,
+            })
+            .unwrap();
+        assert!(out.batches.is_empty());
+        assert_eq!(
+            out.effects,
+            [Effect::WatchReply {
+                round: 2,
+                part: judge.clone(),
+                path: dir.join("r2").join(store::JUDGE_FILE),
+            }]
+        );
+        let out = engine
+            .handle(Input::Redeliver {
+                round: 2,
+                part: judge.clone(),
+            })
+            .unwrap();
+        let brief = engine.session().round(2).unwrap().brief(&judge).unwrap();
+        assert!(out.batches.is_empty());
+        assert_eq!(body_to(&out, &judge), brief.body);
+
+        let reply = r#"{
+  "overview": "claude closed the gap and now leads.",
+  "evaluations": {
+    "claude": { "score": 88, "strengths": "Queue and keyboard", "feedback": "Polish the empty queue state." },
+    "codex": { "score": 84, "strengths": "Solid on small screens", "feedback": "The queue drawer hides the scrubber." }
+  },
+  "ranking": ["claude", "codex"],
+  "winner": "claude",
+  "final_verdict": "claude met every checklist item and answered the feedback; codex's drawer still hides the scrubber.",
+  "close": true,
+  "amendments": [ { "round": 1, "contestant": "claude", "score": 76, "reason": "R1 was judged without its stylesheet" } ]
+}"#;
+        let out = engine
+            .handle(Input::ReplyFileWritten {
+                round: 2,
+                part: judge,
+                content: reply.into(),
+                artifacts: vec![],
+                at: 1_790_000_260_000,
+            })
+            .unwrap();
+        let written: Vec<String> = out
+            .batches
+            .iter()
+            .map(|b| serde_json::to_string(b).unwrap())
+            .collect();
+        let rest: Vec<&str> = FULL.lines().skip(CUT.lines().count()).collect();
+        assert_eq!(written, rest);
+        assert_eq!(*engine.session(), reduce::replay(read(FULL)).unwrap());
     }
 }

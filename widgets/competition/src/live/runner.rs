@@ -1,6 +1,6 @@
 //! Runs one competition against a live Noa, on a thread of its own.
 //!
-//! Opens a Noa tab for the competition, spawns the judge and every contestant
+//! Opens a Noa tab for the competition, spawns every judge and contestant
 //! as interactive agents in splits, creates each contestant's private entry
 //! directory (`entries/<part>/`), snapshots deliverables on every submission
 //! (`r<N>/artifacts/<part>/`), regenerates `compare.html`, and feeds back
@@ -40,8 +40,8 @@ const REPLY_STABLE_FOR: Millis = 600;
 const MAX_SPAWNS: u8 = 2;
 /// Noa's most panes in one row or column of a tab (`MAX_PANES_PER_AXIS`,
 /// crates/noa-app/src/split_tree/tree/types.rs): a split along a full one
-/// is refused. A tab of three columns of three holds the judge and the
-/// largest panel.
+/// is refused. A tab of three columns of three holds the most judges and
+/// the largest panel.
 const PANES_PER_AXIS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,7 +255,9 @@ fn in_play(session: &Session, round: RoundNo, part: &PartId) -> bool {
     if current.no != round {
         return false;
     }
-    let phase_ok = if *part == session.judge.id {
+    // Every judge (and the lead's verdict brief, which `brief` finds in
+    // its scorecard's place) is in play while the round is judged.
+    let phase_ok = if session.is_judge(part) {
         current.phase == Phase::Judging
     } else {
         matches!(current.phase, Phase::Briefing | Phase::Competing)
@@ -768,7 +770,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let Some(round) = self.engine.session().current_round() else {
             return;
         };
-        for brief in round.briefs.iter().chain(&round.judge_brief) {
+        for brief in round.briefs.iter().chain(round.judge_briefs()) {
             let Some(digest) = brief.receipt.rejected_digest else {
                 continue;
             };
@@ -793,7 +795,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let lost: Vec<PartId> = round
             .briefs
             .iter()
-            .chain(&round.judge_brief)
+            .chain(round.judge_briefs())
             .filter(|b| b.receipt.sent.is_some() && !b.reply_path.exists())
             .filter(|b| !self.panes.contains_key(&b.to))
             .filter(|b| in_play(self.engine.session(), no, &b.to))
@@ -1309,7 +1311,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
 
     fn all_parts(&self) -> Vec<PartId> {
         let s = self.engine.session();
-        std::iter::once(s.judge.id.clone())
+        s.judges()
+            .map(|j| j.id.clone())
             .chain(s.contestant_ids().cloned())
             .collect()
     }
@@ -2166,6 +2169,186 @@ mod tests {
     #[test]
     fn six_entries_and_the_judge_fit_in_one_tab() {
         judge_is_briefed_after(6);
+    }
+
+    /// A new competition of `n` claude entries judged by `judges` claude
+    /// judges (`judge`, `judge-2`, …).
+    fn panel_start(root: &Path, n: usize, judges: usize) -> Start {
+        Start::New {
+            request: "Design a music player UI".into(),
+            workdir: None,
+            max_rounds: Some(2),
+            reveal_interval: 5,
+            judges: vec![AgentKind::Claude.into(); judges],
+            panel: vec![AgentKind::Claude.into(); n],
+            root: root.to_owned(),
+        }
+    }
+
+    /// Runs round 1 until every contestant has submitted and every judge's
+    /// pane is up (not yet briefed).
+    fn run_to_judging(fake: &Fake, runner: &mut Runner<Fake, Fake>, conn: &mut Fake) {
+        step(runner, conn);
+        let contestants: Vec<PartId> = runner.engine.session().contestant_ids().cloned().collect();
+        for part in &contestants {
+            fake.report(runner.panes[part].id, "input", None);
+        }
+        step(runner, conn);
+        step(runner, conn);
+        let reply_dir = runner.engine.reply_dir();
+        for part in &contestants {
+            assert_eq!(fake.pasted(runner.panes[part].id), 1, "{part} not briefed");
+            fs::write(store::reply_path(&reply_dir, 1, part), "# Summary: done").unwrap();
+        }
+        step(runner, conn);
+        fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+        step(runner, conn);
+        assert_eq!(
+            runner.engine.session().round(1).unwrap().phase,
+            Phase::Judging
+        );
+        step(runner, conn);
+    }
+
+    fn judge_ids(runner: &Runner<Fake, Fake>) -> Vec<PartId> {
+        runner
+            .engine
+            .session()
+            .judges()
+            .map(|j| j.id.clone())
+            .collect()
+    }
+
+    /// Reports every judge's pane at its prompt and lets the briefs go out.
+    fn brief_judges(fake: &Fake, runner: &mut Runner<Fake, Fake>, conn: &mut Fake) {
+        for judge in judge_ids(runner) {
+            fake.report(runner.panes[&judge].id, "input", None);
+        }
+        step(runner, conn);
+        step(runner, conn);
+    }
+
+    #[test]
+    fn six_entries_and_three_judges_fit_in_one_tab() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, _actions, _updates) = rig_on(&fake, panel_start(&root, 6, 3));
+        let mut conn = fake.clone();
+        run_to_judging(&fake, &mut runner, &mut conn);
+        brief_judges(&fake, &mut runner, &mut conn);
+        let id = runner.engine.session().id.clone();
+        for judge in judge_ids(&runner) {
+            let pane = runner.panes[&judge].id;
+            assert_eq!(fake.pasted(pane), 1, "{judge} was not briefed");
+            let label = fake.0.borrow().panes[&pane].label.clone();
+            assert_eq!(label, Some(format!("comp:{id}:{judge}")));
+        }
+        let w = fake.0.borrow();
+        assert_eq!(w.spawned, 9);
+        assert_eq!(w.tabs.len(), 1, "{:?}", w.tabs);
+        assert_eq!(w.tabs[0].len(), PANES_PER_AXIS, "{:?}", w.tabs);
+        assert!(
+            w.tabs[0].iter().all(|c| c.len() == PANES_PER_AXIS),
+            "{:?}",
+            w.tabs
+        );
+        drop(w);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resume_takes_up_every_judges_pane() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, _actions, _updates) = rig_on(&fake, panel_start(&root, 2, 3));
+        let mut conn = fake.clone();
+        run_to_judging(&fake, &mut runner, &mut conn);
+        brief_judges(&fake, &mut runner, &mut conn);
+        let judges = judge_ids(&runner);
+        let panes: BTreeMap<PartId, u64> = judges
+            .iter()
+            .map(|j| (j.clone(), runner.panes[j].id))
+            .collect();
+        let dir = runner.engine.dir().to_owned();
+        drop(runner);
+        wait_unlocked(&dir);
+        // judge-3's pane closed while the competition was stopped.
+        let lost = judges[2].clone();
+        fake.0.borrow_mut().panes.remove(&panes[&lost]);
+        let spawned = fake.0.borrow().spawned;
+
+        let (mut runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir });
+        for judge in &judges[..2] {
+            assert_eq!(runner.panes[judge].id, panes[judge], "{judge} not taken up");
+        }
+        step(&mut runner, &mut conn);
+        assert_eq!(
+            fake.0.borrow().spawned,
+            spawned + 1,
+            "only judge-3 starts again"
+        );
+        let pane = runner.panes[&lost].id;
+        assert_ne!(pane, panes[&lost]);
+        fake.report(pane, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        // Briefs out before the stop are not pasted again; the lost one is,
+        // without counting a retry.
+        for judge in &judges[..2] {
+            assert_eq!(fake.pasted(panes[judge]), 1, "{judge} briefed again");
+        }
+        assert_eq!(fake.pasted(pane), 1, "judge-3 was not briefed again");
+        let round = runner.engine.session().round(1).unwrap();
+        for judge in &judges {
+            let receipt = &round.brief(judge).unwrap().receipt;
+            assert_eq!(receipt.retries, 0, "{judge}");
+            assert!(receipt.failed.is_none(), "{judge}");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_dead_judge_pane_is_restarted_for_its_brief() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, _actions, _updates) = rig_on(&fake, panel_start(&root, 2, 3));
+        let mut conn = fake.clone();
+        run_to_judging(&fake, &mut runner, &mut conn);
+        let judges = judge_ids(&runner);
+        assert_eq!(fake.0.borrow().spawned, 5);
+        // judge-2's agent exits before it is briefed.
+        let dead = runner.panes[&judges[1]].id;
+        fake.0.borrow_mut().panes.remove(&dead);
+        fake.0.borrow_mut().events.push_back(Changes {
+            removed: vec![dead],
+            ..Changes::default()
+        });
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.0.borrow().spawned, 6);
+        let again = runner.panes[&judges[1]].id;
+        assert_ne!(again, dead);
+        brief_judges(&fake, &mut runner, &mut conn);
+        for judge in &judges {
+            assert_eq!(
+                fake.pasted(runner.panes[judge].id),
+                1,
+                "{judge} not briefed"
+            );
+        }
+        assert_eq!(
+            fake.0.borrow().spawned,
+            6,
+            "another judge was started again"
+        );
+        let round = runner.engine.session().round(1).unwrap();
+        for judge in &judges {
+            assert!(
+                round.brief(judge).unwrap().receipt.sent.is_some(),
+                "{judge}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

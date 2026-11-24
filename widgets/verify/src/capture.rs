@@ -703,6 +703,23 @@ pub fn capture(target: &Target, dest: &Path, now: Millis) -> Result<Captured, St
     Err(last)
 }
 
+/// `git status --porcelain` of the work tree at `dir` (untracked files
+/// listed, no submodule ignored), run as capture runs git ([`git`]: no
+/// filter driver, optional locks off) on a copy of the index
+/// ([`IndexCopy`]): the stat refresh status makes of an entry whose mtime
+/// moved goes to the copy, never to the person's index.
+pub fn worktree_status(dir: &Path) -> Result<Vec<u8>, String> {
+    let off = Drivers::of(dir)?;
+    let (mut cmd, _index) = git_indexed(dir, &off)?;
+    cmd.args([
+        "status",
+        "--porcelain",
+        "--untracked-files=normal",
+        "--ignore-submodules=none",
+    ]);
+    run(cmd, MAX_LISTING_BYTES)
+}
+
 /// The top level of the work tree holding `path`; a non-git directory is
 /// refused with 「検証は git の作業ツリーでのみ行えます」.
 pub fn repo_root(path: &Path) -> Result<PathBuf, String> {

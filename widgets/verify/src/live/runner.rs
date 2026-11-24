@@ -2612,15 +2612,9 @@ fn check_shared_ref(
     if head != want {
         return Err(shared_head_moved(&head, &want));
     }
-    let status = checkout_git(
-        workdir,
-        &[
-            "status",
-            "--porcelain",
-            "--untracked-files=normal",
-            "--ignore-submodules=none",
-        ],
-    )?;
+    // On a copy of the index: the person's is never written (L1-3).
+    let status = verify::capture::worktree_status(workdir)
+        .map_err(|e| format!("git status が失敗しました: {e}"))?;
     if !status.is_empty() {
         return Err(format!(
             "{SHARED_REF_HEAD}。作業ツリーに未コミットの変更があります"
@@ -3665,6 +3659,40 @@ pub(crate) mod tests {
         let (runner, _, _) = open_wired(&fake, start()).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(runner.engine.session().rebuild.head_sha, feat);
         assert_eq!(runner.engine.session().isolation, Isolation::Shared);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// AC-1, L1-3: the 共有 start's check of a clean checkout writes
+    /// nothing to the person's index, though a tracked file's mtime moved
+    /// (git refreshes such an entry's stat information when it can).
+    #[test]
+    fn ac01_the_shared_check_of_a_clean_checkout_leaves_the_index_unwritten() {
+        let root = temp_root();
+        let repo = repo(&root);
+        let file = fs::File::options()
+            .write(true)
+            .open(repo.join("src/lib.rs"))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+            .unwrap();
+        drop(file);
+        let index = fs::read(repo.join(".git/index")).unwrap();
+        let mut target = state_of(&repo);
+        target.head = Head::Ref("HEAD".into());
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            check_shared_ref(&target, Isolation::Shared, &repo).unwrap(),
+            Some(head)
+        );
+        assert!(
+            fs::read(repo.join(".git/index")).unwrap() == index,
+            "the person's index was written"
+        );
+        // The same file changed is still a change.
+        fs::write(repo.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        let err = check_shared_ref(&target, Isolation::Shared, &repo).unwrap_err();
+        assert!(err.contains("未コミットの変更"), "{err}");
+        assert!(fs::read(repo.join(".git/index")).unwrap() == index);
         let _ = fs::remove_dir_all(root);
     }
 

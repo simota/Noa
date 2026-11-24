@@ -132,6 +132,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::OpenDiscussion => "Open Discussion",
         AppCommand::OpenCompetition => "Open Competition",
         AppCommand::OpenReview => "Open Review",
+        AppCommand::OpenVerify => "Open Verify",
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
         // (this whole `match`) — following that established convention
@@ -279,6 +280,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::OpenReview => {
             "Run a thorough multi-agent review of a diff, files or a document with blind reviews, cross-examination and a consolidated report, in a window of its own."
         }
+        AppCommand::OpenVerify => {
+            "Verify a change against acceptance criteria with several agents running checks in isolated worktrees, recorded evidence and a verdict, in a window of its own."
+        }
         AppCommand::OpenThemePicker => "Choose a color theme.",
         AppCommand::ToggleProcessMonitor => "Show the processes running in each terminal.",
         AppCommand::NextNotification => "Go to the next session with an unread notification.",
@@ -381,6 +385,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::OpenDiscussion,
         AppCommand::OpenCompetition,
         AppCommand::OpenReview,
+        AppCommand::OpenVerify,
         AppCommand::SetTabTitle,
         AppCommand::CloseTab,
         AppCommand::NextTab,
@@ -682,7 +687,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::OpenRepoBrowser
         | AppCommand::OpenDiscussion
         | AppCommand::OpenCompetition
-        | AppCommand::OpenReview => CommandCategory::View,
+        | AppCommand::OpenReview
+        | AppCommand::OpenVerify => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
         AppCommand::CopyMode(_) => CommandCategory::Clipboard,
@@ -1051,6 +1057,7 @@ mod tests {
             AppCommand::OpenDiscussion,
             AppCommand::OpenCompetition,
             AppCommand::OpenReview,
+            AppCommand::OpenVerify,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
         commands

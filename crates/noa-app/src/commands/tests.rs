@@ -1231,3 +1231,20 @@ fn the_review_widget_is_addressable_by_action_and_menu_id() {
         crate::command_palette::CommandCategory::View
     );
 }
+
+#[test]
+fn the_verify_widget_is_addressable_by_action_and_menu_id() {
+    let command = AppCommand::OpenVerify;
+    assert_eq!(command.action_name(), "verify.open");
+    assert_eq!(AppCommand::from_action_name("verify.open"), Some(command));
+    assert_eq!(command.menu_id(), "noa.view.open-verify");
+    assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+    assert_eq!(
+        crate::command_palette::command_palette_title(command),
+        "Open Verify"
+    );
+    assert_eq!(
+        crate::command_palette::command_category(command),
+        crate::command_palette::CommandCategory::View
+    );
+}

@@ -150,6 +150,7 @@ Single-judge sessions show exactly what they show today. With two or more judges
    - The 審判 line lists every judge with kind and setup, marking the lead.
    - The leaderboard lines use means and add the last round's per-judge scores and spread.
    - Each round record gives every entry `(81.3/100 · judge 80 / judge-2 83 / judge-3 81 · 差 3)`.
+   - In both, a spread of `SPREAD_WARN` (15) or more is marked as the leaderboard marks it: `⚠ 差 18`.
    - Each round gets a `**審判別総評:**` list.
    - The final verdict section is unchanged.
    - The same text feeds 結果をコピー, レポート保存… and `adopt-<winner>.md`.

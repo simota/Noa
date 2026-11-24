@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use super::aggregate::PanelScores;
+use super::aggregate::{PanelScores, SPREAD_WARN};
 use super::types::{PartId, Participant, RoundKind, RoundNo, Session};
 
 pub fn result_markdown(session: &Session) -> String {
@@ -149,14 +149,17 @@ fn judge_label(judge: &Participant, lead: bool) -> String {
     format!("{}（{about}）", judge.id)
 }
 
-/// `judge 80 / judge-2 83 / judge-3 81 · 差 3`.
+/// `judge 80 / judge-2 83 / judge-3 81 · 差 3`; a spread from
+/// [`SPREAD_WARN`] up is marked as the leaderboard marks it (`⚠ 差 18`).
 fn judges_text(panel: &PanelScores) -> String {
     let scores: Vec<String> = panel
         .scores
         .iter()
         .map(|(judge, score)| format!("{judge} {score}"))
         .collect();
-    format!("{} · 差 {}", scores.join(" / "), panel.spread())
+    let spread = panel.spread();
+    let warn = if spread >= SPREAD_WARN { "⚠ " } else { "" };
+    format!("{} · {warn}差 {spread}", scores.join(" / "))
 }
 
 /// `81.3/100 · judge 80 / judge-2 83 / judge-3 81 · 差 3`, in a panel
@@ -194,4 +197,45 @@ pub fn adopt_task(
     out.push('\n');
     out.push_str(&result_markdown(session));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::aggregate::tests::{cards, panel_session, settle};
+    use crate::model::types::Submission;
+
+    /// A panel's spread from `SPREAD_WARN` up is marked as the leaderboard
+    /// marks it, in the leaderboard lines and in the round record.
+    #[test]
+    fn a_panel_report_marks_a_spread_over_the_warning_line() {
+        let mut session = panel_session(Some(3));
+        for part in ["claude", "codex"] {
+            session.rounds[0].submissions.insert(
+                PartId::new(part),
+                Submission {
+                    part: PartId::new(part),
+                    summary: format!("{part} entry"),
+                    body: String::new(),
+                    artifacts: Vec::new(),
+                    at: 3,
+                },
+            );
+        }
+        let all = cards(
+            &[("codex", 85), ("claude", 60)],
+            &[("codex", 80), ("claude", 78)],
+            &[("codex", 88), ("claude", 62)],
+        );
+        settle(&mut session, 1, &all).unwrap();
+        let report = result_markdown(&session);
+        for line in [
+            "（R1: judge 60 / judge-2 78 / judge-3 62 · ⚠ 差 18）",
+            "- **claude** (66.7/100 · judge 60 / judge-2 78 / judge-3 62 · ⚠ 差 18): claude entry",
+            "（R1: judge 85 / judge-2 80 / judge-3 88 · 差 8）",
+            "- **codex** (84.3/100 · judge 85 / judge-2 80 / judge-3 88 · 差 8): codex entry",
+        ] {
+            assert!(report.contains(line), "missing {line:?} in\n{report}");
+        }
+    }
 }

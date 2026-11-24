@@ -9,6 +9,7 @@
 //!   target/               the snapshot (manifest.json, diff.patch, files/, document.md)
 //!   r<N>/<reviewer>.json  reviewer replies
 //!   r<N>/lead.json        the lead's output
+//!   fix-<n>.md            a fix request's task (修正を依頼)
 //! ```
 
 use std::fmt;
@@ -138,6 +139,58 @@ pub fn rewrite_report(dir: &Path) -> Result<(), StoreError> {
     write_report(dir, &export::report_markdown(&session))?;
     drop(store);
     Ok(())
+}
+
+/// Where an agent asked to fix `session`'s findings works: the workdir of
+/// a git or files review (the tree the findings point into). A document
+/// review has no tree to fix, and one without a workdir nowhere to work.
+pub fn fix_workdir(session: &Session) -> Result<&Path, &'static str> {
+    if session.target.kind == TargetKind::Document {
+        return Err("文書のレビューでは修正を依頼できません（直す作業ツリーがありません）");
+    }
+    session
+        .workdir
+        .as_deref()
+        .ok_or("修正の依頼には、作業ディレクトリのあるレビューが必要です")
+}
+
+/// The most fix requests one review keeps (`fix-1.md` … `fix-999.md`).
+pub const MAX_FIX_TASKS: u32 = 999;
+
+/// Writes `text` as the next free `fix-<n>.md` in `session`'s reply dir
+/// (`dir` is its store directory) and returns its path. The reply dir is
+/// opened (made where missing) one component at a time from its base and
+/// the file made relative to it ([`fsx::open_dir`]): nothing is written over
+/// an earlier request, through a link, or outside the reply dir. An id that
+/// is not one plain path component is refused before anything is made.
+/// Callers check first that the log belongs to `dir`
+/// ([`crate::engine::check_store_paths`]).
+pub fn write_fix_task(dir: &Path, session: &Session, text: &str) -> io::Result<PathBuf> {
+    let id = Path::new(session.id.as_str());
+    if !matches!(
+        id.components().collect::<Vec<_>>().as_slice(),
+        [std::path::Component::Normal(_)]
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("レビュー ID {} はフォルダ名になりません", session.id),
+        ));
+    }
+    let base = reply_base(dir, session);
+    let reply = reply_dir(dir, session);
+    let folder = fsx::open_dir(&base, &reply, true)?;
+    for n in 1..=MAX_FIX_TASKS {
+        let name = format!("fix-{n}.md");
+        match fsx::write_new_at(&folder, std::ffi::OsStr::new(&name), text.as_bytes()) {
+            Ok(()) => return Ok(reply.join(name)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other(format!(
+        "{} に修正の依頼が {MAX_FIX_TASKS} 件あります",
+        reply.display()
+    )))
 }
 
 /// Makes the folder a reply goes to, below `base` ([`reply_base`]).
@@ -386,11 +439,86 @@ pub struct Summary {
 pub struct Listed {
     pub dir: PathBuf,
     pub summary: Result<Summary, String>,
+    /// The log's modification time and size when it was read: a log whose
+    /// stamp has moved on is read again.
+    pub stamp: Option<LogStamp>,
+}
+
+/// When a log was last written and how long it was then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogStamp {
+    pub modified: std::time::SystemTime,
+    pub len: u64,
+}
+
+/// `dir`'s log stamp, or `None` when it cannot be read.
+pub fn log_stamp(dir: &Path) -> Option<LogStamp> {
+    let meta = fs::metadata(dir.join(EVENTS_FILE)).ok()?;
+    Some(LogStamp {
+        modified: meta.modified().ok()?,
+        len: meta.len(),
+    })
+}
+
+/// `dir` listed: its log read now (stamped first, so a write during the
+/// read shows as a change next time).
+pub fn listed(dir: &Path) -> Listed {
+    let stamp = log_stamp(dir);
+    let summary = read_session(dir)
+        .map(|session| Summary {
+            busy: is_busy(dir),
+            ..Summary::of(dir, &session)
+        })
+        .map_err(|e| e.to_string());
+    Listed {
+        dir: dir.to_owned(),
+        summary,
+        stamp,
+    }
 }
 
 /// The newest `limit` reviews under `root`, newest first. Only the listed
 /// logs are read; a log that cannot be read is listed with why.
 pub fn list_sessions(root: &Path, limit: usize) -> Vec<Listed> {
+    page_sessions(root, &[], limit).0
+}
+
+/// The newest `count` reviews under `root` as the folder holds them now,
+/// and how many it holds: one listing gives both. A row of `shown` read
+/// well whose log has not changed (same stamp) is kept, only asked again
+/// whether another window holds it; a changed, new or unread one is read; a folder gone
+/// from the listing is gone from the rows, and none comes twice.
+pub fn page_sessions(root: &Path, shown: &[Listed], count: usize) -> (Vec<Listed>, usize) {
+    let dirs = session_dirs(root);
+    let total = dirs.len();
+    let rows = dirs
+        .into_iter()
+        .take(count)
+        .map(|dir| match shown.iter().find(|l| l.dir == dir) {
+            // Only a summary that was read is kept; a row that failed is
+            // tried again (a log made readable keeps its stamp).
+            Some(old)
+                if old.summary.is_ok() && old.stamp.is_some() && old.stamp == log_stamp(&dir) =>
+            {
+                let mut row = old.clone();
+                if let Ok(summary) = &mut row.summary {
+                    summary.busy = is_busy(&dir);
+                }
+                row
+            }
+            _ => listed(&dir),
+        })
+        .collect();
+    (rows, total)
+}
+
+/// How many reviews `root` holds (no log is read).
+pub fn count_sessions(root: &Path) -> usize {
+    session_dirs(root).len()
+}
+
+/// The review folders under `root` (those with a log), newest first.
+fn session_dirs(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
     };
@@ -407,18 +535,7 @@ pub fn list_sessions(root: &Path, limit: usize) -> Vec<Listed> {
         })
         .collect();
     dirs.sort_by(|a, b| b.cmp(a));
-    dirs.into_iter()
-        .take(limit)
-        .map(|(_, dir)| {
-            let summary = read_session(&dir)
-                .map(|session| Summary {
-                    busy: is_busy(&dir),
-                    ..Summary::of(&dir, &session)
-                })
-                .map_err(|e| e.to_string());
-            Listed { dir, summary }
-        })
-        .collect()
+    dirs.into_iter().map(|(_, dir)| dir).collect()
 }
 
 /// `rev-<millis>` or `rev-<millis>-<n>` as `(millis, n)`, for ordering.

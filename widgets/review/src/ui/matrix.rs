@@ -3,7 +3,7 @@
 //! then file coverage: per target file its findings and who reviewed it.
 
 use noa_gpui_core::style::{AlignItems, Size as LayoutSize, auto, length};
-use noa_gpui_core::widgets::{Container, Label, Pressable, Tone, Truncation};
+use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Pressable, Tone, Truncation};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use review::model::types::{Session, Severity, covers};
@@ -206,27 +206,41 @@ pub(super) fn insert(
                 format!("+{} −{}", file.additions, file.deletions),
             );
         }
+        // The findings pointing into the file (their own location or a
+        // source's), as the board's file filter takes them.
+        let touching: Vec<_> = session
+            .findings
+            .iter()
+            .filter(|f| super::board::touches(session, f, &file.path))
+            .collect();
         let mut counts = Vec::new();
         for s in Severity::ALL {
             let n = live
                 .iter()
-                .filter(|f| {
-                    f.severity == s && f.location.as_ref().is_some_and(|l| l.path == file.path)
-                })
+                .filter(|f| f.severity == s && touching.iter().any(|t| t.id == f.id))
                 .count();
             if n > 0 {
                 counts.push(format!("{} {n}", s.label()));
             }
         }
+        let settled = touching.iter().filter(|f| !f.status.is_live()).count();
         caption(
             tree,
             top,
-            if counts.is_empty() {
-                "指摘なし".to_owned()
-            } else {
-                counts.join(" · ")
+            match (counts.is_empty(), settled) {
+                (true, 0) => "指摘なし".to_owned(),
+                (true, n) => format!("未解決の指摘なし（却下・取り下げ・統合 {n}）"),
+                (false, _) => counts.join(" · "),
             },
         );
+        if !touching.is_empty() {
+            let show = tree.insert(
+                Some(top),
+                Button::new("このファイルの指摘").control_size(ControlSize::Small),
+            );
+            tree.set_accessible_label(show, format!("{} の指摘を表示", file.path));
+            actions.push((show, Action::FilterFile(Some(file.path.clone()))));
+        }
         let reviewed: Vec<String> = session
             .coverage
             .iter()

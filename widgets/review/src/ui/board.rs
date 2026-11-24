@@ -13,7 +13,7 @@ use super::{
 };
 
 /// Whether `filters` let `f` through.
-fn passes(session: &Session, filters: &Filters, f: &Finding) -> bool {
+pub(crate) fn passes(session: &Session, filters: &Filters, f: &Finding) -> bool {
     (filters.severities.is_empty() || filters.severities.contains(&f.severity))
         && (filters.lenses.is_empty() || filters.lenses.contains(&f.category))
         && (filters.statuses.is_empty() || filters.statuses.contains(&status_key(f.status)))
@@ -25,6 +25,76 @@ fn passes(session: &Session, filters: &Filters, f: &Finding) -> bool {
             .reviewer
             .as_ref()
             .is_none_or(|part| f.origins().contains(part) || f.stances.contains_key(part))
+        && filters
+            .path
+            .as_ref()
+            .is_none_or(|path| touches(session, f, path))
+        && holds(session, f, &filters.query)
+}
+
+/// `path` as a chip shows it: whole, or its last components after `…/`
+/// when long, so the chip and what follows it stay in the pane.
+pub(crate) fn short_path(path: &str) -> String {
+    const MAX: usize = 32;
+    if path.chars().count() <= MAX {
+        return path.to_owned();
+    }
+    let mut tail = String::new();
+    for part in path.rsplit('/') {
+        let next = if tail.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{part}/{tail}")
+        };
+        if !tail.is_empty() && next.chars().count() > MAX - 2 {
+            break;
+        }
+        tail = next;
+    }
+    if tail.chars().count() > MAX - 2 {
+        let chars: Vec<char> = tail.chars().collect();
+        tail = chars[chars.len() - (MAX - 2)..].iter().collect();
+    }
+    format!("…/{tail}")
+}
+
+/// Whether `f` points into `path`: its own location or a source's.
+pub(crate) fn touches(session: &Session, f: &Finding, path: &str) -> bool {
+    f.location.as_ref().is_some_and(|l| l.path == path)
+        || f.sources.iter().any(|key| {
+            session
+                .raw_finding(key)
+                .and_then(|r| r.location.as_ref())
+                .is_some_and(|l| l.path == path)
+        })
+}
+
+/// Whether `f` holds every word of `query`, case aside, in its id, claim,
+/// rationale, fix or location, or a source's claim, evidence or fix.
+fn holds(session: &Session, f: &Finding, query: &str) -> bool {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return true;
+    }
+    let mut hay = format!("{}\n{}\n{}", f.id, f.claim, f.rationale).to_lowercase();
+    let mut add = |text: &str| {
+        hay.push('\n');
+        hay.push_str(&text.to_lowercase());
+    };
+    if let Some(fix) = &f.fix {
+        add(fix);
+    }
+    if let Some(loc) = &f.location {
+        add(&loc.to_string());
+    }
+    for raw in f.sources.iter().filter_map(|key| session.raw_finding(key)) {
+        add(&raw.claim);
+        add(&raw.evidence);
+        if let Some(fix) = &raw.fix {
+            add(fix);
+        }
+    }
+    words.iter().all(|w| hay.contains(w.as_str()))
 }
 
 /// The findings `filters` let through, in rank order. A rebuild ranks once,
@@ -109,6 +179,17 @@ pub(super) fn summary(
     );
     if let Some(part) = &filters.reviewer {
         tag(tree, row, format!("レビュアー: {part}"), Tone::Accent);
+    }
+    if let Some(path) = &filters.path {
+        let chip = tree.insert(
+            Some(row),
+            Button::new(format!("ファイル: {} ✕", short_path(path)))
+                .control_size(ControlSize::Small)
+                .selected(true)
+                .tooltip(path.clone()),
+        );
+        tree.set_accessible_label(chip, format!("ファイル {path} の絞り込みを解除"));
+        actions.push((chip, Action::FilterFile(None)));
     }
     chip(
         tree,

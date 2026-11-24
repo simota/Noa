@@ -9,6 +9,7 @@ use noa_gpui_core::{Role, UiTree, WidgetId};
 
 use review::model::types::{FindingStatus, Session, StanceKind};
 
+use super::fix::{self, FixOffer};
 use super::{
     Action, body, caption, card, decision_tone, heading, keep_scroll, note, scroll_column,
     severity_tone, status_tone, tag,
@@ -29,10 +30,11 @@ pub(super) fn insert(
     session: &Session,
     selected: Option<&str>,
     has_files: bool,
+    offer: Option<&FixOffer>,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let Some(f) = selected.and_then(|id| session.finding(id)) else {
-        overview(tree, host, session);
+        overview(tree, host, session, offer, actions);
         return;
     };
     heading(tree, host, &format!("指摘 {}", f.id));
@@ -102,6 +104,9 @@ pub(super) fn insert(
     if let Some(fix) = &f.fix {
         caption(tree, lead, "修正案");
         body(tree, lead, fix.clone());
+    }
+    if let Some(offer) = offer {
+        fix::insert(tree, list, offer, actions);
     }
 
     caption(tree, list, "出典");
@@ -179,7 +184,13 @@ pub(super) fn insert(
     actions.push((back, Action::SelectFinding(None)));
 }
 
-fn overview(tree: &mut UiTree, host: WidgetId, session: &Session) {
+fn overview(
+    tree: &mut UiTree,
+    host: WidgetId,
+    session: &Session,
+    offer: Option<&FixOffer>,
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
     heading(tree, host, "取りまとめ");
     let list = scroll_column(tree, host, 10.0);
     keep_scroll(tree, list, session, "overview");
@@ -199,6 +210,9 @@ fn overview(tree: &mut UiTree, host: WidgetId, session: &Session) {
         }
         None if session.closed => note(tree, list, "判定なし（ユーザーが終了）"),
         None => note(tree, list, "総合判定は最終ラウンドの取りまとめで出ます"),
+    }
+    if let Some(offer) = offer {
+        fix::insert(tree, list, offer, actions);
     }
     let summaries: Vec<_> = session
         .rounds

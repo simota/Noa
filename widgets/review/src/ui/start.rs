@@ -17,7 +17,7 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
 use review::model::types::{
-    AgentChoice, AgentKind, AgentSetup, BuiltinLens, DEFAULT_MAX_ROUNDS, Head, LensChoice,
+    AgentChoice, AgentKind, AgentSetup, BuiltinLens, DEFAULT_MAX_ROUNDS, Head, Lens, LensChoice,
     MAX_MAX_ROUNDS, MAX_PANEL, MIN_PANEL, Millis, ReviewerChoice, RoundNo, Session, Severity,
     Target, TargetKind,
 };
@@ -52,6 +52,13 @@ pub(super) struct Parts {
     pub(super) document_workdir: WidgetId,
     pub(super) request: WidgetId,
     pub(super) max_rounds: WidgetId,
+    /// Holds the round limit input, made again when its cap changes.
+    rounds_row: WidgetId,
+    /// The cap the round limit input has.
+    round_cap: RoundNo,
+    /// The form was filled from a stored review (同じ設定で再レビュー):
+    /// the agent check keeps its panel and only drops kinds not installed.
+    pub(super) refilled: bool,
     /// Holds the lead's kind menu, so it can be rebuilt for other kinds.
     lead_host: WidgetId,
     pub(super) lead: WidgetId,
@@ -123,6 +130,16 @@ impl Detection {
         }
     }
 
+    /// The agents a fix can be asked of: the installed ones (all of them
+    /// when the check could not tell), or why none can be yet.
+    pub(super) fn fix_kinds(&self) -> Result<Vec<AgentKind>, String> {
+        match self {
+            Self::Done(Installed::Found(kinds)) if !kinds.is_empty() => Ok(kinds.clone()),
+            Self::Done(Installed::Unknown(_)) => Ok(AgentKind::ALL.to_vec()),
+            _ => Err(self.note().unwrap_or_default()),
+        }
+    }
+
     pub(super) fn blocked_reason(&self) -> String {
         self.note().unwrap_or_default()
     }
@@ -185,6 +202,9 @@ pub(crate) struct Form {
     pub document_workdir: String,
     pub request: String,
     pub max_rounds: RoundNo,
+    /// The highest limit the form takes: `MAX_MAX_ROUNDS`, or a stored
+    /// review's limit after +N when it is set up again.
+    pub round_cap: RoundNo,
     pub lead: AgentChoice,
     pub panel: Vec<ReviewerChoice>,
 }
@@ -254,6 +274,7 @@ impl Form {
             document_workdir: String::new(),
             request: String::new(),
             max_rounds: DEFAULT_MAX_ROUNDS,
+            round_cap: MAX_MAX_ROUNDS,
             lead: first.into(),
             panel,
         }
@@ -286,6 +307,185 @@ impl Form {
             self.panel.push(row);
         }
         (self, left_out)
+    }
+}
+
+/// Where the note a review again adds to its request starts: an earlier
+/// one is cut there, so notes do not pile up review after review.
+pub(super) const AGAIN_MARK: &str = "（前回のレビュー ";
+/// The line under the note's heading.
+const AGAIN_ASK: &str = "前回は次の指摘を必ず直すものとしました。直っているか、直し方に新しい問題がないかを確かめてください:";
+
+/// The line a note [`again_note`] writes ends with: what the widget wrote
+/// stops there, so a line the person adds after it, `- ` lines too, stays
+/// theirs.
+const AGAIN_END: &str = "（前回のレビューの要修正はここまで）";
+
+/// Where in `request` a note [`again_note`] wrote lies: from its heading
+/// alone on a line (「（前回のレビュー <id> の総合判定: <decision>）」), with
+/// the line [`AGAIN_ASK`] right under it, through the line [`AGAIN_END`],
+/// with the blank line before it. Without that closing line it is not one
+/// (nothing of the person's is taken for it).
+fn again_block(request: &str) -> Option<std::ops::Range<usize>> {
+    let mut at = 0;
+    let lines: Vec<(usize, &str)> = request
+        .split_inclusive('\n')
+        .map(|line| {
+            let start = at;
+            at += line.len();
+            (start, line)
+        })
+        .collect();
+    let bare = |i: usize| lines.get(i).map(|(_, l)| l.trim_end_matches('\n'));
+    // A heading the widget writes: alone on its line, the fixed line under.
+    let heading = |i: usize| {
+        bare(i).is_some_and(|head| {
+            head.starts_with(AGAIN_MARK) && head.ends_with('）') && head.contains(" の総合判定: ")
+        }) && bare(i + 1) == Some(AGAIN_ASK)
+    };
+    for (i, (start, _)) in lines.iter().enumerate() {
+        if !heading(i) {
+            continue;
+        }
+        // Its closing line, before any next heading: a note left without
+        // one (an older form) is the person's text now, kept as it is, and
+        // a later note is matched from its own heading.
+        let Some(close) = (i + 2..lines.len())
+            .take_while(|&j| !heading(j))
+            .find(|&j| bare(j) == Some(AGAIN_END))
+        else {
+            continue;
+        };
+        let end = close + 1;
+        let from = match i.checked_sub(1) {
+            Some(prev) if lines[prev].1.trim().is_empty() => lines[prev].0,
+            _ => *start,
+        };
+        let to = lines.get(end).map_or(request.len(), |(at, _)| *at);
+        return Some(from..to);
+    }
+    None
+}
+
+/// What a review again asks on top of `session`'s request: that its
+/// verdict's live must-fix findings be checked. `None` without any.
+pub(super) fn again_note(session: &Session) -> Option<String> {
+    let verdict = session.verdict()?;
+    let must_fix: Vec<_> = verdict
+        .must_fix
+        .iter()
+        .filter_map(|id| session.finding(id))
+        .filter(|f| f.status.is_live())
+        .collect();
+    if must_fix.is_empty() {
+        return None;
+    }
+    let mut out = format!(
+        "{AGAIN_MARK}{} の総合判定: {}）\n{AGAIN_ASK}",
+        session.id,
+        verdict.decision.label()
+    );
+    for f in must_fix {
+        let at = f
+            .location
+            .as_ref()
+            .map(|loc| format!("（{loc}）"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "\n- {} [{}] {}{at}",
+            f.id,
+            f.severity.label(),
+            f.claim
+        ));
+    }
+    out.push('\n');
+    out.push_str(AGAIN_END);
+    Some(out)
+}
+
+impl Form {
+    /// The form that starts `session` again: the same target, panel,
+    /// round limit and request, the request followed by [`again_note`]
+    /// (an earlier such note is dropped first).
+    pub(super) fn from_session(session: &Session) -> Self {
+        let target = &session.target;
+        let path = |p: &Option<PathBuf>| {
+            p.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        };
+        let mut form = Self {
+            kind: target.kind,
+            request: String::new(),
+            max_rounds: session.max_rounds,
+            round_cap: session.max_rounds.max(MAX_MAX_ROUNDS),
+            lead: AgentChoice {
+                kind: session.lead.kind,
+                setup: session.lead.setup.clone(),
+            },
+            panel: session
+                .reviewers
+                .iter()
+                .map(|part| ReviewerChoice {
+                    agent: AgentChoice {
+                        kind: part.kind,
+                        setup: part.setup.clone(),
+                    },
+                    lens: match &part.lens {
+                        Some(Lens::Custom { text, .. }) => LensChoice::Custom(text.clone()),
+                        Some(Lens::Builtin { id }) => LensChoice::Builtin(*id),
+                        None => LensChoice::Builtin(BuiltinLens::Correctness),
+                    },
+                })
+                .collect(),
+            ..Self::for_kinds(&AgentKind::ALL)
+        };
+        match target.kind {
+            TargetKind::Git => {
+                form.repo = path(&target.path);
+                form.base = target.base.clone().unwrap_or_default();
+                form.head = match &target.head {
+                    Head::Worktree => String::new(),
+                    Head::Ref(head) => head.clone(),
+                };
+                form.filter = target.paths.join("\n");
+            }
+            TargetKind::Files => {
+                form.root = path(&target.path);
+                form.paths = target.paths.join("\n");
+            }
+            TargetKind::Document => {
+                form.text = target.text.clone().unwrap_or_default();
+                form.document_file = path(&target.path);
+                form.document_workdir = path(&target.workdir);
+            }
+        }
+        let request = session.request.as_str();
+        form.request = match (again_block(request), again_note(session)) {
+            // Nothing to add: the request as it was, note and all.
+            (_, None) => request.to_owned(),
+            // The earlier note gives way to this one where it stood; what
+            // the person wrote around it stays.
+            (Some(block), Some(note)) => {
+                let before = request[..block.start].trim_end();
+                let after = &request[block.end..];
+                let mut out = before.to_owned();
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(&note);
+                if !after.is_empty() {
+                    out.push('\n');
+                    out.push_str(after);
+                }
+                out
+            }
+            (None, Some(note)) => match request.trim_end() {
+                "" => note,
+                asked => format!("{asked}\n\n{note}"),
+            },
+        };
+        form
     }
 }
 
@@ -330,8 +530,10 @@ impl Form {
                 // Kept byte for byte (leading blank lines and indentation
                 // move every line number); only emptiness looks past blanks.
                 let text = Some(self.text.clone()).filter(|t| !t.trim().is_empty());
-                let path = match (&text, self.document_file.trim()) {
-                    (None, file) if !file.is_empty() => Some(expand(file)?),
+                let path = match &text {
+                    None if !self.document_file.trim().is_empty() => {
+                        Some(expand(&self.document_file)?)
+                    }
                     _ => None,
                 };
                 if text.is_none() && path.is_none() {
@@ -339,7 +541,7 @@ impl Form {
                 }
                 let workdir = match self.document_workdir.trim() {
                     "" => None,
-                    dir => Some(dir_path(dir, "作業ディレクトリ")?),
+                    _ => Some(dir_path(&self.document_workdir, "作業ディレクトリ")?),
                 };
                 Target {
                     path,
@@ -556,15 +758,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     );
     let max_rounds = tree.insert(
         Some(rounds_row),
-        NumberInput::new(
-            1.0,
-            f64::from(MAX_MAX_ROUNDS),
-            f64::from(DEFAULT_MAX_ROUNDS),
-        )
-        .step(1.0)
-        .decimals(0)
-        .stepper(true)
-        .width(80.0),
+        rounds_input(MAX_MAX_ROUNDS, DEFAULT_MAX_ROUNDS),
     );
     caption(
         tree,
@@ -600,6 +794,9 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         document_workdir,
         request,
         max_rounds,
+        rounds_row,
+        round_cap: MAX_MAX_ROUNDS,
+        refilled: false,
         lead_host,
         lead,
         kinds,
@@ -614,6 +811,27 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     show_kind(tree, &parts, TargetKind::Git);
     sync_row_buttons(tree, &mut parts);
     parts
+}
+
+/// The round limit input, 1 to `cap`.
+fn rounds_input(cap: RoundNo, value: RoundNo) -> NumberInput {
+    NumberInput::new(1.0, f64::from(cap), f64::from(value))
+        .step(1.0)
+        .decimals(0)
+        .stepper(true)
+        .width(80.0)
+}
+
+/// Brings the top of the filled form into view and focuses its first
+/// field (the repository, the root, or the document).
+pub(super) fn show_top(tree: &mut UiTree, parts: &Parts, kind: TargetKind) {
+    tree.update::<ScrollView, _>(parts.root, |s, cx| s.set_offset(cx, 0.0));
+    let first = match kind {
+        TargetKind::Git => parts.repo,
+        TargetKind::Files => parts.root_dir,
+        TargetKind::Document => parts.text,
+    };
+    tree.set_focus(Some(first));
 }
 
 /// Shows the fields of target `kind` only.
@@ -893,6 +1111,16 @@ pub(super) fn fill(
         let value = value.clone();
         tree.update::<TextArea, _>(id, |a, cx| a.set_text(cx, value));
     }
+    if parts.round_cap != form.round_cap {
+        // An input's range is fixed once made: a new one takes the cap.
+        tree.remove(parts.max_rounds, text);
+        parts.max_rounds = tree.insert(
+            Some(parts.rounds_row),
+            rounds_input(form.round_cap, form.max_rounds),
+        );
+        tree.move_child(parts.max_rounds, 0);
+        parts.round_cap = form.round_cap;
+    }
     let rounds = f64::from(form.max_rounds);
     tree.update::<NumberInput, _>(parts.max_rounds, |n, cx| n.set_value(cx, rounds));
     let (form, left_out) = form.clone().restricted(&parts.kinds);
@@ -1006,6 +1234,13 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
             .map(|f| f.text().trim().to_owned())
             .unwrap_or_default()
     };
+    // A path is kept as typed (a folder's name may end in a space); only
+    // whether it is blank looks past spaces ([`dir_path`], [`expand`]).
+    let path = |id: WidgetId| {
+        tree.get::<TextField>(id)
+            .map(|f| f.text().to_owned())
+            .unwrap_or_default()
+    };
     let area = |id: WidgetId| {
         tree.get::<TextArea>(id)
             .map(|a| a.text().to_owned())
@@ -1014,7 +1249,7 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
     let max_rounds = tree
         .get::<NumberInput>(parts.max_rounds)
         .map_or(DEFAULT_MAX_ROUNDS, |n| {
-            n.value().round().clamp(1.0, f64::from(MAX_MAX_ROUNDS)) as RoundNo
+            n.value().round().clamp(1.0, f64::from(parts.round_cap)) as RoundNo
         });
     let kind = selected_kind(tree, parts.lead, &parts.kinds);
     let lead = AgentChoice {
@@ -1044,16 +1279,17 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         .collect();
     Form {
         kind: selected_target(tree, parts),
-        repo: field(parts.repo),
+        repo: path(parts.repo),
         base: field(parts.base),
         head: field(parts.head),
         filter: area(parts.filter),
-        root: field(parts.root_dir),
+        root: path(parts.root_dir),
         paths: area(parts.paths),
         text: area(parts.text),
-        document_file: field(parts.document_file),
-        document_workdir: field(parts.document_workdir),
+        document_file: path(parts.document_file),
+        document_workdir: path(parts.document_workdir),
         request: area(parts.request).trim().to_owned(),
+        round_cap: parts.round_cap,
         max_rounds,
         lead,
         panel,
@@ -1066,6 +1302,7 @@ pub(super) fn rebuild_past(
     tree: &mut UiTree,
     parts: &Parts,
     past: &[Listed],
+    total: usize,
     now: Millis,
     actions: &mut Vec<(WidgetId, Action)>,
     text: &mut TextStore,
@@ -1163,8 +1400,35 @@ pub(super) fn rebuild_past(
         actions.push(open);
         if !summary.closed && !summary.busy {
             let view = tree.insert(Some(buttons), small("表示"));
-            actions.push((view, Action::OpenPast(dir)));
+            actions.push((view, Action::OpenPast(dir.clone())));
         }
+        let again = tree.insert(
+            Some(buttons),
+            small("再レビュー").tooltip(
+                "同じ対象・パネル・依頼で開始ビューを埋めます（前回の要修正を依頼に添えます）",
+            ),
+        );
+        tree.set_accessible_label(again, format!("{} を同じ設定で再レビュー", summary.label));
+        actions.push((again, Action::ReviewAgain(Some(dir))));
+    }
+    if total > past.len() {
+        let more = tree.insert(
+            Some(parts.past),
+            Container::row().align_items(AlignItems::CENTER).gap(10.0),
+        );
+        caption(
+            tree,
+            more,
+            format!("全 {total} 件のうち新しい {} 件", past.len()),
+        );
+        let button = tree.insert(
+            Some(more),
+            small(&format!(
+                "さらに {} 件表示",
+                PAST_LIMIT.min(total - past.len())
+            )),
+        );
+        actions.push((button, Action::MorePast));
     }
 }
 
@@ -1188,7 +1452,6 @@ pub(super) fn age(now: Millis, at: Millis) -> String {
 
 /// `typed` with a leading `~` expanded; it must be absolute.
 fn expand(typed: &str) -> Result<PathBuf, String> {
-    let typed = typed.trim();
     let path = match typed.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => {
             let Some(home) = std::env::var_os("HOME") else {

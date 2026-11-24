@@ -1,5 +1,20 @@
 use super::*;
 
+use std::cell::RefCell;
+
+thread_local! {
+    /// Run once right after a stored view read its log, before it goes on
+    /// (a test's stand-in for another window writing at that moment).
+    static AFTER_STORED_READ: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+/// Called by `show_stored` after its read (tests only).
+pub(super) fn after_stored_read() {
+    if let Some(hook) = AFTER_STORED_READ.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+}
+
 use review::model::types::{AgentKind, LensChoice, MIN_PANEL, ReviewerChoice, TargetKind};
 
 use crate::installed::Installed;
@@ -1385,5 +1400,1403 @@ fn a_rebuild_ranks_the_findings_at_most_once() {
         board::RANKINGS.with(|n| n.set(0));
         screen.rebuild_center(&mut text);
         assert!(board::RANKINGS.with(|n| n.get()) <= 1);
+        // The whole screen too, with 修正を依頼 counting the shown scope.
+        assert!(screen.session.as_ref().unwrap().workdir.is_some());
+        board::RANKINGS.with(|n| n.set(0));
+        screen.rebuild(&mut text);
+        assert!(
+            fix_actions(&screen)
+                .iter()
+                .any(|(_, s)| *s == FixScope::Shown)
+                != nothing_shown
+        );
+        assert!(board::RANKINGS.with(|n| n.get()) <= 1);
     }
+}
+
+// ---- 修正を依頼 ----
+
+/// Feeds `session` to a live screen with its store and reply dirs, as a
+/// runner's snapshot carries them.
+fn live_with_dirs(session: Session) -> (Review, crate::live::FakeLink) {
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(session)),
+            reply_root: Some(PathBuf::from("/w/.noa/reviews/rev-demo")),
+            session_dir: Some(PathBuf::from("/data/noa/reviews/rev-demo")),
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    (screen, link)
+}
+
+/// Every label of the right pane, joined.
+fn all_text(screen: &Review) -> String {
+    labels_under(&screen.tree, screen.right_host).join("\n")
+}
+
+fn fix_actions(screen: &Review) -> Vec<(AgentKind, FixScope)> {
+    acts(screen)
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::RequestFix { agent, scope } => Some((agent, scope)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_verdict_offers_a_fix_of_its_must_fix_and_of_the_shown_findings_by_every_agent() {
+    let (screen, _link) = live_with_dirs(crate::demo::session());
+    let offered = fix_actions(&screen);
+    for scope in [FixScope::MustFix, FixScope::Shown] {
+        for kind in AgentKind::ALL {
+            assert!(
+                offered.contains(&(kind, scope.clone())),
+                "{kind:?} {scope:?}"
+            );
+        }
+    }
+    assert_eq!(offered.len(), 2 * AgentKind::ALL.len());
+    // Each button says what it does to a screen reader.
+    let codex = widget_for(
+        &screen,
+        &Action::RequestFix {
+            agent: AgentKind::Codex,
+            scope: FixScope::MustFix,
+        },
+    )
+    .unwrap();
+    let label = screen.tree.accessible_label(codex).unwrap_or_default();
+    assert!(label.starts_with("codex に要修正"), "{label}");
+}
+
+#[test]
+fn a_fix_request_carries_the_must_fix_findings_and_the_reviews_store() {
+    let session = crate::demo::session();
+    let must_fix = session.verdict().unwrap().must_fix.clone();
+    assert!(!must_fix.is_empty());
+    let (mut screen, link) = live_with_dirs(session);
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Codex,
+            scope: FixScope::MustFix,
+        },
+    );
+    let sent = commands(&link);
+    let [Command::RequestFix(req)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(req.agent, AgentKind::Codex);
+    assert_eq!(req.ids, must_fix);
+    assert_eq!(req.dir, PathBuf::from("/data/noa/reviews/rev-demo"));
+}
+
+#[test]
+fn the_shown_scope_follows_the_board_filters() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    act(&mut screen, Action::ToggleSeverity(Severity::Critical));
+    let shown: Vec<String> = board::shown(screen.session.as_ref().unwrap(), &screen.filters)
+        .into_iter()
+        .map(|f| f.id.clone())
+        .collect();
+    assert!(!shown.is_empty());
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Claude,
+            scope: FixScope::Shown,
+        },
+    );
+    let sent = commands(&link);
+    let [Command::RequestFix(req)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(req.ids, shown);
+}
+
+#[test]
+fn a_selected_finding_offers_a_fix_of_itself_only() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    act(&mut screen, Action::SelectFinding(Some("F2".into())));
+    let offered = fix_actions(&screen);
+    assert_eq!(offered.len(), AgentKind::ALL.len());
+    assert!(
+        offered
+            .iter()
+            .all(|(_, scope)| *scope == FixScope::Finding("F2".into()))
+    );
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Agy,
+            scope: FixScope::Finding("F2".into()),
+        },
+    );
+    let sent = commands(&link);
+    let [Command::RequestFix(req)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(req.ids, ["F2"]);
+}
+
+#[test]
+fn only_installed_agents_are_offered_a_fix() {
+    let (mut screen, _link, tx, mut text) = live_pending();
+    report(
+        &mut screen,
+        &tx,
+        Installed::Found(vec![AgentKind::Codex]),
+        &mut text,
+    );
+    screen.session = Some(Arc::new(crate::demo::session()));
+    screen.rebuild(&mut text);
+    let offered = fix_actions(&screen);
+    assert!(!offered.is_empty());
+    assert!(offered.iter().all(|(k, _)| *k == AgentKind::Codex));
+}
+
+#[test]
+fn no_fix_is_offered_while_the_agent_check_runs_or_without_a_tree_to_fix() {
+    // The check has not reported.
+    let (mut screen, _link, _tx, mut text) = live_pending();
+    screen.session = Some(Arc::new(crate::demo::session()));
+    screen.rebuild(&mut text);
+    assert!(fix_actions(&screen).is_empty());
+    assert!(all_text(&screen).contains("インストール済みのエージェントを確認しています"));
+
+    // A document review has no work tree to fix.
+    let mut document = crate::demo::session();
+    document.target.kind = TargetKind::Document;
+    let (screen, _link) = live_with_dirs(document);
+    assert!(fix_actions(&screen).is_empty());
+    assert!(all_text(&screen).contains("文書のレビューでは修正を依頼できません"));
+
+    // Nor does a review without a workdir.
+    let mut nowhere = crate::demo::session();
+    nowhere.workdir = None;
+    let (screen, _link) = live_with_dirs(nowhere);
+    assert!(fix_actions(&screen).is_empty());
+    assert!(all_text(&screen).contains("作業ディレクトリのあるレビューが必要です"));
+}
+
+#[test]
+fn a_headless_stored_view_shows_no_fix_card() {
+    let root = std::env::temp_dir().join(format!("noa-review-ui-fix-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    let screen = Review::stored(&dir).unwrap();
+    assert!(fix_actions(&screen).is_empty());
+    assert!(!all_text(&screen).contains("修正を依頼"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_stored_review_in_the_live_window_can_be_fixed() {
+    let root = std::env::temp_dir().join(format!("noa-review-ui-fix-live-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    let (channel, link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Claude,
+            scope: FixScope::MustFix,
+        },
+    );
+    // (Showing it left whatever was on screen first.)
+    let sent: Vec<Command> = commands(&link)
+        .into_iter()
+        .filter(|c| *c != Command::Leave)
+        .collect();
+    let [Command::RequestFix(req)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(req.dir, dir);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// ---- 同じ設定で再レビュー ----
+
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("noa-review-again-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The demo review as if it had reviewed `repo`, with a custom lens and a
+/// path filter.
+fn demo_in(repo: &Path) -> Session {
+    let mut session = crate::demo::session();
+    session.target.path = Some(repo.to_owned());
+    session.target.paths = vec!["src/".into(), "docs/a b.md".into()];
+    session.reviewers[2].lens = Some(review::model::types::Lens::Custom {
+        id: "custom".into(),
+        text: "API 互換性と移行手順".into(),
+    });
+    session
+}
+
+fn panel_of(session: &Session) -> Vec<ReviewerChoice> {
+    session
+        .reviewers
+        .iter()
+        .map(|p| ReviewerChoice {
+            agent: review::model::types::AgentChoice {
+                kind: p.kind,
+                setup: p.setup.clone(),
+            },
+            lens: match p.lens.as_ref().unwrap() {
+                review::model::types::Lens::Builtin { id } => LensChoice::Builtin(*id),
+                review::model::types::Lens::Custom { text, .. } => LensChoice::Custom(text.clone()),
+            },
+        })
+        .collect()
+}
+
+#[test]
+fn reviewing_again_fills_the_start_view_with_the_same_target_panel_and_limit() {
+    let repo = temp_dir("git");
+    let session = demo_in(&repo);
+    let (mut screen, _link) = live_with(session.clone());
+    assert!(acts(&screen).contains(&Action::ReviewAgain(None)));
+    act(&mut screen, Action::ReviewAgain(None));
+    assert!(screen.session.is_none());
+    assert!(!screen.tree.is_hidden(screen.start.root));
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.target().unwrap(), session.target);
+    assert_eq!(form.panel, panel_of(&session));
+    assert_eq!(form.lead.kind, session.lead.kind);
+    assert_eq!(form.lead.setup, session.lead.setup);
+    assert_eq!(form.max_rounds, session.max_rounds);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn files_and_document_reviews_come_back_as_they_were_set_up() {
+    let root = temp_dir("files");
+    let mut files = crate::demo::session();
+    files.target = review::model::types::Target {
+        kind: TargetKind::Files,
+        path: Some(root.clone()),
+        base: None,
+        head: review::model::types::Head::Worktree,
+        paths: vec!["src".into(), "README.md".into()],
+        text: None,
+        workdir: None,
+    };
+    assert_eq!(
+        start::Form::from_session(&files).target().unwrap(),
+        files.target
+    );
+    let mut typed = files.clone();
+    typed.target = review::model::types::Target {
+        kind: TargetKind::Document,
+        path: None,
+        text: Some("\n  # Plan\n\nstep 1\n".into()),
+        workdir: Some(root.clone()),
+        ..files.target.clone()
+    };
+    typed.target.paths.clear();
+    assert_eq!(
+        start::Form::from_session(&typed).target().unwrap(),
+        typed.target
+    );
+    let doc = root.join("plan.md");
+    std::fs::write(&doc, "# plan\n").unwrap();
+    let mut from_file = typed.clone();
+    from_file.target.text = None;
+    from_file.target.path = Some(doc);
+    from_file.target.workdir = None;
+    assert_eq!(
+        start::Form::from_session(&from_file).target().unwrap(),
+        from_file.target
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_request_keeps_what_was_asked_and_adds_the_must_fix_to_check() {
+    let session = crate::demo::session();
+    let form = start::Form::from_session(&session);
+    assert!(form.request.starts_with(session.request.trim_end()));
+    let note = &form.request[session.request.trim_end().len()..];
+    assert!(
+        note.starts_with("\n\n（前回のレビュー rev-demo の総合判定: 要修正）"),
+        "{note}"
+    );
+    for id in &session.verdict().unwrap().must_fix {
+        let f = session.finding(id).unwrap();
+        assert!(
+            note.contains(&format!("- {id} [{}] {}", f.severity.label(), f.claim)),
+            "{note}"
+        );
+    }
+    // Reviewed again after that: the earlier note gives way to the new one.
+    let mut again = session.clone();
+    again.request = form.request.clone();
+    let twice = start::Form::from_session(&again).request;
+    assert_eq!(twice, form.request);
+    assert_eq!(twice.matches("（前回のレビュー ").count(), 1);
+}
+
+#[test]
+fn a_review_without_a_verdict_keeps_its_request_as_it_was() {
+    let session = crate::demo::held();
+    assert!(session.verdict().is_none());
+    assert_eq!(
+        start::Form::from_session(&session).request,
+        session.request.trim_end()
+    );
+}
+
+#[test]
+fn past_reviews_can_be_reviewed_again_from_the_list() {
+    let mut screen = Review::demo_start();
+    let again: Vec<Action> = acts(&screen)
+        .into_iter()
+        .filter(|a| matches!(a, Action::ReviewAgain(Some(_))))
+        .collect();
+    // One per readable row; an unreadable log offers none.
+    let readable = screen.past.iter().filter(|l| l.summary.is_ok()).count();
+    assert!(screen.past.len() > readable);
+    assert_eq!(again.len(), readable);
+    let Action::ReviewAgain(Some(dir)) = again[0].clone() else {
+        unreachable!()
+    };
+    let stored = screen.load_stored(&dir).unwrap();
+    act(&mut screen, again[0].clone());
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.kind, stored.target.kind);
+    assert_eq!(form.panel, panel_of(&stored));
+    assert_eq!(form.max_rounds, stored.max_rounds);
+}
+
+#[test]
+fn starting_the_filled_form_starts_the_same_review_in_two_steps() {
+    let repo = temp_dir("start");
+    let session = demo_in(&repo);
+    let (mut screen, link) = live_with(session.clone());
+    // Two steps: 同じ設定で再レビュー, then レビューを開始.
+    act(&mut screen, Action::ReviewAgain(None));
+    act(&mut screen, Action::Start);
+    let started: Vec<Command> = commands(&link)
+        .into_iter()
+        .filter(|c| matches!(c, Command::Start { .. }))
+        .collect();
+    let [
+        Command::Start {
+            request,
+            target,
+            max_rounds,
+            lead,
+            panel,
+            ..
+        },
+    ] = started.as_slice()
+    else {
+        panic!("{started:?}");
+    };
+    assert_eq!(**target, session.target);
+    assert_eq!(*max_rounds, session.max_rounds);
+    assert_eq!(lead.kind, session.lead.kind);
+    assert_eq!(*panel, panel_of(&session));
+    assert!(request.starts_with(session.request.trim_end()));
+    assert!(request.contains("（前回のレビュー rev-demo"));
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn reviewing_again_leaves_out_agents_that_are_not_installed() {
+    let repo = temp_dir("installed");
+    let (mut screen, _link, tx, mut text) = live_pending();
+    report(&mut screen, &tx, found(&[AgentKind::Claude]), &mut text);
+    screen.session = Some(Arc::new(demo_in(&repo)));
+    screen.rebuild(&mut text);
+    act(&mut screen, Action::ReviewAgain(None));
+    let form = start::read(&screen.tree, &screen.start);
+    assert!(
+        form.panel
+            .iter()
+            .all(|row| row.agent.kind == AgentKind::Claude)
+    );
+    assert_eq!(form.lead.kind, AgentKind::Claude);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+// ---- --repo ----
+
+#[test]
+fn the_focused_panes_directory_fills_the_repository_root_and_working_directory() {
+    let (channel, _link) = Channel::fake();
+    let screen = live_ready(channel).with_place(Path::new("/Users/me/src/noa"));
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.repo, "/Users/me/src/noa");
+    assert_eq!(form.root, "/Users/me/src/noa");
+    assert_eq!(form.document_workdir, "/Users/me/src/noa");
+    // The rest stays the clean form.
+    let clean = start::Form::for_kinds(&AgentKind::ALL);
+    assert_eq!(form.panel, clean.panel);
+    assert_eq!(form.kind, clean.kind);
+}
+
+#[test]
+fn the_place_stays_when_the_agent_check_reports_later() {
+    let (screen, _link, tx, mut text) = live_pending();
+    let mut screen = screen.with_place(Path::new("/Users/me/src/noa"));
+    report(&mut screen, &tx, found(&[AgentKind::Codex]), &mut text);
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.repo, "/Users/me/src/noa");
+    assert_eq!(form.root, "/Users/me/src/noa");
+    // The untouched panel took the installed kinds as its defaults.
+    assert!(
+        form.panel
+            .iter()
+            .all(|row| row.agent.kind == AgentKind::Codex)
+    );
+}
+
+// ---- 指摘の検索とファイルの絞り込み ----
+
+/// Types `typed` into the findings search, as keystrokes do.
+fn type_search(screen: &mut Review, typed: &str, text: &mut TextStore) {
+    if !screen.search_open {
+        act(screen, Action::ToggleSearch);
+        assert_eq!(screen.tree.focused(), Some(screen.search));
+    }
+    // (A click in the field focuses it.)
+    screen.tree.set_focus(Some(screen.search));
+    screen.dispatch(noa_gpui_core::Event::Text(typed.to_owned()), text);
+}
+
+fn shown_ids(screen: &Review) -> Vec<String> {
+    board::shown(screen.session.as_ref().unwrap(), &screen.filters)
+        .into_iter()
+        .map(|f| f.id.clone())
+        .collect()
+}
+
+#[test]
+fn typing_in_the_search_narrows_the_board_and_keeps_the_field() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    let mut text = TextStore::new(Default::default());
+    let all = rows(&screen);
+    assert!(all > 1);
+    // "シェル" is in F2's claim only (its evidence too).
+    type_search(&mut screen, "シェル", &mut text);
+    assert_eq!(screen.filters.query, "シェル");
+    assert_eq!(shown_ids(&screen), ["F2"]);
+    assert_eq!(rows(&screen), 1);
+    let summary = labels_under(&screen.tree, screen.tabs_host).join(" ");
+    assert!(
+        summary.contains(&format!(
+            "表示 1 / 全 {}",
+            screen.session.as_ref().unwrap().findings.len()
+        )),
+        "{summary}"
+    );
+    // The field is the same widget, still focused, still holding the text.
+    assert_eq!(screen.tree.focused(), Some(screen.search));
+    assert_eq!(
+        screen.tree.get::<TextField>(screen.search).unwrap().text(),
+        "シェル"
+    );
+    // Clearing the filters clears the search too.
+    act(&mut screen, Action::ClearFilters);
+    assert!(screen.filters.query.is_empty());
+    assert!(
+        screen
+            .tree
+            .get::<TextField>(screen.search)
+            .unwrap()
+            .text()
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_search_matches_ids_paths_and_evidence_in_any_case_and_every_word() {
+    let session = crate::demo::session();
+    let mut filters = Filters::default();
+    let ids = |filters: &Filters| -> Vec<String> {
+        board::shown(&session, filters)
+            .into_iter()
+            .map(|f| f.id.clone())
+            .collect()
+    };
+    // F1 itself, and any finding whose text names it.
+    filters.query = "f1".into();
+    let named = ids(&filters);
+    assert_eq!(named.first().map(String::as_str), Some("F1"), "{named:?}");
+    assert!(named.len() < ids(&Filters::default()).len());
+    filters.query = "STORE.RS".into();
+    let by_path = ids(&filters);
+    assert!(by_path.contains(&"F1".to_owned()), "{by_path:?}");
+    // Evidence only a source holds ("touch" is in codex/2's evidence).
+    filters.query = "touch".into();
+    assert_eq!(ids(&filters), ["F2"]);
+    // Every word must be there.
+    filters.query = "touch store.rs".into();
+    assert!(ids(&filters).is_empty());
+    filters.query = "   ".into();
+    assert_eq!(ids(&filters), ids(&Filters::default()));
+}
+
+#[test]
+fn a_file_in_the_coverage_opens_the_board_on_its_findings() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+    let files: Vec<String> = acts(&screen)
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::FilterFile(Some(path)) => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert!(files.contains(&"src/store.rs".to_owned()), "{files:?}");
+    // A file no finding points into has no button.
+    let session = screen.session.clone().unwrap();
+    for file in &session.manifest.files {
+        let any = session
+            .findings
+            .iter()
+            .any(|f| board::touches(&session, f, &file.path));
+        assert_eq!(files.contains(&file.path), any, "{}", file.path);
+    }
+    act(&mut screen, Action::FilterFile(Some("src/store.rs".into())));
+    assert_eq!(screen.tab, CenterTab::Findings);
+    let shown = shown_ids(&screen);
+    assert!(!shown.is_empty());
+    for id in &shown {
+        let f = session.finding(id).unwrap();
+        assert!(board::touches(&session, f, "src/store.rs"), "{id}");
+    }
+    // The chip says which file and takes it off.
+    assert!(acts(&screen).contains(&Action::FilterFile(None)));
+    act(&mut screen, Action::FilterFile(None));
+    assert_eq!(screen.filters.path, None);
+}
+
+#[test]
+fn chip_counts_hold_with_a_query_and_a_file() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    screen.filters.query = "の".into();
+    screen.filters.path = Some("src/store.rs".into());
+    screen.rebuild(&mut TextStore::new(Default::default()));
+    let session = screen.session.clone().unwrap();
+    // Every severity chip's count is what choosing it shows.
+    for s in Severity::ALL {
+        let mut chosen = screen.filters.clone();
+        chosen.severities = [s].into();
+        let label = format!("{} {}", s.label(), board::count(&session, &chosen));
+        assert!(
+            screen
+                .actions
+                .iter()
+                .any(|(id, a)| *a == Action::ToggleSeverity(s)
+                    && screen
+                        .tree
+                        .get::<noa_gpui_core::widgets::Button>(*id)
+                        .map(|b| b.label().to_owned())
+                        == Some(label.clone())),
+            "{label}"
+        );
+        assert_eq!(
+            board::shown(&session, &chosen).len(),
+            board::count(&session, &chosen)
+        );
+    }
+}
+
+#[test]
+fn the_search_opens_on_demand_on_the_findings_tab_and_closing_drops_it() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    // Closed by default: it takes no line of the board.
+    assert!(screen.tree.is_hidden(screen.search_row));
+    act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+    // ⌘F (the button's shortcut) opens it on the findings tab, focused.
+    let button = widget_for(&screen, &Action::ToggleSearch).unwrap();
+    assert!(
+        !screen
+            .tree
+            .get::<noa_gpui_core::widgets::Button>(button)
+            .unwrap()
+            .is_selected()
+    );
+    act(&mut screen, Action::ToggleSearch);
+    assert_eq!(screen.tab, CenterTab::Findings);
+    assert!(!screen.tree.is_hidden(screen.search_row));
+    assert_eq!(screen.tree.focused(), Some(screen.search));
+    assert_eq!(
+        screen.tree.accessible_label(screen.search),
+        Some("指摘を検索")
+    );
+    act(&mut screen, Action::ShowTab(CenterTab::Report));
+    assert!(screen.tree.is_hidden(screen.search_row));
+    act(&mut screen, Action::ShowTab(CenterTab::Findings));
+    let mut text = TextStore::new(Default::default());
+    type_search(&mut screen, "シェル", &mut text);
+    assert_eq!(rows(&screen), 1);
+    act(&mut screen, Action::ToggleSearch);
+    assert!(screen.tree.is_hidden(screen.search_row));
+    assert!(screen.filters.query.is_empty());
+    assert!(rows(&screen) > 1);
+}
+
+// ---- 過去のレビューをさらに表示 ----
+
+#[test]
+fn past_reviews_beyond_the_first_page_can_be_listed() {
+    let root = std::env::temp_dir().join(format!("noa-review-past-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let log = crate::demo::log();
+    let n = start::PAST_LIMIT + 2;
+    for i in 0..n {
+        let dir = root.join(format!("rev-{}", 1_000 + i));
+        let mut store = Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+    }
+    assert_eq!(store::count_sessions(&root), n);
+    let (channel, _link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    screen.past_root = Some(root.clone());
+    screen.refresh_past();
+    screen.rebuild(&mut TextStore::new(Default::default()));
+    let listed = |screen: &Review| {
+        acts(screen)
+            .iter()
+            .filter(|a| matches!(a, Action::ReviewAgain(Some(_))))
+            .count()
+    };
+    assert_eq!(listed(&screen), start::PAST_LIMIT);
+    let text = labels_under(&screen.tree, screen.start.root).join(" ");
+    assert!(
+        text.contains(&format!("全 {n} 件のうち新しい {} 件", start::PAST_LIMIT)),
+        "{text}"
+    );
+    act(&mut screen, Action::MorePast);
+    assert_eq!(listed(&screen), n);
+    assert!(!acts(&screen).contains(&Action::MorePast));
+    // The newest first, the oldest now reached.
+    assert!(screen.past.last().unwrap().dir.ends_with("rev-1000"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_short_past_list_offers_no_more() {
+    let screen = Review::demo_start();
+    assert!(!acts(&screen).contains(&Action::MorePast));
+}
+
+// ---- 独立レビュー（codex）の指摘への回帰テスト ----
+
+/// Presses the visible button carrying `action` from the keyboard (focus,
+/// then Space), as a person would.
+fn press_button(screen: &mut Review, action: &Action) {
+    let id = widget_for(screen, action).unwrap_or_else(|| panic!("no button for {action:?}"));
+    assert!(!screen.tree.is_hidden(id), "{action:?} is hidden");
+    screen.tree.set_focus(Some(id));
+    assert_eq!(
+        screen.tree.focused(),
+        Some(id),
+        "{action:?} cannot take focus"
+    );
+    press(screen, noa_gpui_core::Key::Space);
+}
+
+/// ⌘F, as the keyboard sends it.
+fn command_f(screen: &mut Review) {
+    let mut text = TextStore::new(Default::default());
+    noa_gpui_platform::Screen::dispatch(
+        screen,
+        noa_gpui_core::Event::KeyDown {
+            key: noa_gpui_core::Key::Char('f'),
+            modifiers: noa_gpui_core::Modifiers {
+                command: true,
+                meta: true,
+                ..Default::default()
+            },
+        },
+        &mut text,
+    );
+}
+
+#[test]
+fn the_fix_and_review_again_buttons_are_pressable_from_the_keyboard() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    press_button(
+        &mut screen,
+        &Action::RequestFix {
+            agent: AgentKind::Codex,
+            scope: FixScope::MustFix,
+        },
+    );
+    assert!(matches!(
+        commands(&link).as_slice(),
+        [Command::RequestFix(_)]
+    ));
+
+    // 同じ設定で再レビュー, then レビューを開始: two presses.
+    let repo = temp_dir("press");
+    let (mut screen, link) = live_with(demo_in(&repo));
+    press_button(&mut screen, &Action::ReviewAgain(None));
+    press_button(&mut screen, &Action::Start);
+    let started = commands(&link)
+        .into_iter()
+        .filter(|c| matches!(c, Command::Start { .. }))
+        .count();
+    assert_eq!(started, 1);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn a_running_review_says_by_the_fix_buttons_that_reviewers_read_the_work_tree() {
+    let note = "レビュアーは作業ツリーも参照する";
+    let (running, _link) = live_with_dirs(crate::demo::held());
+    assert!(!fix_actions(&running).is_empty());
+    assert!(all_text(&running).contains(note));
+    let (closed, _link) = live_with_dirs(crate::demo::session());
+    assert!(!all_text(&closed).contains(note));
+}
+
+#[test]
+fn a_place_ending_in_a_space_is_reviewed_as_given() {
+    let root = temp_dir("space");
+    std::fs::create_dir_all(root.join("repo")).unwrap();
+    std::fs::create_dir_all(root.join("repo ")).unwrap();
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel).with_place(&root.join("repo "));
+    act(&mut screen, Action::Start);
+    let started: Vec<Command> = commands(&link)
+        .into_iter()
+        .filter(|c| matches!(c, Command::Start { .. }))
+        .collect();
+    let [Command::Start { target, .. }] = started.as_slice() else {
+        panic!("{started:?}");
+    };
+    assert_eq!(target.path.as_deref(), Some(root.join("repo ").as_path()));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn refilling_replaces_only_the_note_it_wrote() {
+    // No verdict: a request that names 前回のレビュー in a sentence stays whole.
+    let mut held = crate::demo::held();
+    held.request = "必ず確認（前回のレビュー で追加した条件も含む）。最後にテストを実行。".into();
+    assert_eq!(start::Form::from_session(&held).request, held.request);
+
+    // A note from an earlier review, with the person's words after it.
+    let session = crate::demo::session();
+    let mut earlier = session.clone();
+    earlier.id = review::model::types::SessionId::new("rev-old");
+    let old_note = start::again_note(&earlier).unwrap();
+    let mut again = session.clone();
+    again.request = format!("依頼A\n\n{old_note}\n最後にテストを実行。");
+    let new_note = start::again_note(&session).unwrap();
+    assert_eq!(
+        start::Form::from_session(&again).request,
+        format!("依頼A\n\n{new_note}\n最後にテストを実行。")
+    );
+    // A `- ` line the person added right after the note is theirs.
+    again.request = format!("{old_note}\n- 利用者が追加したテスト条件");
+    assert_eq!(
+        start::Form::from_session(&again).request,
+        format!("{new_note}\n- 利用者が追加したテスト条件")
+    );
+    // A note without its closing line is not taken for the widget's: it
+    // stays, and the new note follows.
+    let unclosed = old_note.replace("\n（前回のレビューの要修正はここまで）", "");
+    again.request = unclosed.clone();
+    assert_eq!(
+        start::Form::from_session(&again).request,
+        format!("{unclosed}\n\n{new_note}")
+    );
+    // Two refills from a request with an older, unclosed note and a line
+    // of the person's after it: the line survives both.
+    again.request = format!("依頼A\n\n{unclosed}\n- 手で追加した制約");
+    let once = start::Form::from_session(&again).request;
+    assert_eq!(once, format!("{}\n\n{new_note}", again.request));
+    let mut twice = session.clone();
+    twice.request = once.clone();
+    let twice = start::Form::from_session(&twice).request;
+    assert!(twice.contains("- 手で追加した制約"), "{twice}");
+    assert_eq!(twice, once);
+    assert_eq!(
+        twice
+            .matches("（前回のレビューの要修正はここまで）")
+            .count(),
+        1
+    );
+    // And with a sentence of the person's that only mentions the mark.
+    again.request = "（前回のレビュー の件も見て）".into();
+    assert_eq!(
+        start::Form::from_session(&again).request,
+        format!("（前回のレビュー の件も見て）\n\n{new_note}")
+    );
+}
+
+#[test]
+fn a_refill_keeps_a_limit_raised_past_ten() {
+    let repo = temp_dir("rounds");
+    let mut session = demo_in(&repo);
+    session.max_rounds = 13;
+    let (mut screen, link) = live_with(session);
+    act(&mut screen, Action::ReviewAgain(None));
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!((form.max_rounds, form.round_cap), (13, 13));
+    act(&mut screen, Action::Start);
+    let started: Vec<Command> = commands(&link)
+        .into_iter()
+        .filter(|c| matches!(c, Command::Start { .. }))
+        .collect();
+    let [
+        Command::Start {
+            max_rounds,
+            round_cap,
+            ..
+        },
+    ] = started.as_slice()
+    else {
+        panic!("{started:?}");
+    };
+    assert_eq!((*max_rounds, *round_cap), (13, 13));
+    // A new review is back to the usual limit.
+    act(&mut screen, Action::NewReview);
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.round_cap, review::model::types::MAX_MAX_ROUNDS);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn a_refilled_panel_keeps_its_lenses_when_the_agent_check_reports_after() {
+    // A review set up with the default panel (claude/正確性, codex/セキュリ
+    // ティ, agy/設計, CLI defaults): refilled, it looks untouched.
+    use review::model::types::{AgentSetup, BuiltinLens, Lens};
+    let repo = temp_dir("late-check");
+    let mut session = demo_in(&repo);
+    session.lead.setup = AgentSetup::default();
+    for (part, lens) in session.reviewers.iter_mut().zip([
+        BuiltinLens::Correctness,
+        BuiltinLens::Security,
+        BuiltinLens::Design,
+    ]) {
+        part.setup = AgentSetup::default();
+        part.lens = Some(Lens::Builtin { id: lens });
+    }
+    let (mut screen, _link, tx, mut text) = live_pending();
+    screen.session = Some(Arc::new(session));
+    screen.rebuild(&mut text);
+    act(&mut screen, Action::ReviewAgain(None));
+    report(
+        &mut screen,
+        &tx,
+        found(&[AgentKind::Codex, AgentKind::Agy]),
+        &mut text,
+    );
+    let form = start::read(&screen.tree, &screen.start);
+    let rows: Vec<(AgentKind, LensChoice)> = form
+        .panel
+        .iter()
+        .map(|r| (r.agent.kind, r.lens.clone()))
+        .collect();
+    // Only claude went; the others kept their lenses.
+    assert_eq!(
+        rows,
+        [
+            (AgentKind::Codex, LensChoice::Builtin(BuiltinLens::Security)),
+            (AgentKind::Agy, LensChoice::Builtin(BuiltinLens::Design)),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn a_filter_that_hides_the_selected_finding_lets_it_go() {
+    let (mut screen, _link) = live_with_dirs(crate::demo::session());
+    act(&mut screen, Action::SelectFinding(Some("F2".into())));
+    act(&mut screen, Action::FilterFile(Some("src/store.rs".into())));
+    assert_eq!(screen.selected, None);
+    assert!(
+        fix_actions(&screen)
+            .iter()
+            .all(|(_, s)| *s != FixScope::Finding("F2".into()))
+    );
+    // A finding the filter keeps stays selected.
+    act(&mut screen, Action::SelectFinding(Some("F1".into())));
+    act(&mut screen, Action::ToggleSeverity(Severity::High));
+    assert_eq!(screen.selected.as_deref(), Some("F1"));
+    // Words that hide it let it go too.
+    let mut text = TextStore::new(Default::default());
+    type_search(&mut screen, "シェル", &mut text);
+    assert_eq!(screen.selected, None);
+}
+
+#[test]
+fn the_tab_row_and_the_header_stay_in_the_pane_at_the_smallest_window() {
+    let long = "crates/noa-app/src/app/helpers/a/rather/long/path/to/its/file.rs";
+    let mut held = Review::demo_held();
+    lay_out(&mut held, SMALLEST);
+    assert_eq!(cut_off(&held, held.tabs_host), vec![]);
+    assert_eq!(cut_off(&held, held.header_host), vec![]);
+    for path in ["src/store.rs", long] {
+        let (mut screen, _link) = live_with(crate::demo::held());
+        act(&mut screen, Action::FilterFile(Some(path.into())));
+        lay_out(&mut screen, SMALLEST);
+        assert_eq!(cut_off(&screen, screen.tabs_host), vec![], "{path}");
+        // 条件をすべて解除 and the chip are inside the pane, pressable.
+        let pane = screen.tree.window_rect(screen.tabs_host).unwrap();
+        for action in [Action::ClearFilters, Action::FilterFile(None)] {
+            let at = screen
+                .tree
+                .window_rect(widget_for(&screen, &action).unwrap())
+                .unwrap();
+            assert!(
+                at.right() <= pane.right() + 0.5,
+                "{action:?} {at:?} {pane:?}"
+            );
+        }
+    }
+    assert!(board::short_path(long).starts_with("…/"));
+    assert!(board::short_path(long).chars().count() <= 32);
+    assert_eq!(board::short_path("src/store.rs"), "src/store.rs");
+}
+
+#[test]
+fn command_f_from_another_tab_goes_to_the_search_and_keeps_its_words() {
+    let (mut screen, _link) = live_with(crate::demo::session());
+    command_f(&mut screen);
+    assert!(screen.search_open);
+    assert_eq!(screen.tree.focused(), Some(screen.search));
+    let mut text = TextStore::new(Default::default());
+    screen.dispatch(noa_gpui_core::Event::Text("シェル".into()), &mut text);
+    assert_eq!(screen.filters.query, "シェル");
+    act(&mut screen, Action::ShowTab(CenterTab::Report));
+    command_f(&mut screen);
+    assert_eq!(screen.tab, CenterTab::Findings);
+    assert!(screen.search_open);
+    assert_eq!(screen.filters.query, "シェル");
+    assert_eq!(screen.tree.focused(), Some(screen.search));
+    // Where it shows, ⌘F closes it.
+    command_f(&mut screen);
+    assert!(!screen.search_open);
+    assert!(screen.filters.query.is_empty());
+}
+
+#[test]
+fn reviewing_again_from_far_down_the_list_shows_the_form_with_focus() {
+    let mut screen = Review::demo_start();
+    screen
+        .tree
+        .update::<noa_gpui_core::widgets::ScrollView, _>(screen.start.root, |s, cx| {
+            s.set_offset(cx, 2000.0)
+        });
+    let scrolled = |screen: &Review| {
+        screen
+            .tree
+            .get::<noa_gpui_core::widgets::ScrollView>(screen.start.root)
+            .unwrap()
+            .offset()
+    };
+    assert!(scrolled(&screen) > 0.0);
+    let again = acts(&screen)
+        .into_iter()
+        .find(|a| matches!(a, Action::ReviewAgain(Some(_))))
+        .unwrap();
+    press_button(&mut screen, &again);
+    let offset = screen
+        .tree
+        .get::<noa_gpui_core::widgets::ScrollView>(screen.start.root)
+        .unwrap()
+        .offset();
+    assert_eq!(offset, 0.0);
+    assert_eq!(screen.tree.focused(), Some(screen.start.repo));
+}
+
+#[test]
+fn the_coverage_counts_a_file_as_its_button_does() {
+    // F1 now sits in src/engine.rs; its sources still point into store.rs.
+    let mut session = crate::demo::session();
+    let f1 = session.findings.iter_mut().find(|f| f.id == "F1").unwrap();
+    let raw_path = session_raw_path(&crate::demo::session(), "F1");
+    f1.location = Some(review::model::types::Location {
+        path: "src/engine.rs".into(),
+        line: Some(1),
+        end_line: None,
+    });
+    let (mut screen, _link) = live_with(session);
+    act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+    let labels = labels_under(&screen.tree, screen.center_host);
+    let at = labels.iter().position(|l| *l == raw_path).unwrap();
+    let row: Vec<&String> = labels[at..].iter().take(5).collect();
+    assert!(
+        acts(&screen).contains(&Action::FilterFile(Some(raw_path.clone()))),
+        "{row:?}"
+    );
+    assert!(!row.iter().any(|l| l.as_str() == "指摘なし"), "{row:?}");
+    assert!(row.iter().any(|l| l.contains("高 1")), "{row:?}");
+}
+
+/// The path F's first source points into.
+fn session_raw_path(session: &Session, id: &str) -> String {
+    let f = session.finding(id).unwrap();
+    session
+        .raw_finding(&f.sources[0])
+        .unwrap()
+        .location
+        .as_ref()
+        .unwrap()
+        .path
+        .clone()
+}
+
+/// `n` stored copies of `log` under a new `root`, `rev-<base + i>`.
+fn stored_many(
+    name: &str,
+    log: &[Vec<review::model::reduce::Event>],
+    base: usize,
+    n: usize,
+) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("noa-review-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for i in 0..n {
+        let dir = root.join(format!("rev-{}", base + i));
+        let mut store = Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+    }
+    root
+}
+
+fn past_screen(root: &Path) -> (Review, crate::live::FakeLink) {
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    screen.past_root = Some(root.to_owned());
+    screen.refresh_past();
+    screen.rebuild(&mut TextStore::new(Default::default()));
+    (screen, link)
+}
+
+/// Presses さらに表示 until it is gone (at most `limit` times).
+fn page_to_the_end(screen: &mut Review, limit: usize) {
+    for _ in 0..limit {
+        if !acts(screen).contains(&Action::MorePast) {
+            return;
+        }
+        act(screen, Action::MorePast);
+    }
+    panic!("さらに表示 never went away");
+}
+
+fn listed_dirs(screen: &Review) -> Vec<PathBuf> {
+    screen.past.iter().map(|l| l.dir.clone()).collect()
+}
+
+#[test]
+fn more_past_reviews_rereads_a_changed_log_and_asks_the_lock_again() {
+    let n = start::PAST_LIMIT + 3;
+    let root = stored_many("paging", &crate::demo::held_log(), 2_000, n);
+    let (mut screen, _link) = past_screen(&root);
+    // The first listed (unfinished) review was finished by another
+    // window meanwhile, and another window takes the second.
+    let first = screen.past[0].dir.clone();
+    assert!(!screen.past[0].summary.as_ref().unwrap().closed);
+    std::fs::remove_file(first.join(store::EVENTS_FILE)).unwrap();
+    let done = crate::demo::log();
+    let mut store = Store::create(&first, &done[0]).unwrap();
+    store.append_all(&done[1..]).unwrap();
+    drop(store);
+    let (_held, _) = Store::open(&screen.past[1].dir).unwrap();
+    act(&mut screen, Action::MorePast);
+    assert_eq!(screen.past.len(), n);
+    // Read again: finished, so 表示, not 再開.
+    assert!(screen.past[0].summary.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumePast(first.clone())));
+    // Asked again: the held one is busy now.
+    assert!(screen.past[1].summary.as_ref().unwrap().busy);
+    // The oldest page is there, and the unfinished oldest resumes itself.
+    let oldest = screen.past.last().unwrap().dir.clone();
+    assert!(oldest.ends_with("rev-2000"));
+    assert!(acts(&screen).contains(&Action::ResumePast(oldest)));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn past_reviews_added_or_gone_between_pages_end_without_gaps_or_doubles() {
+    let log = crate::demo::log();
+    let n = 2 * start::PAST_LIMIT + 1;
+    // A newer review arrives after the first page.
+    let root = stored_many("paging-new", &log, 3_000, n);
+    let (mut screen, _link) = past_screen(&root);
+    let dir = root.join("rev-9999");
+    let mut store = Store::create(&dir, &log[0]).unwrap();
+    store.append_all(&log[1..]).unwrap();
+    drop(store);
+    page_to_the_end(&mut screen, 5);
+    let dirs = listed_dirs(&screen);
+    assert_eq!(dirs.len(), n + 1);
+    assert_eq!(screen.past_total, n + 1);
+    let unique: std::collections::BTreeSet<_> = dirs.iter().collect();
+    assert_eq!(unique.len(), dirs.len());
+    let _ = std::fs::remove_dir_all(&root);
+
+    // The last review of the first page is taken away.
+    let root = stored_many("paging-gone", &log, 4_000, n);
+    let (mut screen, _link) = past_screen(&root);
+    let last = screen.past.last().unwrap().dir.clone();
+    std::fs::remove_dir_all(&last).unwrap();
+    page_to_the_end(&mut screen, 5);
+    let dirs = listed_dirs(&screen);
+    assert_eq!(dirs.len(), n - 1);
+    assert_eq!(screen.past_total, n - 1);
+    assert!(!dirs.contains(&last));
+    let unique: std::collections::BTreeSet<_> = dirs.iter().collect();
+    assert_eq!(unique.len(), dirs.len());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_noa_older_than_0_9_13_gets_a_reason_instead_of_fix_buttons() {
+    for (version, offered) in [("0.9.12", false), ("0.9.13", true)] {
+        let (mut screen, link) = live_with_dirs(crate::demo::session());
+        link.versions.send((1, version.to_owned())).unwrap();
+        screen.poll_live(&mut TextStore::new(Default::default()));
+        assert_eq!(!fix_actions(&screen).is_empty(), offered, "{version}");
+        assert_eq!(
+            all_text(&screen).contains("0.9.13 以降が必要"),
+            !offered,
+            "{version}"
+        );
+    }
+}
+
+#[test]
+fn a_finding_a_new_state_hides_lets_the_selection_and_the_fix_scope_go() {
+    let (mut screen, link) = live_with_dirs(crate::demo::held());
+    act(&mut screen, Action::SelectFinding(Some("F2".into())));
+    assert!(
+        fix_actions(&screen)
+            .iter()
+            .any(|(_, s)| *s == FixScope::Finding("F2".into()))
+    );
+    // The lead rejects F2; the default filters hide rejected findings.
+    let mut next = crate::demo::held();
+    let f2 = next.findings.iter_mut().find(|f| f.id == "F2").unwrap();
+    f2.status = FindingStatus::Rejected;
+    next.rev += 1;
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(next)),
+            reply_root: Some(PathBuf::from("/w/.noa/reviews/rev-demo-held")),
+            session_dir: Some(PathBuf::from("/data/noa/reviews/rev-demo-held")),
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert_eq!(screen.selected, None);
+    assert!(
+        fix_actions(&screen)
+            .iter()
+            .all(|(_, s)| *s != FixScope::Finding("F2".into()))
+    );
+    // A request for it, sent before the screen moved on, takes nothing.
+    act(
+        &mut screen,
+        Action::RequestFix {
+            agent: AgentKind::Codex,
+            scope: FixScope::Finding("F2".into()),
+        },
+    );
+    assert!(
+        !commands(&link)
+            .iter()
+            .any(|c| matches!(c, Command::RequestFix(_)))
+    );
+}
+
+#[test]
+fn a_stored_review_another_window_runs_shows_the_running_note_and_follows_its_lock() {
+    let note = "レビュアーは作業ツリーも参照する";
+    let root = std::env::temp_dir().join(format!("noa-review-held-note-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let held = Store::open(&dir).unwrap();
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(screen.read_only);
+    assert!(all_text(&screen).contains(note));
+    // The other window lets go: the note follows at the next look.
+    drop(held);
+    screen.busy_checked = None;
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert!(!all_text(&screen).contains(note));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_past_review_that_could_not_be_read_is_tried_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = stored_many("unreadable", &crate::demo::log(), 5_000, 2);
+    let log = root.join("rev-5001").join(store::EVENTS_FILE);
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (mut screen, _link) = past_screen(&root);
+    let row = |screen: &Review| {
+        screen
+            .past
+            .iter()
+            .find(|l| l.dir.ends_with("rev-5001"))
+            .unwrap()
+            .summary
+            .is_ok()
+    };
+    assert!(!row(&screen));
+    // Readable again, same size and time: the next listing reads it.
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    screen.refresh_past();
+    assert!(row(&screen));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Writes `log` as the log in `dir`, as another window's runner would.
+fn rewrite_log(dir: &Path, log: &[Vec<review::model::reduce::Event>]) {
+    std::fs::remove_file(dir.join(store::EVENTS_FILE)).unwrap();
+    let mut store = Store::create(dir, &log[0]).unwrap();
+    store.append_all(&log[1..]).unwrap();
+}
+
+/// The stored view's next look at its log and lock (its 1 s floor passed).
+fn look_again(screen: &mut Review) {
+    screen.busy_checked = None;
+    screen.poll_live(&mut TextStore::new(Default::default()));
+}
+
+#[test]
+fn a_stored_review_finished_elsewhere_drops_resume_on_the_next_look() {
+    let root = std::env::temp_dir().join(format!("noa-review-finished-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(acts(&screen).contains(&Action::ResumeShown));
+    rewrite_log(&dir, &crate::demo::log());
+    look_again(&mut screen);
+    assert!(screen.session.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumeShown));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_stored_review_extended_elsewhere_shows_the_running_note_with_its_fix_buttons() {
+    let note = "レビュアーは作業ツリーも参照する";
+    let root = std::env::temp_dir().join(format!("noa-review-extended-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(screen.session.as_ref().unwrap().closed);
+    assert!(!all_text(&screen).contains(note));
+    // Another window took it up again (+N) and holds its log.
+    let mut extended = crate::demo::log();
+    extended.push(vec![review::model::reduce::Event::RoundsExtended {
+        max_rounds: 4,
+        at: 9_999_999,
+    }]);
+    rewrite_log(&dir, &extended);
+    let (_held, session) = Store::open(&dir).unwrap();
+    assert!(!session.closed);
+    look_again(&mut screen);
+    assert!(!screen.session.as_ref().unwrap().closed);
+    assert!(all_text(&screen).contains(note));
+    assert!(!fix_actions(&screen).is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_fix_card_follows_the_version_of_each_noa_connected() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    for (seq, (version, offered)) in [("0.9.12", false), ("0.9.13", true), ("0.9.12", false)]
+        .into_iter()
+        .enumerate()
+    {
+        link.versions
+            .send((seq as u64 + 1, version.to_owned()))
+            .unwrap();
+        screen.poll_live(&mut TextStore::new(Default::default()));
+        assert_eq!(!fix_actions(&screen).is_empty(), offered, "{version}");
+    }
+}
+
+#[test]
+fn a_stored_review_finished_while_it_was_being_shown_is_caught_at_the_next_look() {
+    let root = std::env::temp_dir().join(format!("noa-review-mid-show-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let finished = dir.clone();
+    // Another window finishes it right after the view read the log.
+    AFTER_STORED_READ.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            rewrite_log(&finished, &crate::demo::log())
+        }));
+    });
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(!screen.session.as_ref().unwrap().closed);
+    look_again(&mut screen);
+    assert!(screen.session.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumeShown));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_change_that_could_not_be_read_is_read_at_a_later_look() {
+    use std::os::unix::fs::PermissionsExt;
+    let root =
+        std::env::temp_dir().join(format!("noa-review-unread-change-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    rewrite_log(&dir, &crate::demo::log());
+    let log = dir.join(store::EVENTS_FILE);
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    look_again(&mut screen);
+    assert!(!screen.session.as_ref().unwrap().closed);
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    look_again(&mut screen);
+    assert!(screen.session.as_ref().unwrap().closed);
+    assert!(!acts(&screen).contains(&Action::ResumeShown));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_report_written_before_the_writer_let_go_is_no_longer_offered_again() {
+    let root = std::env::temp_dir().join(format!("noa-review-late-report-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    // The writer holds the log, and has not written its report yet.
+    let (held, session) = Store::open(&dir).unwrap();
+    let (channel, _link) = Channel::fake();
+    let mut screen = stored_ready(channel, &dir);
+    assert!(screen.report_stale);
+    store::write_report(&dir, &export::report_markdown(&session)).unwrap();
+    drop(held);
+    look_again(&mut screen);
+    assert!(screen.stored_free);
+    assert!(!acts(&screen).contains(&Action::RegenerateReport));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_older_connections_version_arriving_late_does_not_win() {
+    let (mut screen, link) = live_with_dirs(crate::demo::session());
+    // The runner reconnected to a 0.9.12 (hello 2); a fix request's report
+    // from an earlier connection (hello 1, 0.9.13) arrives after it.
+    for report in [(2, "0.9.12"), (1, "0.9.13")] {
+        link.versions.send((report.0, report.1.to_owned())).unwrap();
+        screen.poll_live(&mut TextStore::new(Default::default()));
+    }
+    assert!(fix_actions(&screen).is_empty());
+    assert!(all_text(&screen).contains("0.9.13 以降が必要"));
+    // A newer connection to a 0.9.13 does.
+    link.versions.send((3, "0.9.13".to_owned())).unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert!(!fix_actions(&screen).is_empty());
 }

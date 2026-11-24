@@ -7,6 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use review::model::types::{AgentChoice, PartId, ReviewerChoice, RoundNo, Session, Target};
 
+use crate::session::fix::{self, FixRequest};
+use crate::session::ipc::IpcConnect;
 use crate::session::runner::{self, Action, SessionHandle, Update};
 
 /// How often the screen is woken to refresh elapsed times.
@@ -38,6 +40,9 @@ pub enum Command {
         request: String,
         target: Box<Target>,
         max_rounds: RoundNo,
+        /// The highest limit this start may ask for: `MAX_MAX_ROUNDS`, or a
+        /// review set up again with the limit it had after +N.
+        round_cap: RoundNo,
         lead: AgentChoice,
         panel: Vec<ReviewerChoice>,
     },
@@ -76,6 +81,9 @@ pub enum Command {
     /// one can be resumed from the list) and the start view comes back.
     /// Sent by [`Channel::leave`].
     Leave,
+    /// Starts an agent on fixing findings of the review on screen, in a
+    /// new tab of its own (running or stored, whatever its runner does).
+    RequestFix(Box<FixRequest>),
 }
 
 /// A notice for the screen, in the [`Channel::generation`] of the command
@@ -88,6 +96,9 @@ pub struct Channel {
     /// One `()` each time a runner has stopped and let go of its log, so
     /// the list of past reviews is read again.
     pub released: Receiver<()>,
+    /// The running Noa's version, once a look at it at startup could read
+    /// it (what 修正を依頼 can offer depends on it).
+    pub versions: Receiver<(u64, String)>,
     commands: Sender<(u64, Command)>,
     generation: Arc<AtomicU64>,
 }
@@ -128,8 +139,20 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
     let (released_tx, released) = mpsc::channel();
+    let (version_tx, versions) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let told = Arc::clone(&wake);
+    let probed = version_tx.clone();
+    std::thread::Builder::new()
+        .name("review-version".into())
+        .spawn(move || {
+            if let Some(version) = crate::session::ipc::probe_version() {
+                let _ = probed.send(version);
+                told();
+            }
+        })
+        .expect("spawn review-version thread");
     let generation = Arc::new(AtomicU64::new(0));
     let _ = snapshot_tx.send(Snapshot {
         link,
@@ -161,6 +184,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
                     snapshots: snapshot_tx,
                     notices: notice_tx,
                     released: released_tx,
+                    versions: version_tx,
                     wake,
                 },
             )
@@ -170,6 +194,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
         snapshots,
         notices,
         released,
+        versions,
         commands,
         generation,
     }
@@ -181,6 +206,9 @@ struct Outlets {
     snapshots: Sender<Snapshot>,
     notices: Sender<Notice>,
     released: Sender<()>,
+    /// The version of each Noa a runner or a fix request connected to,
+    /// with the number of that connection's hello.
+    versions: Sender<(u64, String)>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -199,6 +227,24 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
             .is_some_and(|(_, ended)| ended.load(Ordering::Acquire))
         {
             handle = None;
+        }
+        // A fix needs no runner: it is one request to Noa, on a link of
+        // its own, so a stored review asks for one as a running one does.
+        if let Command::RequestFix(req) = cmd {
+            let outlets = outlets.clone();
+            std::thread::Builder::new()
+                .name("review-fix".into())
+                .spawn(move || {
+                    let mut seen = None;
+                    let (Ok(text) | Err(text)) = fix::request(&mut IpcConnect, &req, &mut seen);
+                    if let Some(version) = seen {
+                        let _ = outlets.versions.send(version);
+                    }
+                    let _ = outlets.notices.send((generation, text));
+                    (outlets.wake)();
+                })
+                .expect("spawn review-fix thread");
+            continue;
         }
         let start = match (cmd, &handle) {
             (Command::Leave, _) => {
@@ -220,6 +266,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     request,
                     target,
                     max_rounds,
+                    round_cap,
                     lead,
                     panel,
                 },
@@ -233,6 +280,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     request,
                     target: *target,
                     max_rounds,
+                    round_cap,
                     lead,
                     panel,
                     root,
@@ -295,6 +343,7 @@ fn forwarded(cmd: Command) -> Option<Action> {
         Command::Start { .. }
         | Command::Resume { .. }
         | Command::ExtendStored { .. }
+        | Command::RequestFix(_)
         | Command::Leave => return None,
     })
 }
@@ -311,6 +360,7 @@ fn forward_updates(
         snapshots,
         notices,
         released,
+        versions,
         wake,
     } = outlets;
     let mut link = Link::Connecting;
@@ -354,6 +404,10 @@ fn forward_updates(
                     .is_ok()
             }
             Update::Notice(text) => notices.send((generation, text)).is_ok(),
+            Update::Version(seq, version) => {
+                let _ = versions.send((seq, version));
+                true
+            }
             Update::Ended(Ok(())) => break,
             Update::Ended(Err(why)) => {
                 ended.store(true, Ordering::Release);
@@ -386,6 +440,7 @@ pub struct FakeLink {
     pub snapshots: Sender<Snapshot>,
     pub notices: Sender<Notice>,
     pub released: Sender<()>,
+    pub versions: Sender<(u64, String)>,
     pub commands: Receiver<(u64, Command)>,
 }
 
@@ -396,11 +451,13 @@ impl Channel {
         let (snapshot_tx, snapshots) = mpsc::channel();
         let (notice_tx, notices) = mpsc::channel();
         let (released_tx, released) = mpsc::channel();
+        let (version_tx, versions) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let channel = Channel {
             snapshots,
             notices,
             released,
+            versions,
             commands,
             generation: Arc::new(AtomicU64::new(0)),
         };
@@ -408,6 +465,7 @@ impl Channel {
             snapshots: snapshot_tx,
             notices: notice_tx,
             released: released_tx,
+            versions: version_tx,
             commands: command_rx,
         };
         (channel, link)
@@ -504,6 +562,7 @@ mod tests {
                 snapshots: snapshot_tx,
                 notices: notice_tx,
                 released: released_tx,
+                versions: mpsc::channel().0,
                 wake: Arc::new(|| {}),
             },
         );
@@ -532,6 +591,7 @@ mod tests {
                 snapshots: snapshot_tx,
                 notices: notice_tx,
                 released: released_tx,
+                versions: mpsc::channel().0,
                 wake: Arc::new(|| {}),
             },
         );

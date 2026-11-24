@@ -92,6 +92,7 @@ pub struct Client {
     next_id: u64,
     granted_scopes: ScopeSet,
     server_instance_id: String,
+    server_version: String,
     control_origin: (String, u16),
     /// Notifications that arrived while a request waited for its response.
     notifications: VecDeque<Notification>,
@@ -133,6 +134,7 @@ impl Client {
             next_id: 1,
             granted_scopes: ScopeSet::empty(),
             server_instance_id: String::new(),
+            server_version: String::new(),
             control_origin,
             notifications: VecDeque::new(),
             notifications_dropped: false,
@@ -153,6 +155,7 @@ impl Client {
         }
         client.granted_scopes = ScopeSet::from_strings(result.granted_scopes);
         client.server_instance_id = result.server_instance_id;
+        client.server_version = result.server_version;
         Ok(client)
     }
 
@@ -165,6 +168,13 @@ impl Client {
     /// server instance.
     pub fn server_instance_id(&self) -> &str {
         &self.server_instance_id
+    }
+
+    /// The server's version from this connection's `noa.hello`
+    /// (`serverVersion`), so what a request needs of the server is judged
+    /// on the server that will take it.
+    pub fn server_version(&self) -> &str {
+        &self.server_version
     }
 
     pub fn list_panels(&mut self) -> Result<Vec<Panel>, ClientError> {
@@ -1730,6 +1740,8 @@ mod tests {
             Duration::from_millis(50),
         )
         .unwrap();
+        // The hello's serverVersion is kept for the client's own requests.
+        assert_eq!(client.server_version(), "t");
         let first: Result<ListPanelsResult, _> = client.request_with_timeout(
             "noa.listPanels",
             serde_json::json!({}),

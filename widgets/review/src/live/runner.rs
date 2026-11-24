@@ -109,6 +109,10 @@ pub enum Update {
     },
     Link(Link),
     Notice(String),
+    /// The version of the Noa this runner just connected to (each
+    /// connection, so a reconnect to another Noa shows), with the number
+    /// of that connection's hello.
+    Version(u64, String),
     Ended(Result<(), String>),
 }
 
@@ -496,6 +500,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     /// On each connection: takes up the panes; on the first, starts (or
     /// resumes) the review.
     fn begin(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
+        self.emit(Update::Version(conn.hello_seq(), conn.server_version()));
         self.sync_panes(conn)?;
         if !self.started {
             self.started = true;
@@ -1082,6 +1087,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             argv: agent_argv(participant.kind, &participant.setup),
             cwd,
             label: self.pane_label(part),
+            attended: false,
+            env: Vec::new(),
         };
         let mut refused = String::new();
         for placement in self.placements() {
@@ -1405,6 +1412,8 @@ pub struct NewReview {
     pub request: String,
     pub target: Target,
     pub max_rounds: RoundNo,
+    /// See [`review::engine::Setup::round_cap`].
+    pub round_cap: RoundNo,
     pub lead: AgentChoice,
     pub panel: Vec<ReviewerChoice>,
     /// The store root (`<data dir>/noa/reviews`).
@@ -1418,6 +1427,7 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
         request,
         target,
         max_rounds,
+        round_cap,
         lead,
         panel,
         root,
@@ -1450,6 +1460,7 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
         manifest,
         workdir,
         max_rounds,
+        round_cap,
         lead,
         panel: &panel,
     };
@@ -1662,6 +1673,14 @@ mod tests {
             Ok(())
         }
 
+        fn server_version(&self) -> String {
+            "0.9.13".into()
+        }
+
+        fn hello_seq(&self) -> u64 {
+            1
+        }
+
         fn focus(&mut self, pane: u64) -> Result<(), NoaError> {
             let mut w = self.0.borrow_mut();
             if !w.panes.contains_key(&pane) {
@@ -1754,6 +1773,7 @@ mod tests {
             request: "Review the migration plan".into(),
             target,
             max_rounds,
+            round_cap: review::model::types::MAX_MAX_ROUNDS,
             lead: AgentKind::Claude.into(),
             panel: panel.into_iter().map(reviewer).collect(),
             root: root.to_owned(),
@@ -1770,6 +1790,27 @@ mod tests {
         let mut conn = fake.clone();
         assert!(runner.begin(&mut conn).is_ok());
         (runner, actions, updates)
+    }
+
+    #[test]
+    fn each_connection_reports_the_version_of_its_noa() {
+        let root = temp_root();
+        let fake = fake();
+        let (_runner, _actions, updates) = rig_on(
+            &fake,
+            new_start(
+                &root,
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+            ),
+        );
+        let versions: Vec<String> = updates
+            .try_iter()
+            .filter_map(|u| match u {
+                Update::Version(_, v) => Some(v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(versions, ["0.9.13"]);
     }
 
     fn rig(fake: &Fake, root: &Path) -> Runner<Fake, Fake> {
@@ -2527,6 +2568,7 @@ mod tests {
                 workdir: None,
             },
             max_rounds: 1,
+            round_cap: review::model::types::MAX_MAX_ROUNDS,
             lead: AgentKind::Claude.into(),
             panel: vec![
                 reviewer(AgentKind::Claude.into()),

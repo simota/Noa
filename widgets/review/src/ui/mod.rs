@@ -10,6 +10,7 @@
 mod board;
 mod cards;
 mod composer;
+mod fix;
 mod matrix;
 mod progress;
 mod report;
@@ -31,21 +32,25 @@ use noa_gpui_core::style::{
 };
 use noa_gpui_core::widgets::{
     Alert, AlertResponse, AlertStyle, Button, ButtonClicked, Container, ControlSize, Label,
-    ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, Toast, Tone,
+    ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, TextChanged, TextField,
+    Toast, Tone,
 };
-use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
+use noa_gpui_core::{Message as UiMessage, Role, Shortcut, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
 use noa_gpui_text::TextStore;
 
 use review::model::export;
 use review::model::types::{
-    Agreement, Decision, FindingStatus, Millis, PartId, Phase, RoundNo, Session, Severity,
+    AgentKind, Agreement, Decision, FindingStatus, Millis, PartId, Phase, RoundNo, Session,
+    Severity,
 };
 use review::store::{self, Listed};
 
 use crate::installed::Installed;
 use crate::live::{Channel, Command, Link, Snapshot};
+use crate::session::fix::FixRequest;
 
+pub(crate) use fix::FixScope;
 pub(crate) use start::Form as StartForm;
 
 const LEFT_WIDTH: f32 = 280.0;
@@ -55,6 +60,11 @@ pub(crate) const MIN_WINDOW: (f64, f64) = (
     (LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH + 2.0 * noa_gpui_core::widgets::DIVIDER) as f64,
     600.0,
 );
+
+/// The shortest time between two looks at a stored review on screen (its
+/// log and its lock). The look is taken when the window wakes: on input,
+/// on a redraw, and at least every `live::CLOCK_TICK` (10 s) when idle.
+const BUSY_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The rounds the "+N" buttons add.
 const EXTEND_BY: [RoundNo; 2] = [1, 3];
@@ -74,6 +84,12 @@ pub enum Action {
     ToggleStatus(FindingStatus),
     ToggleAgreement(Agreement),
     FilterReviewer(Option<PartId>),
+    /// The board narrowed to the findings pointing into one target file
+    /// (from the file coverage), or no longer.
+    FilterFile(Option<String>),
+    /// Opens the findings search (on the findings tab, focused), or
+    /// closes it and drops its words.
+    ToggleSearch,
     ClearFilters,
     /// A matrix cell: the board filtered to one lens (and severity).
     ShowCell(String, Option<Severity>),
@@ -96,6 +112,16 @@ pub enum Action {
     ResumeShown,
     /// Writes the stored review's report again from its log.
     RegenerateReport,
+    /// Fills the start view to review again what the review shown
+    /// (`None`) or the one stored in the folder reviewed, as it was set up.
+    ReviewAgain(Option<PathBuf>),
+    /// Lists more of the past reviews.
+    MorePast,
+    /// Starts `agent` on fixing the findings of `scope` in a new tab.
+    RequestFix {
+        agent: AgentKind,
+        scope: FixScope,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +150,12 @@ pub struct Filters {
     pub statuses: BTreeSet<FindingStatusKey>,
     pub agreements: BTreeSet<AgreementKey>,
     pub reviewer: Option<PartId>,
+    /// Words a finding must hold (its id, claim, rationale, fix, location,
+    /// or a source's claim, evidence or fix), case aside; empty: any.
+    pub query: String,
+    /// A target file a finding must point into (its own location or a
+    /// source's).
+    pub path: Option<String>,
 }
 
 /// [`FindingStatus`] in a set (by its order in `FindingStatus::ALL`).
@@ -160,6 +192,8 @@ impl Default for Filters {
             .collect(),
             agreements: BTreeSet::new(),
             reviewer: None,
+            query: String::new(),
+            path: None,
         }
     }
 }
@@ -195,10 +229,19 @@ pub struct Review {
     read_only: bool,
     past: Vec<Listed>,
     past_root: Option<PathBuf>,
+    /// How many past reviews the list shows; さらに表示 raises it.
+    past_limit: usize,
+    /// How many there are in all.
+    past_total: usize,
     /// The log of the read-only review on screen, when it is one.
     stored_dir: Option<PathBuf>,
     /// That log is free to write: no runner holds it.
     stored_free: bool,
+    /// When whether a runner holds it was last asked (the view asks again
+    /// every [`BUSY_RECHECK`] while the review is unfinished).
+    busy_checked: Option<std::time::Instant>,
+    /// The stored log's stamp when it was last read.
+    stored_stamp: Option<store::LogStamp>,
     /// Rounds or a resume were asked for on the read-only review on
     /// screen: it stays shown until the runner's first snapshot of it
     /// arrives, then goes live.
@@ -217,12 +260,23 @@ pub struct Review {
     detection: start::Detection,
     /// Where that check reports, until it has.
     installed: Option<Receiver<Installed>>,
+    /// The version of the newest Noa connection that reported (its number
+    /// in hello order, and the version): a report from an older connection
+    /// that arrives later is not applied.
+    noa_version: Option<(u64, String)>,
 
     start: start::Parts,
     board: WidgetId,
     left_host: WidgetId,
     header_host: WidgetId,
     progress_host: WidgetId,
+    /// The center tabs and the findings summary.
+    tabs_host: WidgetId,
+    /// The findings search: kept across rebuilds, so typing in it goes on.
+    search_row: WidgetId,
+    search: WidgetId,
+    /// The search row is open (it takes no line of the board otherwise).
+    search_open: bool,
     center_host: WidgetId,
     right_host: WidgetId,
     composer: composer::Parts,
@@ -296,6 +350,23 @@ impl Review {
         screen
     }
 
+    /// Puts `dir` in the start view's repository, root and working
+    /// directory fields (`--repo`: the focused pane's directory, so a
+    /// review of where the person works needs no path typed).
+    pub fn with_place(mut self, dir: &Path) -> Self {
+        let mut text = TextStore::new(Default::default());
+        let place = dir.display().to_string();
+        let form = start::Form {
+            repo: place.clone(),
+            root: place.clone(),
+            document_workdir: place,
+            ..start::read(&self.tree, &self.start)
+        };
+        start::fill(&mut self.tree, &mut self.start, &form, &mut text);
+        self.rebuild(&mut text);
+        self
+    }
+
     /// Picks the center tab and the selected finding (for `--tab` and
     /// `--finding`).
     pub fn with_view(mut self, tab: Option<CenterTab>, finding: Option<String>) -> Self {
@@ -336,6 +407,27 @@ impl Review {
         let center_col = tree.insert(Some(split), pane_column(Role::Background));
         let header_host = tree.insert(Some(center_col), strip_host());
         let progress_host = tree.insert(Some(center_col), strip_host());
+        let tabs_host = tree.insert(Some(center_col), strip_host());
+        let search_row = tree.insert(
+            Some(center_col),
+            Container::new(Style {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::CENTER,
+                flex_shrink: 0.0,
+                padding: LayoutRect {
+                    left: length(12.0),
+                    right: length(12.0),
+                    top: length(0.0),
+                    bottom: length(6.0),
+                },
+                ..Default::default()
+            }),
+        );
+        let search = tree.insert(
+            Some(search_row),
+            TextField::new("指摘を検索（ID・主張・根拠・修正案・パス）", 360.0),
+        );
+        tree.set_accessible_label(search, "指摘を検索");
         let center_host = tree.insert(Some(center_col), Container::new(fill()));
         let composer = composer::insert(&mut tree, center_col);
         let right_host = tree.insert(Some(split), pane_column(Role::Surface));
@@ -356,8 +448,12 @@ impl Review {
             read_only: false,
             past: Vec::new(),
             past_root: store::default_root(),
+            past_limit: start::PAST_LIMIT,
+            past_total: 0,
             stored_dir: None,
             stored_free: false,
+            busy_checked: None,
+            stored_stamp: None,
             extending: false,
             report_stale: false,
             starting: false,
@@ -365,11 +461,16 @@ impl Review {
             built: None,
             detection: start::Detection::all_installed(),
             installed: None,
+            noa_version: None,
             start,
             board,
             left_host,
             header_host,
             progress_host,
+            tabs_host,
+            search_row,
+            search,
+            search_open: false,
             center_host,
             right_host,
             composer,
@@ -458,6 +559,7 @@ impl Review {
                 &mut self.tree,
                 &self.start,
                 &self.past,
+                self.past_total,
                 system_now(),
                 &mut self.actions,
                 text,
@@ -467,13 +569,16 @@ impl Review {
     }
 
     fn refresh_past(&mut self) {
-        self.past = match &self.source {
-            Source::Demo => crate::demo::past(),
-            Source::Live(_) | Source::Snapshot => self
-                .past_root
-                .as_deref()
-                .map(|root| store::list_sessions(root, start::PAST_LIMIT))
-                .unwrap_or_default(),
+        (self.past, self.past_total) = match &self.source {
+            Source::Demo => {
+                let past = crate::demo::past();
+                let total = past.len();
+                (past, total)
+            }
+            Source::Live(_) | Source::Snapshot => match self.past_root.as_deref() {
+                Some(root) => store::page_sessions(root, &self.past, self.past_limit),
+                None => (Vec::new(), 0),
+            },
         };
     }
 
@@ -503,6 +608,7 @@ impl Review {
         self.extending = false;
         self.tab = CenterTab::Findings;
         self.filters = Filters::default();
+        self.search_open = false;
         self.selected = None;
         self.pending_intervention = None;
         composer::reset(&mut self.tree, &mut self.composer);
@@ -510,7 +616,12 @@ impl Review {
     }
 
     fn show_stored(&mut self, dir: &Path, text: &mut TextStore) -> Result<(), String> {
+        // Taken just before the read, so it goes with the session read: a
+        // write that lands after it shows as a change at the next look.
+        let stamp = store::log_stamp(dir);
         let session = self.load_stored(dir)?;
+        #[cfg(test)]
+        tests::after_stored_read();
         self.leave();
         if !matches!(self.source, Source::Demo) {
             self.reply_root = Some(store::reply_dir(dir, &session));
@@ -520,6 +631,8 @@ impl Review {
         self.read_only = true;
         self.stored_dir = Some(dir.to_owned());
         self.stored_free = !store::is_busy(dir);
+        self.stored_stamp = stamp;
+        self.busy_checked = Some(std::time::Instant::now());
         self.report_stale = !matches!(self.source, Source::Demo)
             && store::report_is_stale(dir, self.session.as_deref().expect("just set"));
         self.rebuild(text);
@@ -607,6 +720,17 @@ impl Review {
             tag(&mut self.tree, row, "判定なし", Tone::Neutral);
         }
         let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+        // In the header (the title gives way), not the tab row, which the
+        // smallest window fills: ⌘F works from every tab.
+        let search = self.tree.insert(
+            Some(row),
+            small("検索")
+                .selected(self.search_open)
+                .shortcut(Shortcut::command('f'))
+                .tooltip("指摘を言葉やパスで絞り込みます（⌘F）"),
+        );
+        self.tree.set_accessible_label(search, "指摘を検索");
+        self.actions.push((search, Action::ToggleSearch));
         let copy = self.tree.insert(Some(row), small("コピー"));
         self.actions.push((copy, Action::CopyReport));
         let save = self.tree.insert(Some(row), small("レポート保存…"));
@@ -622,13 +746,33 @@ impl Review {
     }
 
     fn rebuild_center(&mut self, text: &mut TextStore) {
+        clear_children(&mut self.tree, self.tabs_host, text);
         clear_children(&mut self.tree, self.center_host, text);
+        self.tree.set_hidden(
+            self.search_row,
+            !(self.search_open && self.tab == CenterTab::Findings),
+        );
+        // The field shows the query the filters hold (cleared with them).
+        if self.tree.get::<TextField>(self.search).map(|f| f.text()) != Some(&self.filters.query) {
+            let query = self.filters.query.clone();
+            self.tree
+                .update::<TextField, _>(self.search, |f, cx| f.set_text(cx, query));
+        }
         let Some(session) = self.session.clone() else {
             return;
         };
         let tabs = self.tree.insert(
-            Some(self.center_host),
+            Some(self.tabs_host),
             Container::new(Style {
+                // As wide as the pane, so what does not fit wraps.
+                size: LayoutSize {
+                    width: percent(1.0),
+                    height: auto(),
+                },
+                min_size: LayoutSize {
+                    width: length(0.0),
+                    height: auto(),
+                },
                 flex_direction: FlexDirection::Row,
                 // Wraps when the tabs, the findings summary and the
                 // snapshot button do not fit on one line.
@@ -704,14 +848,93 @@ impl Review {
         let Some(session) = &self.session else {
             return;
         };
+        let offer = self.fix_offer(session);
         thread::insert(
             &mut self.tree,
             self.right_host,
             session,
             self.selected.as_deref(),
             self.reply_root.is_some(),
+            offer.as_ref(),
             &mut self.actions,
         );
+    }
+
+    /// What 修正を依頼 offers for `session`: nothing in a headless stored
+    /// view (no Noa to start an agent in), else the installed agents and
+    /// the scopes that hold findings, or why it cannot.
+    fn fix_offer(&self, session: &Session) -> Option<fix::FixOffer> {
+        if let Source::Snapshot = self.source {
+            return None;
+        }
+        if let Err(why) = store::fix_workdir(session) {
+            return Some(fix::FixOffer::Unavailable(why.to_owned()));
+        }
+        // A Noa known to be older than 0.9.13 would let the fix tab take
+        // the global auto-approve setting (the request checks it again).
+        if let Some(version) = self
+            .noa_version
+            .as_ref()
+            .map(|(_, v)| v.as_str())
+            .filter(|v| !crate::session::ipc::sets_tab_auto_approve(v))
+        {
+            return Some(fix::FixOffer::Unavailable(
+                crate::session::ipc::no_tab_auto_approve(version),
+            ));
+        }
+        let kinds = match self.detection.fix_kinds() {
+            Ok(kinds) => kinds,
+            Err(why) => return Some(fix::FixOffer::Unavailable(why)),
+        };
+        let scopes = match self.shown_selection() {
+            Some(id) => vec![(FixScope::Finding(id.to_owned()), 1)],
+            None => [FixScope::MustFix, FixScope::Shown]
+                .into_iter()
+                .map(|scope| {
+                    // Counted unranked: a rebuild ranks once, for the board.
+                    let n = match scope {
+                        FixScope::Shown => board::count(session, &self.filters),
+                        _ => self.fix_ids(session, &scope).len(),
+                    };
+                    (scope, n)
+                })
+                .filter(|(_, n)| *n > 0)
+                .collect(),
+        };
+        // Running here, or (a stored view) in another window whose runner
+        // holds the log.
+        let running = !session.closed
+            && (!self.read_only || (self.stored_dir.is_some() && !self.stored_free));
+        Some(fix::FixOffer::Offered {
+            kinds,
+            scopes,
+            running,
+        })
+    }
+
+    /// The findings a fix request of `scope` takes.
+    fn fix_ids(&self, session: &Session, scope: &FixScope) -> Vec<String> {
+        match scope {
+            FixScope::MustFix => session
+                .verdict()
+                .map(|v| {
+                    v.must_fix
+                        .iter()
+                        .filter(|id| session.finding(id).is_some_and(|f| f.status.is_live()))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
+            FixScope::Shown => board::shown(session, &self.filters)
+                .into_iter()
+                .map(|f| f.id.clone())
+                .collect(),
+            // The selected one, while the board shows it.
+            FixScope::Finding(id) => (self.shown_selection() == Some(id.as_str()))
+                .then(|| id.clone())
+                .into_iter()
+                .collect(),
+        }
     }
 
     fn rebuild_composer(&mut self, text: &mut TextStore) {
@@ -864,6 +1087,13 @@ impl Review {
                 .insert(Some(self.status_trailing), small("失敗を再試行"));
             self.actions.push((retry, Action::Retry));
         }
+        let again = self.tree.insert(
+            Some(self.status_trailing),
+            small("同じ設定で再レビュー").tooltip(
+                "同じ対象・パネル・依頼で開始ビューを埋めます（前回の要修正を依頼に添えます）",
+            ),
+        );
+        self.actions.push((again, Action::ReviewAgain(None)));
         let new = self
             .tree
             .insert(Some(self.status_trailing), small("新しいレビュー"));
@@ -889,7 +1119,8 @@ impl Review {
         self.installed = None;
         let before = start::read(&self.tree, &self.start);
         let clean = start::Form::for_kinds(self.start.kinds());
-        let pristine = before.lead == clean.lead && before.panel == clean.panel;
+        let pristine =
+            !self.start.refilled && before.lead == clean.lead && before.panel == clean.panel;
         self.detection = start::Detection::Done(installed);
         let kinds = self.detection.menu_kinds();
         let form = if pristine {
@@ -909,8 +1140,53 @@ impl Review {
         }
     }
 
+    /// A stored review on screen, when the window wakes (at most every
+    /// [`BUSY_RECHECK`]): its log read again if it changed (another window
+    /// finished it, or extended a finished one), and whether a runner holds
+    /// it asked again, so its state, 再開, +N and 修正を依頼 with its
+    /// running note follow together.
+    fn recheck_stored(&mut self) {
+        let Some(dir) = self.stored_dir.clone() else {
+            return;
+        };
+        if !self.read_only
+            || self.extending
+            || self
+                .busy_checked
+                .is_some_and(|at| at.elapsed() < BUSY_RECHECK)
+        {
+            return;
+        }
+        self.busy_checked = Some(std::time::Instant::now());
+        let stamp = store::log_stamp(&dir);
+        // The stamp is kept only with a read that worked: a log that could
+        // not be read is tried again at the next look.
+        if stamp != self.stored_stamp
+            && let Ok(session) = store::read_session(&dir)
+        {
+            self.stored_stamp = stamp;
+            self.report_stale = store::report_is_stale(&dir, &session);
+            self.session = Some(Arc::new(session));
+            self.drop_hidden_selection();
+            self.built = None;
+        }
+        let free = !store::is_busy(&dir);
+        if free != self.stored_free {
+            self.stored_free = free;
+            // A writer that let go has written its report by then (it
+            // writes the report after the log, before it releases it).
+            if free && let Some(session) = &self.session {
+                self.report_stale = store::report_is_stale(&dir, session);
+            }
+            self.built = None;
+        }
+    }
+
     fn poll_live(&mut self, text: &mut TextStore) {
         self.poll_installed(text);
+        if matches!(self.source, Source::Live(_)) {
+            self.recheck_stored();
+        }
         let mut latest = None;
         let mut notices = Vec::new();
         let mut released = false;
@@ -928,6 +1204,16 @@ impl Review {
             }
             while channel.released.try_recv().is_ok() {
                 released = true;
+            }
+            while let Ok(version) = channel.versions.try_recv() {
+                if self
+                    .noa_version
+                    .as_ref()
+                    .is_none_or(|(newest, _)| version.0 > *newest)
+                {
+                    self.noa_version = Some(version);
+                }
+                self.built = None;
             }
         }
         let refused_start = self.starting && self.session.is_none() && !notices.is_empty();
@@ -965,6 +1251,7 @@ impl Review {
                 self.starting = false;
             }
             self.session = snapshot.session;
+            self.drop_hidden_selection();
             if snapshot.reply_root.is_some() {
                 self.reply_root = snapshot.reply_root;
                 self.session_dir = snapshot.session_dir;
@@ -986,6 +1273,32 @@ impl Review {
             }
         }
         self.rebuild(text);
+    }
+
+    /// Rebuilds after the filters changed: a selected finding they now
+    /// hide is let go, so the thread and 修正を依頼 follow what is shown.
+    fn refilter(&mut self, text: &mut TextStore) {
+        self.drop_hidden_selection();
+        self.rebuild(text);
+    }
+
+    /// The selected finding, while the board shows it (it exists and the
+    /// filters let it through): what the thread and 修正を依頼 go by.
+    fn shown_selection(&self) -> Option<&str> {
+        let (session, id) = (self.session.as_ref()?, self.selected.as_deref()?);
+        session
+            .finding(id)
+            .is_some_and(|f| board::passes(session, &self.filters, f))
+            .then_some(id)
+    }
+
+    /// Lets the selection go once the board no longer shows it: after the
+    /// filters change, or a new state of the review (a finding rejected,
+    /// withdrawn or merged under filters that hide those).
+    fn drop_hidden_selection(&mut self) {
+        if self.selected.is_some() && self.shown_selection().is_none() {
+            self.selected = None;
+        }
     }
 
     fn toast(&mut self, message: impl Into<String>) {
@@ -1073,6 +1386,7 @@ impl Review {
                     request: form.request,
                     target: Box::new(target),
                     max_rounds: form.max_rounds,
+                    round_cap: form.round_cap,
                     lead: form.lead,
                     panel: form.panel,
                 });
@@ -1108,24 +1422,43 @@ impl Review {
             }
             Action::ToggleSeverity(s) => {
                 toggle(&mut self.filters.severities, s);
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::ToggleLens(id) => {
                 toggle(&mut self.filters.lenses, id);
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::ToggleStatus(s) => {
                 toggle(&mut self.filters.statuses, status_key(s));
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::ToggleAgreement(a) => {
                 toggle(&mut self.filters.agreements, agreement_key(a));
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::FilterReviewer(part) => {
                 self.filters.reviewer = part;
                 self.tab = CenterTab::Findings;
-                self.rebuild(text);
+                self.refilter(text);
+            }
+            // Closes the search only where it shows; from another tab, or
+            // closed, it opens on the findings tab with its words kept.
+            Action::ToggleSearch => {
+                if self.search_open && self.tab == CenterTab::Findings {
+                    self.search_open = false;
+                    self.filters.query.clear();
+                    self.refilter(text);
+                } else {
+                    self.search_open = true;
+                    self.tab = CenterTab::Findings;
+                    self.refilter(text);
+                    self.tree.set_focus(Some(self.search));
+                }
+            }
+            Action::FilterFile(path) => {
+                self.filters.path = path;
+                self.tab = CenterTab::Findings;
+                self.refilter(text);
             }
             Action::ClearFilters => {
                 self.filters = Filters {
@@ -1141,7 +1474,7 @@ impl Review {
                     ..Filters::default()
                 };
                 self.tab = CenterTab::Findings;
-                self.rebuild(text);
+                self.refilter(text);
             }
             Action::SelectFinding(id) => {
                 self.selected = id;
@@ -1219,6 +1552,7 @@ impl Review {
                 self.leave();
                 let form = start::Form::for_kinds(self.start.kinds());
                 start::fill(&mut self.tree, &mut self.start, &form, text);
+                self.start.refilled = false;
                 self.rebuild(text);
             }
             Action::FocusPane(part) => self.send_cmd(Command::Focus { part }),
@@ -1249,6 +1583,75 @@ impl Review {
                     self.extending = true;
                     self.send_cmd(Command::Resume { dir });
                     self.rebuild(text);
+                }
+            }
+            // One more page, reconciled with the folder as it is now:
+            // unchanged rows are kept (their lock asked again), changed and
+            // new ones read, vanished ones dropped.
+            Action::MorePast => {
+                if let (Source::Live(_) | Source::Snapshot, Some(root)) =
+                    (&self.source, self.past_root.clone())
+                {
+                    let want = self.past.len() + start::PAST_LIMIT;
+                    (self.past, self.past_total) = store::page_sessions(&root, &self.past, want);
+                    self.past_limit = self.past.len().max(start::PAST_LIMIT);
+                }
+                self.rebuild(text);
+            }
+            Action::ReviewAgain(dir) => {
+                let session = match &dir {
+                    None => match &self.session {
+                        Some(session) => Session::clone(session),
+                        None => return,
+                    },
+                    Some(dir) => match self.load_stored(dir) {
+                        Ok(session) => session,
+                        Err(why) => return self.toast(why),
+                    },
+                };
+                let form = start::Form::from_session(&session);
+                if self.session.is_some() {
+                    self.leave();
+                }
+                let left_out = start::fill(&mut self.tree, &mut self.start, &form, text);
+                // Set by the person: the agent check that reports later
+                // only drops kinds that are not installed.
+                self.start.refilled = true;
+                if !left_out.is_empty() {
+                    self.toast(start::left_out_message(&left_out));
+                }
+                self.toast(format!(
+                    "{} と同じ設定を入れました。確かめてから「レビューを開始」を押してください",
+                    session.id
+                ));
+                self.rebuild(text);
+                start::show_top(&mut self.tree, &self.start, form.kind);
+            }
+            Action::RequestFix { agent, scope } => {
+                let Some(session) = self.session.clone() else {
+                    return;
+                };
+                let ids = self.fix_ids(&session, &scope);
+                if ids.is_empty() {
+                    self.toast("修正を依頼する指摘が表示されていません");
+                    return;
+                }
+                match (&self.source, self.session_dir.clone()) {
+                    (Source::Live(_), Some(dir)) => {
+                        self.send_cmd(Command::RequestFix(Box::new(FixRequest {
+                            session,
+                            dir,
+                            agent,
+                            ids,
+                        })));
+                        self.toast(format!("{} に修正を依頼しています…", agent.command()));
+                    }
+                    (Source::Live(_), None) => {
+                        self.toast("このレビューの保存先が分からないため、修正を依頼できません");
+                    }
+                    (Source::Demo | Source::Snapshot, _) => {
+                        self.toast("デモ表示では操作を送信できません");
+                    }
                 }
             }
             Action::RegenerateReport => {
@@ -1293,6 +1696,15 @@ impl Screen for Review {
             self.close_alert = None;
             if answer.button == 1 {
                 self.send_cmd(Command::Close);
+            }
+            return;
+        }
+        if let Some(TextChanged(query)) = message.downcast_ref::<TextChanged>()
+            && message.source == self.search
+        {
+            if self.filters.query != *query {
+                self.filters.query = query.clone();
+                self.refilter(text);
             }
             return;
         }

@@ -80,6 +80,11 @@ pub struct PaneSpec {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub label: String,
+    /// The person works with this pane (a fix request): it opens with
+    /// keyboard focus and without auto approval, whatever its placement.
+    pub attended: bool,
+    /// Environment the pane's process gets on top of Noa's.
+    pub env: Vec<(String, String)>,
 }
 
 /// Where a new pane goes.
@@ -113,6 +118,13 @@ pub trait Noa {
     /// Brings `pane` (and its window and tab) to the front with keyboard
     /// focus (`noa.focusPane`).
     fn focus(&mut self, pane: u64) -> Result<(), NoaError>;
+    /// The version this connection's `noa.hello` gave (`serverVersion`):
+    /// what a request needs of Noa is judged on the server that takes it.
+    fn server_version(&self) -> String;
+    /// This connection's place among every hello the window completed
+    /// ([`next_hello`]): a later one is newer, whatever order the reports
+    /// of them arrive in.
+    fn hello_seq(&self) -> u64;
 }
 
 /// Opens connections to Noa; the runner calls it again after a lost one.
@@ -128,35 +140,26 @@ pub struct IpcConnect;
 
 pub struct IpcNoa {
     client: Client,
+    /// `noa.hello`'s `serverVersion`.
+    version: String,
+    /// When its hello completed ([`next_hello`]).
+    seq: u64,
+}
+
+/// Numbers every `noa.hello` the window completes, in the order they
+/// complete, so the version of the newest connection wins on screen.
+static HELLOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The next hello's number (starting at 1).
+pub(crate) fn next_hello() -> u64 {
+    HELLOS.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
 }
 
 impl Connect for IpcConnect {
     type Conn = IpcNoa;
 
     fn connect(&mut self) -> Result<IpcNoa, String> {
-        let (config, _diagnostics) =
-            noa_config::load_startup_config(noa_config::ConfigOverrides::default())
-                .map_err(|err| format!("設定を読めません: {err:#}"))?;
-        if !config.server_enable {
-            return Err(SERVER_DISABLED.into());
-        }
-        let token = match config.server_token.filter(|token| !token.trim().is_empty()) {
-            Some(token) => token,
-            None => {
-                let path = noa_config::server_token_path()
-                    .ok_or_else(|| "トークンの場所がわかりません".to_owned())?;
-                std::fs::read_to_string(&path)
-                    .map(|token| token.trim().to_owned())
-                    .ok()
-                    .filter(|token| !token.is_empty())
-                    .ok_or_else(|| format!("トークンがありません: {}", path.display()))?
-            }
-        };
-        let url = control_url(&config.server_bind, config.server_port);
-        // An older Noa ignores `refuseShell` and would type into a shell.
-        if !server_version(&url, &token).is_some_and(|v| honours_refuse_shell(&v)) {
-            return Err(UNSAFE_SEND.to_owned());
-        }
+        let (url, token) = endpoint()?;
         let scopes = ScopeSet::from_strings(["read", "control", "input"]);
         let mut client = match Client::connect(&url, &token, scopes) {
             Ok(client) => client,
@@ -168,6 +171,14 @@ impl Connect for IpcConnect {
             }
             Err(other) => return Err(format!("{url} に接続できません: {other}")),
         };
+        // Judged on this connection's own hello, the one every request goes
+        // through: an older Noa ignores `refuseShell` and would type into a
+        // shell.
+        let version = client.server_version().to_owned();
+        let seq = next_hello();
+        if !honours_refuse_shell(&version) {
+            return Err(UNSAFE_SEND.to_owned());
+        }
         let granted = client.granted_scopes();
         if !granted.contains(Scope::Control) || !granted.contains(Scope::Input) {
             return Err(
@@ -178,8 +189,45 @@ impl Connect for IpcConnect {
         client
             .subscribe(&[EventKind::StateChanged], None)
             .map_err(|err| format!("購読できません: {err}"))?;
-        Ok(IpcNoa { client })
+        Ok(IpcNoa {
+            client,
+            version,
+            seq,
+        })
     }
+}
+
+/// The control server's URL and token, from the config.
+fn endpoint() -> Result<(String, String), String> {
+    let (config, _diagnostics) =
+        noa_config::load_startup_config(noa_config::ConfigOverrides::default())
+            .map_err(|err| format!("設定を読めません: {err:#}"))?;
+    if !config.server_enable {
+        return Err(SERVER_DISABLED.into());
+    }
+    let token = match config.server_token.filter(|token| !token.trim().is_empty()) {
+        Some(token) => token,
+        None => {
+            let path = noa_config::server_token_path()
+                .ok_or_else(|| "トークンの場所がわかりません".to_owned())?;
+            std::fs::read_to_string(&path)
+                .map(|token| token.trim().to_owned())
+                .ok()
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| format!("トークンがありません: {}", path.display()))?
+        }
+    };
+    Ok((control_url(&config.server_bind, config.server_port), token))
+}
+
+/// The running Noa's version (`noa.hello` only, read scope), for what the
+/// window shows before any review connects; `None` when it cannot tell.
+/// Only for display: what a request may do is judged on its own
+/// connection ([`Noa::server_version`]).
+pub fn probe_version() -> Option<(u64, String)> {
+    let (url, token) = endpoint().ok()?;
+    let version = server_version(&url, &token)?;
+    Some((next_hello(), version))
 }
 
 fn control_url(bind: &str, port: u16) -> String {
@@ -214,15 +262,69 @@ pub(crate) const UNSAFE_SEND: &str =
 /// ignores the field (as `widgets/agent-dashboard` checks it).
 const REFUSE_SHELL_SINCE: (u64, u64, u64) = (0, 9, 12);
 
-/// Whether `version` (`noa.hello`'s `serverVersion`) is
-/// `REFUSE_SHELL_SINCE` or later. A version that does not parse is not.
-fn honours_refuse_shell(version: &str) -> bool {
-    let core = version.split(['-', '+']).next().unwrap_or("");
-    let parts: Vec<u64> = core.split('.').map_while(|n| n.parse().ok()).collect();
-    match parts[..] {
-        [major, minor, patch] => (major, minor, patch) >= REFUSE_SHELL_SINCE,
-        _ => false,
+/// The first Noa that takes `autoApprove` on `noa.newTab` (the per-tab
+/// setting came with v0.9.13; 0.9.12 reads the request without it).
+const TAB_AUTO_APPROVE_SINCE: (u64, u64, u64) = (0, 9, 13);
+
+/// Why 修正を依頼 is not offered on an older Noa.
+pub(crate) fn no_tab_auto_approve(version: &str) -> String {
+    format!(
+        "この Noa（{version}）は新しいタブの自動承認を止められないため、修正を依頼できません（Noa 0.9.13 以降が必要）"
+    )
+}
+
+/// `version` as `MAJOR.MINOR.PATCH`, read strictly: the whole string must
+/// be three decimal numbers, optionally followed by `-<pre-release>` and
+/// `+<build>` of dot-separated `[0-9A-Za-z-]` parts (semver's shape).
+/// Anything else (`v0.9.13`, `0.9.13.1`, `0.9.13.invalid`, `0.9`) is `None`.
+fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
+    let ident = |part: &str| {
+        !part.is_empty()
+            && part
+                .split('.')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    };
+    let (rest, build) = match version.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (version, None),
+    };
+    if build.is_some_and(|b| !ident(b)) {
+        return None;
     }
+    let (core, pre) = match rest.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (rest, None),
+    };
+    if pre.is_some_and(|p| !ident(p)) {
+        return None;
+    }
+    let number = |n: &str| {
+        (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| n.parse().ok())
+            .flatten()
+    };
+    let mut parts = core.split('.');
+    let parsed = (
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+    );
+    parts.next().is_none().then_some(parsed)
+}
+
+/// Whether `version` (`noa.hello`'s `serverVersion`) is `since` or later.
+/// A version that does not parse strictly is not.
+fn at_least(version: &str, since: (u64, u64, u64)) -> bool {
+    parse_version(version).is_some_and(|v| v >= since)
+}
+
+fn honours_refuse_shell(version: &str) -> bool {
+    at_least(version, REFUSE_SHELL_SINCE)
+}
+
+/// Whether a Noa of `version` takes `autoApprove` on `noa.newTab`.
+pub(crate) fn sets_tab_auto_approve(version: &str) -> bool {
+    at_least(version, TAB_AUTO_APPROVE_SINCE)
 }
 
 /// The server's version from a `noa.hello` of our own: `noa_ipc::Client`
@@ -280,6 +382,14 @@ fn noa_error(err: ClientError) -> NoaError {
 }
 
 impl Noa for IpcNoa {
+    fn server_version(&self) -> String {
+        self.version.clone()
+    }
+
+    fn hello_seq(&self) -> u64 {
+        self.seq
+    }
+
     fn panes(&mut self) -> Result<Vec<PaneView>, NoaError> {
         let panels = self.client.list_panels().map_err(noa_error)?;
         Ok(panels.iter().map(view).collect())
@@ -370,14 +480,17 @@ fn spawn_params(placement: Placement, spec: &PaneSpec) -> SpawnParams {
         config: Some(SpawnConfig {
             command: Some(spec.argv.clone()),
             cwd: Some(spec.cwd.to_string_lossy().into_owned()),
+            env: spec.env.iter().cloned().collect(),
             ..SpawnConfig::default()
         }),
         label: Some(spec.label.clone()),
-        focus: Some(false),
+        focus: Some(spec.attended),
         // Reviewers and the lead run unattended in their own tab, so
         // its agent prompts are answered without the user (the later
-        // splits share the tab's setting).
-        auto_approve: matches!(placement, Placement::NewTab).then_some(true),
+        // splits share the tab's setting). A fix edits the work tree: its
+        // tab is set to ask the person, said outright, since a tab Noa
+        // opens otherwise takes the global `auto-approve` setting.
+        auto_approve: matches!(placement, Placement::NewTab).then_some(!spec.attended),
         ..SpawnParams::default()
     }
 }
@@ -401,18 +514,74 @@ mod tests {
     }
 
     #[test]
+    fn only_a_noa_from_0_9_13_sets_a_new_tabs_auto_approve() {
+        for (version, ok) in [
+            ("0.9.12", false),
+            ("0.9.12-dev+abc", false),
+            ("0.9.13", true),
+            ("0.9.13-dev", true),
+            ("0.9.13-rc.1+build.5", true),
+            ("0.10.0", true),
+            ("1.0.0", true),
+            ("nope", false),
+            // Read strictly: the whole string, not a prefix of it.
+            ("0.9.13.invalid", false),
+            ("0.9.13.1", false),
+            ("v0.9.13", false),
+            ("0.9", false),
+            ("0.9.13-", false),
+            ("0.9.13+", false),
+            ("0.9.13-a..b", false),
+            (" 0.9.13", false),
+            ("0.9.+13", false),
+        ] {
+            assert_eq!(sets_tab_auto_approve(version), ok, "{version}");
+        }
+        assert!(no_tab_auto_approve("0.9.12").contains("0.9.13 以降が必要"));
+    }
+
+    #[test]
     fn only_the_review_tab_turns_auto_approve_on() {
         let spec = PaneSpec {
             argv: vec!["codex".into()],
             cwd: PathBuf::from("/tmp"),
             label: "codex".into(),
+            attended: false,
+            env: Vec::new(),
         };
         assert_eq!(
             spawn_params(Placement::NewTab, &spec).auto_approve,
             Some(true)
         );
+        assert_eq!(spawn_params(Placement::NewTab, &spec).focus, Some(false));
         for split in [Placement::Right(7), Placement::Below(7)] {
             assert_eq!(spawn_params(split, &spec).auto_approve, None);
+        }
+    }
+
+    #[test]
+    fn an_attended_pane_takes_focus_and_never_auto_approves() {
+        let spec = PaneSpec {
+            argv: vec!["codex".into()],
+            cwd: PathBuf::from("/tmp"),
+            label: "fix · rev-1".into(),
+            attended: true,
+            env: vec![("K".into(), "v".into())],
+        };
+        // A new tab is told outright not to auto-approve: left out, Noa
+        // would give it the global `auto-approve` setting.
+        let tab = spawn_params(Placement::NewTab, &spec);
+        assert_eq!(tab.auto_approve, Some(false));
+        assert_eq!(tab.focus, Some(true));
+        assert_eq!(
+            tab.config.unwrap().env.get("K").map(String::as_str),
+            Some("v")
+        );
+        // A split shares its tab's setting, so it sends none.
+        for placement in [Placement::Right(7), Placement::Below(7)] {
+            let params = spawn_params(placement, &spec);
+            assert_eq!(params.auto_approve, None, "{placement:?}");
+            assert_eq!(params.focus, Some(true), "{placement:?}");
         }
     }
 

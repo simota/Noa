@@ -144,8 +144,10 @@ impl Driver {
                 request: "ストアの書き換えです。ログのロックと再開まわりを重点的に見てください。",
                 target: target(),
                 manifest: manifest(),
-                workdir: None,
+                // As a git review's: the repository's top level.
+                workdir: Some(PathBuf::from("/Users/demo/repos/noa")),
                 max_rounds: 3,
+                round_cap: review::model::types::MAX_MAX_ROUNDS,
                 lead: AgentChoice {
                     kind: AgentKind::Claude,
                     setup: AgentSetup {
@@ -409,6 +411,14 @@ pub fn log() -> Vec<Vec<review::model::reduce::Event>> {
     d.log
 }
 
+/// The held demo's event log (unfinished), for tests that need it on disk.
+#[cfg(test)]
+pub fn held_log() -> Vec<Vec<review::model::reduce::Event>> {
+    let mut d = Driver::new("rev-demo-held", true);
+    round_one(&mut d);
+    d.log
+}
+
 /// The demo held after its first consolidation.
 pub fn held() -> Session {
     let mut d = Driver::new("rev-demo-held", true);
@@ -451,6 +461,7 @@ pub fn past() -> Vec<Listed> {
             busy,
             ..Summary::of(&Path::new(DIR).join(id), session)
         }),
+        stamp: None,
     };
     vec![
         row("rev-demo-held", &held, false),
@@ -458,6 +469,7 @@ pub fn past() -> Vec<Listed> {
         Listed {
             dir: Path::new(DIR).join("rev-broken"),
             summary: Err("events.jsonl line 3 is damaged: expected value".into()),
+            stamp: None,
         },
     ]
 }

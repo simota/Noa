@@ -3,7 +3,7 @@
 //! browser (`repo-browser.open`), the discussion (`discussion.open`), the
 //! competition (`competition.open`) and the review (`review.open`). They
 //! read Noa's panes through the control server, so each runs as a process of
-//! its own.
+//! its own. Only the review gets an argument: the focused pane's directory.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -54,6 +54,19 @@ pub(crate) const REVIEW: HelperProgram = HelperProgram {
     crate_name: "review",
 };
 
+/// What `helper` is started with, given the working directory of the
+/// focused pane (local, an existing directory, as `App::focused_pane_cwd`
+/// gives it): the review takes it as `--repo=`, the place its start view
+/// offers first; every other program starts with no argument.
+pub(crate) fn launch_args(helper: HelperProgram, focused_cwd: Option<&str>) -> Vec<String> {
+    match focused_cwd {
+        Some(cwd) if helper.crate_name == REVIEW.crate_name && Path::new(cwd).is_absolute() => {
+            vec![format!("--repo={cwd}")]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// How much of the program's stderr is kept to say why it exited.
 const STDERR_TAIL: usize = 4096;
 
@@ -62,6 +75,7 @@ const STDERR_TAIL: usize = 4096;
 /// it ends unsuccessfully.
 pub(crate) fn open(
     helper: HelperProgram,
+    args: &[String],
     on_failure: impl FnOnce(String) + Send + 'static,
 ) -> Result<(), String> {
     let HelperProgram {
@@ -84,6 +98,7 @@ pub(crate) fn open(
     };
     let mut command = Command::new(&program);
     command
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -348,6 +363,28 @@ mod tests {
         );
         for dir in [exe_dir, dev] {
             let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn only_the_review_is_given_the_focused_panes_directory() {
+        assert_eq!(
+            launch_args(REVIEW, Some("/Users/me/src/noa")),
+            ["--repo=/Users/me/src/noa"]
+        );
+        assert!(launch_args(REVIEW, None).is_empty());
+        assert!(launch_args(REVIEW, Some("relative/dir")).is_empty());
+        for helper in [AGENT_DASHBOARD, REPO_BROWSER, DISCUSSION, COMPETITION] {
+            assert!(
+                launch_args(helper, Some("/Users/me/src/noa")).is_empty(),
+                "{}",
+                helper.crate_name
+            );
+            assert!(
+                launch_args(helper, None).is_empty(),
+                "{}",
+                helper.crate_name
+            );
         }
     }
 

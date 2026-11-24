@@ -1,4 +1,5 @@
-//! The start view: competition request, optional workdir, judge agent, round
+//! The start view: competition request, optional workdir, the judge panel
+//! (1–3 rows of agent, model and effort; the first is the lead), round
 //! limit, peer-reveal interval (default every 5 rounds), and the contestant
 //! panel (rows of agent, model, and effort; a kind may enter more than once),
 //! above the list of past competitions to open, resume, or rematch.
@@ -17,8 +18,8 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
 use competition::model::types::{
-    AgentChoice, AgentKind, AgentSetup, DEFAULT_MAX_ROUNDS, DEFAULT_REVEAL_INTERVAL, MAX_PANEL,
-    Millis, Participant, RoundNo, Session,
+    AgentChoice, AgentKind, AgentSetup, DEFAULT_MAX_ROUNDS, DEFAULT_REVEAL_INTERVAL, MAX_JUDGES,
+    MAX_PANEL, Millis, Participant, RoundNo, Session,
 };
 use competition::store::Listed;
 
@@ -46,6 +47,11 @@ pub(super) struct Parts {
     kinds: Vec<AgentKind>,
     /// The model and effort of the judge; rebuilt when its kind changes.
     pub(super) judge_setup: SetupParts,
+    /// Holds the co-judges' rows, below the lead's.
+    co_judge_list: WidgetId,
+    /// One row per co-judge (`judge-2`, `judge-3`), in seat order.
+    pub(super) co_judges: Vec<PanelRow>,
+    pub(super) add_judge: WidgetId,
     /// Holds the panel's rows.
     panel_list: WidgetId,
     /// One row per entry, in panel order.
@@ -149,7 +155,11 @@ pub(crate) struct Form {
     pub workdir: String,
     pub max_rounds: RoundNo,
     pub reveal_interval: RoundNo,
+    /// The lead judge (the first row).
     pub judge: AgentChoice,
+    /// The judges after the lead, in seat order (at most
+    /// `MAX_JUDGES - 1`); empty for a single judge.
+    pub co_judges: Vec<AgentChoice>,
     pub panel: Vec<AgentChoice>,
 }
 
@@ -179,14 +189,25 @@ impl Form {
             max_rounds: DEFAULT_MAX_ROUNDS,
             reveal_interval: DEFAULT_REVEAL_INTERVAL,
             judge: first.into(),
+            co_judges: Vec::new(),
             panel,
         }
     }
 
+    /// The judge panel in seat order, lead first.
+    pub(crate) fn judges(&self) -> Vec<AgentChoice> {
+        std::iter::once(&self.judge)
+            .chain(&self.co_judges)
+            .cloned()
+            .collect()
+    }
+
     /// This form with only the available `kinds`: panel entries of
     /// another kind are dropped (the panel is padded back to the minimum
-    /// with the first kind), a judge of another kind becomes the first
-    /// kind on its defaults. Also the kinds left out, in order, once each.
+    /// with the first kind). Judges of another kind are dropped too: a
+    /// dropped lead is replaced by the first co-judge left, or else by the
+    /// first kind on its defaults, so one judge always stays. Also the
+    /// kinds left out, in order, once each.
     fn restricted(mut self, kinds: &[AgentKind]) -> (Self, Vec<AgentKind>) {
         let mut left_out = Vec::new();
         let mut note = |kind: AgentKind| {
@@ -194,9 +215,24 @@ impl Form {
                 left_out.push(kind);
             }
         };
-        if !kinds.contains(&self.judge.kind) {
+        self.co_judges.truncate(MAX_JUDGES - 1);
+        let lead_kept = kinds.contains(&self.judge.kind);
+        if !lead_kept {
             note(self.judge.kind);
-            self.judge = kinds[0].into();
+        }
+        self.co_judges.retain(|choice| {
+            let keep = kinds.contains(&choice.kind);
+            if !keep {
+                note(choice.kind);
+            }
+            keep
+        });
+        if !lead_kept {
+            self.judge = if self.co_judges.is_empty() {
+                kinds[0].into()
+            } else {
+                self.co_judges.remove(0)
+            };
         }
         self.panel.retain(|choice| {
             let keep = kinds.contains(&choice.kind);
@@ -231,6 +267,12 @@ impl Form {
                 .clamp(1, MAX_MAX_ROUNDS),
             reveal_interval: session.reveal_interval.min(MAX_REVEAL_INTERVAL),
             judge: choice(&session.judge),
+            co_judges: session
+                .co_judges
+                .iter()
+                .take(MAX_JUDGES - 1)
+                .map(choice)
+                .collect(),
             panel: session
                 .contestants
                 .iter()
@@ -368,7 +410,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     caption(
         tree,
         judge_col,
-        "審判 (Judge) のエージェント・モデル・エフォート",
+        format!("審判 (Judge)（1〜{MAX_JUDGES}人）・エージェント・モデル・エフォート"),
     );
     let judge_row = tree.insert(
         Some(judge_col),
@@ -380,6 +422,26 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     let judge_host = tree.insert(Some(judge_row), Container::row());
     let judge = insert_kind_menu(tree, judge_host, &kinds, kinds[0]);
     let judge_setup = insert_setup(tree, judge_row, kinds[0]);
+    let co_judge_list = tree.insert(Some(judge_col), Container::column().gap(6.0));
+    let judge_foot = tree.insert(
+        Some(judge_col),
+        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+    );
+    let add_judge = tree.insert(
+        Some(judge_foot),
+        Button::new("＋ 審判を追加").control_size(ControlSize::Small),
+    );
+    tree.insert(
+        Some(judge_col),
+        Label::new(
+            "1人目がリード審判です。早期終了と最終講評はリード審判が決め、\
+             ほかの審判は採点だけを行います。審判は毎ラウンド全員が採点し、\
+             各参加者のスコアは審判の平均点になります",
+        )
+        .font_size(11.0)
+        .color(Role::Muted)
+        .wrap(true),
+    );
 
     let panel_col = tree.insert(Some(card), Container::column().gap(6.0));
     caption(
@@ -428,6 +490,9 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         judge,
         kinds,
         judge_setup,
+        co_judge_list,
+        co_judges: Vec::new(),
+        add_judge,
         panel_list,
         panel,
         add_row,
@@ -539,13 +604,44 @@ fn insert_row(
     }
 }
 
-/// Adding stops at [`MAX_PANEL`] rows, removing at two.
+/// Adding stops at [`MAX_PANEL`] rows, removing at two; judge rows stop
+/// at [`MAX_JUDGES`] (every co-judge row can be removed).
 fn sync_row_buttons(tree: &mut UiTree, parts: &mut Parts) {
     let removable = parts.panel.len() > 2;
     for row in &parts.panel {
         tree.set_enabled(row.remove, removable);
     }
     tree.set_enabled(parts.add_row, parts.panel.len() < MAX_PANEL);
+    tree.set_enabled(parts.add_judge, 1 + parts.co_judges.len() < MAX_JUDGES);
+}
+
+/// Adds a judge row of the last judge's kind (on its default model and
+/// effort), up to [`MAX_JUDGES`] judges.
+pub(super) fn add_judge_row(tree: &mut UiTree, parts: &mut Parts) {
+    if 1 + parts.co_judges.len() >= MAX_JUDGES {
+        return;
+    }
+    let last = parts.co_judges.last().map_or(parts.judge, |row| row.kind);
+    let kind = selected_kind(tree, last, &parts.kinds);
+    let row = insert_row(tree, parts.co_judge_list, &parts.kinds, &kind.into());
+    parts.co_judges.push(row);
+    sync_row_buttons(tree, parts);
+}
+
+/// Removes the co-judge row `index` (0 is `judge-2`); the lead's row
+/// has no remove button.
+pub(super) fn remove_judge_row(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    index: usize,
+    text: &mut TextStore,
+) {
+    if index >= parts.co_judges.len() {
+        return;
+    }
+    let row = parts.co_judges.remove(index);
+    tree.remove(row.host, text);
+    sync_row_buttons(tree, parts);
 }
 
 /// Adds a row of the last row's kind (on its default model and effort),
@@ -579,7 +675,12 @@ pub(super) fn row_kind_changed(
     source: WidgetId,
     text: &mut TextStore,
 ) -> bool {
-    let Some(row) = parts.panel.iter_mut().find(|row| row.kind == source) else {
+    let Some(row) = parts
+        .panel
+        .iter_mut()
+        .chain(&mut parts.co_judges)
+        .find(|row| row.kind == source)
+    else {
         return false;
     };
     let kind = selected_kind(tree, row.kind, &parts.kinds);
@@ -610,6 +711,14 @@ pub(super) fn fill(
     tree.update::<PopUpButton, _>(parts.judge, |p, cx| p.set_selected(cx, judge));
     judge_kind_changed(tree, parts, text);
     set_setup(tree, &parts.judge_setup, form.judge.kind, &form.judge.setup);
+    for row in std::mem::take(&mut parts.co_judges) {
+        tree.remove(row.host, text);
+    }
+    parts.co_judges = form
+        .co_judges
+        .iter()
+        .map(|choice| insert_row(tree, parts.co_judge_list, &parts.kinds, choice))
+        .collect();
     for row in std::mem::take(&mut parts.panel) {
         tree.remove(row.host, text);
     }
@@ -649,6 +758,10 @@ pub(super) fn actions(parts: &Parts, actions: &mut Vec<(WidgetId, Action)>) {
     actions.push((parts.add_row, Action::AddPanelRow));
     for (index, row) in parts.panel.iter().enumerate() {
         actions.push((row.remove, Action::RemovePanelRow(index)));
+    }
+    actions.push((parts.add_judge, Action::AddJudgeRow));
+    for (index, row) in parts.co_judges.iter().enumerate() {
+        actions.push((row.remove, Action::RemoveJudgeRow(index)));
     }
 }
 
@@ -728,24 +841,21 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         kind,
         setup: read_setup(tree, &parts.judge_setup, kind),
     };
-    let panel = parts
-        .panel
-        .iter()
-        .map(|row| {
-            let kind = selected_kind(tree, row.kind, &parts.kinds);
-            AgentChoice {
-                kind,
-                setup: read_setup(tree, &row.setup, kind),
-            }
-        })
-        .collect();
+    let row_choice = |row: &PanelRow| {
+        let kind = selected_kind(tree, row.kind, &parts.kinds);
+        AgentChoice {
+            kind,
+            setup: read_setup(tree, &row.setup, kind),
+        }
+    };
     Form {
         request,
         workdir,
         max_rounds,
         reveal_interval,
         judge,
-        panel,
+        co_judges: parts.co_judges.iter().map(row_choice).collect(),
+        panel: parts.panel.iter().map(row_choice).collect(),
     }
 }
 
@@ -953,5 +1063,112 @@ mod tests {
         let long = "あ".repeat(EXCERPT_CHARS + 5);
         assert_eq!(excerpt(&long).chars().count(), EXCERPT_CHARS + 1);
         assert!(excerpt(&long).ends_with('…'));
+    }
+
+    fn screen() -> (UiTree, Parts, TextStore) {
+        let mut tree = UiTree::new();
+        let root = tree.insert(None, Container::column());
+        let parts = insert(&mut tree, root);
+        (tree, parts, TextStore::new(Default::default()))
+    }
+
+    #[test]
+    fn judge_rows_take_one_to_three() {
+        let (mut tree, mut parts, mut text) = screen();
+        // One judge by default, and room for two more.
+        assert!(read(&tree, &parts).co_judges.is_empty());
+        assert!(tree.is_enabled(parts.add_judge));
+        for _ in 0..4 {
+            add_judge_row(&mut tree, &mut parts);
+        }
+        assert_eq!(read(&tree, &parts).judges().len(), MAX_JUDGES);
+        assert!(!tree.is_enabled(parts.add_judge));
+        // Each co-judge row's controls follow its own kind.
+        let row = parts.co_judges[1].kind;
+        tree.update::<PopUpButton, _>(row, |p, cx| p.set_selected(cx, 2));
+        assert!(row_kind_changed(&mut tree, &mut parts, row, &mut text));
+        let models = tree
+            .get::<ComboBox>(parts.co_judges[1].setup.model)
+            .unwrap()
+            .items()
+            .to_vec();
+        let agy: Vec<String> = AgentKind::Agy
+            .models()
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        assert_eq!(models, agy);
+        let effort = parts.co_judges[1].setup.effort;
+        tree.update::<PopUpButton, _>(effort, |p, cx| p.set_selected(cx, 1));
+        let form = read(&tree, &parts);
+        let kinds: Vec<AgentKind> = form.judges().iter().map(|c| c.kind).collect();
+        assert_eq!(
+            kinds,
+            [AgentKind::Claude, AgentKind::Claude, AgentKind::Agy]
+        );
+        assert_eq!(
+            form.co_judges[1].setup.effort.as_deref(),
+            AgentKind::Agy.efforts().first().copied()
+        );
+        // Any row after the first goes; the lead's row stays.
+        remove_judge_row(&mut tree, &mut parts, 0, &mut text);
+        let kinds: Vec<AgentKind> = read(&tree, &parts)
+            .judges()
+            .iter()
+            .map(|c| c.kind)
+            .collect();
+        assert_eq!(kinds, [AgentKind::Claude, AgentKind::Agy]);
+        assert!(tree.is_enabled(parts.add_judge));
+        remove_judge_row(&mut tree, &mut parts, 0, &mut text);
+        remove_judge_row(&mut tree, &mut parts, 0, &mut text);
+        assert_eq!(read(&tree, &parts).judges().len(), 1);
+    }
+
+    #[test]
+    fn judges_of_one_kind_are_judge_and_judge_2() {
+        let (mut tree, mut parts, mut text) = screen();
+        let on = |model: &str| AgentChoice {
+            kind: AgentKind::Claude,
+            setup: AgentSetup {
+                model: Some(model.into()),
+                effort: None,
+            },
+        };
+        let form = Form {
+            judge: on("opus"),
+            co_judges: vec![on("sonnet")],
+            panel: vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+            ..Form::default()
+        };
+        assert!(fill(&mut tree, &mut parts, &form, &mut text).is_empty());
+        let read = read(&tree, &parts);
+        assert_eq!(read, form);
+        let seats = competition::engine::participants(&read.judges(), &read.panel);
+        let judges: Vec<(&str, Option<&str>)> = std::iter::once(&seats.judge)
+            .chain(&seats.co_judges)
+            .map(|p| (p.id.as_str(), p.setup.model.as_deref()))
+            .collect();
+        assert_eq!(
+            judges,
+            [("judge", Some("opus")), ("judge-2", Some("sonnet"))]
+        );
+        let contestants: Vec<&str> = seats.contestants.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(contestants, ["claude", "codex"]);
+    }
+
+    #[test]
+    fn a_rematch_form_keeps_the_judges_in_seat_order_within_the_limit() {
+        let mut session = crate::demo::panel_session();
+        let mut extra = session.co_judges[0].clone();
+        extra.id = competition::model::types::judge_id(3);
+        session.co_judges.push(extra);
+        let form = Form::of_session(&session);
+        let kinds: Vec<AgentKind> = form.judges().iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, [AgentKind::Claude, AgentKind::Codex, AgentKind::Agy]);
+        // A dropped co-judge leaves the lead where it is.
+        let (form, left_out) = form.restricted(&[AgentKind::Claude, AgentKind::Agy]);
+        let kinds: Vec<AgentKind> = form.judges().iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, [AgentKind::Claude, AgentKind::Agy]);
+        assert_eq!(left_out, [AgentKind::Codex]);
     }
 }

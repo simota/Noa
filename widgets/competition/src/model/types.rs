@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::aggregate::PanelScores;
+
 /// Wall-clock time in milliseconds since the Unix epoch. Always injected by
 /// the caller, so the model and the engine never read a clock themselves.
 pub type Millis = u64;
@@ -25,8 +27,22 @@ pub const DEFAULT_MAX_ROUNDS: RoundNo = 10;
 /// one Noa tab.
 pub const MAX_PANEL: usize = 6;
 
-/// The id of the judge agent ("Judge").
+/// The id of the judge agent ("Judge"): the lead judge of a panel.
 pub const JUDGE_ID: &str = "judge";
+
+/// The most judges one competition seats: each runs in its own pane, and
+/// six contestants with three judges fill the 3×3 grid of one Noa tab.
+pub const MAX_JUDGES: usize = 3;
+
+/// The id of the judge in seat `seat` (0 = lead): `judge`, `judge-2`,
+/// `judge-3`. Ids follow the seat, not the kind, so they never collide
+/// with contestant ids (kind names).
+pub fn judge_id(seat: usize) -> PartId {
+    match seat {
+        0 => PartId::new(JUDGE_ID),
+        n => PartId::new(format!("{JUDGE_ID}-{}", n + 1)),
+    }
+}
 
 macro_rules! string_id {
     ($(#[$doc:meta])* $name:ident) => {
@@ -562,10 +578,21 @@ pub struct Round {
     /// Accepted submissions in this round.
     #[serde(default)]
     pub submissions: BTreeMap<PartId, Submission>,
-    /// The judge's evaluation brief, once the round reaches `Judging`.
+    /// The judge's evaluation brief, once the round reaches `Judging`; the
+    /// lead's scorecard brief in a panel.
     pub judge_brief: Option<Brief>,
-    /// The judge's accepted output for this round.
+    /// The judge's accepted output for this round; in a panel, the combined
+    /// judgment of every scorecard.
     pub outcome: Option<JudgeOutput>,
+    /// The co-judges' scorecard briefs (panel only), in seat order of issue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_judge_briefs: Vec<Brief>,
+    /// Each judge's accepted scorecard (panel only).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scorecards: BTreeMap<PartId, JudgeOutput>,
+    /// The lead's verdict brief, in a deciding round of a panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_brief: Option<Brief>,
 }
 
 impl Round {
@@ -578,27 +605,47 @@ impl Round {
                 .map(|b| b.to.clone())
                 .collect(),
             Phase::Judging => self
-                .judge_brief
-                .iter()
-                .filter(|b| b.receipt.failed.is_some())
+                .judge_briefs()
+                .filter(|b| b.receipt.failed.is_some() && b.receipt.replied.is_none())
                 .map(|b| b.to.clone())
                 .collect(),
             Phase::Closed => Vec::new(),
         }
     }
 
+    /// Every judge brief now open or done, lead first: the lead's is the
+    /// verdict brief once issued (its scorecard brief is replied by then),
+    /// else its scorecard brief; then the co-judges'.
+    pub fn judge_briefs(&self) -> impl Iterator<Item = &Brief> {
+        self.verdict_brief
+            .as_ref()
+            .or(self.judge_brief.as_ref())
+            .into_iter()
+            .chain(&self.co_judge_briefs)
+    }
+
+    /// The brief open or done for `to`: a contestant's, a judge's (for the
+    /// lead, the verdict brief once issued).
     pub fn brief(&self, to: &PartId) -> Option<&Brief> {
         self.briefs
             .iter()
-            .chain(self.judge_brief.as_ref())
+            .chain(self.judge_briefs())
             .find(|brief| &brief.to == to)
     }
 
     pub fn brief_mut(&mut self, to: &PartId) -> Option<&mut Brief> {
         self.briefs
             .iter_mut()
-            .chain(self.judge_brief.as_mut())
+            .chain(self.verdict_brief.as_mut().or(self.judge_brief.as_mut()))
+            .chain(&mut self.co_judge_briefs)
             .find(|brief| &brief.to == to)
+    }
+
+    /// Whether the lead's verdict is asked for and not in yet.
+    pub fn verdict_pending(&self) -> bool {
+        self.verdict_brief
+            .as_ref()
+            .is_some_and(|b| b.receipt.replied.is_none())
     }
 }
 
@@ -619,7 +666,12 @@ pub struct Session {
     /// Bumped once per applied event batch.
     pub rev: u64,
     pub created_at: Millis,
+    /// The judge; the lead judge of a panel.
     pub judge: Participant,
+    /// The judges after the lead (`judge-2`, `judge-3`), who only score.
+    /// Empty in a single-judge session, and then not written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_judges: Vec<Participant>,
     pub contestants: Vec<Participant>,
     pub messages: Vec<Message>,
     pub rounds: Vec<Round>,
@@ -654,6 +706,11 @@ impl Session {
     /// the final round runs, its briefs say FINAL (those sent and those
     /// waiting to go out), so rounds are added once its verdict is in.
     pub fn extendable(&self) -> Result<(), &'static str> {
+        // Between the combined scores and the lead's verdict: an early
+        // close is decided, though the competition is not closed yet.
+        if !self.closed && self.current_round().is_some_and(Round::verdict_pending) {
+            return Err("最終講評の待機中です");
+        }
         let Some(max) = self.max_rounds else {
             return Err("ラウンド上限のないコンペです");
         };
@@ -662,6 +719,10 @@ impl Session {
         if !self.closed {
             return if at_limit {
                 Err("最終ラウンドの進行中です（最終判定の後に追加できます）")
+            } else if self.lead_closes_current_round() {
+                // Co-judges still scoring: the round will end the
+                // competition early, and an extension would be lost.
+                Err("リード審判が早期終了を決めています")
             } else {
                 Ok(())
             };
@@ -671,6 +732,18 @@ impl Session {
         } else {
             Err("ラウンド上限の前に終了したコンペです")
         }
+    }
+
+    /// Whether the current round is still being judged and the lead's
+    /// accepted scorecard of it asks to end the competition early (panel
+    /// only). A judged round no longer decides: the last round's card
+    /// always closes, and a held competition extended after its verdict
+    /// keeps that round current.
+    fn lead_closes_current_round(&self) -> bool {
+        self.current_round()
+            .filter(|round| round.phase == Phase::Judging)
+            .and_then(|round| round.scorecards.get(&self.judge.id))
+            .is_some_and(|card| card.close)
     }
 
     /// The judge's final verdict on the winner now decided: that of the
@@ -687,9 +760,48 @@ impl Session {
     }
 
     pub fn participant(&self, id: &PartId) -> Option<&Participant> {
-        std::iter::once(&self.judge)
+        self.judges()
             .chain(&self.contestants)
             .find(|part| &part.id == id)
+    }
+
+    /// The judge panel in seat order, lead first.
+    pub fn judges(&self) -> impl Iterator<Item = &Participant> {
+        std::iter::once(&self.judge).chain(&self.co_judges)
+    }
+
+    pub fn is_judge(&self, id: &PartId) -> bool {
+        self.judges().any(|part| &part.id == id)
+    }
+
+    /// Whether more than one judge scores (a multi-judge session).
+    pub fn is_panel(&self) -> bool {
+        !self.co_judges.is_empty()
+    }
+
+    /// Every judge's score of `part` in round `no`, in seat order, once
+    /// every judge's scorecard of that round is in (a panel round); `None`
+    /// for a single-judge round or one still being scored.
+    pub fn panel_scores(&self, no: RoundNo, part: &PartId) -> Option<PanelScores> {
+        let round = self.round(no)?;
+        let scores = self
+            .judges()
+            .map(|judge| {
+                let card = round.scorecards.get(&judge.id)?;
+                Some((judge.id.clone(), card.evaluations.get(part)?.score))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(PanelScores { scores })
+    }
+
+    /// `part`'s round-`no` score as every view shows it: the mean to one
+    /// decimal (`81.3`) in a panel round, the score (`81`) otherwise.
+    pub fn score_label(&self, no: RoundNo, part: &PartId) -> Option<String> {
+        if let Some(panel) = self.panel_scores(no, part) {
+            return Some(panel.mean_label());
+        }
+        let outcome = self.round(no)?.outcome.as_ref()?;
+        Some(outcome.evaluations.get(part)?.score.to_string())
     }
 
     pub fn is_contestant(&self, id: &PartId) -> bool {
@@ -829,7 +941,10 @@ impl Session {
         match author {
             Author::User => "ユーザー".to_owned(),
             Author::Part(id) if id.as_str() == JUDGE_ID => "審判 (Judge)".to_owned(),
-            Author::Part(id) => id.to_string(),
+            Author::Part(id) => match self.co_judges.iter().position(|p| &p.id == id) {
+                Some(seat) => format!("審判 {} ({id})", seat + 2),
+                None => id.to_string(),
+            },
         }
     }
 }
@@ -958,6 +1073,9 @@ mod tests {
                 briefs: Vec::new(),
                 submissions: BTreeMap::new(),
                 judge_brief: None,
+                co_judge_briefs: Vec::new(),
+                scorecards: BTreeMap::new(),
+                verdict_brief: None,
                 outcome,
             }
         };
@@ -970,6 +1088,7 @@ mod tests {
             rev: 1,
             created_at: 0,
             judge: p(JUDGE_ID, AgentKind::Claude, Role::Judge),
+            co_judges: Vec::new(),
             contestants: vec![
                 p("claude", AgentKind::Claude, Role::Contestant),
                 p("codex", AgentKind::Codex, Role::Contestant),
@@ -1005,5 +1124,125 @@ mod tests {
         assert_eq!(s.round(10).map(|r| r.no), Some(10));
         assert_eq!(s.round_mut(10).map(|r| r.no), Some(10));
         assert_eq!(s.latest_score(&claude), Some(91));
+    }
+
+    #[test]
+    fn judge_ids_follow_the_seat() {
+        assert_eq!(
+            [judge_id(0), judge_id(1), judge_id(2)].map(|id| id.0),
+            ["judge", "judge-2", "judge-3"]
+        );
+        // Three judges of one kind: ids by seat, never colliding with the
+        // contestants' kind names.
+        let claude = |model: &str| AgentChoice {
+            kind: AgentKind::Claude,
+            setup: AgentSetup {
+                model: Some(model.into()),
+                effort: None,
+            },
+        };
+        let seats = crate::engine::participants(
+            &[claude("opus"), claude("sonnet"), claude("haiku")],
+            &[AgentKind::Claude.into(), AgentKind::Claude.into()],
+        );
+        let judges: Vec<(&str, Role, Option<&str>)> = std::iter::once(&seats.judge)
+            .chain(&seats.co_judges)
+            .map(|p| (p.id.as_str(), p.role, p.setup.model.as_deref()))
+            .collect();
+        assert_eq!(
+            judges,
+            [
+                ("judge", Role::Judge, Some("opus")),
+                ("judge-2", Role::Judge, Some("sonnet")),
+                ("judge-3", Role::Judge, Some("haiku")),
+            ]
+        );
+        let ids: Vec<&str> = seats.contestants.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["claude", "claude-2"]);
+
+        let session = crate::model::aggregate::tests::panel_session(Some(3));
+        assert!(session.is_panel());
+        let seated: Vec<&str> = session.judges().map(|p| p.id.as_str()).collect();
+        assert_eq!(seated, ["judge", "judge-2", "judge-3"]);
+        assert!(session.is_judge(&judge_id(2)) && !session.is_judge(&PartId::new("claude")));
+        assert_eq!(
+            session.participant(&judge_id(1)).map(|p| p.kind),
+            Some(AgentKind::Claude)
+        );
+        let name = |id: &str| session.author_name(&Author::Part(PartId::new(id)));
+        assert_eq!(
+            [
+                name("judge"),
+                name("judge-2"),
+                name("judge-3"),
+                name("codex")
+            ],
+            [
+                "審判 (Judge)",
+                "審判 2 (judge-2)",
+                "審判 3 (judge-3)",
+                "codex"
+            ]
+        );
+    }
+
+    #[test]
+    fn rounds_are_not_added_while_a_verdict_is_pending() {
+        use crate::model::aggregate::tests::{cards, panel_session, settle};
+        use crate::model::reduce::{Event, apply};
+        let mut session = panel_session(Some(3));
+        let mut all = cards(
+            &[("codex", 90), ("claude", 70)],
+            &[("codex", 85), ("claude", 75)],
+            &[("codex", 80), ("claude", 79)],
+        );
+        // The lead asks to close early, before the limit.
+        all.get_mut(&judge_id(0)).unwrap().close = true;
+        settle(&mut session, 1, &all).unwrap();
+        assert_eq!(
+            session.extendable(),
+            Err("リード審判が早期終了を決めています")
+        );
+        let brief = Brief {
+            to: judge_id(0),
+            base_rev: session.rev,
+            body: "verdict".into(),
+            reply_path: PathBuf::from("/c/r1/verdict.json"),
+            receipt: Receipt::default(),
+        };
+        apply(&mut session, &[Event::VerdictRequested { round: 1, brief }]).unwrap();
+        assert_eq!(session.extendable(), Err("最終講評の待機中です"));
+        let extend = Event::RoundsExtended {
+            max_rounds: 4,
+            at: 9,
+        };
+        assert!(apply(&mut session.clone(), std::slice::from_ref(&extend)).is_err());
+        // In: the competition ended early, and is not extended either.
+        apply(
+            &mut session,
+            &[
+                Event::ReplyAccepted {
+                    round: 1,
+                    to: judge_id(0),
+                    at: 10,
+                },
+                Event::VerdictAccepted {
+                    round: 1,
+                    winner: PartId::new("codex"),
+                    final_verdict: "codex".into(),
+                },
+                Event::PhaseChanged {
+                    round: 1,
+                    phase: Phase::Closed,
+                },
+                Event::SessionClosed,
+            ],
+        )
+        .unwrap();
+        assert!(!session.current_round().unwrap().verdict_pending());
+        assert_eq!(
+            session.extendable(),
+            Err("ラウンド上限の前に終了したコンペです")
+        );
     }
 }

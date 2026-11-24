@@ -1161,6 +1161,48 @@ fn ac27_worktree_and_snapshot_buttons_open_finder_through_the_opener() {
 
 // ---- round controls and the composer ----
 
+/// L1-4 item 2, L1-7 item 2: the progress strip counts every item asked
+/// for re-run, those of a verifier whose script could not be written
+/// (`not_run`, no `RerunRequested`) too, as the round's evidence lists them.
+#[test]
+fn the_rerun_count_holds_the_items_whose_script_could_not_be_written() {
+    use verify::model::types::{EvidenceBody, Isolation, Rerun};
+    let mut session = crate::demo::held();
+    assert_eq!(session.isolation, Isolation::Worktree);
+    let asked: Vec<(PartId, EvidenceKey)> = session
+        .evidence
+        .iter()
+        .filter(|e| matches!(e.body, EvidenceBody::Command { rerun: true, .. }))
+        .filter_map(|e| e.key.split().filter(|(_, r, _)| *r == 1).map(|(p, ..)| (p, e.key.clone())))
+        .collect();
+    let parts: std::collections::BTreeSet<&PartId> = asked.iter().map(|(p, _)| p).collect();
+    assert!(parts.len() >= 2, "{asked:?}");
+    // One verifier's script was never written: its items end `not_run`.
+    let unwritten = (*parts.iter().next().unwrap()).clone();
+    session.rounds[0].reruns.remove(&unwritten);
+    for e in &mut session.evidence {
+        if asked.iter().any(|(p, k)| *p == unwritten && *k == e.key) {
+            e.rerun = Some(Rerun::NotRun {
+                why: "再実行スクリプトを書けません".into(),
+                log: None,
+            });
+        }
+    }
+    let round = session.rounds[0].clone();
+    assert_eq!(progress::reruns(&session, &round), (asked.len(), asked.len()));
+    // Not yet ended: counted as asked, not done.
+    for e in &mut session.evidence {
+        if asked.iter().any(|(p, k)| *p == unwritten && *k == e.key) {
+            e.rerun = None;
+        }
+    }
+    let unwritten_items = asked.iter().filter(|(p, _)| *p == unwritten).count();
+    assert_eq!(
+        progress::reruns(&session, &round),
+        (asked.len() - unwritten_items, asked.len())
+    );
+}
+
 /// L1-4 item 6, L1-7: an ended verification whose worktree is still
 /// there (its removal failed: locked, say) offers no +1 / +3, which the
 /// engine would refuse until it is removed; once removed, it does.

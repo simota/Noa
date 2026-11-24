@@ -156,13 +156,31 @@ pub fn local(at: Unix, tz: &dyn Tz) -> LocalTime {
     }
 }
 
-/// Unix time of the first instant of a local date. A day with a UTC-offset
-/// change inside it uses the offset in force at the start of that civil day.
+/// Unix time of the first instant of a local date. When local midnight does
+/// not exist (a forward offset change at 00:00) that is the first instant after
+/// the change; when it occurs twice, the first occurrence.
 pub fn day_start(date: LocalDate, tz: &dyn Tz) -> Unix {
+    const STEP: i64 = 900;
     let naive = days_from_civil(date) * 86_400;
-    // Offset at the guessed instant, then once more at the corrected one.
-    let guess = naive - i64::from(tz.offset_secs(naive));
-    naive - i64::from(tz.offset_secs(guess))
+    let reached = |t: Unix| t + i64::from(tz.offset_secs(t)) >= naive;
+    // Offsets stay within ±15 h, so `from` is surely before the day and the
+    // scan surely ends inside it. Find the first step that has reached it, then
+    // bisect the step before it for the exact second.
+    let mut lo = naive - 16 * 3600;
+    let mut hi = lo + STEP;
+    while !reached(hi) {
+        lo = hi;
+        hi += STEP;
+    }
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if reached(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
 }
 
 pub fn add_days(date: LocalDate, days: i64) -> LocalDate {
@@ -277,5 +295,34 @@ mod tests {
         assert_eq!(local(monday + 86_400 * 6, &tz).weekday, 6);
         assert_eq!(local(0, &tz).weekday, 3); // 1970-01-01, a Thursday
         assert_eq!(local(-86_400, &tz).weekday, 2);
+    }
+
+    /// Santiago 2026-09-06: clocks jump 00:00 -> 01:00 (-04 -> -03) at 04:00 UTC.
+    struct SpringForwardAtMidnight;
+
+    impl Tz for SpringForwardAtMidnight {
+        fn offset_secs(&self, at: Unix) -> i32 {
+            let change = parse_rfc3339("2026-09-06T04:00:00Z").unwrap();
+            if at < change { -4 * 3600 } else { -3 * 3600 }
+        }
+    }
+
+    #[test]
+    fn day_start_when_midnight_does_not_exist() {
+        let tz = SpringForwardAtMidnight;
+        let date = LocalDate {
+            year: 2026,
+            month: 9,
+            day: 6,
+        };
+        let start = day_start(date, &tz);
+        assert_eq!(start, parse_rfc3339("2026-09-06T04:00:00Z").unwrap());
+        assert_eq!(local(start, &tz).date, date);
+        assert_eq!(local(start - 1, &tz).date, add_days(date, -1));
+        // The day before starts at its ordinary local midnight.
+        assert_eq!(
+            day_start(add_days(date, -1), &tz),
+            parse_rfc3339("2026-09-05T04:00:00Z").unwrap()
+        );
     }
 }

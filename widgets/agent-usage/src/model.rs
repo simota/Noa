@@ -46,6 +46,10 @@ impl Agent {
 /// Over this, a window is called out as burning too fast (severity Critical).
 pub const OVER_PACE_THRESHOLD: f64 = 0.10;
 
+/// Slack, as a fraction of the window, for the rounding error of subtracting
+/// two ratios. Far below anything a percent-level source can express.
+const PACE_EPS: f64 = 1e-9;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Normal,
@@ -70,7 +74,7 @@ impl Severity {
 
     pub fn escalated(base: Severity, pace_delta: Option<f64>) -> Severity {
         match pace_delta {
-            Some(delta) if delta > OVER_PACE_THRESHOLD => base.max(Severity::Critical),
+            Some(delta) if delta > OVER_PACE_THRESHOLD + PACE_EPS => base.max(Severity::Critical),
             _ => base,
         }
     }
@@ -123,10 +127,12 @@ impl UsageWindow {
             return None;
         }
         let elapsed = self.elapsed_fraction(now).filter(|e| *e >= 0.1)?;
-        let rate = self.used_percent / elapsed; // percent per whole window
-        if rate <= 100.0 {
+        // On or under pace never runs out; judged on the delta (with slack) so
+        // that `57 / 0.57 == 100.00000000000001` cannot predict an exhaustion.
+        if self.used_percent / 100.0 - elapsed <= PACE_EPS {
             return None;
         }
+        let rate = self.used_percent / elapsed; // percent per whole window
         let at_limit = 100.0 / rate;
         if at_limit <= elapsed {
             return None;
@@ -249,11 +255,15 @@ impl UsageSource {
     }
 }
 
-/// The window that runs out first among current sources.
+/// The window that runs out first among current sources; `None` when no
+/// current window is on course to run out before its reset.
 pub fn binding_window(sources: &[UsageSource], now: Unix) -> Option<(Agent, &UsageWindow)> {
     let mut best: Option<(Agent, &UsageWindow)> = None;
     for source in sources.iter().filter(|s| s.is_current(now)) {
         for w in &source.windows {
+            if w.projected_exhaustion(now).is_none() {
+                continue;
+            }
             if best.is_none_or(|(_, b)| w.exhausts_before(b, now)) {
                 best = Some((source.agent, w));
             }
@@ -304,13 +314,12 @@ pub mod format {
 
     /// "+27% over pace" from +1 % rounded; `None` when keeping up.
     pub fn over_pace(w: &UsageWindow, now: Unix) -> Option<String> {
-        let pct = (w.pace_delta(now)? * 100.0).round() as i64;
+        let pct = ((w.pace_delta(now)? + PACE_EPS) * 100.0).round() as i64;
         (pct >= 1).then(|| format!("+{pct}% over pace"))
     }
 
-    /// "maxes out 11/27(Thu) at this pace" — only when over pace by ≥ 1 %.
+    /// "maxes out 11/27(Thu) at this pace" — whenever an exhaustion is projected.
     pub fn exhaustion(w: &UsageWindow, now: Unix, tz: &dyn Tz) -> Option<String> {
-        over_pace(w, now)?;
         let at = w.projected_exhaustion(now)?;
         let when = if at - now < 86_400 {
             resets_in(Some(at), now, tz)
@@ -514,13 +523,59 @@ mod tests {
         let current = source(Agent::Codex, vec![calm.clone()], NOW - 10);
         let stale_hot = source(Agent::Claude, vec![hot.clone()], NOW - 5000);
         let sources = [stale_hot.clone(), current.clone()];
-        let (agent, w) = binding_window(&sources, NOW).unwrap();
-        assert_eq!((agent, w.id.as_str()), (Agent::Codex, "7d"));
+        // The calm window is not on course to run out, so nothing binds.
+        assert!(binding_window(&sources, NOW).is_none());
         // With the hot one current it binds.
         let fresh_hot = source(Agent::Claude, vec![hot], NOW - 10);
         let sources = [fresh_hot, current];
         assert_eq!(binding_window(&sources, NOW).unwrap().0, Agent::Claude);
         // Nothing current: none.
         assert!(binding_window(&[stale_hot, UsageSource::placeholder(Agent::Agy)], NOW).is_none());
+    }
+
+    #[test]
+    fn binding_window_ignores_windows_that_will_not_run_out() {
+        // Fresh Codex 5h window, half elapsed, 10 % used.
+        let calm = window("5h", 10.0, Some(9000), Some(300));
+        assert_eq!(calm.projected_exhaustion(NOW), None);
+        let sources = [source(Agent::Codex, vec![calm], NOW - 10)];
+        assert!(binding_window(&sources, NOW).is_none());
+    }
+
+    #[test]
+    fn pace_threshold_is_exact_at_the_boundary() {
+        // 5400 s of 18000 s elapsed, 40 % used: exactly 10 points ahead.
+        let w = window("5h", 40.0, Some(12_600), Some(300));
+        assert_eq!(w.severity(NOW), Severity::Normal);
+        // 7290 s elapsed, 41 % used: exactly 0.5 points ahead.
+        let w = window("5h", 41.0, Some(10_710), Some(300));
+        assert_eq!(format::over_pace(&w, NOW).as_deref(), Some("+1% over pace"));
+    }
+
+    #[test]
+    fn exactly_on_pace_projects_no_exhaustion() {
+        // 10260 s of 18000 s elapsed (57 %), 57 % used.
+        let w = window("5h", 57.0, Some(7_740), Some(300));
+        assert_eq!(w.pace_delta(NOW), Some(0.0));
+        assert_eq!(w.projected_exhaustion(NOW), None);
+    }
+
+    #[test]
+    fn exhaustion_text_follows_the_projection() {
+        // 1800 s elapsed, 10.1 % used: runs out 16022 s from now, before the
+        // reset at 16200 s, though the lead rounds to 0 %.
+        let w = window("5h", 10.1, Some(16_200), Some(300));
+        assert_eq!(w.projected_exhaustion(NOW), Some(NOW + 16_022));
+        assert_eq!(format::over_pace(&w, NOW), None);
+        assert_eq!(
+            format::exhaustion(&w, NOW, &TZ).as_deref(),
+            Some("maxes out in 4h27m at this pace")
+        );
+        // Already full with an unknown span.
+        let full = window("full", 100.0, None, None);
+        assert_eq!(
+            format::exhaustion(&full, NOW, &TZ).as_deref(),
+            Some("maxes out now at this pace")
+        );
     }
 }

@@ -300,11 +300,48 @@ mod tests {
         // the list above, which also checks that the crate's Cargo.toml is there.
         let dirs = dev_build_dirs(VERIFY);
         assert_eq!(dirs.len(), 2);
-        assert!(dirs[0].ends_with("widgets/verify/target/debug"), "{dirs:?}");
+        let (first, second) = if cfg!(debug_assertions) {
+            ("debug", "release")
+        } else {
+            ("release", "debug")
+        };
         assert!(
-            dirs[1].ends_with("widgets/verify/target/release"),
+            dirs[0].ends_with(format!("widgets/verify/target/{first}")),
             "{dirs:?}"
         );
+        assert!(
+            dirs[1].ends_with(format!("widgets/verify/target/{second}")),
+            "{dirs:?}"
+        );
+    }
+
+    #[test]
+    fn verify_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("verify-exe");
+        let dev = scratch_dir("verify-dev");
+        std::fs::write(dev.join(REVIEW.crate_name), "").unwrap();
+        assert_eq!(
+            locate(VERIFY, Some(&exe_dir), std::slice::from_ref(&dev)),
+            None
+        );
+        std::fs::write(dev.join("verify"), "").unwrap();
+        assert_eq!(
+            locate(VERIFY, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(dev.join("verify"))
+        );
+        std::fs::write(exe_dir.join("Noa Review"), "").unwrap();
+        assert_eq!(
+            locate(VERIFY, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(dev.join("verify"))
+        );
+        std::fs::write(exe_dir.join("Noa Verify"), "").unwrap();
+        assert_eq!(
+            locate(VERIFY, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(exe_dir.join("Noa Verify"))
+        );
+        for dir in [exe_dir, dev] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

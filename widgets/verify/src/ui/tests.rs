@@ -1161,6 +1161,32 @@ fn ac27_worktree_and_snapshot_buttons_open_finder_through_the_opener() {
 
 // ---- round controls and the composer ----
 
+/// L1-4 item 6, L1-7: an ended verification whose worktree is still
+/// there (its removal failed: locked, say) offers no +1 / +3, which the
+/// engine would refuse until it is removed; once removed, it does.
+#[test]
+fn extending_is_not_offered_while_an_ended_verifications_worktree_is_left() {
+    let mut session = crate::demo::session();
+    assert!(session.closed && session.extendable().is_ok());
+    session
+        .worktrees
+        .get_mut(&PartId::new("codex"))
+        .unwrap()
+        .state = verify::model::types::WorktreeState::Made;
+    let (screen, _link) = live_with(session);
+    let a = acts(&screen);
+    assert!(
+        !a.contains(&Action::Extend(1)) && !a.contains(&Action::Extend(3)),
+        "{a:?}"
+    );
+    let (screen, _link) = live_with(crate::demo::session());
+    let a = acts(&screen);
+    assert!(
+        a.contains(&Action::Extend(1)) && a.contains(&Action::Extend(3)),
+        "{a:?}"
+    );
+}
+
 #[test]
 fn round_controls_and_pane_jumps_reach_the_runner() {
     let (mut screen, link) = live_with(crate::demo::held());

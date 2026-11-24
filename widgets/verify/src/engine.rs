@@ -1141,19 +1141,8 @@ impl Engine {
         if by == 0 {
             return rejected("1ラウンド以上追加してください");
         }
-        if let Err(why) = self.session.extendable() {
+        if let Err(why) = self.session.extendable_now() {
             return rejected(why);
-        }
-        if self.session.closed
-            && self
-                .session
-                .worktrees
-                .values()
-                .any(|t| t.state == WorktreeState::Made)
-        {
-            return rejected(
-                "ワークツリーの削除が終わっていません（削除が終わってから追加してください）",
-            );
         }
         let base = self
             .session

@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-24
+
+A multi-agent review widget, `+ctl retry`, and resumable, extendable
+discussion and competition sessions.
+
 ### Added
 
+- A review widget (`widgets/review`): blind independent reviews of a git
+  diff, files or a document, cross-examination with stances, and a lead
+  that consolidates each round into de-duplicated findings and a verdict,
+  with a Markdown report and stored, resumable reviews. Noa opens it on the
+  focused pane's directory (`--repo=DIR`). 修正を依頼 hands the must-fix,
+  shown or selected findings to claude, codex or agy in a new tab without
+  auto approval; 再レビュー starts again with the same setup; 検索 (⌘F)
+  searches the findings and a file's coverage narrows them to that file;
+  past reviews list beyond the newest twelve.
+- `+ctl retry PANE` closes a failed worker and starts its journaled command
+  again in the same directory, worktree and branch under its label, swapping
+  the tier's flags for `--tier`'s, and types its last task again. The board's
+  detail view shows each worker's task and its `$NOA_RESULT` file.
+- The competition and discussion start views offer only the agents installed
+  on the machine (checked through the login shell), and a discussion panel
+  takes 1–6 rows where a kind may appear more than once.
 - The discussion and competition start views list past sessions: a finished
   one opens read-only without starting agents, an interrupted one resumes
   (taking its labelled panes back), and a new session or a rematch with the
@@ -39,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The agent dashboard never types a message into a pane whose agent went
   back to its shell (`refuseShell`, and nothing is sent to a Noa older than
   0.9.12).
+- The discussion window draws the stored discussions listed at launch.
+- The agent dashboard counts the workers of an open orchestrator whose
+  workers all closed before it started.
+- A read-only competition's viewer page links its artifacts when written
+  elsewhere, and `--session` through a symlink or relative path resumes.
+- The repo browser lists `--worktree` with no pane in its repository, and
+  caps the agent argument to fit Linux's `MAX_ARG_STRLEN`.
+- The review widget's Return reaches the screen's primary action, keyboard
+  focus stays on what was pressed, and the progress strip wraps in a narrow
+  window.
 
 ## [0.9.14] - 2026-11-23
 

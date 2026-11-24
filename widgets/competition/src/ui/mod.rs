@@ -2942,10 +2942,11 @@ mod tests {
     }
 
     #[test]
-    fn an_intervention_to_the_lead_in_a_deciding_round_reaches_its_verdict_brief() {
+    fn an_intervention_in_a_deciding_round_reaches_the_leads_verdict_brief() {
         let ids = |v: &[&str]| v.iter().map(|x| PartId::new(*x)).collect::<Vec<_>>();
         let next = "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）";
-        let verdict = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます（他パネルへの個別指示はブラインド維持）";
+        let verdict = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届き、次のラウンドのブリーフで宛先パネルに届きます";
+        let verdict_too = "追加指示は次のラウンドのブリーフで宛先パネルに届きます。宛先にリード審判がいなくても、このラウンドでこのあと出る最終講評のブリーフでリード審判にも届きます";
         // The last round, being scored, its verdict brief not issued yet.
         let mut session = crate::demo::panel_session();
         let last = session.rounds.len() - 1;
@@ -2953,22 +2954,32 @@ mod tests {
         for to in [ids(&[]), ids(&["judge"]), ids(&["judge", "judge-2", "judge-3"])] {
             assert_eq!(composer::hint(&session, &to), verdict, "{to:?}");
         }
-        // Neither a co-judge nor a contestant is briefed again this round.
-        for to in [ids(&["judge-2"]), ids(&["claude"])] {
-            assert_eq!(composer::hint(&session, &to), next, "{to:?}");
+        // The verdict brief carries every intervention, whatever its
+        // addressees: one to co-judges or contestants reaches them next
+        // round, and the lead now. Nothing claims blindness.
+        for to in [
+            ids(&["judge-2"]),
+            ids(&["judge-2", "judge-3"]),
+            ids(&["claude"]),
+            ids(&["claude", "judge-3"]),
+        ] {
+            assert_eq!(composer::hint(&session, &to), verdict_too, "{to:?}");
         }
+        assert!(!verdict.contains("ブラインド") && !verdict_too.contains("ブラインド"));
 
         // A round before the last: the next round's briefs, until the
         // lead's scorecard closes the competition.
         let mut early = session.clone();
         early.max_rounds = Some(last as RoundNo + 3);
         assert_eq!(composer::hint(&early, &ids(&["judge"])), next);
+        assert_eq!(composer::hint(&early, &ids(&["judge-2"])), next);
         early.rounds[last]
             .scorecards
             .get_mut(&PartId::new(JUDGE_ID))
             .unwrap()
             .close = true;
         assert_eq!(composer::hint(&early, &ids(&["judge"])), verdict);
+        assert_eq!(composer::hint(&early, &ids(&["codex"])), verdict_too);
 
         // Before judging, and once the verdict brief is out, it is not.
         let mut competing = session.clone();
@@ -2983,6 +2994,7 @@ mod tests {
         single.rounds[last_single].phase = Phase::Judging;
         assert_eq!(composer::hint(&single, &[]), next);
         assert_eq!(composer::hint(&single, &ids(&["judge"])), next);
+        assert_eq!(composer::hint(&single, &ids(&["claude"])), next);
 
         // On screen, the hint follows the chosen recipients.
         let mut text = TextStore::new(Default::default());
@@ -2999,7 +3011,7 @@ mod tests {
         };
         assert_eq!(hint(&screen), verdict, "全員");
         let popup = screen.composer.recipients;
-        for want in [verdict, verdict, next] {
+        for want in [verdict, verdict, verdict_too] {
             // 審判全員, 審判 (Judge), then judge-2.
             press_down(&mut screen, popup, &mut text);
             assert_eq!(hint(&screen), want);

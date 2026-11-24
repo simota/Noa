@@ -1191,7 +1191,8 @@ mod tests {
         fs::write(repo.join("loose.txt"), "yes\n").unwrap();
         fs::create_dir_all(repo.join(".noa/reviews/rev-1/target")).unwrap();
         fs::write(repo.join(".noa/reviews/rev-1/target/x.txt"), "old\n").unwrap();
-        fs::write(repo.join(".noa/.gitignore"), "*\n").unwrap();
+        // No `.noa/.gitignore` here: git lists the snapshot as untracked,
+        // and only the capture's own rule keeps it out.
         let target = Target {
             kind: TargetKind::Files,
             path: Some(repo.clone()),

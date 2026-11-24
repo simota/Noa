@@ -1,10 +1,12 @@
 //! Markdown export for clipboard copy, saving reports, and adopting a
-//! winning entry into a repository.
+//! winning entry into a repository. A judge panel's report gives means,
+//! each judge's score and the spread; a single judge's is as it always was.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-use super::types::{PartId, RoundKind, Session};
+use super::aggregate::PanelScores;
+use super::types::{PartId, Participant, RoundKind, RoundNo, Session};
 
 pub fn result_markdown(session: &Session) -> String {
     let mut out = String::new();
@@ -28,13 +30,27 @@ pub fn result_markdown(session: &Session) -> String {
     };
     let panel: Vec<&str> = session.contestant_ids().map(|p| p.as_str()).collect();
     let _ = writeln!(out, "- ラウンド: {rounds}{limit}・{state}・{reveal}");
-    let _ = writeln!(
-        out,
-        "- 審判: {}（{}）・参加者: {}",
-        session.judge.id,
-        session.judge.kind.command(),
-        panel.join(", ")
-    );
+    if session.is_panel() {
+        let judges: Vec<String> = session
+            .judges()
+            .enumerate()
+            .map(|(seat, judge)| judge_label(judge, seat == 0))
+            .collect();
+        let _ = writeln!(
+            out,
+            "- 審判: {}・参加者: {}",
+            judges.join(", "),
+            panel.join(", ")
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "- 審判: {}（{}）・参加者: {}",
+            session.judge.id,
+            session.judge.kind.command(),
+            panel.join(", ")
+        );
+    }
     if let Some(winner) = &session.winner {
         let _ = writeln!(out, "- 優勝: **{winner}**");
     }
@@ -45,11 +61,20 @@ pub fn result_markdown(session: &Session) -> String {
 
     let _ = writeln!(out, "\n## リーダーボード\n");
     for (idx, part) in session.current_ranking().iter().enumerate() {
-        let scores: Vec<String> = session
-            .score_history(part)
-            .into_iter()
-            .map(|(r, s)| format!("R{r}:{s}"))
-            .collect();
+        let history = session.score_history(part);
+        let scores: Vec<String> = if session.is_panel() {
+            history
+                .iter()
+                .map(|(r, s)| {
+                    let label = session
+                        .score_label(*r, part)
+                        .unwrap_or_else(|| s.to_string());
+                    format!("R{r}:{label}")
+                })
+                .collect()
+        } else {
+            history.iter().map(|(r, s)| format!("R{r}:{s}")).collect()
+        };
         let crown = if session.winner.as_ref() == Some(part) {
             " 🏆"
         } else {
@@ -60,7 +85,13 @@ pub fn result_markdown(session: &Session) -> String {
         } else {
             scores.join(" → ")
         };
-        let _ = writeln!(out, "{}. **{part}**{crown} — {hist}", idx + 1);
+        // A panel's last scored round, judge by judge.
+        let last = history
+            .last()
+            .and_then(|(r, _)| Some((*r, session.panel_scores(*r, part)?)))
+            .map(|(r, panel)| format!("（R{r}: {}）", judges_text(&panel)))
+            .unwrap_or_default();
+        let _ = writeln!(out, "{}. **{part}**{crown} — {hist}{last}", idx + 1);
     }
 
     let _ = writeln!(out, "\n## ラウンド記録");
@@ -73,19 +104,70 @@ pub fn result_markdown(session: &Session) -> String {
         if let Some(outcome) = &round.outcome {
             let _ = writeln!(out, "\n**審判総評:** {}\n", outcome.overview.trim());
         }
+        if round.outcome.is_some() && !round.scorecards.is_empty() {
+            let _ = writeln!(out, "**審判別総評:**\n");
+            for (seat, judge) in session.judges().enumerate() {
+                if let Some(card) = round.scorecards.get(&judge.id) {
+                    let _ = writeln!(
+                        out,
+                        "- {}: {}",
+                        judge_label(judge, seat == 0),
+                        card.overview.trim()
+                    );
+                }
+            }
+            out.push('\n');
+        }
         for part in session.contestant_ids() {
             if let Some(sub) = round.submissions.get(part) {
-                let score = round
-                    .outcome
-                    .as_ref()
-                    .and_then(|o| o.evaluations.get(part))
-                    .map(|e| format!(" ({}/100)", e.score))
-                    .unwrap_or_default();
+                let score = match panel_score(session, round.no, part) {
+                    Some(panel) => format!(" ({panel})"),
+                    None => round
+                        .outcome
+                        .as_ref()
+                        .and_then(|o| o.evaluations.get(part))
+                        .map(|e| format!(" ({}/100)", e.score))
+                        .unwrap_or_default(),
+                };
                 let _ = writeln!(out, "- **{part}**{score}: {}", sub.summary);
             }
         }
     }
     out
+}
+
+/// `judge（claude · opus, リード）`, `judge-2（codex）`.
+fn judge_label(judge: &Participant, lead: bool) -> String {
+    let mut about = judge.kind.command().to_owned();
+    if let Some(setup) = judge.setup.label() {
+        about.push_str(" · ");
+        about.push_str(&setup);
+    }
+    if lead {
+        about.push_str(", リード");
+    }
+    format!("{}（{about}）", judge.id)
+}
+
+/// `judge 80 / judge-2 83 / judge-3 81 · 差 3`.
+fn judges_text(panel: &PanelScores) -> String {
+    let scores: Vec<String> = panel
+        .scores
+        .iter()
+        .map(|(judge, score)| format!("{judge} {score}"))
+        .collect();
+    format!("{} · 差 {}", scores.join(" / "), panel.spread())
+}
+
+/// `81.3/100 · judge 80 / judge-2 83 / judge-3 81 · 差 3`, in a panel
+/// round.
+fn panel_score(session: &Session, round: RoundNo, part: &PartId) -> Option<String> {
+    let panel = session.panel_scores(round, part)?;
+    Some(format!(
+        "{}/100 · {}",
+        panel.mean_label(),
+        judges_text(&panel)
+    ))
 }
 
 /// Prompt written for an agent started to integrate the winning entry into `workdir`.

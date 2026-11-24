@@ -1,5 +1,6 @@
 //! The composer under the center pane: user instructions to everyone, the
-//! judge, or a specific contestant.
+//! judge (with a panel: every judge, or one of them), or a specific
+//! contestant.
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
@@ -8,7 +9,7 @@ use noa_gpui_core::widgets::{Button, Container, ControlSize, PopUpButton, TextAr
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
-use competition::model::types::{JUDGE_ID, PartId, Session};
+use competition::model::types::{Author, JUDGE_ID, PartId, Session};
 
 use super::{caption, clear_children, fill, gap, note};
 
@@ -22,10 +23,20 @@ pub(super) struct Parts {
 }
 
 pub(crate) fn choices(session: &Session) -> Vec<(String, Vec<PartId>)> {
-    let mut out = vec![
-        ("全員".to_owned(), Vec::new()),
-        ("審判 (Judge)".to_owned(), vec![PartId::new(JUDGE_ID)]),
-    ];
+    let mut out = vec![("全員".to_owned(), Vec::new())];
+    if session.is_panel() {
+        // Every judge at once, then each judge on its own.
+        out.push((
+            "審判全員".to_owned(),
+            session.judges().map(|j| j.id.clone()).collect(),
+        ));
+        out.extend(session.judges().map(|j| {
+            let name = session.author_name(&Author::Part(j.id.clone()));
+            (name, vec![j.id.clone()])
+        }));
+    } else {
+        out.push(("審判 (Judge)".to_owned(), vec![PartId::new(JUDGE_ID)]));
+    }
     out.extend(
         session
             .contestants

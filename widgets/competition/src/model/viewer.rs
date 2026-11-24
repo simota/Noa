@@ -2,6 +2,10 @@
 //! the competition's artifact root so visual deliverables (HTML/CSS/JS designs,
 //! SVG, PNG/JPG/WebP images) and code/text reports can be compared side by side
 //! in the system browser across rounds.
+//!
+//! A judge panel's page also carries each judge's score, the mean and the
+//! spread, rendered by a script block of its own ([`PANEL_SCRIPT`]); a
+//! single judge's page has neither, byte for byte as before the panel.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -11,6 +15,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use super::aggregate::{PanelScores, SPREAD_WARN};
 use super::types::{ArtifactFile, ArtifactKind, PartId, Phase, Round, RoundKind, RoundNo, Session};
 use crate::{preview, store};
 
@@ -21,7 +26,54 @@ struct ViewerHeader<'a> {
     reveal_interval: u32,
     winner: Option<&'a str>,
     contestants: Vec<&'a str>,
+    /// The judge panel, lead first; absent for a single judge. Before
+    /// `rounds`: the page splices the rounds into the header's last field.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    judges: Vec<ViewerJudge<'a>>,
     rounds: [(); 0],
+}
+
+#[derive(Serialize)]
+struct ViewerJudge<'a> {
+    id: &'a str,
+    /// `claude · opus`: the agent and what it runs on.
+    agent: String,
+    lead: bool,
+}
+
+/// An entry's score by each judge of a panel, once every judge scored.
+#[derive(Serialize)]
+struct ViewerPanel<'a> {
+    /// The mean to one decimal: `81.3`.
+    mean: String,
+    scores: Vec<ViewerJudgeScore<'a>>,
+    spread: u8,
+    /// The spread is [`SPREAD_WARN`] or more.
+    warn: bool,
+}
+
+#[derive(Serialize)]
+struct ViewerJudgeScore<'a> {
+    judge: &'a str,
+    score: u8,
+}
+
+impl<'a> ViewerPanel<'a> {
+    fn of(panel: &'a PanelScores) -> Self {
+        Self {
+            mean: panel.mean_label(),
+            scores: panel
+                .scores
+                .iter()
+                .map(|(judge, score)| ViewerJudgeScore {
+                    judge: judge.as_str(),
+                    score: *score,
+                })
+                .collect(),
+            spread: panel.spread(),
+            warn: panel.spread() >= SPREAD_WARN,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -49,6 +101,9 @@ struct ViewerEntry<'a> {
     summary: &'a str,
     report: &'a str,
     files: Vec<ViewerFile<'a>>,
+    /// Each judge's score, the mean and the spread (panel rounds only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    panel: Option<ViewerPanel<'a>>,
 }
 
 #[derive(Serialize)]
@@ -115,6 +170,9 @@ struct RoundStamp {
     submissions: Vec<(PartId, u64, usize)>,
     ranking: Vec<PartId>,
     scores: Vec<(PartId, u8, Option<RoundNo>)>,
+    /// Every judge's score per entry (panel rounds): an amendment can move
+    /// one without moving the rounded mean in `scores`.
+    panel: Vec<(PartId, Vec<u8>)>,
     has_outcome: bool,
 }
 
@@ -301,6 +359,13 @@ fn round_stamp(session: &Session, r: &Round) -> RoundStamp {
             .collect(),
         ranking,
         scores,
+        panel: session
+            .contestant_ids()
+            .filter_map(|part| {
+                let panel = session.panel_scores(r.no, part)?;
+                Some((part.clone(), panel.scores.iter().map(|(_, s)| *s).collect()))
+            })
+            .collect(),
         has_outcome,
     }
 }
@@ -310,10 +375,12 @@ fn build_viewer_round<'a>(
     r: &'a Round,
     artifact_root: &Path,
     cache: Option<&'a ViewerCache>,
+    panels: &'a [Option<PanelScores>],
 ) -> ViewerRound<'a> {
     let entries = session
         .contestant_ids()
-        .map(|part| {
+        .zip(panels)
+        .map(|(part, panel)| {
             let ev = r.outcome.as_ref().and_then(|o| o.evaluations.get(part));
             let sub = r.submissions.get(part);
             let files: Vec<ViewerFile<'a>> = match sub {
@@ -391,6 +458,7 @@ fn build_viewer_round<'a>(
                 summary: sub.map_or("", |s| s.summary.as_str()),
                 report: sub.map_or("", |s| s.body.as_str()),
                 files,
+                panel: panel.as_ref().map(ViewerPanel::of),
             }
         })
         .collect();
@@ -421,6 +489,22 @@ fn assemble_html<'a>(
         reveal_interval: session.reveal_interval,
         winner: session.winner.as_ref().map(PartId::as_str),
         contestants: session.contestant_ids().map(PartId::as_str).collect(),
+        judges: if session.is_panel() {
+            session
+                .judges()
+                .enumerate()
+                .map(|(seat, judge)| ViewerJudge {
+                    id: judge.id.as_str(),
+                    agent: match judge.setup.label() {
+                        Some(setup) => format!("{} · {setup}", judge.kind.command()),
+                        None => judge.kind.command().to_owned(),
+                    },
+                    lead: seat == 0,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
         rounds: [],
     };
     let header_json = serde_json::to_string(&header).unwrap_or_else(|_| "{}".to_owned());
@@ -441,8 +525,26 @@ fn assemble_html<'a>(
     } else {
         push_escaped_lt(&mut html, &header_json);
     }
-    html.push_str(HTML_SUFFIX);
+    if session.is_panel() {
+        let body_end = HTML_SUFFIX
+            .strip_suffix(HTML_END)
+            .expect("the page ends with </body></html>");
+        html.push_str(body_end);
+        html.push_str(PANEL_SCRIPT);
+        html.push_str(HTML_END);
+    } else {
+        html.push_str(HTML_SUFFIX);
+    }
     html
+}
+
+/// Every contestant's panel scores in round `r`, in contestant order
+/// (`None` each for a single judge or a round not yet combined).
+fn round_panels(session: &Session, r: &Round) -> Vec<Option<PanelScores>> {
+    session
+        .contestant_ids()
+        .map(|part| session.panel_scores(r.no, part))
+        .collect()
 }
 
 /// Build the viewer's HTML document for `session`, referencing artifact
@@ -452,7 +554,8 @@ pub fn render_html(session: &Session, artifact_root: &Path) -> String {
         .rounds
         .iter()
         .map(|r| {
-            let vr = build_viewer_round(session, r, artifact_root, None);
+            let panels = round_panels(session, r);
+            let vr = build_viewer_round(session, r, artifact_root, None, &panels);
             escape_lt_owned(serde_json::to_string(&vr).unwrap_or_else(|_| "{}".to_owned()))
         })
         .collect();
@@ -526,7 +629,8 @@ pub fn render_html_cached(
                 unframed_html_parts.push(part.clone());
             }
         }
-        let vr = build_viewer_round(session, r, artifact_root, Some(cache));
+        let panels = round_panels(session, r);
+        let vr = build_viewer_round(session, r, artifact_root, Some(cache), &panels);
         let json = escape_lt_owned(serde_json::to_string(&vr).unwrap_or_else(|_| "{}".to_owned()));
         if let Some(stamp) = stamp {
             // The round's previews now live in `json`; a stamp mismatch later
@@ -989,6 +1093,70 @@ init();
 </html>
 "##;
 
+/// How the page ends; [`PANEL_SCRIPT`] goes right before it.
+const HTML_END: &str = "</body>\n</html>\n";
+
+/// A panel page's own script, after the shared one: it lists the judges
+/// under the request and wraps `renderRound` so each card shows the mean,
+/// every judge's score and the spread (highlighted from `SPREAD_WARN`).
+const PANEL_SCRIPT: &str = r##"<style>
+  .panel-scores {
+    padding: 8px 14px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+  }
+  .panel-scores .label { color: var(--muted); }
+  .panel-scores .spread.warn { color: var(--gold); font-weight: 700; }
+  .judges { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+</style>
+<script>
+(function () {
+  const judges = document.createElement("p");
+  judges.className = "judges";
+  judges.textContent = "審判: " + DATA.judges
+    .map(j => j.id + " (" + j.agent + (j.lead ? ", リード" : "") + ")")
+    .join(" · ");
+  document.querySelector(".title-block").appendChild(judges);
+
+  const renderShared = renderRound;
+  renderRound = function (idx) {
+    renderShared(idx);
+    const r = DATA.rounds[idx];
+    if (!r) return;
+    // The cards, in the order the shared script made them.
+    const order = (r.ranking.length ? r.ranking : DATA.contestants)
+      .filter(part => r.entries.some(e => e.part === part));
+    const cards = grid.querySelectorAll("section.card");
+    order.forEach((part, i) => {
+      const entry = r.entries.find(e => e.part === part);
+      const card = cards[i];
+      if (!card || !entry.panel) return;
+      card.querySelector(".score").textContent = entry.panel.mean + " / 100";
+      const block = document.createElement("div");
+      block.className = "panel-scores";
+      const scores = document.createElement("span");
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = "審判別スコア ";
+      scores.appendChild(label);
+      scores.appendChild(document.createTextNode(
+        entry.panel.scores.map(s => s.judge + " " + s.score).join(" · ")));
+      const spread = document.createElement("span");
+      spread.className = "spread" + (entry.panel.warn ? " warn" : "");
+      spread.textContent = "審判間の差 " + entry.panel.spread;
+      block.appendChild(scores);
+      block.appendChild(spread);
+      card.insertBefore(block, card.querySelector(".file-tabs"));
+    });
+  };
+  renderRound(Number(roundSelect.value));
+})();
+</script>
+"##;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1279,5 +1447,39 @@ mod tests {
         assert!(after_amend.contains("91"));
         assert!(after_amend.contains("corrected"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A closed round's cached JSON is reused only while its stamp holds:
+    /// a judge's score that moves without moving the rounded mean must
+    /// still change the stamp, or the page would show the old panel.
+    #[test]
+    fn the_round_stamp_follows_each_judges_score() {
+        use crate::model::aggregate::tests::{cards, panel_session, settle};
+        use crate::model::types::judge_id;
+        let mut session = panel_session(Some(3));
+        let all = cards(
+            &[("codex", 85), ("claude", 80)],
+            &[("claude", 83), ("codex", 80)],
+            &[("codex", 88), ("claude", 81)],
+        );
+        settle(&mut session, 1, &all).unwrap();
+        session.rounds[0].phase = Phase::Closed;
+        let before = round_stamp(&session, &session.rounds[0]);
+        assert_eq!(before.panel.len(), 2);
+        // judge-2's claude 83 → 82: the mean 81.3 → 81.0 still rounds to 81.
+        let claude = PartId::new("claude");
+        let card = session.rounds[0].scorecards.get_mut(&judge_id(1)).unwrap();
+        card.evaluations.get_mut(&claude).unwrap().score = 82;
+        let after = round_stamp(&session, &session.rounds[0]);
+        assert_eq!(before.scores, after.scores);
+        assert_ne!(before, after);
+        let root = std::env::temp_dir();
+        let mut cache = ViewerCache::new();
+        let _ = render_html_cached(&session, &root, &mut cache);
+        assert_eq!(
+            render_html_cached(&session, &root, &mut cache),
+            render_html(&session, &root)
+        );
+        assert!(render_html(&session, &root).contains("\"mean\":\"81.0\""));
     }
 }

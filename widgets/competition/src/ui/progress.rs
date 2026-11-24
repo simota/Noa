@@ -54,12 +54,23 @@ pub(super) fn elapsed(receipt: &Receipt, now: Millis) -> Option<String> {
 pub(super) fn has_running(session: &Session) -> bool {
     !session.closed
         && session.current_round().is_some_and(|round| {
-            round.briefs.iter().chain(&round.judge_brief).any(|b| {
+            all_briefs(round).any(|b| {
                 b.receipt.sent.is_some()
                     && b.receipt.replied.is_none()
                     && b.receipt.failed.is_none()
             })
         })
+}
+
+/// Every brief of `round`: the contestants', the judges' scorecard briefs
+/// (lead first), then a panel's verdict brief.
+fn all_briefs(round: &Round) -> impl Iterator<Item = &Brief> {
+    round
+        .briefs
+        .iter()
+        .chain(&round.judge_brief)
+        .chain(&round.co_judge_briefs)
+        .chain(&round.verdict_brief)
 }
 
 fn duration(ms: Millis) -> String {
@@ -133,7 +144,7 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
     }
     spacer(tree, top);
     if let Some(round) = current {
-        steps(tree, top, round, session.closed);
+        steps(tree, top, session, round);
     }
 
     let Some(round) = current.filter(|_| !session.closed) else {
@@ -164,13 +175,28 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
     for brief in &round.briefs {
         part_chip(tree, parts, brief.to.as_str(), Some(brief), now);
     }
-    let judge = format!("審判 ({JUDGE_ID})");
-    match &round.judge_brief {
-        Some(brief) => part_chip(tree, parts, &judge, Some(brief), now),
-        None => part_chip(tree, parts, &judge, None, now),
+    if session.is_panel() {
+        // A chip per judge's scorecard, then the lead's verdict once asked.
+        for judge in session.judges() {
+            let brief = if judge.id == session.judge.id {
+                round.judge_brief.as_ref()
+            } else {
+                round.co_judge_briefs.iter().find(|b| b.to == judge.id)
+            };
+            part_chip(tree, parts, &format!("審判 ({})", judge.id), brief, now);
+        }
+        if let Some(brief) = &round.verdict_brief {
+            part_chip(tree, parts, &format!("講評 ({JUDGE_ID})"), Some(brief), now);
+        }
+    } else {
+        let judge = format!("審判 ({JUDGE_ID})");
+        match &round.judge_brief {
+            Some(brief) => part_chip(tree, parts, &judge, Some(brief), now),
+            None => part_chip(tree, parts, &judge, None, now),
+        }
     }
 
-    for brief in round.briefs.iter().chain(&round.judge_brief) {
+    for brief in all_briefs(round) {
         if let Some(why) = &brief.receipt.failed {
             caption(tree, strip, format!("✗ {}: {why}", brief.to));
         } else if let Some(why) = brief
@@ -184,15 +210,38 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
     }
 }
 
-fn steps(tree: &mut UiTree, parent: WidgetId, round: &Round, closed: bool) {
+/// `採点 2/3` while a panel's round is being scored: the judges whose
+/// scorecard is in, of all of them. `採点` otherwise.
+fn judging_label(session: &Session, round: &Round) -> String {
+    let name = STEPS[2].1;
+    if !session.is_panel() || round.phase != Phase::Judging {
+        return name.to_owned();
+    }
+    let judges = session.judges().count();
+    let scored = session
+        .judges()
+        .filter(|j| round.scorecards.contains_key(&j.id))
+        .count();
+    format!("{name} {scored}/{judges}")
+}
+
+fn steps(tree: &mut UiTree, parent: WidgetId, session: &Session, round: &Round) {
+    let closed = session.closed;
     let at = STEPS
         .iter()
         .position(|(phase, _)| *phase == round.phase)
         .unwrap_or(0);
-    for (i, (_, name)) in STEPS.iter().enumerate() {
+    for (i, (phase, name)) in STEPS.iter().enumerate() {
         if i > 0 {
             caption(tree, parent, "›");
         }
+        let judging;
+        let name = if *phase == Phase::Judging {
+            judging = judging_label(session, round);
+            judging.as_str()
+        } else {
+            name
+        };
         let (text, tone) = if closed || i < at || round.phase == Phase::Closed {
             (format!("✓ {name}"), Tone::Success)
         } else if i == at {

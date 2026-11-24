@@ -88,6 +88,10 @@ pub enum Action {
     SetHold(bool),
     Continue,
     Extend(RoundNo),
+    /// Takes up the unfinished stored review on screen (its agents start).
+    ResumeShown,
+    /// Writes the stored review's report again from its log.
+    RegenerateReport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,9 +194,13 @@ pub struct Review {
     stored_dir: Option<PathBuf>,
     /// That log is free to write: no runner holds it.
     stored_free: bool,
-    /// Rounds were asked for on the read-only review on screen: it stays
-    /// shown until the runner's first snapshot of it arrives.
+    /// Rounds or a resume were asked for on the read-only review on
+    /// screen: it stays shown until the runner's first snapshot of it
+    /// arrives, then goes live.
     extending: bool,
+    /// The stored report differs from what the log gives (missing, or the
+    /// review stopped between writing its log and its report).
+    report_stale: bool,
     /// A start was asked for: a refusal shows under the form.
     starting: bool,
     built: Option<BuiltKey>,
@@ -331,6 +339,7 @@ impl Review {
             stored_dir: None,
             stored_free: false,
             extending: false,
+            report_stale: false,
             starting: false,
             built: None,
             start,
@@ -447,6 +456,8 @@ impl Review {
         self.read_only = true;
         self.stored_dir = Some(dir.to_owned());
         self.stored_free = !store::is_busy(dir);
+        self.report_stale = !matches!(self.source, Source::Demo)
+            && report_stale(dir, self.session.as_deref().expect("just set"));
         self.rebuild(text);
         Ok(())
     }
@@ -732,6 +743,27 @@ impl Review {
                     .set_accessible_label(more, format!("ラウンドを {by} 追加"));
                 self.actions.push((more, Action::Extend(by)));
             }
+        }
+        let stored_free = self.read_only
+            && self.stored_dir.is_some()
+            && self.stored_free
+            && !self.extending
+            && matches!(self.source, Source::Live(_));
+        if stored_free && !session.closed {
+            let resume = self.tree.insert(
+                Some(self.status_trailing),
+                small("再開").tooltip("このレビューを続けます（エージェントが起動します）"),
+            );
+            self.actions.push((resume, Action::ResumeShown));
+        }
+        if self.read_only && self.report_stale && self.stored_free && !self.extending {
+            let regenerate = self.tree.insert(
+                Some(self.status_trailing),
+                small("レポートを再生成").tooltip(
+                    "保存されたレポートがログと一致しません（書き出し前に止まった可能性があります）。ログから書き直します",
+                ),
+            );
+            self.actions.push((regenerate, Action::RegenerateReport));
         }
         if !self.read_only
             && !session.closed
@@ -1027,8 +1059,47 @@ impl Review {
                 }
                 _ => self.send_cmd(Command::Extend { by }),
             },
+            Action::ResumeShown => {
+                if let Some(dir) = self.stored_dir.clone() {
+                    self.extending = true;
+                    self.send_cmd(Command::Resume { dir });
+                    self.rebuild(text);
+                }
+            }
+            Action::RegenerateReport => {
+                let Some(dir) = self.stored_dir.clone() else {
+                    return;
+                };
+                match regenerate_report(&dir) {
+                    Ok(()) => {
+                        self.report_stale = false;
+                        self.toast("レポートをログから書き直しました");
+                    }
+                    Err(why) => self.toast(format!("レポートを書き直せません: {why}")),
+                }
+                self.stored_free = !store::is_busy(&dir);
+                self.rebuild(text);
+            }
         }
     }
+}
+
+/// Whether `dir`'s stored report is not what its log gives. A review not
+/// yet consolidated once has no report to compare.
+fn report_stale(dir: &Path, session: &Session) -> bool {
+    let has_report = session.closed || session.rounds.iter().any(|r| r.outcome.is_some());
+    has_report
+        && std::fs::read_to_string(store::report_path(dir)).ok()
+            != Some(export::report_markdown(session))
+}
+
+/// Writes `dir`'s report from its log, holding the log's lock while it
+/// does (a runner that took it up meanwhile is not written under).
+fn regenerate_report(dir: &Path) -> Result<(), String> {
+    let (store, session) = store::Store::open(dir).map_err(|e| e.to_string())?;
+    store::write_report(dir, &export::report_markdown(&session)).map_err(|e| e.to_string())?;
+    drop(store);
+    Ok(())
 }
 
 impl Screen for Review {

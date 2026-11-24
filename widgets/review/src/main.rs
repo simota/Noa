@@ -84,7 +84,7 @@ fn parse_size(arg: &str) -> Result<(u32, u32), String> {
 }
 
 fn first_live_snapshot() -> Result<Snapshot, String> {
-    let channel = live::start(|| {});
+    let channel = live::start(|| {}, live::startup_link());
     let until = Instant::now() + FIRST_SNAPSHOT_WAIT;
     let mut reason = "Noa から 3 秒以内に応答がありません".to_owned();
     loop {
@@ -220,7 +220,7 @@ fn main() -> Result<(), String> {
             Review::demo_held()
         } else {
             let waker = setup.waker.clone();
-            let channel = live::start(move || waker.wake());
+            let channel = live::start(move || waker.wake(), live::startup_link());
             match &args.session {
                 Some(dir) => Review::live_stored(channel, dir),
                 None => Review::live(channel),

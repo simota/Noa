@@ -138,7 +138,7 @@ impl Connect for IpcConnect {
             noa_config::load_startup_config(noa_config::ConfigOverrides::default())
                 .map_err(|err| format!("設定を読めません: {err:#}"))?;
         if !config.server_enable {
-            return Err("設定でサーバーが無効です（server-enable = true が必要）".into());
+            return Err(SERVER_DISABLED.into());
         }
         let token = match config.server_token.filter(|token| !token.trim().is_empty()) {
             Some(token) => token,
@@ -202,6 +202,9 @@ fn view(panel: &Panel) -> PaneView {
         agent_detail: panel.agent.as_ref().and_then(|a| a.detail.clone()),
     }
 }
+
+/// Why the review cannot reach Noa when its config turns the server off.
+pub(crate) const SERVER_DISABLED: &str = "設定でサーバーが無効です（server-enable = true が必要）";
 
 /// Why the review sends nothing to a Noa not known to honour `refuseShell`.
 pub(crate) const UNSAFE_SEND: &str =

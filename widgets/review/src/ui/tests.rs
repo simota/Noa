@@ -94,17 +94,20 @@ fn ac25_each_filter_changes_the_shown_count() {
     act(&mut screen, Action::ToggleAgreement(Agreement::Split));
     assert_eq!(rows(&screen), 0);
     act(&mut screen, Action::ToggleAgreement(Agreement::Split));
+    act(&mut screen, Action::ClearFilters);
+    assert_eq!(rows(&screen), 5);
+
+    // In the finished demo every reviewer spoke on every finding, so the
+    // reviewer filter is checked after round 1, where agy raised one.
+    let (mut screen, _link) = live_with(crate::demo::held());
+    assert_eq!(rows(&screen), 4);
     act(
         &mut screen,
         Action::FilterReviewer(Some(PartId::new("agy"))),
     );
-    assert_eq!(
-        rows(&screen),
-        4,
-        "agy took a stance on F1, F2, F3 and raised F5"
-    );
-    act(&mut screen, Action::ClearFilters);
-    assert_eq!(rows(&screen), 5);
+    assert_eq!(rows(&screen), 1, "only the finding agy raised");
+    act(&mut screen, Action::FilterReviewer(None));
+    assert_eq!(rows(&screen), 4);
 }
 
 #[test]
@@ -232,4 +235,87 @@ fn a_refused_start_shows_why_under_the_form() {
     screen.poll_live(&mut text);
     assert!(!screen.starting);
     assert!(!screen.tree.is_hidden(screen.start.root));
+}
+
+/// The demo review's log up to the end of round 1 (unfinished), stored
+/// under `root`.
+fn stored_unfinished(root: &Path) -> PathBuf {
+    let dir = root.join("rev-demo");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = crate::demo::log();
+    let mut store = Store::create(&dir, &log[0]).unwrap();
+    let mut session = review::model::reduce::create(&log[0]).unwrap();
+    for batch in &log[1..] {
+        review::model::reduce::apply(&mut session, batch).unwrap();
+        store.append(batch).unwrap();
+        if session.round(1).is_some_and(|r| r.outcome.is_some()) {
+            break;
+        }
+    }
+    assert!(!session.closed);
+    dir
+}
+
+#[test]
+fn ac20_an_unfinished_review_is_resumed_from_its_read_only_view_and_goes_live() {
+    let root = std::env::temp_dir().join(format!("noa-review-ui-resume-{}", std::process::id()));
+    let dir = stored_unfinished(&root);
+    let (channel, link) = Channel::fake();
+    let mut screen = Review::live_stored(channel, &dir);
+    assert!(screen.read_only);
+    assert!(acts(&screen).contains(&Action::ResumeShown));
+    // Opening it left whatever was on screen before.
+    assert_eq!(commands(&link), [Command::Leave]);
+    act(&mut screen, Action::ResumeShown);
+    assert_eq!(commands(&link), [Command::Resume { dir: dir.clone() }]);
+    assert!(
+        !acts(&screen).contains(&Action::ResumeShown),
+        "offered twice"
+    );
+    // The runner's first snapshot of it turns the view live.
+    let session = store::read_session(&dir).unwrap();
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(session)),
+            reply_root: None,
+            session_dir: None,
+            // The view's own leave moved the channel on one generation.
+            generation: 1,
+        })
+        .unwrap();
+    let mut text = TextStore::new(Default::default());
+    screen.poll_live(&mut text);
+    assert!(!screen.read_only);
+    assert!(acts(&screen).contains(&Action::Close));
+    // A finished review is not offered it.
+    let done = stored_demo(&root);
+    let (channel, _link) = Channel::fake();
+    let screen = Review::live_stored(channel, &done);
+    assert!(!acts(&screen).contains(&Action::ResumeShown));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn ac23_a_missing_report_is_rewritten_from_the_log_only_when_asked() {
+    let root = std::env::temp_dir().join(format!("noa-review-ui-report-{}", std::process::id()));
+    let dir = stored_demo(&root);
+    let (channel, _link) = Channel::fake();
+    let mut screen = Review::live_stored(channel, &dir);
+    // Viewing writes nothing, even with the report missing.
+    assert!(!store::report_path(&dir).exists());
+    assert!(acts(&screen).contains(&Action::RegenerateReport));
+    act(&mut screen, Action::RegenerateReport);
+    let session = store::read_session(&dir).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(store::report_path(&dir)).unwrap(),
+        export::report_markdown(&session)
+    );
+    assert!(!acts(&screen).contains(&Action::RegenerateReport));
+    assert!(!store::is_busy(&dir), "the log stayed locked");
+    // A report that matches the log is not offered again.
+    let (channel, _link) = Channel::fake();
+    let screen = Review::live_stored(channel, &dir);
+    assert!(!acts(&screen).contains(&Action::RegenerateReport));
+    let _ = std::fs::remove_dir_all(root);
 }

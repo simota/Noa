@@ -112,7 +112,19 @@ impl Channel {
     }
 }
 
-pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
+/// What the window shows of Noa before any review connects: down at once
+/// when the config turns the control server off (the review would only
+/// find out when it starts), else waiting.
+pub fn startup_link() -> Link {
+    match noa_config::load_startup_config(noa_config::ConfigOverrides::default()) {
+        Ok((config, _)) if !config.server_enable => {
+            Link::Down(crate::session::ipc::SERVER_DISABLED.to_owned())
+        }
+        _ => Link::Connecting,
+    }
+}
+
+pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
     let (released_tx, released) = mpsc::channel();
@@ -120,7 +132,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let generation = Arc::new(AtomicU64::new(0));
     let _ = snapshot_tx.send(Snapshot {
-        link: Link::Connecting,
+        link,
         session: None,
         reply_root: None,
         session_dir: None,
@@ -411,7 +423,7 @@ mod tests {
 
     #[test]
     fn leaving_sends_the_start_view_in_a_new_generation() {
-        let channel = start(|| {});
+        let channel = start(|| {}, Link::Connecting);
         let first = channel.snapshots.recv_timeout(WAIT).unwrap();
         assert_eq!(first.generation, 0);
         channel.leave();
@@ -423,7 +435,7 @@ mod tests {
 
     #[test]
     fn a_command_for_a_review_that_is_not_running_says_so() {
-        let channel = start(|| {});
+        let channel = start(|| {}, Link::Connecting);
         channel.send(Command::Focus {
             part: PartId::new("claude"),
         });

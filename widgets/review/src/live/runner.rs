@@ -514,6 +514,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let views = conn.panes().map_err(link)?;
         let by_id: BTreeMap<u64, &PaneView> = views.iter().map(|v| (v.pane_id, v)).collect();
         let mut alive = BTreeMap::new();
+        // States the engine has not seen: a full sync follows lost or
+        // dropped notifications, and its timers must hear what they said.
+        let mut states = Vec::new();
         for part in self.all_parts() {
             let label = self.pane_label(&part);
             let known_id = self.panes.get(&part).map(|p| p.id).or_else(|| {
@@ -533,12 +536,13 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                         .find(|v| v.label.as_deref() == Some(label.as_str()))
                 });
             if let Some(view) = found {
-                let mut pane = self
-                    .panes
-                    .get(&part)
-                    .filter(|p| p.id == view.pane_id)
-                    .cloned()
-                    .unwrap_or_else(|| Pane::from_view(view));
+                let known = self.panes.get(&part).filter(|p| p.id == view.pane_id);
+                let changed =
+                    known.is_none_or(|p| p.seq != view.agent_seq || p.state != view.agent_state);
+                if changed && let Some(state) = agent_state(view.agent_state.as_deref()) {
+                    states.push((part.clone(), state));
+                }
+                let mut pane = known.cloned().unwrap_or_else(|| Pane::from_view(view));
                 pane.seq = view.agent_seq;
                 pane.state.clone_from(&view.agent_state);
                 pane.blocked.clone_from(&view.agent_blocked);
@@ -550,6 +554,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
         }
         self.panes = alive;
+        let at = self.clock.now();
+        for (part, state) in states {
+            self.feed(Input::AgentStateChanged { part, state, at })?;
+        }
         Ok(())
     }
 
@@ -1291,7 +1299,12 @@ fn open_log(
         store
             .append_all(&out.batches)
             .map_err(|e| format!("write log: {e}"))?;
-        let _ = store::write_report(&dir, &export::report_markdown(engine.session()));
+    }
+    // The report follows the log: a stop between the two writes (the log
+    // took a lead output, the report did not) is repaired here.
+    let session = engine.session();
+    if session.closed || session.rounds.iter().any(|r| r.outcome.is_some()) {
+        let _ = store::write_report(&dir, &export::report_markdown(session));
     }
     Ok((engine, store))
 }
@@ -1943,6 +1956,16 @@ mod tests {
         let first = fs::read_to_string(&report).unwrap();
         assert!(first.starts_with("# レビュー結果（暫定）"), "{first}");
         assert!(first.contains("F1"), "{first}");
+
+        // A stop after the log took the lead output but before the report
+        // was written: taking the review up again writes it.
+        fs::remove_file(&report).unwrap();
+        let dir = runner.engine.dir().to_owned();
+        drop((runner, actions));
+        wait_unlocked(&dir);
+        let (mut runner, actions, _updates) = rig_on(&fake, Start::Resume { dir });
+        assert_eq!(fs::read_to_string(&report).unwrap(), first);
+
         actions.send(Action::Close).unwrap();
         runner.drain_actions(Some(&mut conn)).unwrap();
         let last = fs::read_to_string(&report).unwrap();
@@ -2720,6 +2743,50 @@ mod tests {
             .map(|(_, t)| t.clone())
             .collect();
         assert_eq!(typed, [brief_pointer(&path)]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_state_change_whose_notification_was_lost_reaches_the_engine_on_the_full_sync() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let pane = fake.pane_of(":claude");
+        fake.report(pane, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        let claude = PartId::new("claude");
+        let started = |runner: &Runner<Fake, Fake>| {
+            runner
+                .engine
+                .session()
+                .round(1)
+                .unwrap()
+                .brief(&claude)
+                .unwrap()
+                .receipt
+                .started
+        };
+        assert!(started(&runner).is_none());
+        // The agent starts working; the notification is lost and Noa says
+        // only that some were dropped.
+        {
+            let mut w = fake.0.borrow_mut();
+            let p = w.panes.get_mut(&pane).unwrap();
+            p.seq += 1;
+            p.state = Some("running".into());
+            w.events.push_back(Changes {
+                dropped: true,
+                ..Changes::default()
+            });
+        }
+        step(&mut runner, &mut conn);
+        assert!(
+            started(&runner).is_some(),
+            "the engine never heard the agent start"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

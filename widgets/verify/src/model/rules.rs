@@ -195,17 +195,23 @@ impl<'a> History<'a> {
     /// Rule 3: the cross-checks that contest `pass` and still stand: each
     /// a `not_reproduced` about that very result (rule 1) citing evidence
     /// that counts (rule 2), with no `pass` on the criterion of a later
-    /// round than the check that is not itself contested. Its checker is
-    /// another verifier, as a verifier is never assigned its own result. A
-    /// contested pass counts for no ruling; a `disputed` check contests
-    /// nothing.
+    /// round than the check that has a command or file that counts for the
+    /// criterion (media whose `shows` leaves it out has none) and is not
+    /// itself contested. Its checker is another verifier, as a verifier is
+    /// never assigned its own result. A contested pass counts for no
+    /// ruling; a `disputed` check contests nothing.
     pub fn contesting(&self, pass: &CriterionResult) -> Vec<&'a CrossCheck> {
         self.checks
             .iter()
             .filter(|c| {
                 self.not_reproduces(c, pass)
                     && !self.passes().any(|later| {
-                        later.round > c.check.round && self.contesting(later).is_empty()
+                        later.round > c.check.round
+                            && later
+                                .evidence
+                                .iter()
+                                .any(|k| self.standing(k) == Standing::Stored)
+                            && self.contesting(later).is_empty()
                     })
             })
             .map(|c| c.check)
@@ -1284,6 +1290,54 @@ mod tests {
                     .chain([
                         Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
                         Res(3, "claude", "AC-1", Pass, &["e2"]),
+                    ])
+                    .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a contested pass, then a later pass whose only file shows another criterion",
+                claude_matched()
+                    .into_iter()
+                    .chain([
+                        Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                        Res(3, "claude-2", "AC-1", Pass, &["f1"]),
+                        Res(3, "claude-2", "AC-2", Pass, &["f1"]),
+                        Shows("claude-2/r3/f1", &["AC-2"]),
+                    ])
+                    .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(format!(
+                    "{TWO}; claude's R1 pass is contested by codex's R2 not_reproduced and counts for nothing until a later pass that is not contested"
+                )),
+            ),
+            (
+                "a contested pass, then a later pass whose only log was lost",
+                claude_matched()
+                    .into_iter()
+                    .chain([
+                        Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                        Res(3, "claude-2", "AC-1", Pass, &["e1"]),
+                        Lost("claude-2/r3/e1"),
+                    ])
+                    .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(format!(
+                    "{TWO}; claude's R1 pass is contested by codex's R2 not_reproduced and counts for nothing until a later pass that is not contested"
+                )),
+            ),
+            (
+                "a contested pass, then a later pass whose file shows the criterion",
+                claude_matched()
+                    .into_iter()
+                    .chain([
+                        Chk(2, "codex", "claude/AC-1", NotReproduced, &["e1"]),
+                        Res(3, "claude-2", "AC-1", Pass, &["f1"]),
+                        Res(3, "claude-2", "AC-2", Pass, &["f1"]),
+                        Shows("claude-2/r3/f1", &["AC-1", "AC-2"]),
                     ])
                     .collect(),
                 Verified,

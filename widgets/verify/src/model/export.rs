@@ -596,6 +596,27 @@ fn write_defects(out: &mut String, session: &Session, base: Option<&Path>) {
         if !evidence.is_empty() {
             let _ = writeln!(out, "- 証跡: {}", evidence.join(", "));
         }
+        // Each cross-check on the defect (or on one merged into it) with
+        // the evidence it cites: which log backs which reproduction.
+        let ids = session.merged_ids(d);
+        for c in session
+            .cross_checks
+            .iter()
+            .filter(|c| matches!(&c.subject, Subject::Defect { id } if ids.contains(id.as_str())))
+        {
+            if c.evidence.is_empty() {
+                continue;
+            }
+            let keys: Vec<&str> = c.evidence.iter().map(EvidenceKey::as_str).collect();
+            let _ = writeln!(
+                out,
+                "- 追試の証跡（R{} {}・{}）: {}",
+                c.round,
+                c.by,
+                c.outcome.label(),
+                keys.join(", ")
+            );
+        }
         if let Some(fix) = d.fix.as_deref().or_else(|| {
             d.sources
                 .iter()
@@ -624,6 +645,10 @@ fn write_cross_checks(out: &mut String, session: &Session) {
         );
         if !c.note.is_empty() {
             let _ = write!(out, " — {}", one_line(&c.note));
+        }
+        if !c.evidence.is_empty() {
+            let keys: Vec<&str> = c.evidence.iter().map(EvidenceKey::as_str).collect();
+            let _ = write!(out, " · 証跡: {}", keys.join(", "));
         }
         out.push('\n');
     }
@@ -1067,12 +1092,14 @@ pub fn fix_task(
             .iter()
             .filter(|r| r.criterion == c.id && r.outcome == Outcome::Fail)
         {
+            // A note of several lines keeps its line breaks: it may hold
+            // the steps (`cd bench`, then `./open-tab --cold`).
             let _ = writeln!(
                 out,
-                "- {} (R{}) reported fail: {}",
+                "- {} (R{}) reported fail:{}",
                 r.part,
                 r.round,
-                one_line(&r.note)
+                steps_entry(&r.note)
             );
             for key in &r.evidence {
                 if !keys.contains(&key) {
@@ -1889,6 +1916,42 @@ mod tests {
         ] {
             assert!(d1.contains(line), "{line:?} in\n{d1}");
         }
+    }
+
+    #[test]
+    fn ac24_a_fail_note_of_several_lines_keeps_its_line_breaks_in_the_fix_task() {
+        let mut rig = Rig::new(3);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        rig.reply("claude", &all_pass());
+        rig.reply(
+            "codex",
+            &format!(
+                r#"{{"summary": "Ran it.", "environment": "macOS", "results": [
+                  {{"criterion": "AC-1", "result": "fail", "note": "Steps:\ncd bench\n./open-tab --cold", "evidence": ["e2"]}},
+                  {{"criterion": "AC-2", "result": "pass", "evidence": ["e1"]}},
+                  {{"criterion": "AC-3", "result": "pass", "evidence": ["e1"]}}],
+                  "evidence": [{}, {}]}}"#,
+                cmd("e1", 0, true),
+                cmd("e2", 1, false)
+            ),
+        );
+        rig.reply("claude-2", &all_pass());
+        rig.ingest();
+        let session = rig.engine.session();
+        assert!(
+            session
+                .results
+                .iter()
+                .any(|r| r.part.as_str() == "codex" && r.outcome == Outcome::Fail),
+            "{:?}",
+            rig.rejected("codex")
+        );
+        let task = fix_task(session, &["AC-1".into()], &[], &BTreeMap::new());
+        let ac1 = &task[task.find("### AC-1").unwrap()..];
+        let want = "- codex (R1) reported fail:\n  ```\n  Steps:\n  cd bench\n  ./open-tab --cold\n  ```\n";
+        assert!(ac1.contains(want), "{want:?} in\n{ac1}");
     }
 
     #[test]

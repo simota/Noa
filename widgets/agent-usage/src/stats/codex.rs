@@ -359,7 +359,7 @@ mod tests {
         let sub = tails.iter().find(|t| t.0).unwrap();
         // The sub-thread joins its parent's session.
         assert_eq!(main.1, sub.1);
-        assert_eq!(crate::stats::index::merged_sessions(&ix).len(), 1);
+        assert_eq!(ix.sessions.len(), 1);
     }
 
     fn meta(id: &str, parent: Option<&str>, minute: u32) -> String {
@@ -433,7 +433,7 @@ mod tests {
         }
         let mut ix = t.indexer();
         ix.pass(&mut |_| {});
-        let sessions = crate::stats::index::merged_sessions(ix.index());
+        let sessions = &ix.index().sessions;
         assert_eq!(sessions.len(), 1);
         assert_eq!(
             *sessions.keys().next().unwrap(),

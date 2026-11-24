@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::aggregate::file_agent;
-use super::index::{Index, Indexer, active_buckets, fnv};
+use super::index::{Index, Indexer, fnv};
 use super::types::Counters;
 use crate::model::{Agent, Unix};
 use crate::paths::Roots;
@@ -269,13 +269,14 @@ fn sum_where(ix: &Index, keep: impl Fn(Agent) -> bool) -> Counters {
         } else {
             &e.data.fallback[..]
         };
-        for b in e.data.buckets.iter().chain(fallback) {
+        let active = &e.data.unlinked_active;
+        for b in e.data.buckets.iter().chain(fallback).chain(active) {
             if keep(b.agent) {
                 add(&mut c, &b.c);
             }
         }
     }
-    for b in active_buckets(ix) {
+    for b in ix.sessions.values().flat_map(|s| &s.active) {
         if keep(b.agent) {
             add(&mut c, &b.c);
         }

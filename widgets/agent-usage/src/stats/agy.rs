@@ -2,7 +2,7 @@
 //! prompt `{timestamp (ms epoch), workspace, conversationId?, type?}`. A line
 //! without `type == "slash_command"` is one turn. Sessions are the distinct
 //! `conversationId`s plus the `conversations/<uuid>.db` files the history
-//! never names (those are only stat'ed, see `index::merged_sessions`).
+//! never names (those are only stat'ed, see `index::derive_sessions`).
 //!
 //! Active time links the turns of one `conversationId`. A turn without one
 //! belongs to no session and has no neighbour: it adds no active time (turns
@@ -59,7 +59,7 @@ pub(crate) fn line(bytes: &[u8], sink: &mut Sink<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::model::Agent;
-    use crate::stats::index::{self, merged_sessions};
+    use crate::stats::index;
     use crate::stats::testutil::*;
 
     #[test]
@@ -80,8 +80,10 @@ mod tests {
         let t = Tree::fixtures();
         let mut ix = t.indexer();
         ix.pass(&mut |_| {});
-        let sessions: Vec<_> = merged_sessions(ix.index())
-            .into_iter()
+        let sessions: Vec<_> = ix
+            .index()
+            .sessions
+            .iter()
             .filter(|((a, _), _)| *a == Agent::Agy)
             .collect();
         // Conversations 1 and 2 from the history (1 also has a .db file),
@@ -90,16 +92,8 @@ mod tests {
         let only_db = index::agy_db_key(std::path::Path::new(
             "00000000-0000-4000-8000-0000000a9003.db",
         ));
-        let (_, hours) = sessions
-            .iter()
-            .find(|((_, k), _)| *k == only_db)
-            .unwrap()
-            .1
-            .clone();
-        assert_eq!(
-            hours.into_iter().collect::<Vec<_>>(),
-            vec![DB_MTIME - DB_MTIME % 3600]
-        );
+        let (_, session) = sessions.iter().find(|((_, k), _)| *k == only_db).unwrap();
+        assert_eq!(session.hours, vec![DB_MTIME - DB_MTIME % 3600]);
     }
 
     #[test]
@@ -146,6 +140,6 @@ mod tests {
         ix.pass(&mut |_| {});
         let c = sum_agent(ix.index(), Agent::Agy);
         assert_eq!((c.turns, c.active_secs), (5, 90));
-        assert_eq!(merged_sessions(ix.index()).len(), 1);
+        assert_eq!(ix.index().sessions.len(), 1);
     }
 }

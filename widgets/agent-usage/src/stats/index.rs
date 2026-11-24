@@ -13,8 +13,10 @@
 //! over its old entry instead of being counted again. An entry whose file is
 //! gone (Claude Code deletes old transcripts) is kept, so totals keep it.
 //!
-//! Active time is computed over each session's events from all of its files
-//! (`active_buckets`), not per file.
+//! Sessions are derived at index time (`Index::sessions`): each one's hours
+//! and active time, over the events of all of its files merged. A pass
+//! rebuilds only the sessions of the files it parsed, so `report` sums
+//! per-hour buckets and never reads event times.
 //!
 //! Every log root is opened read-only; the only file written is
 //! `<own_dir>/index-v1.json` (temp file + rename).
@@ -35,8 +37,10 @@ use crate::model::{Agent, Unix};
 use crate::paths::{self, Roots};
 
 /// 2: per-session event times replace the per-file last event time, Codex
-/// fresh input no longer subtracts cache writes.
-pub(crate) const VERSION: u32 = 2;
+/// fresh input no longer subtracts cache writes. 3: a file's active time of
+/// events naming no session is kept with it; files under a Claude project
+/// other than transcripts and subagent logs are no longer indexed.
+pub(crate) const VERSION: u32 = 3;
 /// Lines longer than this (without the `\n`) are skipped and counted.
 pub(crate) const MAX_LINE: usize = 8 << 20;
 const HEAD_LEN: u64 = 4096;
@@ -120,6 +124,10 @@ pub(crate) struct FileData {
     pub workers: Vec<Worker>,
     /// Event times per session key, for active time.
     pub activity: Vec<Activity>,
+    /// Active time of the events that name no session (`Activity` key 0),
+    /// which are linked only to each other: buckets holding only
+    /// `active_secs`.
+    pub unlinked_active: Vec<Bucket>,
     pub lines_bad: u64,
     pub lines_skipped: u64,
 }
@@ -166,13 +174,37 @@ impl FileEntry {
     }
 }
 
+/// One session over all of its files (a Claude transcript and its subagent
+/// logs, a Codex thread and its sub-threads), derived from the file entries
+/// whenever one of them changes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Session {
+    /// The first project its files name; 0 when none does.
+    pub project: u32,
+    /// UTC hours with activity, ascending.
+    pub hours: Vec<Unix>,
+    /// Active time: buckets holding only `active_secs`.
+    pub active: Vec<Bucket>,
+}
+
+impl Session {
+    /// Whether it had activity in an hour that overlaps `start..=end`.
+    pub fn active_between(&self, start: Unix, end: Unix) -> bool {
+        let first = self.hours.partition_point(|h| h + 3600 <= start);
+        self.hours.get(first).is_some_and(|h| *h <= end)
+    }
+}
+
 /// Buckets, sessions, interned strings, workers and coverage of every parsed
-/// log. Snapshots are cheap: file entries are shared `Arc`s.
+/// log. Snapshots are cheap: file entries and sessions are shared `Arc`s.
 #[derive(Clone, Debug, Default)]
 pub struct Index {
     /// Interned model, project and tool names; id 0 is "".
     pub(crate) strings: Arc<Vec<String>>,
     pub(crate) files: BTreeMap<PathBuf, Arc<FileEntry>>,
+    /// Every session by agent and key (for Codex the root thread's key),
+    /// derived from `files` (`derive_sessions`); not saved.
+    pub(crate) sessions: BTreeMap<(Agent, u64), Arc<Session>>,
     /// Whether each agent's log root exists (by `Agent::index`).
     pub(crate) roots_present: [bool; 3],
     pub(crate) coverage: Coverage,
@@ -225,11 +257,14 @@ pub(crate) fn load(path: &Path) -> Option<Index> {
             .into_iter()
             .map(|(p, e)| (p, Arc::new(e)))
             .collect(),
+        sessions: BTreeMap::new(),
         roots_present: disk.roots_present,
         coverage: Coverage::default(),
         generation: 0,
     };
     index.coverage = summed_coverage(&index, 0, 0, false);
+    let parents = codex_parents(&index);
+    derive_sessions(&mut index, &parents, None);
     Some(index)
 }
 
@@ -283,6 +318,8 @@ pub(crate) struct Sink<'a> {
     sessions: HashMap<u64, usize>,
     activity: HashMap<u64, usize>,
     events: Vec<Event>,
+    /// Sessions given events or hours in this pass.
+    touched: BTreeSet<u64>,
 }
 
 struct Event {
@@ -324,6 +361,7 @@ impl<'a> Sink<'a> {
             lookup,
             data,
             events: Vec::new(),
+            touched: BTreeSet::new(),
         }
     }
 
@@ -421,6 +459,7 @@ impl<'a> Sink<'a> {
 
     /// Records the session's existence in the hour of `ts` without activity.
     pub fn session_hour(&mut self, session: u64, project: u32, ts: Unix) {
+        self.touched.insert(session);
         let hour = hour_of(ts);
         let agent = self.agent;
         let data = &mut *self.data;
@@ -448,10 +487,12 @@ impl<'a> Sink<'a> {
     }
 
     /// Files the pass's events under their sessions: the session's hours and
-    /// its event times (active time is computed from those, across files).
-    fn finish(mut self) {
+    /// its event times (its active time is derived from those, across files,
+    /// by `derive_sessions`). Returns the sessions given events or hours.
+    fn finish(mut self) -> BTreeSet<u64> {
         let mut events = std::mem::take(&mut self.events);
         events.sort_by_key(|e| (e.session, e.ts));
+        let unlinked = events.first().is_some_and(|e| e.session == 0);
         for e in events {
             if e.session != 0 {
                 self.session_hour(e.session, e.project, e.ts);
@@ -475,6 +516,16 @@ impl<'a> Sink<'a> {
                 _ => list.push(event),
             }
         }
+        if unlinked {
+            let FileData {
+                activity,
+                unlinked_active,
+                ..
+            } = &mut *self.data;
+            let events = activity.iter().find(|a| a.key == 0).map(|a| &a.events);
+            *unlinked_active = active_time(self.agent, events.map_or(&[], Vec::as_slice));
+        }
+        std::mem::take(&mut self.touched)
     }
 }
 
@@ -568,11 +619,7 @@ fn enumerate(roots: &Roots) -> (Vec<(PathBuf, Kind)>, [bool; 3]) {
     let mut present = [false; 3];
     if let Some(dir) = &roots.claude_projects {
         present[Agent::Claude.index()] = dir.is_dir();
-        walk(dir, 4, &mut |p| {
-            if p.extension().is_some_and(|e| e == "jsonl") {
-                files.push((p.to_path_buf(), Kind::Claude));
-            }
-        });
+        claude_logs(dir, &mut files);
     }
     for dir in &roots.codex_sessions {
         present[Agent::Codex.index()] |= dir.is_dir();
@@ -605,20 +652,59 @@ fn enumerate(roots: &Roots) -> (Vec<(PathBuf, Kind)>, [bool; 3]) {
     (files, present)
 }
 
+/// Claude Code's conversation logs, and nothing else under `projects/`:
+/// `<encoded-cwd>/<sessionId>.jsonl` and
+/// `<encoded-cwd>/<sessionId>/subagents/agent-*.jsonl`. Other JSONL there
+/// (tool output saved under `<sessionId>/tool-results/`, say) is not a
+/// conversation, whatever records it holds.
+fn claude_logs(projects: &Path, out: &mut Vec<(PathBuf, Kind)>) {
+    let jsonl = |p: &PathBuf| p.extension().is_some_and(|e| e == "jsonl");
+    let agent_log = |p: &PathBuf| {
+        jsonl(p)
+            && p.file_name()
+                .is_some_and(|n| n.as_encoded_bytes().starts_with(b"agent-"))
+    };
+    for project in children(projects).1 {
+        let (transcripts, sessions) = children(&project);
+        out.extend(
+            transcripts
+                .into_iter()
+                .filter(jsonl)
+                .map(|p| (p, Kind::Claude)),
+        );
+        for session in sessions {
+            for subagents in children(&session).1 {
+                if subagents.ends_with("subagents") {
+                    let logs = children(&subagents).0.into_iter().filter(agent_log);
+                    out.extend(logs.map(|p| (p, Kind::Claude)));
+                }
+            }
+        }
+    }
+}
+
+/// The regular files and the directories directly in `dir`; symlinks are
+/// not followed.
+fn children(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let (mut files, mut dirs) = (Vec::new(), Vec::new());
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Ok(ty) = entry.file_type() else { continue };
+        if ty.is_file() {
+            files.push(entry.path());
+        } else if ty.is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    (files, dirs)
+}
+
 /// Regular files below `dir`, `depth` levels deep at most; symlinks are not
 /// followed.
 fn walk(dir: &Path, depth: u32, f: &mut dyn FnMut(&Path)) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(ty) = entry.file_type() else { continue };
-        let path = entry.path();
-        if ty.is_file() {
-            f(&path);
-        } else if ty.is_dir() && depth > 1 {
-            walk(&path, depth - 1, f);
-        }
+    let (files, dirs) = children(dir);
+    files.iter().for_each(|p| f(p));
+    if depth > 1 {
+        dirs.iter().for_each(|d| walk(d, depth - 1, f));
     }
 }
 
@@ -628,6 +714,10 @@ pub(crate) struct Indexer {
     home: Option<PathBuf>,
     index: Index,
     lookup: HashMap<String, u32>,
+    /// Codex thread → parent, as `index.sessions` was last derived with.
+    parents: HashMap<u64, u64>,
+    /// `(agent, key)` of every session whose files changed since then.
+    touched: BTreeSet<(Agent, u64)>,
     stop: Arc<AtomicBool>,
     last_save: Instant,
     dirty: bool,
@@ -654,8 +744,10 @@ impl Indexer {
         Indexer {
             roots,
             home,
+            parents: codex_parents(&index),
             index,
             lookup,
+            touched: BTreeSet::new(),
             stop,
             last_save: Instant::now(),
             dirty: false,
@@ -667,10 +759,48 @@ impl Indexer {
         &self.index
     }
 
-    /// A snapshot to publish, with a new generation.
+    /// A snapshot to publish, with its sessions up to date and a new
+    /// generation.
     pub fn snapshot(&mut self) -> Index {
+        self.refresh_sessions();
         self.index.generation += 1;
         self.index.clone()
+    }
+
+    /// Rebuilds the sessions whose files changed since the last call, and
+    /// both sessions of every Codex key that a changed parent link moved
+    /// from one root thread to another; every other session is unchanged.
+    fn refresh_sessions(&mut self) {
+        let parents = codex_parents(&self.index);
+        // A key's session as last derived, and as of now.
+        let old_and_new = |agent, key| {
+            [
+                (agent, session_root(&self.parents, agent, key)),
+                (agent, session_root(&parents, agent, key)),
+            ]
+        };
+        let mut roots = BTreeSet::new();
+        for &(agent, key) in &self.touched {
+            roots.extend(old_and_new(agent, key));
+        }
+        if parents != self.parents {
+            let codex = self
+                .index
+                .files
+                .iter()
+                .filter(|(_, e)| e.kind == Kind::Codex);
+            for (agent, key) in codex.flat_map(|(path, e)| session_keys(path, e)) {
+                let [old, new] = old_and_new(agent, key);
+                if old != new {
+                    roots.extend([old, new]);
+                }
+            }
+        }
+        self.touched.clear();
+        self.parents = parents;
+        if !roots.is_empty() {
+            derive_sessions(&mut self.index, &self.parents, Some(&roots));
+        }
     }
 
     fn stopped(&self) -> bool {
@@ -752,6 +882,8 @@ impl Indexer {
                 }
                 Some(old) => {
                     if let Some(entry) = self.index.files.remove(&old) {
+                        // Its place among its sessions' files changes.
+                        self.touched.extend(session_keys(path, &entry));
                         self.index.files.insert(path.clone(), entry);
                         self.dirty = true;
                     }
@@ -786,6 +918,7 @@ impl Indexer {
         if kind == Kind::AgyDb {
             let mut entry = FileEntry::new(kind);
             (entry.len, entry.mtime) = (len, mtime);
+            self.touched.extend(session_keys(path, &entry));
             self.index.files.insert(path.to_path_buf(), Arc::new(entry));
             return Ok(Some((0, false)));
         }
@@ -797,6 +930,10 @@ impl Indexer {
             _ => false,
         };
         let reparsed = old.is_some() && !resume;
+        // Parsed again from 0, the file no longer holds what it did.
+        if let Some(e) = old.filter(|_| reparsed) {
+            self.touched.extend(session_keys(path, e));
+        }
         let mut entry = match (resume, self.index.files.remove(path)) {
             (true, Some(e)) => Arc::unwrap_or_clone(e),
             _ => FileEntry::new(kind),
@@ -804,7 +941,7 @@ impl Indexer {
         let start = entry.offset;
         file.seek(SeekFrom::Start(start))?;
         let mut reader = BufReader::with_capacity(1 << 16, &mut file);
-        let consumed = {
+        let (consumed, sessions) = {
             let FileEntry { tail, data, .. } = &mut entry;
             let mut sink = Sink::new(
                 kind.agent(),
@@ -829,9 +966,11 @@ impl Indexer {
                 n += 1;
                 !n.is_multiple_of(STOP_CHECK_LINES) || !stop.load(Ordering::Relaxed)
             });
-            sink.finish();
-            consumed?
+            (consumed?, sink.finish())
         };
+        let agent = kind.agent();
+        self.touched
+            .extend(sessions.into_iter().map(|key| (agent, key)));
         drop(reader);
         entry.offset = start + consumed;
         let (head_len, hash) = head_hash(&mut file, HEAD_LEN)?;
@@ -907,73 +1046,109 @@ fn session_root(parents: &HashMap<u64, u64>, agent: Agent, key: u64) -> u64 {
     k
 }
 
-/// Every distinct `(agent, session key)` with its project and merged hours.
-pub(crate) fn merged_sessions(index: &Index) -> BTreeMap<(Agent, u64), (u32, BTreeSet<Unix>)> {
-    let parents = codex_parents(index);
-    let mut out: BTreeMap<(Agent, u64), (u32, BTreeSet<Unix>)> = BTreeMap::new();
-    for e in index.files.values() {
-        for s in &e.data.sessions {
-            let key = session_root(&parents, s.agent, s.key);
-            let slot = out
-                .entry((s.agent, key))
-                .or_insert_with(|| (s.project, BTreeSet::new()));
-            if slot.0 == 0 {
-                slot.0 = s.project;
-            }
-            slot.1.extend(s.hours.iter().copied());
-        }
+/// The `(agent, key)` of every session a file holds events or hours of.
+fn session_keys(path: &Path, e: &FileEntry) -> Vec<(Agent, u64)> {
+    let mut keys: Vec<_> = e.data.sessions.iter().map(|s| (s.agent, s.key)).collect();
+    if e.kind == Kind::AgyDb {
+        keys.push((Agent::Agy, agy_db_key(path)));
     }
-    // A `.db` file the history never names is a session of its own, active
-    // in the hour of its mtime.
-    for (path, e) in &index.files {
-        if e.kind == Kind::AgyDb {
-            let hour = hour_of((e.mtime / 1_000_000_000) as Unix);
-            out.entry((Agent::Agy, agy_db_key(path)))
-                .or_insert_with(|| (0, BTreeSet::from([hour])));
-        }
-    }
-    out
+    keys
 }
 
-/// Active time as buckets holding only `active_secs`: per session, the
-/// events of all of its files (parent and subagent logs, Codex sub-threads)
-/// merged in time order, one per second, so overlapping files count once; a
-/// gap of at most `ACTIVE_GAP` adds to the bucket of the later event. Events
-/// that name no session are linked only within their file.
-pub(crate) fn active_buckets(index: &Index) -> Vec<Bucket> {
-    type Key = (Unix, Agent, u32, u32);
-    fn add_gaps(agent: Agent, events: &[EventAt], out: &mut BTreeMap<Key, u64>) {
-        for w in events.windows(2) {
-            let ((prev, ..), (ts, model, project)) = (w[0], w[1]);
-            let gap = ts - prev;
-            if gap > 0 && gap <= ACTIVE_GAP {
-                *out.entry((hour_of(ts), agent, model, project)).or_default() += gap as u64;
+/// Derives `index.sessions` from the file entries: the sessions in `only`
+/// (each dropped when no file holds it any more), or all of them. A session
+/// is the events and hours of all of its files (parent and subagent logs,
+/// Codex sub-threads under the root of their parent chain in `parents`).
+fn derive_sessions(
+    index: &mut Index,
+    parents: &HashMap<u64, u64>,
+    only: Option<&BTreeSet<(Agent, u64)>>,
+) {
+    #[derive(Default)]
+    struct Parts {
+        project: u32,
+        hours: Vec<Unix>,
+        events: Vec<EventAt>,
+    }
+    let wanted = |key: &(Agent, u64)| only.is_none_or(|o| o.contains(key));
+    let mut parts: BTreeMap<(Agent, u64), Parts> = BTreeMap::new();
+    for e in index.files.values() {
+        for s in &e.data.sessions {
+            let key = (s.agent, session_root(parents, s.agent, s.key));
+            if wanted(&key) {
+                let p = parts.entry(key).or_default();
+                if p.project == 0 {
+                    p.project = s.project;
+                }
+                p.hours.extend_from_slice(&s.hours);
             }
         }
-    }
-    let parents = codex_parents(index);
-    let mut sessions: BTreeMap<(Agent, u64), Vec<EventAt>> = BTreeMap::new();
-    let mut secs: BTreeMap<Key, u64> = BTreeMap::new();
-    for e in index.files.values() {
         let agent = e.kind.agent();
-        for a in &e.data.activity {
-            if a.key == 0 {
-                add_gaps(agent, &a.events, &mut secs);
-            } else {
-                sessions
-                    .entry((agent, session_root(&parents, agent, a.key)))
+        for a in e.data.activity.iter().filter(|a| a.key != 0) {
+            let key = (agent, session_root(parents, agent, a.key));
+            if wanted(&key) {
+                parts
+                    .entry(key)
                     .or_default()
+                    .events
                     .extend_from_slice(&a.events);
             }
         }
     }
-    for ((agent, _), mut events) in sessions {
+    // A `.db` file the history never names is a session of its own, active
+    // in the hour of its mtime.
+    for (path, e) in index.files.iter().filter(|(_, e)| e.kind == Kind::AgyDb) {
+        let key = (Agent::Agy, agy_db_key(path));
+        if wanted(&key) {
+            parts.entry(key).or_insert_with(|| Parts {
+                hours: vec![hour_of((e.mtime / 1_000_000_000) as Unix)],
+                ..Parts::default()
+            });
+        }
+    }
+    let session = |agent: Agent, mut p: Parts| {
+        p.hours.sort_unstable();
+        p.hours.dedup();
         // Stable: of one second in several files, the first file's event.
-        events.sort_by_key(|e| e.0);
-        add_gaps(agent, &events, &mut secs);
+        p.events.sort_by_key(|e| e.0);
+        Arc::new(Session {
+            project: p.project,
+            hours: p.hours,
+            active: active_time(agent, &p.events),
+        })
+    };
+    match only {
+        None => {
+            index.sessions = parts
+                .into_iter()
+                .map(|(key, p)| (key, session(key.0, p)))
+                .collect();
+        }
+        Some(only) => {
+            for key in only {
+                match parts.remove(key) {
+                    Some(p) => index.sessions.insert(*key, session(key.0, p)),
+                    None => index.sessions.remove(key),
+                };
+            }
+        }
+    }
+}
+
+/// Active time of events in time order, as buckets holding only
+/// `active_secs`: a gap of at most `ACTIVE_GAP` adds to the bucket of the
+/// later event, so events of one second count once.
+fn active_time(agent: Agent, events: &[EventAt]) -> Vec<Bucket> {
+    let mut secs: BTreeMap<(Unix, u32, u32), u64> = BTreeMap::new();
+    for w in events.windows(2) {
+        let ((prev, ..), (ts, model, project)) = (w[0], w[1]);
+        let gap = ts - prev;
+        if gap > 0 && gap <= ACTIVE_GAP {
+            *secs.entry((hour_of(ts), model, project)).or_default() += gap as u64;
+        }
     }
     secs.into_iter()
-        .map(|((hour, agent, model, project), s)| Bucket {
+        .map(|((hour, model, project), s)| Bucket {
             hour,
             agent,
             model,
@@ -991,6 +1166,15 @@ pub(crate) mod tests {
     use super::*;
     use crate::stats::testutil::*;
     use std::io::Cursor;
+
+    /// `index` with every session derived again from its files, as a
+    /// restart derives them.
+    pub(crate) fn rederived(index: &Index) -> Index {
+        let mut index = index.clone();
+        let parents = codex_parents(&index);
+        derive_sessions(&mut index, &parents, None);
+        index
+    }
 
     fn lines_of(input: &[u8], cap: usize) -> (Vec<Option<Vec<u8>>>, u64) {
         let mut out = Vec::new();
@@ -1168,6 +1352,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn only_transcripts_and_subagent_logs_are_claude_logs() {
+        let t = Tree::new();
+        let reply =
+            |at: &str, id: &str, output| claude_reply_on(&format!("2026-11-20T{at}Z"), id, output);
+        // Tool output saved as JSONL holding an assistant record is no
+        // conversation: alone, it is not indexed at all.
+        let nested = t.claude_file("p", "sess-gen/tool-results/nested.jsonl");
+        write(&nested, &reply("00:00:00", "m_tool", 90));
+        let mut ix = t.indexer();
+        ix.pass(&mut |_| {});
+        assert!(ix.index().files.is_empty(), "{:?}", ix.index().files.keys());
+        assert_eq!(sum(ix.index()), Counters::default());
+
+        // Only `<encoded-cwd>/<sessionId>.jsonl` and
+        // `<encoded-cwd>/<sessionId>/subagents/agent-*.jsonl` are.
+        let main = t.claude_file("p", "sess-gen.jsonl");
+        let sub = t.claude_file("p", "sess-gen/subagents/agent-x.jsonl");
+        write(&main, &reply("00:01:00", "m_main", 10));
+        write(&sub, &reply("00:02:00", "m_sub", 20));
+        let projects = t.root.join("home/.claude/projects");
+        for stray in [
+            projects.join("stray.jsonl"),
+            t.claude_file("p", "sess-gen/agent-y.jsonl"),
+            t.claude_file("p", "sess-gen/subagents/notes.jsonl"),
+            t.claude_file("p", "sess-gen/subagents/deeper/agent-z.jsonl"),
+            t.claude_file("p", "sess-gen/tool-results/agent-w.jsonl"),
+        ] {
+            write(&stray, &reply("00:03:00", "m_stray", 90));
+        }
+        ix.pass(&mut |_| {});
+        let logs: BTreeSet<_> = ix.index().files.keys().cloned().collect();
+        assert_eq!(logs, BTreeSet::from([main, sub]));
+        let c = sum(ix.index());
+        assert_eq!((c.messages, c.tokens.output), (2, 30));
+    }
+
+    #[test]
     fn archived_rollout_takes_over_its_entry_and_deleted_logs_stay_counted() {
         const ROLLOUT: &str = "codex/sessions/2026/11/21/rollout-2026-11-21T09-00-00-00000000-0000-4000-8000-00000000c0de.jsonl";
         const TRANSCRIPT: &str =
@@ -1186,7 +1407,7 @@ pub(crate) mod tests {
         let mut ix = t.indexer();
         ix.pass(&mut |_| {});
         let before = sum(ix.index());
-        let sessions = merged_sessions(ix.index()).len();
+        let sessions = ix.index().sessions.len();
         assert_eq!(sessions, 2);
 
         // Archived (moved), then a restart from the saved index: the entry
@@ -1202,7 +1423,7 @@ pub(crate) mod tests {
         assert_eq!(ix.pass(&mut |_| {}).parsed, 0);
         assert_eq!(codex_paths(&ix), vec![archived.clone()]);
         assert_eq!(sum(ix.index()), before);
-        assert_eq!(merged_sessions(ix.index()).len(), sessions);
+        assert_eq!(ix.index().sessions.len(), sessions);
         let saved = load(&paths::index_path(&t.own)).unwrap();
         assert!(saved.files.contains_key(&archived) && !saved.files.contains_key(&live));
 
@@ -1221,6 +1442,127 @@ pub(crate) mod tests {
         std::fs::remove_file(t.fixture_path(TRANSCRIPT)).unwrap();
         ix.pass(&mut |_| {});
         assert_eq!(sum(ix.index()), before);
-        assert_eq!(merged_sessions(ix.index()).len(), sessions);
+        assert_eq!(ix.index().sessions.len(), sessions);
+    }
+
+    #[test]
+    fn sessions_kept_by_passes_match_a_rebuild() {
+        const A: &str = "00000000-0000-4000-8000-00000000000a";
+        const B: &str = "00000000-0000-4000-8000-00000000000b";
+        const C: &str = "00000000-0000-4000-8000-00000000000c";
+        const D: &str = "00000000-0000-4000-8000-00000000000d";
+        // A Codex thread opened at `minute` with one turn 30 s later; B
+        // works in another project.
+        let thread = |id: &str, parent: Option<&str>, minute: u32| {
+            let parent = parent.map_or(String::new(), |p| format!(r#","parent_thread_id":"{p}""#));
+            let project = if id == B { "beta" } else { "alpha" };
+            jsonl(&[
+                format!(
+                    r#"{{"timestamp":"2026-11-21T00:{minute:02}:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/home/synthetic/work/{project}"{parent}}}}}"#
+                ),
+                format!(
+                    r#"{{"timestamp":"2026-11-21T00:{minute:02}:30Z","type":"event_msg","payload":{{"type":"task_started"}}}}"#
+                ),
+            ])
+        };
+        let rollout =
+            |id: &str, minute: u32| format!("rollout-2026-11-21T09-{minute:02}-00-{id}.jsonl");
+        let prompt = |conversation: &str, ms: i64| {
+            format!(
+                r#"{{"timestamp":{ms},"workspace":"/home/synthetic/work/a","conversationId":"{conversation}"}}"#
+            )
+        };
+        const X: &str = "00000000-0000-4000-8000-0000000a9101";
+        const Y: &str = "00000000-0000-4000-8000-0000000a9102";
+        const T0: i64 = 1_795_410_000_000;
+        let active = |ix: &Indexer, agent| sum_agent(ix.index(), agent).active_secs;
+        let t = Tree::new();
+        let mut ix = t.indexer();
+        let pass = |ix: &mut Indexer| {
+            ix.pass(&mut |_| {});
+            assert_eq!(ix.index().sessions, rederived(ix.index()).sessions);
+        };
+
+        // A sub-thread before its parent's log, a transcript.
+        write(&t.codex_file(&rollout(D, 6)), &thread(D, Some(C), 6));
+        let main = t.claude_file("-synthetic-gaps", "sess-gen.jsonl");
+        write(&main, &[claude_turn_at(0), claude_turn_at(60)].concat());
+        pass(&mut ix);
+        assert_eq!(
+            (active(&ix, Agent::Codex), active(&ix, Agent::Claude)),
+            (30, 60)
+        );
+
+        // Its parent arrives (itself a sub-thread), the transcript grows and
+        // gains a subagent log; agy names one conversation and stores two.
+        write(&t.codex_file(&rollout(C, 4)), &thread(C, Some(B), 4));
+        append(&main, &claude_turn_at(200));
+        let sub = t.claude_file("-synthetic-gaps", "sess-gen/subagents/agent-x.jsonl");
+        write(&sub, &claude_turn_at(90));
+        let history = t.agy_history();
+        write(&history, &jsonl(&[prompt(X, T0), prompt(X, T0 + 60_000)]));
+        let conversations = history.with_file_name("conversations");
+        std::fs::create_dir_all(&conversations).unwrap();
+        for id in [X, Y] {
+            write(&conversations.join(format!("{id}.db")), b"");
+        }
+        pass(&mut ix);
+        assert_eq!(active(&ix, Agent::Codex), 30 + 90 + 30);
+        assert_eq!(active(&ix, Agent::Claude), 60 + 30 + 110);
+        assert_eq!(
+            (active(&ix, Agent::Agy), ix.index().sessions.len()),
+            (60, 1 + 1 + 2)
+        );
+
+        // The root and its sub-thread close the chain; the transcript is
+        // rewritten shorter; the history names the other conversation.
+        write(&t.codex_file(&rollout(A, 0)), &thread(A, None, 0));
+        write(&t.codex_file(&rollout(B, 2)), &thread(B, Some(A), 2));
+        write(&main, &claude_turn_at(0));
+        append(&history, &jsonl(&[prompt(Y, T0 + 90_000)]));
+        pass(&mut ix);
+        assert_eq!(active(&ix, Agent::Codex), 3 * (30 + 90) + 30);
+        assert_eq!(
+            (active(&ix, Agent::Claude), active(&ix, Agent::Agy)),
+            (90, 60)
+        );
+        assert_eq!(ix.index().sessions.len(), 1 + 1 + 2);
+        let y = ix.index().sessions[&(Agent::Agy, fnv(Y.as_bytes()))]
+            .hours
+            .clone();
+        assert_eq!(y, vec![hour_of((T0 + 90_000) / 1000)]);
+
+        // The subagent log is rewritten as another session's.
+        let other = String::from_utf8(claude_turn_at(90)).unwrap();
+        write(&sub, other.replace("sess-gen", "sess-oth").as_bytes());
+        pass(&mut ix);
+        assert_eq!(active(&ix, Agent::Claude), 0);
+        assert_eq!(ix.index().sessions.len(), 1 + 2 + 2);
+
+        // A sub-thread's log is archived, which puts it first among its
+        // session's files; then the middle thread is rewritten as a root,
+        // which splits the chain in two.
+        let project = |ix: &Indexer| {
+            let s = &ix.index().sessions[&(Agent::Codex, fnv(A.as_bytes()))];
+            ix.index().string(s.project).to_owned()
+        };
+        assert_eq!(project(&ix), "~/work/alpha");
+        let live = t.codex_file(&rollout(B, 2));
+        let archived = t
+            .root
+            .join("home/.codex/archived_sessions")
+            .join(live.file_name().unwrap());
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::rename(&live, &archived).unwrap();
+        pass(&mut ix);
+        assert_eq!(active(&ix, Agent::Codex), 3 * (30 + 90) + 30);
+        assert_eq!(project(&ix), "~/work/beta");
+        write(&t.codex_file(&rollout(C, 4)), &thread(C, None, 4));
+        pass(&mut ix);
+        assert_eq!(active(&ix, Agent::Codex), 2 * (30 + 90 + 30));
+        assert_eq!(ix.index().sessions.len(), 2 + 2 + 2);
+
+        // A restart derives the same sessions from the saved files.
+        assert_eq!(t.indexer().index().sessions, ix.index().sessions);
     }
 }

@@ -287,7 +287,7 @@ mod tests {
     fn subagent_file_joins_its_session() {
         let sub = "claude/projects/-synthetic-alpha/0b1c2d3e-0000-4000-8000-000000000001/subagents/agent-a1b2c3.jsonl";
         let ix = index_fixture_files(&[MAIN, sub]);
-        let sessions = crate::stats::index::merged_sessions(&ix);
+        let sessions = &ix.sessions;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions.keys().next().unwrap().0, Agent::Claude);
         let c = sum(&ix);

@@ -4,10 +4,14 @@
 //! today and the 6 / 29 days before; all = everything indexed. Buckets are
 //! UTC hours, so a bucket counts when its hour overlaps the period (with a
 //! half-hour zone, day boundaries shift by up to 30 min).
+//!
+//! A report reads only per-hour buckets and the sessions the index derived
+//! (hours, active time), never event times: its cost follows the number of
+//! hours with data, not of events.
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::index::{Index, Kind, active_buckets, merged_sessions};
+use super::index::{FileEntry, Index, Kind};
 use super::prices;
 use super::types::{
     AgentFilter, Availability, Bucket, Counters, Counts, KeyRow, ModelRow, Period, StatsReport,
@@ -63,15 +67,34 @@ impl Acc {
     }
 }
 
-/// The buckets a file contributes: its own, plus the Codex `token_count`
-/// fallback when it has no usage records.
-fn buckets_of(e: &super::index::FileEntry) -> impl Iterator<Item = &Bucket> {
+/// The buckets a file contributes: its own, the Codex `token_count` fallback
+/// when it has no usage records, and the active time of its events that name
+/// no session.
+fn buckets_of(e: &FileEntry) -> impl Iterator<Item = &Bucket> {
     let fallback: &[Bucket] = if e.data.has_records {
         &[]
     } else {
         &e.data.fallback
     };
-    e.data.buckets.iter().chain(fallback)
+    e.data
+        .buckets
+        .iter()
+        .chain(fallback)
+        .chain(&e.data.unlinked_active)
+}
+
+/// Every bucket of the agents `filter` selects: the files' own and the
+/// sessions' active time.
+fn buckets(index: &Index, filter: AgentFilter) -> impl Iterator<Item = &Bucket> {
+    let sessions = index
+        .sessions
+        .iter()
+        .filter(move |((agent, _), _)| filter.matches(*agent))
+        .flat_map(|(_, s)| &s.active);
+    let files = index.files.values().flat_map(|e| buckets_of(e));
+    files
+        .filter(move |b| filter.matches(b.agent))
+        .chain(sessions)
 }
 
 pub(crate) fn file_agent(kind: Kind) -> Option<Agent> {
@@ -178,12 +201,11 @@ pub fn report(
     tz: &dyn Tz,
 ) -> StatsReport {
     let today = local(now, tz).date;
-    let active = active_buckets(index);
     let first = match period {
         Period::Today => today,
         Period::Days7 => add_days(today, -6),
         Period::Days30 => add_days(today, -29),
-        Period::All => earliest(index, &active, filter, now)
+        Period::All => earliest(index, filter, now)
             .map_or(today, |at| local(at, tz).date)
             .min(today),
     };
@@ -200,9 +222,8 @@ pub fn report(
     let mut days = vec![[0u64; 3]; slots.len()];
     let mut heatmap = [[0u64; 24]; 7];
 
-    let buckets = index.files.values().flat_map(|e| buckets_of(e));
-    for b in buckets.chain(&active) {
-        if !filter.matches(b.agent) || !in_range(b.hour) {
+    for b in buckets(index, filter) {
+        if !in_range(b.hour) {
             continue;
         }
         let model = index.string(b.model);
@@ -233,13 +254,13 @@ pub fn report(
             }
         }
     }
-    for ((agent, _), (project, hours)) in merged_sessions(index) {
-        if !filter.matches(agent) || !hours.iter().any(|h| in_range(*h)) {
+    for ((agent, _), s) in &index.sessions {
+        if !filter.matches(*agent) || !s.active_between(start, now) {
             continue;
         }
         agents[agent.index()].sessions += 1;
-        if project != 0 {
-            projects.entry(project).or_default().sessions += 1;
+        if s.project != 0 {
+            projects.entry(s.project).or_default().sessions += 1;
         }
     }
 
@@ -330,30 +351,31 @@ pub fn report(
 }
 
 /// The first hour with data for the filter, up to `now`.
-fn earliest(index: &Index, active: &[Bucket], filter: AgentFilter, now: Unix) -> Option<Unix> {
-    let mut first: Option<Unix> = None;
-    let mut see = |at: Unix| {
-        if at <= now && first.is_none_or(|f| at < f) {
-            first = Some(at);
-        }
-    };
-    let buckets = index.files.values().flat_map(|e| buckets_of(e));
-    for b in buckets.chain(active).filter(|b| filter.matches(b.agent)) {
-        see(b.hour);
-    }
-    for e in index.files.values() {
-        for w in e.data.workers.iter().filter(|w| filter.matches(w.agent)) {
-            see(w.ts);
-        }
-    }
-    first
+fn earliest(index: &Index, filter: AgentFilter, now: Unix) -> Option<Unix> {
+    let workers = index
+        .files
+        .values()
+        .flat_map(|e| &e.data.workers)
+        .filter(|w| filter.matches(w.agent))
+        .map(|w| w.ts);
+    buckets(index, filter)
+        .map(|b| b.hour)
+        .chain(workers)
+        .filter(|at| *at <= now)
+        .min()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::index::tests::rederived;
+    use crate::stats::index::{Activity, EventAt, FileData, Tail, hour_of};
     use crate::stats::testutil::*;
+    use crate::stats::types::SessionSpan;
     use crate::time::{FixedTz, parse_rfc3339};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     const JST: FixedTz = FixedTz(9 * 3600);
 
@@ -642,7 +664,7 @@ mod tests {
         write(&sub, &claude_turn_at(120));
         let mut ix = t.indexer();
         ix.pass(&mut |_| {});
-        assert_eq!(merged_sessions(ix.index()).len(), 1);
+        assert_eq!(ix.index().sessions.len(), 1);
         assert_eq!(sum(ix.index()).active_secs, 120);
         // Overlapping files count once: parent 0, 60, 240 and subagent 90,
         // 120, 180 are 0 … 240 (per file they would add 240 + 90). Another
@@ -655,7 +677,7 @@ mod tests {
         let line = String::from_utf8(claude_turn_at(150)).unwrap();
         write(&other, line.replace("sess-gen", "sess-other").as_bytes());
         ix.pass(&mut |_| {});
-        assert_eq!(merged_sessions(ix.index()).len(), 2);
+        assert_eq!(ix.index().sessions.len(), 2);
         assert_eq!(sum(ix.index()).active_secs, 240);
         let r = report(
             ix.index(),
@@ -709,5 +731,142 @@ mod tests {
         let rows: u64 = r.per_model.iter().map(|m| m.counts.c.tokens.total()).sum();
         assert_eq!(rows, r.total.c.tokens.total());
         assert_eq!(rows, 2065 + 100);
+    }
+
+    #[test]
+    fn report_reads_no_event_times() {
+        let t = Tree::fixtures();
+        // A session over two files, and a log whose events name no session.
+        write(
+            &t.claude_file("-synthetic-gaps", "sess-gen.jsonl"),
+            &claude_turn_and_reply(0, "m1", 1),
+        );
+        write(
+            &t.claude_file("-synthetic-gaps", "sess-gen/subagents/agent-x.jsonl"),
+            &claude_turn_at(60),
+        );
+        let unnamed = t.claude_file("-synthetic-gaps", "unnamed.jsonl");
+        let lines = String::from_utf8(claude_turn_and_reply(0, "m2", 1)).unwrap();
+        write(
+            &unnamed,
+            lines.replace(r#""sessionId":"sess-gen","#, "").as_bytes(),
+        );
+        let mut ix = t.indexer();
+        ix.pass(&mut |_| {});
+        let full = ix.index().clone();
+        let unlinked: u64 = full.files[&unnamed]
+            .data
+            .unlinked_active
+            .iter()
+            .map(|b| b.c.active_secs)
+            .sum();
+        assert_eq!(unlinked, 5);
+        // Every event time dropped: no report changes.
+        let mut bare = full.clone();
+        for e in bare.files.values_mut() {
+            Arc::make_mut(e).data.activity.clear();
+        }
+        let filters = [
+            AgentFilter::All,
+            AgentFilter::One(Agent::Claude),
+            AgentFilter::One(Agent::Codex),
+            AgentFilter::One(Agent::Agy),
+        ];
+        for period in [Period::Today, Period::Days7, Period::Days30, Period::All] {
+            for filter in filters {
+                let r = report(&full, period, filter, now(), &JST);
+                assert_eq!(
+                    report(&bare, period, filter, now(), &JST),
+                    r,
+                    "{period:?} {filter:?}"
+                );
+            }
+        }
+        let all = report(&full, Period::All, AgentFilter::All, now(), &JST);
+        assert_eq!(all.total.c.active_secs, sum(&full).active_secs);
+        assert!(all.total.c.active_secs >= 60 + 5);
+    }
+
+    #[test]
+    fn report_on_a_million_past_event_times_is_fast() {
+        // 1000 Claude sessions of 1000 events 2 s apart, one an hour from
+        // 2026-10-01: all before today.
+        const SESSIONS: u64 = 1000;
+        const EVENTS: i64 = 1000;
+        let t0 = at("2026-10-01T00:00:00Z");
+        let mut index = Index {
+            strings: Arc::new(vec![String::new(), "claude-opus-5-5".to_owned()]),
+            ..Index::default()
+        };
+        for key in 1..=SESSIONS {
+            let start = t0 + key as i64 * 3600;
+            let events: Vec<EventAt> = (0..EVENTS).map(|i| (start + 2 * i, 1, 0)).collect();
+            let mut hours: Vec<Unix> = events.iter().map(|e| hour_of(e.0)).collect();
+            hours.dedup();
+            let bucket = |hour| Bucket {
+                hour,
+                agent: Agent::Claude,
+                model: 1,
+                project: 0,
+                c: Counters {
+                    messages: 1,
+                    ..Counters::default()
+                },
+            };
+            let data = FileData {
+                buckets: hours.iter().copied().map(bucket).collect(),
+                sessions: vec![SessionSpan {
+                    agent: Agent::Claude,
+                    key,
+                    project: 0,
+                    hours,
+                }],
+                activity: vec![Activity { key, events }],
+                ..FileData::default()
+            };
+            let entry = FileEntry {
+                kind: Kind::Claude,
+                len: 0,
+                mtime: 0,
+                head_len: 0,
+                head_hash: 0,
+                offset: 0,
+                tail: Tail::None,
+                data,
+            };
+            let path = PathBuf::from(format!("/synthetic/projects/p/{key}.jsonl"));
+            index.files.insert(path, Arc::new(entry));
+        }
+        let index = rederived(&index);
+        let events: usize = index
+            .files
+            .values()
+            .map(|e| {
+                e.data
+                    .activity
+                    .iter()
+                    .map(|a| a.events.len())
+                    .sum::<usize>()
+            })
+            .sum();
+        assert_eq!(events, 1_000_000);
+        let tz = FixedTz(0);
+        let timed = |period, filter| {
+            let began = Instant::now();
+            let r = report(&index, period, filter, now(), &tz);
+            (r, began.elapsed())
+        };
+        // Nothing matches: the cost must not follow the event history.
+        let (today, took) = timed(Period::Today, AgentFilter::One(Agent::Codex));
+        assert_eq!(today.total, Counts::empty());
+        assert!(
+            took < Duration::from_millis(50),
+            "today/codex took {took:?}"
+        );
+        // Everything matches: still only per-hour buckets and sessions.
+        let (all, took) = timed(Period::All, AgentFilter::All);
+        assert_eq!(all.total.c.active_secs, SESSIONS * 2 * (EVENTS as u64 - 1));
+        assert_eq!(all.total.sessions, SESSIONS);
+        assert!(took < Duration::from_millis(50), "all/all took {took:?}");
     }
 }

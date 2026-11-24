@@ -36,15 +36,20 @@ for f in $FILES; do
   fi
 done
 
-# The agent usage widget, where Noa looks for its helpers. Its name has a
-# space, so it stays out of $FILES.
-HELPER="libexec/noa/Noa Agent Usage"
+# The widget programs, in libexec/noa where Noa looks for them. Their names
+# have spaces, so they stay out of $FILES.
+for helper in "$SRC"/libexec/noa/*; do
+  [ -f "$helper" ] || continue
+  f="libexec/noa/${helper##*/}"
+  if [ "$UNINSTALL" = true ]; then
+    rm -f "$PREFIX/$f"
+  else
+    mkdir -p "$PREFIX/libexec/noa"
+    cp -f "$helper" "$PREFIX/$f"
+  fi
+done
 if [ "$UNINSTALL" = true ]; then
-  rm -f "$PREFIX/$HELPER"
   rmdir "$PREFIX/libexec/noa" 2>/dev/null || true
-elif [ -f "$SRC/$HELPER" ]; then
-  mkdir -p "$PREFIX/libexec/noa"
-  cp -f "$SRC/$HELPER" "$PREFIX/$HELPER"
 fi
 
 # Point the launcher at the installed binary so it works even when

@@ -311,6 +311,44 @@ mod tests {
     }
 
     #[test]
+    fn pruning_waits_for_an_append_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limits.jsonl");
+        let line = |ts: Unix| {
+            let s = LimitSample {
+                ts,
+                agent: Agent::Codex,
+                window_id: "codex-5h".into(),
+                label: "5h".into(),
+                used_percent: 1.0,
+                resets_at: None,
+                window_minutes: Some(300),
+            };
+            serde_json::to_string(&s).unwrap() + "\n"
+        };
+        // All old: opening it rewrites the file.
+        std::fs::write(&path, line(T0 - RETENTION_SECS - 10)).unwrap();
+        // Another window, mid-append: it holds the lock.
+        let held = lock(&path).unwrap();
+        let opener = {
+            let path = path.clone();
+            std::thread::spawn(move || History::open_at(path, T0))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!opener.is_finished(), "open pruned under a held lock");
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(line(T0).as_bytes()).unwrap();
+        drop(f);
+        drop(held);
+        let h = opener.join().unwrap();
+        // The fresh sample survives the rewrite, on disk and in memory.
+        assert_eq!(h.samples(0).len(), 1);
+        let kept = file_lines(&path);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].ts, T0);
+    }
+
+    #[test]
     fn old_samples_are_pruned_by_rename() {
         use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();

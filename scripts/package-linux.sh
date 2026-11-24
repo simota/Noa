@@ -5,7 +5,7 @@
 #   scripts/package-linux.sh debug      # debug build   -> target/debug/Noa-<ver>-linux-<arch>.tar.gz
 #
 # The tarball unpacks to a single Noa-<ver>-linux-<arch>/ directory laid out as
-# an XDG prefix (bin/, libexec/noa/ for the agent usage widget,
+# an XDG prefix (bin/, libexec/noa/ for the widget programs,
 # share/applications, share/icons/hicolor, share/metainfo) plus an install.sh that copies it into a prefix (default ~/.local).
 set -euo pipefail
 
@@ -42,18 +42,31 @@ case "$TARGET_ROOT" in
 esac
 export CARGO_TARGET_DIR="$TARGET_ROOT"
 
-# The agent usage widget (its own workspace, widgets/agent-usage) builds into
-# the same target dir and ships in libexec/noa, where Noa looks for helpers.
-USAGE_MANIFEST=widgets/agent-usage/Cargo.toml
+# The widget programs (each its own workspace under widgets/) build into the
+# same target dir and ship in libexec/noa under the names Noa looks for there
+# (crate_name:installed name, as in crates/noa-app/src/helper_program.rs).
+WIDGETS=(
+  "agent-dashboard:Noa Agent Dashboard"
+  "repo-browser:Noa Repo Browser"
+  "discussion:Noa Discussion"
+  "competition:Noa Competition"
+  "review:Noa Review"
+  "agent-usage:Noa Agent Usage"
+)
+build_widgets() {
+  for widget in "${WIDGETS[@]}"; do
+    cargo build --locked --manifest-path "widgets/${widget%%:*}/Cargo.toml" "$@"
+  done
+}
 case "$MODE" in
   release)
     cargo build --release -p noa
-    cargo build --release --locked --manifest-path "$USAGE_MANIFEST"
+    build_widgets --release
     PROFILE_DIR="$TARGET_ROOT/release"
     ;;
   debug)
     cargo build -p noa
-    cargo build --locked --manifest-path "$USAGE_MANIFEST"
+    build_widgets
     PROFILE_DIR="$TARGET_ROOT/debug"
     ;;
   *)
@@ -68,7 +81,9 @@ ARCHIVE="$PROFILE_DIR/$NAME.tar.gz"
 
 rm -rf "$STAGE" "$ARCHIVE"
 install -Dm755 "$PROFILE_DIR/Noa" "$STAGE/bin/Noa"
-install -Dm755 "$PROFILE_DIR/agent-usage" "$STAGE/libexec/noa/Noa Agent Usage"
+for widget in "${WIDGETS[@]}"; do
+  install -Dm755 "$PROFILE_DIR/${widget%%:*}" "$STAGE/libexec/noa/${widget#*:}"
+done
 install -Dm644 "dist/linux/$APP_ID.desktop" "$STAGE/share/applications/$APP_ID.desktop"
 install -Dm644 "dist/linux/$APP_ID.metainfo.xml" "$STAGE/share/metainfo/$APP_ID.metainfo.xml"
 for icon in dist/linux/icons/*/"$APP_ID.png"; do
@@ -79,7 +94,7 @@ install -Dm644 LICENSE "$STAGE/LICENSE"
 install -Dm755 dist/linux/install.sh "$STAGE/install.sh"
 
 if [ "$MODE" = release ]; then
-  strip "$STAGE/bin/Noa" "$STAGE/libexec/noa/Noa Agent Usage" 2>/dev/null || true
+  strip "$STAGE/bin/Noa" "$STAGE"/libexec/noa/* 2>/dev/null || true
 fi
 
 # Reproducible-ish archive: fixed mtimes, sorted entries, numeric owner.

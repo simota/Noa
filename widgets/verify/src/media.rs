@@ -10,14 +10,58 @@ pub const SNIFF_BYTES: usize = 32;
 /// The media `head` (a file's first [`SNIFF_BYTES`] bytes, or fewer for a
 /// short file) starts like: PNG, JPEG, GIF, WebP, MP4 / QuickTime (`ftyp`
 /// box) or WebM; `None` for anything else.
-pub fn sniff(_head: &[u8]) -> Option<Media> {
-    todo!("U3: media::sniff")
+pub fn sniff(head: &[u8]) -> Option<Media> {
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(Media::Png);
+    }
+    if head.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some(Media::Jpeg);
+    }
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some(Media::Gif);
+    }
+    if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+        return Some(Media::Webp);
+    }
+    // ISO base media: a first box of type `ftyp`, its major brand saying
+    // QuickTime (`qt  `) or one of the MP4 family.
+    if head.len() >= 12 && &head[4..8] == b"ftyp" {
+        return Some(if &head[8..12] == b"qt  " {
+            Media::QuickTime
+        } else {
+            Media::Mp4
+        });
+    }
+    // EBML: WebM and Matroska share the header; only a Matroska DocType is
+    // told apart, since WebM's may sit past the bytes read.
+    if head.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) && !contains(head, b"matroska") {
+        return Some(Media::Webm);
+    }
+    None
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// The media `path`'s extension names (case-insensitive); `None` for any
 /// other extension.
-pub fn by_extension(_path: &str) -> Option<Media> {
-    todo!("U3: media::by_extension")
+pub fn by_extension(path: &str) -> Option<Media> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let (stem, ext) = name.rsplit_once('.')?;
+    if stem.is_empty() {
+        return None;
+    }
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "png" => Media::Png,
+        "jpg" | "jpeg" => Media::Jpeg,
+        "gif" => Media::Gif,
+        "webp" => Media::Webp,
+        "mp4" | "m4v" => Media::Mp4,
+        "mov" => Media::QuickTime,
+        "webm" => Media::Webm,
+        _ => return None,
+    })
 }
 
 /// A video mark's `t`, `mm:ss[.f]` or `hh:mm:ss[.f]`, as milliseconds
@@ -86,8 +130,78 @@ pub fn cap(media: Option<Media>) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The leading bytes of a real file of each kind (headers as the
+    /// formats define them; the rest of the file does not matter here).
+    pub(crate) fn fixture(media: Media) -> Vec<u8> {
+        let mut bytes: Vec<u8> = match media {
+            Media::Png => b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec(),
+            Media::Jpeg => vec![
+                0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0,
+            ],
+            Media::Gif => b"GIF89a\x01\0\x01\0".to_vec(),
+            Media::Webp => b"RIFF\x24\0\0\0WEBPVP8 ".to_vec(),
+            Media::Mp4 => b"\0\0\0\x20ftypisom\0\0\x02\0isomiso2mp41".to_vec(),
+            Media::QuickTime => b"\0\0\0\x14ftypqt  \0\0\0\0qt  ".to_vec(),
+            Media::Webm => vec![
+                0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01, 0x42, 0xf7, 0x81, 0x01, 0x42,
+                0xf2, 0x81, 0x04, 0x42, 0xf3, 0x81, 0x08, 0x42, 0x82, 0x84, b'w', b'e', b'b', b'm',
+            ],
+        };
+        bytes.resize(64, 0);
+        bytes
+    }
+
+    #[test]
+    fn ac30_each_media_fixture_is_sniffed_by_its_leading_bytes() {
+        for media in Media::ALL {
+            let bytes = fixture(media);
+            assert_eq!(sniff(&bytes[..SNIFF_BYTES]), Some(media), "{media:?}");
+        }
+        for other in [
+            &b""[..],
+            b"plain text log\n",
+            b"\x89PN",
+            b"RIFF\x24\0\0\0WAVEfmt ",
+            b"%PDF-1.7\n",
+        ] {
+            assert_eq!(sniff(other), None, "{other:?}");
+        }
+        let mut mkv = vec![0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x82, 0x88];
+        mkv.extend_from_slice(b"matroska");
+        assert_eq!(sniff(&mkv), None);
+    }
+
+    #[test]
+    fn ac30_extensions_name_media_case_insensitively() {
+        for (path, media) in [
+            ("shots/a.png", Some(Media::Png)),
+            ("shots/a.PNG", Some(Media::Png)),
+            ("a.jpg", Some(Media::Jpeg)),
+            ("a.JPEG", Some(Media::Jpeg)),
+            ("a.gif", Some(Media::Gif)),
+            ("a.webp", Some(Media::Webp)),
+            ("video/x.mp4", Some(Media::Mp4)),
+            ("video/x.m4v", Some(Media::Mp4)),
+            ("video/x.MOV", Some(Media::QuickTime)),
+            ("video/x.webm", Some(Media::Webm)),
+            ("logs/1.log", None),
+            ("png", None),
+            (".png", None),
+            ("dir.png/file", None),
+        ] {
+            assert_eq!(by_extension(path), media, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn caps_follow_the_kind() {
+        assert_eq!(cap(Some(Media::Png)), MAX_IMAGE_BYTES);
+        assert_eq!(cap(Some(Media::QuickTime)), MAX_VIDEO_BYTES);
+        assert_eq!(cap(None), MAX_FILE_BYTES);
+    }
 
     #[test]
     fn marks_read_as_milliseconds_from_the_start() {

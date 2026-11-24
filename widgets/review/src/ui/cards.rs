@@ -1,4 +1,5 @@
-//! The left pane: the target card, one card per reviewer (lens, model,
+//! The left pane: the target card (returned, so the screen can add
+//! スナップショットを開く to it), one card per reviewer (lens, model,
 //! this round's receipt, what it wrote, its pane), and the lead's card.
 
 use noa_gpui_core::style::AlignItems;
@@ -18,7 +19,7 @@ pub(super) fn insert(
     live: bool,
     now: Millis,
     actions: &mut Vec<(WidgetId, Action)>,
-) {
+) -> WidgetId {
     heading(tree, host, "対象とパネル");
     let list = scroll_column(tree, host, 8.0);
     keep_scroll(tree, list, session, "cards");
@@ -152,6 +153,7 @@ pub(super) fn insert(
         );
         actions.push((open, Action::FocusPane(session.lead.id.clone())));
     }
+    target
 }
 
 fn setup_line(part: &Participant) -> String {

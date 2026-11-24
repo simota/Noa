@@ -1310,3 +1310,51 @@ fn focus_on_the_second_of_two_alike_buttons_stays_on_the_second() {
         .collect();
     assert_eq!(screen.tree.focused(), Some(now[1]));
 }
+
+/// The top of the first finding row and how many rows show whole above the
+/// bottom of the scrolled list, with the screen laid out at `size`.
+fn first_rows(screen: &mut Review, size: (f32, f32)) -> (f32, usize) {
+    lay_out(screen, size);
+    let scroll = screen
+        .tree
+        .children(screen.center_host)
+        .iter()
+        .copied()
+        .rfind(|&id| {
+            screen
+                .tree
+                .get::<noa_gpui_core::widgets::ScrollView>(id)
+                .is_some()
+        })
+        .unwrap();
+    let bottom = screen.tree.window_rect(scroll).unwrap().bottom();
+    let rows: Vec<_> = screen
+        .actions
+        .iter()
+        .filter(|(_, a)| matches!(a, Action::SelectFinding(Some(_))))
+        .filter_map(|(id, _)| screen.tree.window_rect(*id))
+        .collect();
+    let top = rows.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let whole = rows.iter().filter(|r| r.bottom() <= bottom + 0.5).count();
+    (top, whole)
+}
+
+#[test]
+fn the_smallest_window_shows_as_much_of_the_findings_as_before() {
+    // Laid out by 601c4c3b (before the filters scrolled with the list): the
+    // first row's top and the rows shown whole at the smallest window.
+    let root = std::env::temp_dir().join(format!("noa-review-rows-{}", std::process::id()));
+    let stored = Review::stored(&stored_demo(&root)).unwrap();
+    // The stored review opens its snapshot from the target card (L1-5).
+    assert!(acts(&stored).contains(&Action::OpenSnapshot(None)));
+    for (mut screen, top_before, whole_before) in [
+        (Review::demo(), 300.2, 3),
+        (Review::demo_held(), 423.2, 0),
+        (stored, 300.2, 3),
+    ] {
+        let (top, whole) = first_rows(&mut screen, SMALLEST);
+        assert!(top <= top_before, "{top} > {top_before}");
+        assert!(whole >= whole_before, "{whole} < {whole_before}");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use noa_gpui_core::style::{
-    AlignItems, FlexDirection, LengthPercentage, Overflow, Point as LayoutPoint,
+    AlignItems, FlexDirection, FlexWrap, LengthPercentage, Overflow, Point as LayoutPoint,
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
@@ -531,7 +531,7 @@ impl Review {
         let Some(session) = &self.session else {
             return;
         };
-        cards::insert(
+        let target = cards::insert(
             &mut self.tree,
             self.left_host,
             session,
@@ -540,6 +540,15 @@ impl Review {
             system_now(),
             &mut self.actions,
         );
+        // L1-5: the target card opens the snapshot, when there is one.
+        if self.reply_root.is_some() {
+            let row = self.tree.insert(Some(target), Container::row());
+            let open = self.tree.insert(
+                Some(row),
+                Button::new("スナップショットを開く").control_size(ControlSize::Small),
+            );
+            self.actions.push((open, Action::OpenSnapshot(None)));
+        }
     }
 
     fn rebuild_header(&mut self, text: &mut TextStore) {
@@ -621,6 +630,9 @@ impl Review {
             Some(self.center_host),
             Container::new(Style {
                 flex_direction: FlexDirection::Row,
+                // Wraps when the tabs, the findings summary and the
+                // snapshot button do not fit on one line.
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::CENTER,
                 flex_shrink: 0.0,
                 gap: gap(6.0),
@@ -659,12 +671,14 @@ impl Review {
             self.actions.push((btn, Action::ShowTab(tab)));
         }
         spacer(&mut self.tree, tabs);
-        if self.reply_root.is_some() {
-            let open = self.tree.insert(
-                Some(tabs),
-                Button::new("スナップショットを開く").control_size(ControlSize::Small),
+        if self.tab == CenterTab::Findings {
+            board::summary(
+                &mut self.tree,
+                tabs,
+                &session,
+                &self.filters,
+                &mut self.actions,
             );
-            self.actions.push((open, Action::OpenSnapshot(None)));
         }
         match self.tab {
             CenterTab::Findings => board::insert(

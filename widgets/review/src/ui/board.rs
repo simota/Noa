@@ -9,7 +9,7 @@ use review::model::types::{Agreement, Finding, FindingStatus, Session, Severity}
 
 use super::{
     Action, Filters, agreement_key, caption, keep_scroll, note, scroll_column, severity_tone,
-    spacer, status_key, status_tone, tag,
+    status_key, status_tone, tag,
 };
 
 /// The findings `filters` let through, in rank order.
@@ -66,6 +66,38 @@ fn filter_row(tree: &mut UiTree, parent: WidgetId, title: &str) -> WidgetId {
     row
 }
 
+/// How many findings the filters let through, the reviewer filter when one
+/// is on, and 条件をすべて解除: in the tab row, so the filter rows take no
+/// line of their own for them.
+pub(super) fn summary(
+    tree: &mut UiTree,
+    row: WidgetId,
+    session: &Session,
+    filters: &Filters,
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
+    caption(
+        tree,
+        row,
+        format!(
+            "表示 {} / 全 {}",
+            shown(session, filters).len(),
+            session.findings.len()
+        ),
+    );
+    if let Some(part) = &filters.reviewer {
+        tag(tree, row, format!("レビュアー: {part}"), Tone::Accent);
+    }
+    chip(
+        tree,
+        row,
+        "条件をすべて解除".into(),
+        false,
+        Action::ClearFilters,
+        actions,
+    );
+}
+
 pub(super) fn insert(
     tree: &mut UiTree,
     host: WidgetId,
@@ -82,7 +114,7 @@ pub(super) fn insert(
         Some(list),
         Container::column()
             .gap(4.0)
-            .padding(10.0)
+            .padding(8.0)
             .background(Role::SurfaceAlt)
             .radius(8.0),
     );
@@ -154,28 +186,6 @@ pub(super) fn insert(
     }
 
     let shown = shown(session, filters);
-    let foot = tree.insert(
-        Some(bar),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
-    );
-    caption(
-        tree,
-        foot,
-        format!("表示 {} / 全 {}", shown.len(), session.findings.len()),
-    );
-    if let Some(part) = &filters.reviewer {
-        tag(tree, foot, format!("レビュアー: {part}"), Tone::Accent);
-    }
-    spacer(tree, foot);
-    chip(
-        tree,
-        foot,
-        "条件をすべて解除".into(),
-        false,
-        Action::ClearFilters,
-        actions,
-    );
-
     if session.findings.is_empty() {
         note(
             tree,

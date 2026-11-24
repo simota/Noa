@@ -1538,7 +1538,7 @@ fn the_report_is_saved_alone_or_exported_with_its_evidence() {
 // ---- requirement A: ペインをすべて閉じる ----
 
 #[test]
-fn the_agents_panes_close_together_only_once_the_verification_has_finished() {
+fn ac36_the_agents_panes_close_together_only_once_the_verification_has_finished() {
     // Running: not offered.
     let (screen, _link) = live_with(crate::demo::held());
     assert!(!acts(&screen).contains(&Action::ClosePanes));
@@ -1579,7 +1579,7 @@ fn the_agents_panes_close_together_only_once_the_verification_has_finished() {
 }
 
 #[test]
-fn an_interrupted_stored_verification_is_not_offered_to_close_its_panes() {
+fn ac36_an_interrupted_stored_verification_is_not_offered_to_close_its_panes() {
     let root = temp("panes-interrupted");
     let dir = stored_unfinished(&root);
     let (channel, link) = Channel::fake();
@@ -1598,7 +1598,7 @@ fn an_interrupted_stored_verification_is_not_offered_to_close_its_panes() {
 }
 
 #[test]
-fn a_finished_stored_verification_probes_its_panes_and_closes_them_by_folder() {
+fn ac36_a_finished_stored_verification_probes_its_panes_and_closes_them_by_folder() {
     let root = temp("panes-stored");
     let dir = stored_demo(&root);
     let (channel, link) = Channel::fake();

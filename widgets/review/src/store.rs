@@ -158,16 +158,31 @@ pub fn fix_workdir(session: &Session) -> Result<&Path, &'static str> {
 pub const MAX_FIX_TASKS: u32 = 999;
 
 /// Writes `text` as the next free `fix-<n>.md` in `session`'s reply dir
-/// (`dir` is its store directory) and returns its path. Nothing is written
-/// over an earlier request, or through a link.
+/// (`dir` is its store directory) and returns its path. The reply dir is
+/// opened (made where missing) one component at a time from its base and
+/// the file made relative to it ([`fsx::open_dir`]): nothing is written over
+/// an earlier request, through a link, or outside the reply dir. An id that
+/// is not one plain path component is refused before anything is made.
+/// Callers check first that the log belongs to `dir`
+/// ([`crate::engine::check_store_paths`]).
 pub fn write_fix_task(dir: &Path, session: &Session, text: &str) -> io::Result<PathBuf> {
+    let id = Path::new(session.id.as_str());
+    if !matches!(
+        id.components().collect::<Vec<_>>().as_slice(),
+        [std::path::Component::Normal(_)]
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("レビュー ID {} はフォルダ名になりません", session.id),
+        ));
+    }
     let base = reply_base(dir, session);
     let reply = reply_dir(dir, session);
-    fsx::create_dirs(&base, &reply)?;
+    let folder = fsx::open_dir(&base, &reply, true)?;
     for n in 1..=MAX_FIX_TASKS {
-        let path = reply.join(format!("fix-{n}.md"));
-        match fsx::write_new(&base, &path, text.as_bytes()) {
-            Ok(()) => return Ok(path),
+        let name = format!("fix-{n}.md");
+        match fsx::write_new_at(&folder, std::ffi::OsStr::new(&name), text.as_bytes()) {
+            Ok(()) => return Ok(reply.join(name)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }

@@ -83,6 +83,8 @@ pub struct PaneSpec {
     /// The person works with this pane (a fix request): it opens with
     /// keyboard focus and without auto approval, whatever its placement.
     pub attended: bool,
+    /// Environment the pane's process gets on top of Noa's.
+    pub env: Vec<(String, String)>,
 }
 
 /// Where a new pane goes.
@@ -373,15 +375,17 @@ fn spawn_params(placement: Placement, spec: &PaneSpec) -> SpawnParams {
         config: Some(SpawnConfig {
             command: Some(spec.argv.clone()),
             cwd: Some(spec.cwd.to_string_lossy().into_owned()),
+            env: spec.env.iter().cloned().collect(),
             ..SpawnConfig::default()
         }),
         label: Some(spec.label.clone()),
         focus: Some(spec.attended),
         // Reviewers and the lead run unattended in their own tab, so
         // its agent prompts are answered without the user (the later
-        // splits share the tab's setting). A fix edits the work tree:
-        // its pane asks the person, as any pane does.
-        auto_approve: (matches!(placement, Placement::NewTab) && !spec.attended).then_some(true),
+        // splits share the tab's setting). A fix edits the work tree: its
+        // tab is set to ask the person, said outright, since a tab Noa
+        // opens otherwise takes the global `auto-approve` setting.
+        auto_approve: matches!(placement, Placement::NewTab).then_some(!spec.attended),
         ..SpawnParams::default()
     }
 }
@@ -411,6 +415,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             label: "codex".into(),
             attended: false,
+            env: Vec::new(),
         };
         assert_eq!(
             spawn_params(Placement::NewTab, &spec).auto_approve,
@@ -429,8 +434,19 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             label: "fix · rev-1".into(),
             attended: true,
+            env: vec![("K".into(), "v".into())],
         };
-        for placement in [Placement::NewTab, Placement::Right(7), Placement::Below(7)] {
+        // A new tab is told outright not to auto-approve: left out, Noa
+        // would give it the global `auto-approve` setting.
+        let tab = spawn_params(Placement::NewTab, &spec);
+        assert_eq!(tab.auto_approve, Some(false));
+        assert_eq!(tab.focus, Some(true));
+        assert_eq!(
+            tab.config.unwrap().env.get("K").map(String::as_str),
+            Some("v")
+        );
+        // A split shares its tab's setting, so it sends none.
+        for placement in [Placement::Right(7), Placement::Below(7)] {
             let params = spawn_params(placement, &spec);
             assert_eq!(params.auto_approve, None, "{placement:?}");
             assert_eq!(params.focus, Some(true), "{placement:?}");

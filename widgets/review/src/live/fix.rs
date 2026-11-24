@@ -25,24 +25,26 @@ pub struct FixRequest {
     pub ids: Vec<String>,
 }
 
-/// `text` as one single-quoted word, read the same by sh, bash, zsh and
-/// fish (`'\''` ends the quote, adds an escaped quote and opens another).
-fn quoted(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
-}
+/// The variable the fixing agent's prompt reaches its pane's shell in.
+pub const PROMPT_VAR: &str = "NOA_REVIEW_FIX_PROMPT";
 
-/// The argv of the fixing agent's pane: the login shell (as the agents are
-/// started, so their PATH is the person's) running the agent on a one-line
-/// prompt that points at the task file.
-pub fn argv(kind: AgentKind, task: &Path) -> Vec<String> {
-    let prompt = format!(
+/// The one-line prompt that points the agent at the task file.
+pub fn prompt(task: &Path) -> String {
+    format!(
         "Read {} and fix the review findings it lists, in this working tree. \
          It is the outcome of a multi-agent code review.",
         task.display()
-    );
+    )
+}
+
+/// The argv of the fixing agent's pane: the login shell (as the agents are
+/// started, so their PATH is the person's) running the agent on the prompt
+/// in [`PROMPT_VAR`]. The code the shell runs is fixed and holds no path:
+/// `"$VAR"` is one word, as is, in sh, bash, zsh and fish alike.
+pub fn argv(kind: AgentKind) -> Vec<String> {
     // agy takes a prompt to start an interactive session with only after -i.
     let interactive = if kind == AgentKind::Agy { " -i" } else { "" };
-    let script = format!("exec {}{interactive} {}", kind.command(), quoted(&prompt));
+    let script = format!("exec {}{interactive} \"${PROMPT_VAR}\"", kind.command());
     vec![login_shell(), "-l".into(), "-i".into(), "-c".into(), script]
 }
 
@@ -68,6 +70,11 @@ fn named(ids: &[String]) -> String {
 pub fn request<C: Connect>(connector: &mut C, req: &FixRequest) -> Result<String, String> {
     let session = &*req.session;
     let workdir = store::fix_workdir(session)?.to_path_buf();
+    // The log must be the folder's, its paths its own, before anything
+    // below the reply dir is made (a log's id or paths edited by hand
+    // would otherwise point the task elsewhere).
+    review::engine::check_store_paths(session, &req.dir)
+        .map_err(|why| format!("修正を依頼できません: {why}"))?;
     let findings = export::fix_findings(session, &req.ids);
     if findings.is_empty() {
         return Err("修正を依頼する指摘がありません".to_owned());
@@ -81,7 +88,8 @@ pub fn request<C: Connect>(connector: &mut C, req: &FixRequest) -> Result<String
     let task = store::write_fix_task(&req.dir, session, &text)
         .map_err(|e| format!("修正の依頼を書けません: {e}"))?;
     let spec = PaneSpec {
-        argv: argv(req.agent, &task),
+        argv: argv(req.agent),
+        env: vec![(PROMPT_VAR.to_owned(), prompt(&task))],
         cwd: workdir,
         // A label of its own per request (its task file's name), so a
         // pane of an earlier one is never mistaken for it.
@@ -176,12 +184,33 @@ mod tests {
     }
 
     /// The finished demo review with its workdir at `workdir`.
-    fn request(workdir: &Path, ids: &[&str]) -> FixRequest {
-        let mut session = crate::demo::session();
+    /// `session` as if logged in the folder `dir` with its workdir at
+    /// `workdir`: the reply paths its briefs logged follow.
+    fn rehome(
+        mut session: review::model::types::Session,
+        workdir: &Path,
+        dir: &Path,
+    ) -> review::model::types::Session {
         session.workdir = Some(workdir.to_owned());
+        let reply = store::reply_dir(dir, &session);
+        for round in &mut session.rounds {
+            for brief in &mut round.briefs {
+                brief.reply_path = store::reply_path(&reply, round.no, &brief.to);
+            }
+            if let Some(brief) = &mut round.lead_brief {
+                brief.reply_path = store::lead_reply_path(&reply, round.no);
+            }
+        }
+        session
+    }
+
+    /// The finished demo review, stored in `<workdir>/store/rev-demo` with
+    /// its workdir at `workdir`.
+    fn request(workdir: &Path, ids: &[&str]) -> FixRequest {
+        let dir = workdir.join("store").join("rev-demo");
         FixRequest {
-            session: Arc::new(session),
-            dir: workdir.join("store"),
+            session: Arc::new(rehome(crate::demo::session(), workdir, &dir)),
+            dir,
             agent: AgentKind::Codex,
             ids: ids.iter().map(|s| (*s).to_owned()).collect(),
         }
@@ -221,13 +250,11 @@ mod tests {
         assert!(at(ranked[0]) < at(ranked[1]));
         assert!(text.contains("Do not push"));
         assert!(text.contains("stop and ask before changing anything"));
-        assert!(
-            spec.argv
-                .last()
-                .unwrap()
-                .contains(&task.display().to_string())
+        assert_eq!(
+            spec.argv.last().unwrap(),
+            "exec codex \"$NOA_REVIEW_FIX_PROMPT\""
         );
-        assert!(spec.argv.last().unwrap().starts_with("exec codex '"));
+        assert_eq!(spec.env, [(PROMPT_VAR.to_owned(), prompt(&task))]);
     }
 
     fn request_with(noa: &FakeNoa, req: &FixRequest) -> Result<String, String> {
@@ -346,20 +373,86 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_survives_quotes_in_the_path() {
-        let task = Path::new("/tmp/it's here/fix-1.md");
-        let script = argv(AgentKind::Agy, task).pop().unwrap();
-        assert!(script.starts_with("exec agy -i '"), "{script}");
-        assert!(script.contains(r"it'\''s here"), "{script}");
-        let out = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(script.replacen("exec agy -i", "printf %s", 1))
-            .output()
-            .unwrap();
-        let printed = String::from_utf8(out.stdout).unwrap();
+    fn the_prompt_reaches_the_agent_as_written_whatever_the_path_holds() {
+        // Quotes, backslashes (two in a row too), a dollar, a newline.
+        let task = Path::new("/tmp/it's \\\\ \"q\" $HOME\nx/fix-1.md");
+        let wanted = prompt(task);
         assert!(
-            printed.starts_with("Read /tmp/it's here/fix-1.md and fix"),
-            "{printed}"
+            argv(AgentKind::Agy)
+                .last()
+                .unwrap()
+                .starts_with("exec agy -i \"")
         );
+        let mut ran = 0;
+        for shell in ["/bin/sh", "/bin/zsh", "/bin/bash", "/opt/homebrew/bin/fish"] {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            // The script the pane runs, with the agent swapped for printf.
+            let script =
+                argv(AgentKind::Codex)
+                    .pop()
+                    .unwrap()
+                    .replacen("exec codex", "printf %s", 1);
+            let out = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(&script)
+                .env(PROMPT_VAR, &wanted)
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), wanted, "{shell}");
+            ran += 1;
+        }
+        assert!(ran > 0);
+    }
+
+    #[test]
+    fn a_log_that_is_not_its_folders_writes_and_starts_nothing() {
+        let workdir = temp("foreign");
+        let elsewhere = workdir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let noa = FakeNoa::default();
+
+        // An id that is an absolute path inside the workdir: joined, it
+        // would replace .noa/reviews; it does not name the folder.
+        let mut req = request(&workdir, &["F1"]);
+        let mut session = (*req.session).clone();
+        session.id = review::model::types::SessionId::new(elsewhere.display().to_string());
+        req.session = Arc::new(session);
+        let why = request_with(&noa, &req).unwrap_err();
+        assert!(why.contains("フォルダ名と一致しません"), "{why}");
+
+        // A folder named as the id, but reply paths logged elsewhere.
+        let dir = workdir.join("store").join("rev-demo");
+        let mut moved = rehome(crate::demo::session(), &elsewhere, &dir);
+        moved.workdir = Some(workdir.clone());
+        let req = FixRequest {
+            session: Arc::new(moved),
+            dir,
+            agent: AgentKind::Codex,
+            ids: vec!["F1".into()],
+        };
+        let why = request_with(&noa, &req).unwrap_err();
+        assert!(why.contains("返答パス"), "{why}");
+
+        assert!(noa.0.borrow().spawned.is_empty());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        assert!(!workdir.join(".noa").exists());
+    }
+
+    #[test]
+    fn an_id_that_is_not_one_plain_name_is_refused_by_the_store() {
+        let workdir = temp("id");
+        let mut session = crate::demo::session();
+        session.workdir = Some(workdir.clone());
+        for id in ["a/b", "..", "/abs"] {
+            session.id = review::model::types::SessionId::new(id);
+            let err = store::write_fix_task(&workdir, &session, "x").unwrap_err();
+            assert!(
+                err.to_string().contains("フォルダ名になりません"),
+                "{id}: {err}"
+            );
+        }
+        assert!(!workdir.join(".noa").exists());
     }
 }

@@ -5,8 +5,11 @@
 //! with `O_NOFOLLOW`, so a link swapped in between the check and the open
 //! fails instead of being followed.
 
+use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -147,23 +150,102 @@ pub fn write_replace(base: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Writes `bytes` to a new file `path` (under `base`), refusing links on
-/// the way: an existing file or link at `path` fails with `AlreadyExists`
-/// and is left as it was.
-pub fn write_new(base: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// `name` as a C string for the `*at` calls.
+fn c_name(name: &OsStr) -> io::Result<CString> {
+    CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "名前に NUL が含まれます"))
+}
+
+/// The directory `dir` below the trusted `base`, opened one component at a
+/// time relative to the one before (`openat` with `O_NOFOLLOW` and
+/// `O_DIRECTORY`), so a link anywhere on the way, also one swapped in while
+/// it is walked, fails instead of being followed. With `create`, missing
+/// components are made on the way (`mkdirat`, relative to the same
+/// descriptors). Files made through the descriptor land in the directory
+/// that was checked, whatever its path names by then.
+pub fn open_dir(base: &Path, dir: &Path, create: bool) -> io::Result<OwnedFd> {
+    let rest = dir.strip_prefix(base).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} は {} の外です", dir.display(), base.display()),
+        )
+    })?;
+    let mut fd = OwnedFd::from(File::open(base)?);
+    let mut at = base.to_path_buf();
+    for part in rest.components() {
+        let Component::Normal(name) = part else {
+            return Err(link_error(dir));
+        };
+        at.push(name);
+        let name = c_name(name)?;
+        if create {
+            // SAFETY: `fd` is an open directory and `name` a C string.
+            let made = unsafe { libc::mkdirat(fd.as_raw_fd(), name.as_ptr(), 0o755) };
+            if made != 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(err);
+                }
+            }
+        }
+        // SAFETY: as above; the descriptor returned is owned below.
+        let next = unsafe {
+            libc::openat(
+                fd.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next < 0 {
+            let err = io::Error::last_os_error();
+            // A link fails the open (ELOOP, or ENOTDIR on macOS with
+            // O_DIRECTORY); which it was only picks the message.
+            let link = err.raw_os_error() == Some(libc::ELOOP)
+                || fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink());
+            return Err(if link { link_error(&at) } else { err });
+        }
+        // SAFETY: `next` was just opened and nothing else owns it.
+        fd = unsafe { OwnedFd::from_raw_fd(next) };
+    }
+    Ok(fd)
+}
+
+/// Writes `bytes` to a new file `name` in the directory `dir` (from
+/// [`open_dir`]): an existing file or link there fails with
+/// `AlreadyExists` and is left as it was; a write that fails removes the
+/// file through the same descriptor.
+pub fn write_new_at(dir: &OwnedFd, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
-    check_no_links(base, path.parent().unwrap_or(base))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(O_NOFOLLOW)
-        .open(path)?;
+    let name = c_name(name)?;
+    // SAFETY: `dir` is an open directory and `name` a C string.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just opened and nothing else owns it.
+    let mut file = unsafe { File::from_raw_fd(fd) };
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     if written.is_err() {
         drop(file);
-        let _ = fs::remove_file(path);
+        // SAFETY: as above.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
     }
     written
+}
+
+/// Writes `bytes` to a new file `path` (under `base`): its directory is
+/// opened with [`open_dir`] and the file made in it with [`write_new_at`].
+pub fn write_new(base: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let name = path.file_name().ok_or_else(|| link_error(path))?.to_owned();
+    let dir = open_dir(base, path.parent().unwrap_or(base), false)?;
+    write_new_at(&dir, &name, bytes)
 }
 
 #[cfg(test)]
@@ -238,6 +320,41 @@ mod tests {
         assert!(is_link_error(
             &write_new(&base, &base.join("d/f.md"), b"x").unwrap_err()
         ));
+    }
+
+    #[test]
+    fn a_directory_swapped_for_a_link_after_it_was_opened_takes_the_file_itself() {
+        let base = temp("swap");
+        let outside = temp("swap-outside");
+        fs::create_dir(base.join("a")).unwrap();
+        let dir = open_dir(&base, &base.join("a"), false).unwrap();
+        // The checked directory moves away and a link takes its name.
+        fs::rename(base.join("a"), base.join("a-old")).unwrap();
+        symlink(&outside, base.join("a")).unwrap();
+        write_new_at(&dir, OsStr::new("f.md"), b"x").unwrap();
+        assert_eq!(fs::read_to_string(base.join("a-old/f.md")).unwrap(), "x");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        // Opening by the path now meets the link and stops.
+        assert!(is_link_error(
+            &open_dir(&base, &base.join("a"), false).unwrap_err()
+        ));
+        assert!(is_link_error(
+            &write_new(&base, &base.join("a/g.md"), b"x").unwrap_err()
+        ));
+        assert!(is_link_error(
+            &open_dir(&base, &base.join("a/deeper"), true).unwrap_err()
+        ));
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn missing_directories_are_made_on_the_way_and_paths_outside_refused() {
+        let base = temp("mkdirat");
+        let dir = open_dir(&base, &base.join("x/y/z"), true).unwrap();
+        write_new_at(&dir, OsStr::new("f"), b"1").unwrap();
+        assert_eq!(fs::read_to_string(base.join("x/y/z/f")).unwrap(), "1");
+        assert!(open_dir(&base, &temp("mkdirat-other"), true).is_err());
+        assert!(open_dir(&base, &base.join("x/../y"), true).is_err());
     }
 
     #[test]

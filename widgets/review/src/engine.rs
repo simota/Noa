@@ -290,20 +290,7 @@ fn resolved(path: &Path) -> Option<PathBuf> {
 /// (or moved) gets the checks a new session does, and its snapshot must be
 /// the one captured.
 pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
-    if dir.file_name() != Some(std::ffi::OsStr::new(session.id.as_str())) {
-        return Err(format!(
-            "ログのレビュー ID {} がフォルダ名と一致しません",
-            session.id
-        ));
-    }
-    if let Some(workdir) = &session.workdir
-        && !workdir.is_dir()
-    {
-        return Err(format!(
-            "作業ディレクトリ {} がありません",
-            workdir.display()
-        ));
-    }
+    check_home(session, dir)?;
     for part in std::iter::once(&session.lead).chain(&session.reviewers) {
         part.setup.check(part.kind)?;
     }
@@ -335,6 +322,45 @@ pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
     {
         return Err("ログの参加者 ID がパネルと一致しません".to_owned());
     }
+    check_reply_paths(session, dir)?;
+    let reply_dir = store::reply_dir(dir, session);
+    let target = store::target_dir(&reply_dir);
+    crate::fsx::check_no_links(&store::reply_base(dir, session), &target)
+        .map_err(|e| format!("スナップショットの場所が変わっています: {e}"))?;
+    crate::capture::verify(&target, &session.manifest)
+}
+
+/// That the log in `dir` is this folder's (its id is the folder's name)
+/// and its workdir is there.
+fn check_home(session: &Session, dir: &Path) -> Result<(), String> {
+    if dir.file_name() != Some(std::ffi::OsStr::new(session.id.as_str())) {
+        return Err(format!(
+            "ログのレビュー ID {} がフォルダ名と一致しません",
+            session.id
+        ));
+    }
+    if let Some(workdir) = &session.workdir
+        && !workdir.is_dir()
+    {
+        return Err(format!(
+            "作業ディレクトリ {} がありません",
+            workdir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// The paths a stored review's log points at are its own, as a resume
+/// checks them: its id names its folder `dir`, its workdir exists, and
+/// every reply path it logged is the one the store gives for it. A request
+/// that writes below the review's reply dir (修正を依頼) checks this first.
+pub fn check_store_paths(session: &Session, dir: &Path) -> Result<(), String> {
+    check_home(session, dir)?;
+    check_reply_paths(session, dir)
+}
+
+/// Every reply path the log holds is the one the store gives for `dir`.
+fn check_reply_paths(session: &Session, dir: &Path) -> Result<(), String> {
     let reply_dir = store::reply_dir(dir, session);
     for round in &session.rounds {
         for brief in &round.briefs {
@@ -363,10 +389,7 @@ pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
             ));
         }
     }
-    let target = store::target_dir(&reply_dir);
-    crate::fsx::check_no_links(&store::reply_base(dir, session), &target)
-        .map_err(|e| format!("スナップショットの場所が変わっています: {e}"))?;
-    crate::capture::verify(&target, &session.manifest)
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

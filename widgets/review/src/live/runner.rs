@@ -1083,6 +1083,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             cwd,
             label: self.pane_label(part),
             attended: false,
+            env: Vec::new(),
         };
         let mut refused = String::new();
         for placement in self.placements() {

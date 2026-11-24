@@ -475,12 +475,29 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             if !session.is_contestant(winner) {
                 return err(format!("unknown contestant {winner}"));
             }
+            if session.is_panel() {
+                // The rules parse_verdict applied when it was accepted.
+                if round_mut(session, *round)?.verdict_brief.is_none() {
+                    return err(format!("round {round} has no verdict brief to answer"));
+                }
+                let top = aggregate::top_set(session, *round);
+                if !top.contains(winner) {
+                    return err(format!(
+                        "round {round}'s verdict names {winner}, outside its highest mean"
+                    ));
+                }
+                if final_verdict.trim().is_empty() {
+                    return err(format!("round {round}'s final verdict is empty"));
+                }
+            }
             let Some(outcome) = round_mut(session, *round)?.outcome.as_mut() else {
                 return err(format!("round {round} has no judgment for a verdict"));
             };
             outcome.winner = Some(winner.clone());
             outcome.final_verdict = Some(final_verdict.clone());
             session.winner = Some(winner.clone());
+            // A tie the lead broke ranks its winner first.
+            aggregate::winner_first(session, *round);
         }
         Event::JudgeAccepted { round, output } => {
             for amendment in &output.amendments {
@@ -1108,6 +1125,143 @@ mod tests {
             Some(7)
         );
         assert!(session.closed);
+    }
+
+    #[test]
+    fn replay_rejects_a_verdict_that_breaks_the_verdict_rules() {
+        let lead = judge_id(0);
+        // R1 (the last of 1): codex 255, claude 224.
+        let mut session = panel_session(Some(1));
+        settle(
+            &mut session,
+            1,
+            &cards(
+                &[("codex", 90), ("claude", 70)],
+                &[("codex", 85), ("claude", 75)],
+                &[("codex", 80), ("claude", 79)],
+            ),
+        )
+        .unwrap();
+        let verdict = |winner: &str, text: &str| Event::VerdictAccepted {
+            round: 1,
+            winner: PartId::new(winner),
+            final_verdict: text.into(),
+        };
+        let rejected = |session: &Session, event: Event| {
+            apply(&mut session.clone(), &[event])
+                .unwrap_err()
+                .to_string()
+        };
+        // No verdict brief issued.
+        let why = rejected(&session, verdict("codex", "codex led."));
+        assert!(why.contains("no verdict brief"), "{why}");
+
+        apply(
+            &mut session,
+            &[Event::VerdictRequested {
+                round: 1,
+                brief: brief_to(&lead, "verdict.json"),
+            }],
+        )
+        .unwrap();
+        // A contestant outside the top set.
+        let why = rejected(&session, verdict("claude", "claude led."));
+        assert!(why.contains("outside its highest mean"), "{why}");
+        // An empty verdict, blank or not.
+        for text in ["", "  \n\t"] {
+            let why = rejected(&session, verdict("codex", text));
+            assert!(why.contains("final verdict is empty"), "{text:?}: {why}");
+        }
+        // Within the rules, it folds.
+        apply(&mut session, &[verdict("codex", "codex led.")]).unwrap();
+        assert_eq!(session.winner, Some(PartId::new("codex")));
+    }
+
+    #[test]
+    fn a_tie_the_verdict_broke_keeps_its_winner_first_until_an_amendment_breaks_it() {
+        use crate::model::types::Amendment;
+        let claude = PartId::new("claude");
+        let codex = PartId::new("codex");
+        // R1 (the last of 1): a tie at 240, the lead ranking claude first;
+        // the verdict names codex.
+        let tied = || {
+            let mut session = panel_session(Some(1));
+            settle(
+                &mut session,
+                1,
+                &cards(
+                    &[("claude", 80), ("codex", 80)],
+                    &[("codex", 81), ("claude", 79)],
+                    &[("claude", 81), ("codex", 79)],
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                session.round(1).unwrap().outcome.as_ref().unwrap().ranking,
+                [claude.clone(), codex.clone()]
+            );
+            apply(
+                &mut session,
+                &[
+                    Event::VerdictRequested {
+                        round: 1,
+                        brief: brief_to(&judge_id(0), "verdict.json"),
+                    },
+                    Event::VerdictAccepted {
+                        round: 1,
+                        winner: codex.clone(),
+                        final_verdict: "codex breaks the tie.".into(),
+                    },
+                    Event::PhaseChanged {
+                        round: 1,
+                        phase: Phase::Closed,
+                    },
+                    Event::SessionClosed,
+                    Event::RoundsExtended {
+                        max_rounds: 2,
+                        at: 9,
+                    },
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                session.round(1).unwrap().outcome.as_ref().unwrap().ranking,
+                [codex.clone(), claude.clone()]
+            );
+            judge_next(&mut session, 2);
+            session
+        };
+        // R2's judge-2 amends its R1 card; R1's ranking after it.
+        let r1_after = |amend: &[(&PartId, u8)]| {
+            let mut session = tied();
+            let mut r2 = cards(
+                &[("claude", 85), ("codex", 84)],
+                &[("claude", 85), ("codex", 84)],
+                &[("claude", 85), ("codex", 84)],
+            );
+            r2.get_mut(&judge_id(1)).unwrap().amendments = amend
+                .iter()
+                .map(|(part, score)| Amendment {
+                    round: 1,
+                    part: (*part).clone(),
+                    score: *score,
+                    reason: "recount".into(),
+                })
+                .collect();
+            settle(&mut session, 2, &r2).unwrap();
+            let outcome = session.round(1).unwrap().outcome.clone().unwrap();
+            assert_eq!(outcome.winner.as_ref(), Some(&codex), "the verdict stays");
+            outcome.ranking
+        };
+        // Both up by one: still a tie (241 each), so the verdict's winner
+        // stays first though the lead ranked claude first.
+        assert_eq!(
+            r1_after(&[(&codex, 82), (&claude, 80)]),
+            [codex.clone(), claude.clone()]
+        );
+        // An amendment that breaks the tie leaves sum order, either way.
+        assert_eq!(r1_after(&[(&claude, 90)]), [claude.clone(), codex.clone()]);
+        assert_eq!(r1_after(&[(&codex, 90)]), [codex.clone(), claude.clone()]);
     }
 
     #[test]

@@ -26,24 +26,36 @@ pub(super) struct Parts {
 
 const NEXT_ROUND_HINT: &str =
     "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）";
-const VERDICT_HINT: &str = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます（他パネルへの個別指示はブラインド維持）";
+/// A panel's deciding round before its verdict brief: that brief carries
+/// every intervention of the competition, whatever its addressees, so
+/// nothing stays blind to the lead.
+const VERDICT_HINT: &str = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます。延長した場合は次のラウンドのブリーフで宛先パネルに届きます";
+const VERDICT_TOO_HINT: &str = "追加指示は宛先にリード審判がいなくても、このラウンドでこのあと出る最終講評のブリーフでリード審判に届きます。延長した場合は次のラウンドのブリーフで宛先パネルに届きます";
+/// A round the lead's scorecard closed before the last: the competition
+/// ends with the verdict and cannot be extended, so there is no next round.
+const EARLY_CLOSE_HINT: &str =
+    "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます";
 
 /// Where an intervention to `to` (empty: everyone) reaches, as the hint
 /// under the composer says it. In a panel's deciding round being scored,
-/// one that reaches the lead goes into the verdict brief issued later in
-/// the same round (L1-6.1); otherwise into the next round's briefs.
+/// every intervention also goes into the lead's verdict brief issued later
+/// in the same round (L1-6.1), whoever it is addressed to; otherwise only
+/// into the next round's briefs. A round the lead closed early has no next
+/// round (that competition cannot be extended), so there it reaches the
+/// verdict brief only.
 pub(crate) fn hint(session: &Session, to: &[PartId]) -> &'static str {
-    let reaches_lead = to.is_empty() || to.contains(&session.judge.id);
-    if session.is_panel()
-        && reaches_lead
-        && !session.closed
-        && session
-            .current_round()
-            .is_some_and(|round| verdict_ahead(session, round))
-    {
+    let deciding = session
+        .current_round()
+        .filter(|round| session.is_panel() && !session.closed && verdict_ahead(session, round));
+    let Some(round) = deciding else {
+        return NEXT_ROUND_HINT;
+    };
+    if session.max_rounds.is_none_or(|max| round.no < max) {
+        EARLY_CLOSE_HINT
+    } else if to.is_empty() || to.contains(&session.judge.id) {
         VERDICT_HINT
     } else {
-        NEXT_ROUND_HINT
+        VERDICT_TOO_HINT
     }
 }
 

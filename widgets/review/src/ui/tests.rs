@@ -1014,12 +1014,13 @@ fn toasts(screen: &Review) -> Vec<String> {
     out
 }
 
-/// A clipboard that takes nothing, as when the OS refuses the write.
+/// A clipboard that refuses the write, as the OS one can: it keeps what it
+/// held.
 struct RefusingClipboard;
 
 impl noa_gpui_core::clipboard::Clipboard for RefusingClipboard {
     fn read_text(&mut self) -> Option<String> {
-        None
+        Some("前の内容".to_owned())
     }
     fn write_text(&mut self, _text: &str) {}
 }
@@ -1181,4 +1182,33 @@ fn a_lead_summary_with_the_sent_text_does_not_count_as_the_send() {
     screen.poll_live(&mut TextStore::new(Default::default()));
     assert_eq!(draft(&screen), "認可も見てください");
     assert!(screen.pending_intervention.is_some());
+}
+
+/// A clipboard that takes the text but cannot be read back.
+struct WriteOnlyClipboard;
+
+impl noa_gpui_core::clipboard::Clipboard for WriteOnlyClipboard {
+    fn read_text(&mut self) -> Option<String> {
+        None
+    }
+    fn write_text(&mut self, _text: &str) {}
+}
+
+#[test]
+fn a_copy_that_cannot_be_read_back_is_reported_as_unconfirmed() {
+    let mut screen = Review::demo();
+    screen.tree.set_clipboard(Box::new(WriteOnlyClipboard));
+    act(&mut screen, Action::CopyReport);
+    assert_eq!(
+        toasts(&screen),
+        ["レポートをコピーしましたが、クリップボードを読み返して確かめられませんでした"]
+    );
+    // Holding other text afterwards is a failure.
+    let mut screen = Review::demo();
+    screen.tree.set_clipboard(Box::new(RefusingClipboard));
+    act(&mut screen, Action::CopyReport);
+    assert_eq!(
+        toasts(&screen),
+        ["レポートをクリップボードにコピーできませんでした"]
+    );
 }

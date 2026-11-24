@@ -1103,14 +1103,18 @@ impl Review {
                 if let Some(session) = &self.session {
                     let md = export::report_markdown(session);
                     // The clipboard reports no failure: what it holds
-                    // afterwards tells whether the copy took.
+                    // afterwards tells whether the copy took, and one that
+                    // cannot be read back leaves it unknown.
                     let clipboard = self.tree.clipboard();
                     clipboard.write_text(&md);
-                    if clipboard.read_text().as_deref() == Some(md.as_str()) {
-                        self.toast("レポートをクリップボードにコピーしました");
-                    } else {
-                        self.toast("レポートをクリップボードにコピーできませんでした");
-                    }
+                    let message = match clipboard.read_text() {
+                        Some(held) if held == md => "レポートをクリップボードにコピーしました",
+                        Some(_) => "レポートをクリップボードにコピーできませんでした",
+                        None => {
+                            "レポートをコピーしましたが、クリップボードを読み返して確かめられませんでした"
+                        }
+                    };
+                    self.toast(message);
                 }
             }
             Action::PickDocument => self.file_dialogs.push(FileDialogRequest {

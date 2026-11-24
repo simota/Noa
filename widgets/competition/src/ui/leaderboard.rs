@@ -1,6 +1,7 @@
 //! Left pane: leaderboard with score history, current round status, a jump
-//! to each agent's pane (the judge's too), and round selector (marking Blind
-//! vs Peer-Reveal rounds).
+//! to each agent's pane (the judges' too), and round selector (marking Blind
+//! vs Peer-Reveal rounds). With a judge panel the scores are means, and the
+//! latest round's score by each judge and their spread show under them.
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
@@ -8,7 +9,10 @@ use noa_gpui_core::style::{
 use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
-use competition::model::types::{PartId, RoundKind, RoundNo, Session};
+use competition::model::aggregate::{PanelScores, SPREAD_WARN};
+use competition::model::types::{
+    Brief, PartId, Participant, Round, RoundKind, RoundNo, Session,
+};
 
 use super::{Action, caption, gap, heading, keep_scroll, scroll_column, spacer, tag};
 
@@ -86,13 +90,15 @@ pub(super) fn insert(
         if let Some(setup) = session.participant(part).and_then(|p| p.setup.label()) {
             caption(tree, card, setup);
         }
-        if let Some(&(_, score)) = score_hist.last() {
+        if session.is_panel() {
+            panel_scores(tree, top, card, session, part, &score_hist);
+        } else if let Some(&(_, score)) = score_hist.last() {
             tag(tree, top, format!("{score} pt"), Tone::Accent);
         } else {
             tag(tree, top, "未採点", Tone::Neutral);
         }
 
-        if !score_hist.is_empty() {
+        if !session.is_panel() && !score_hist.is_empty() {
             let mut line = String::with_capacity(score_hist.len() * 10);
             for (i, (r, s)) in score_hist.iter().enumerate() {
                 if i > 0 {
@@ -131,7 +137,25 @@ pub(super) fn insert(
         }
     }
 
-    judge_card(tree, list, session, &focus_button, actions);
+    if session.is_panel() {
+        for (seat, judge) in session.judges().enumerate() {
+            let name = match seat {
+                0 => "リード審判".to_owned(),
+                n => format!("審判 {}", n + 1),
+            };
+            judge_card(tree, list, session, judge, &name, &focus_button, actions);
+        }
+    } else {
+        judge_card(
+            tree,
+            list,
+            session,
+            &session.judge,
+            "審判",
+            &focus_button,
+            actions,
+        );
+    }
 
     let rhead = tree.insert(
         Some(list),
@@ -171,16 +195,93 @@ pub(super) fn insert(
     }
 }
 
-/// The judge, below the contestants: its agent, what it is doing this
-/// round, and the jump to its pane.
+/// A panel entry's mean scores: the latest mean as its tag, the means by
+/// round, and the latest round's score by each judge with their spread
+/// (a warning from [`SPREAD_WARN`] up).
+fn panel_scores(
+    tree: &mut UiTree,
+    top: WidgetId,
+    card: WidgetId,
+    session: &Session,
+    part: &PartId,
+    score_hist: &[(RoundNo, u8)],
+) {
+    let label = |no: RoundNo| {
+        session
+            .score_label(no, part)
+            .unwrap_or_else(|| "—".to_owned())
+    };
+    let Some(&(last, _)) = score_hist.last() else {
+        tag(tree, top, "未採点", Tone::Neutral);
+        return;
+    };
+    tag(tree, top, format!("{} pt", label(last)), Tone::Accent);
+    let hist: Vec<String> = score_hist
+        .iter()
+        .map(|(no, _)| format!("R{no}:{}", label(*no)))
+        .collect();
+    super::note(tree, card, hist.join(" → "));
+    if let Some(panel) = session.panel_scores(last, part) {
+        if panel.spread() >= SPREAD_WARN {
+            // The spread as its own tag: a whole line would not fit.
+            let row = tree.insert(
+                Some(card),
+                Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+            );
+            super::note(tree, row, judge_scores(&panel));
+            tag(tree, row, format!("⚠ 差 {}", panel.spread()), Tone::Warning);
+        } else {
+            super::note(tree, card, judge_line(&panel));
+        }
+    }
+}
+
+/// The brief a judge card shows the status of: the judge's brief of
+/// `round`, the lead's verdict brief while it is awaited. A verdict the
+/// competition ended without (終了, or a winner chosen by hand) is not
+/// awaited, so the lead's card then shows its scorecard brief.
+fn judge_status_brief<'a>(
+    session: &Session,
+    round: &'a Round,
+    judge: &Participant,
+) -> Option<&'a Brief> {
+    if judge.id == session.judge.id
+        && round.verdict_pending()
+        && !super::judge::awaits_verdict(session, round)
+    {
+        round.judge_brief.as_ref()
+    } else {
+        round.brief(&judge.id)
+    }
+}
+
+/// `judge 80 · judge-2 83 · judge-3 81`.
+fn judge_scores(panel: &PanelScores) -> String {
+    let parts: Vec<String> = panel
+        .scores
+        .iter()
+        .map(|(judge, score)| format!("{judge} {score}"))
+        .collect();
+    parts.join(" · ")
+}
+
+/// `judge 80 · judge-2 83 · judge-3 81 · 差 3`.
+fn judge_line(panel: &PanelScores) -> String {
+    format!("{} · 差 {}", judge_scores(panel), panel.spread())
+}
+
+/// A judge, below the contestants: its seat (`name`), its agent, what it
+/// is doing this round (the lead's verdict once asked), and the jump to
+/// its pane.
 fn judge_card(
     tree: &mut UiTree,
     list: WidgetId,
     session: &Session,
+    judge: &Participant,
+    name: &str,
     focus_button: &impl Fn(&mut UiTree, WidgetId, &mut Vec<(WidgetId, Action)>, &PartId),
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
-    let judge = &session.judge;
     let card = tree.insert(
         Some(list),
         Container::new(Style {
@@ -198,8 +299,8 @@ fn judge_card(
         .radius(8.0),
     );
     let label = match judge.setup.label() {
-        Some(setup) => format!("審判 · {} ({setup})", judge.kind.command()),
-        None => format!("審判 · {}", judge.kind.command()),
+        Some(setup) => format!("{name} · {} ({setup})", judge.kind.command()),
+        None => format!("{name} · {}", judge.kind.command()),
     };
     tree.insert(Some(card), Label::new(label).font_size(12.5).weight(600));
     let row = tree.insert(
@@ -207,7 +308,7 @@ fn judge_card(
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
     );
     if let Some(cur) = session.current_round()
-        && let Some(brief) = cur.brief(&judge.id)
+        && let Some(brief) = judge_status_brief(session, cur, judge)
     {
         let (status_text, tone) = super::progress::delivery(&brief.receipt);
         tag(tree, row, format!("R{} {status_text}", cur.no), tone);

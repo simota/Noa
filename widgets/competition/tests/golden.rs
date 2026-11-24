@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 
+use competition::model::export;
 use competition::model::viewer::{self, ViewerCache};
 
 #[path = "golden/scenario.rs"]
@@ -103,5 +104,22 @@ fn cached_compare_html_matches_main_byte_for_byte() {
         },
     );
     assert_eq!(seen, scenario::STEPS);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The Markdown report of the finished scenario. `golden/report-r3-final.md`
+/// was generated from the code before the judge panel changed the export,
+/// so a single-judge report must stay byte-identical to it.
+#[test]
+fn report_markdown_matches_main_byte_for_byte() {
+    let root = temp_root("report");
+    let mut report = None;
+    scenario::run(&root, &mut |_, _| {}, &mut |step, session, _| {
+        if step == "r3-final" {
+            report = Some(export::result_markdown(session));
+        }
+    });
+    let got = report.expect("the scenario reaches r3-final");
+    assert_same("report", &got, include_str!("golden/report-r3-final.md"));
     let _ = fs::remove_dir_all(&root);
 }

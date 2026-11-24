@@ -22,13 +22,14 @@ use noa_gpui_text::TextStore;
 use crate::live::{Link, Snapshot};
 use crate::ui::Competition;
 
-const USAGE: &str = "usage: competition [--demo [--start | --held] | --session=DIR] \
+const USAGE: &str = "usage: competition [--demo [--start | --held | --judges] | --session=DIR] \
                      [--snapshot=FILE.png [--size=WxH]]\n       \
                      competition --check=ENTRY_DIR [--out=DIR]\n  \
                      the live competition by default; \
                      --demo shows a canned multi-round competition \
                      (--start: the demo's start view, with past competitions; \
-                     --held: held after its last judged round); \
+                     --held: held after its last judged round; \
+                     --judges: scored by a panel of three judges); \
                      --session shows the competition stored in DIR \
                      (<data>/noa/competitions/comp-*) read-only; \
                      --check runs the snapshot check a submission gets (viewer copy, \
@@ -149,6 +150,7 @@ fn main() -> Result<(), String> {
     let mut session_dir = None;
     let mut start_view = false;
     let mut held = false;
+    let mut judges = false;
 
     for arg in std::env::args().skip(1) {
         if let Some(path) = arg.strip_prefix("--check=") {
@@ -170,6 +172,8 @@ fn main() -> Result<(), String> {
             start_view = true;
         } else if arg == "--held" {
             held = true;
+        } else if arg == "--judges" {
+            judges = true;
         } else if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
             return Ok(());
@@ -181,11 +185,14 @@ fn main() -> Result<(), String> {
     if let Some(entry) = check_entry {
         return run_check(&entry, check_out);
     }
-    if (start_view || held) && !demo {
-        return Err(format!("--start and --held need --demo\n{USAGE}"));
+    if (start_view || held || judges) && !demo {
+        return Err(format!("--start, --held and --judges need --demo\n{USAGE}"));
     }
-    if start_view && held {
-        return Err(format!("--start and --held do not go together\n{USAGE}"));
+    let views = [start_view, held, judges];
+    if views.into_iter().filter(|on| *on).count() > 1 {
+        return Err(format!(
+            "--start, --held and --judges do not go together\n{USAGE}"
+        ));
     }
     if demo && session_dir.is_some() {
         return Err(format!("--demo and --session do not go together\n{USAGE}"));
@@ -196,6 +203,8 @@ fn main() -> Result<(), String> {
             Competition::demo_start()
         } else if demo && held {
             Competition::demo_held()
+        } else if demo && judges {
+            Competition::demo_panel()
         } else if demo {
             Competition::demo()
         } else if let Some(dir) = &session_dir {
@@ -219,6 +228,9 @@ fn main() -> Result<(), String> {
         }
         if demo && held {
             return Box::new(Competition::demo_held());
+        }
+        if demo && judges {
+            return Box::new(Competition::demo_panel());
         }
         if demo {
             return Box::new(Competition::demo());

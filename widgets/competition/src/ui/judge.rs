@@ -1,5 +1,7 @@
 //! Right pane: judge overview, winner card, comparison viewer trigger,
-//! Markdown export, and adopting the winner into a repository.
+//! Markdown export, and adopting the winner into a repository. With a judge
+//! panel each judged round also shows its means, a table of scores by
+//! judge with their spread, and each co-judge's overview.
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
@@ -7,7 +9,8 @@ use noa_gpui_core::style::{
 use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
-use competition::model::types::{AgentKind, RoundKind, Session};
+use competition::model::aggregate::SPREAD_WARN;
+use competition::model::types::{AgentKind, JUDGE_ID, Round, RoundKind, Session};
 
 use super::{Action, caption, gap, heading, keep_scroll, note, scroll_column, tag};
 
@@ -128,20 +131,31 @@ pub(super) fn insert(
                 .font_size(12.0)
                 .wrap(true),
         );
+        let panel = !round.scorecards.is_empty();
         let ranks: Vec<String> = outcome
             .ranking
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let sc = outcome
-                    .evaluations
-                    .get(p)
-                    .map(|e| format!("({})", e.score))
-                    .unwrap_or_default();
+                let sc = if panel {
+                    session
+                        .score_label(round.no, p)
+                        .map(|mean| format!("({mean})"))
+                        .unwrap_or_default()
+                } else {
+                    outcome
+                        .evaluations
+                        .get(p)
+                        .map(|e| format!("({})", e.score))
+                        .unwrap_or_default()
+                };
                 format!("#{} {p}{sc}", i + 1)
             })
             .collect();
         caption(tree, card, ranks.join(" · "));
+        if panel {
+            panel_details(tree, card, session, round);
+        }
         // A verdict that is no longer the result (the competition went on,
         // or a later choice overrode it) stays with its round.
         if let (Some(winner), Some(verdict)) = (&outcome.winner, &outcome.final_verdict)
@@ -157,4 +171,97 @@ pub(super) fn insert(
     if !any {
         caption(tree, list, "（まだ審判の評価はありません）");
     }
+}
+
+const NAME_WIDTH: f32 = 72.0;
+const SCORE_WIDTH: f32 = 50.0;
+
+/// One cell of the scores table: `text` in a box `width` wide.
+fn cell(tree: &mut UiTree, row: WidgetId, text: impl Into<String>, width: f32, strong: bool) {
+    let host = tree.insert(
+        Some(row),
+        Container::new(Style {
+            flex_shrink: 0.0,
+            size: LayoutSize {
+                width: length(width),
+                height: auto(),
+            },
+            ..Default::default()
+        }),
+    );
+    let label = Label::new(text.into()).font_size(11.5);
+    let label = if strong {
+        label.weight(600)
+    } else {
+        label.color(Role::Muted)
+    };
+    tree.insert(Some(host), label);
+}
+
+/// A panel round's scores by judge (one row per entry in the combined
+/// order, a column per judge and the spread, a warning from
+/// [`SPREAD_WARN`] up), each co-judge's overview, and whether the lead's
+/// verdict is still awaited.
+fn panel_details(tree: &mut UiTree, card: WidgetId, session: &Session, round: &Round) {
+    let Some(outcome) = &round.outcome else {
+        return;
+    };
+    caption(tree, card, "審判別スコア");
+    let table = tree.insert(Some(card), Container::column().gap(2.0));
+    let head = tree.insert(
+        Some(table),
+        Container::row().align_items(AlignItems::CENTER),
+    );
+    cell(tree, head, "", NAME_WIDTH, false);
+    for judge in session.judges() {
+        cell(tree, head, judge.id.as_str(), SCORE_WIDTH, false);
+    }
+    cell(tree, head, "差", SCORE_WIDTH, false);
+    for part in &outcome.ranking {
+        let Some(panel) = session.panel_scores(round.no, part) else {
+            continue;
+        };
+        let row = tree.insert(
+            Some(table),
+            Container::row().align_items(AlignItems::CENTER),
+        );
+        cell(tree, row, part.as_str(), NAME_WIDTH, true);
+        for (_, score) in &panel.scores {
+            cell(tree, row, score.to_string(), SCORE_WIDTH, false);
+        }
+        let spread = panel.spread();
+        if spread >= SPREAD_WARN {
+            tag(tree, row, format!("⚠ 差 {spread}"), Tone::Warning);
+        } else {
+            cell(tree, row, spread.to_string(), SCORE_WIDTH, false);
+        }
+    }
+    for (seat, judge) in session.co_judges.iter().enumerate() {
+        let Some(card_out) = round.scorecards.get(&judge.id) else {
+            continue;
+        };
+        caption(
+            tree,
+            card,
+            format!("審判 {} ({}) の総評", seat + 2, judge.kind.command()),
+        );
+        tree.insert(
+            Some(card),
+            Label::new(card_out.overview.clone())
+                .font_size(12.0)
+                .wrap(true),
+        );
+    }
+    if awaits_verdict(session, round) {
+        note(tree, card, format!("最終講評を待っています（{JUDGE_ID}）"));
+    }
+}
+
+/// Whether `round` still waits for the lead's verdict: asked for, not in,
+/// and the competition still running. 終了 and a winner chosen by hand
+/// both close the session (`UserSelectWinner` commits `SessionClosed` with
+/// the winner), and the verdict is then never written. A round that waits
+/// is the session's last, since a closed round cannot be extended past.
+pub(super) fn awaits_verdict(session: &Session, round: &Round) -> bool {
+    !session.closed && round.verdict_pending()
 }

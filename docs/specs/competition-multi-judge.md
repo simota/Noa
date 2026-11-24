@@ -67,7 +67,7 @@ The request names `export/report/compare.html`; in this crate the Markdown repor
 ### L1-2. Independent scoring per round (C2)
 
 1. When the round's contestant briefs are all replied or failed, the engine commits, in one batch, `PhaseChanged(Judging)` and a `BriefIssued` for every judge, then sends them all at once (in parallel, not in turn).
-2. Each judge gets its own brief (`brief::judge_brief(session, round, judge, …)`) and writes its own reply file: `r<N>/judge.json` for the lead (the path it has today), `r<N>/judge-2.json`, `r<N>/judge-3.json` for co-judges.
+2. Each judge gets its own brief (`brief::judge_brief(session, round, judge, …)`), which tells it to write its reply to its own file: `r<N>/judge.json` for the lead (the path it has today), `r<N>/judge-2.json`, `r<N>/judge-3.json` for co-judges. This is the role the brief assigns, not an enforced guarantee: every seat writes into the same `r<N>/` directory and a reply is attributed by its file name only (see Risks).
 3. Blindness between judges:
    - A judge brief holds nothing another judge wrote in this round: no score, overview, feedback or file path of another judge's reply.
    - It lists the judges (`judge (lead), judge-2, judge-3`) and tells the judge: score alone; do not open other judges' reply files in `r<N>/` (`judge*.json`, `verdict.json`) or read from or type into other panes; an entry's round score is the mean of all judges' scores.
@@ -102,7 +102,7 @@ An amendment by a panel judge corrects that judge's scorecard of an earlier roun
 
 ### L1-5. Early close and the final verdict (C5)
 
-1. Only the lead decides to end early (`close: true` in its scorecard) and writes the final verdict. Co-judges cannot do either (L1-4).
+1. Only the lead decides to end early (`close: true` in its scorecard) and writes the final verdict. Co-judges cannot do either (L1-4). "Writes the verdict" is the role the brief assigns: whatever appears in `r<N>/verdict.json` is taken as the lead's, since a reply is attributed by its file name only (see Risks).
 2. In a deciding round of a multi-judge session, after the combined judgment the engine commits `VerdictRequested { round, brief }` and sends the lead a verdict brief (`brief::verdict_brief`). The brief carries the combined table: per entry the mean, each judge's score and the spread, ranked by mean. It also carries each judge's overview, the user's interventions, and the entries with the highest mean. The reply path is `r<N>/verdict.json`.
 3. The verdict reply is `{"winner": "<id>", "final_verdict": "<text>"}` (`deny_unknown_fields`, fence tolerated). `validate::parse_verdict` requires `winner` to be one of the entries with the highest mean (the lead breaks a tie; it cannot overrule the mean) and `final_verdict` to be non-empty. Errors go back as correction notes, with retries and failure as for any brief.
 4. On acceptance: `ReplyAccepted`, `VerdictAccepted { round, winner, final_verdict }` (sets the round's `outcome.winner`/`final_verdict` and `session.winner`), a `FinalVerdict` message 「優勝: <winner>\n\n<verdict>」 authored by `judge`, `PhaseChanged(Closed)`, `SessionClosed`. `Session::final_verdict()` then returns it unchanged.
@@ -460,6 +460,7 @@ Open points the request left open, resolved here. Each can be changed before imp
 
 - **Cost and time:** each round runs up to 3× the judge work, plus one verdict turn in deciding rounds. The default stays one judge, and the start view's caption says that each judge scores every round.
 - **Blindness is by instruction:** judges share the round directory and could read each other's replies. Briefs forbid it and hold nothing from other judges. A judge that replies after another may still have read its file; nothing detects it, as with contestants today.
+- **Replies are trusted by file name:** every seat writes its reply into the same `r<N>/` directory, and a reply is attributed to a seat by its file name only. A participating agent able to write that directory can write a reply under another seat's name, a co-judge's scorecard (`judge-2.json`) or the lead's verdict (`verdict.json`), and it is accepted as that seat's. The feature trusts the participating agents not to; nothing detects or prevents it.
 - **The lead sees the panel after a verdict:** if the competition is extended after a verdict, the lead's later scores are no longer blind to that round's panel. This is accepted; the verdict brief is the only place other judges' scores reach any judge.
 - **A stuck judge stalls the round:** C3 requires every judge, and the existing retry, manual winner and 終了 paths are the way out.
 - **Older widgets and multi-judge logs:** an older build folds a multi-judge log until the first `scorecard_accepted` line and then lists it as unreadable. A log cut before that line would show `judge-2` as a contestant there. Downgrades are not supported; noted in `CHANGELOG.md`.

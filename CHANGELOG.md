@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A competition with more than one judge is not readable by an earlier
   version of the widget; downgrading is not supported.
+- A competition trusts its agents: replies are attributed by file name
+  only, so an agent able to write the round directory could write another
+  judge's scorecard or the lead judge's verdict and it would be accepted.
 
 ## [0.9.15] - 2026-11-24
 

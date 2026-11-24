@@ -2,7 +2,6 @@
 //! capture, worktree, evidence, re-run, model, engine and store (`lib.rs`),
 //! fed by the live layer.
 
-#[allow(dead_code)] // STUB until the UI part fills it
 mod demo;
 mod installed;
 mod live;

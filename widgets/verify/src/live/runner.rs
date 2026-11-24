@@ -2507,7 +2507,8 @@ fn reserve(
     now: Millis,
 ) -> Result<(SessionId, PathBuf, PathBuf), String> {
     fs::create_dir_all(root).map_err(|e| format!("{} を作れません: {e}", root.display()))?;
-    store::prepare_workdir(workdir).map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
+    // Its ignore line comes after the capture (`new_verification`).
+    store::make_workdir(workdir).map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
     for suffix in 0..ID_TRIES {
         let id = match suffix {
             0 => SessionId::at(now),
@@ -2633,8 +2634,8 @@ fn check_shared_ref(
 /// own.
 const APPENDED_IGNORE: &[u8] = b"/verify/";
 
-/// A checkout's `.noa/.gitignore` as a start found it, before `reserve`
-/// (`store::prepare_workdir`) may append its ignore line. A start refused
+/// A checkout's `.noa/.gitignore` as a start found it, before
+/// `store::ignore_verify_dir` may append its ignore line. A start refused
 /// after that takes the line away again: a tracked file left changed
 /// would refuse the next 共有 start of a ref as an uncommitted change
 /// (L1-3).
@@ -2737,6 +2738,12 @@ fn new_verification(
     {
         undo();
         return Err(shared_head_moved(&head, &captured.rebuild.head_sha));
+    }
+    // Only now, the target taken: a tracked `.noa/.gitignore` this changes
+    // is the widget's own change, never part of the target (L1-1).
+    if let Err(e) = store::ignore_verify_dir(&workdir) {
+        undo();
+        return Err(format!("prepare {}: {e}", workdir.display()));
     }
     let setup = Setup {
         request: &request,
@@ -5824,6 +5831,50 @@ pub(crate) mod tests {
         step(&mut runner, &mut conn);
         assert_eq!(fake.pasted(new), 1);
         assert!(receipt(&runner).sent.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// AC-2, L1-1: the ignore line a start adds to a tracked
+    /// `.noa/.gitignore` is the widget's own change, never part of the
+    /// target: a clean checkout is still an empty diff (refused, the line
+    /// taken away), and a real change is captured without it.
+    #[test]
+    fn ac02_the_ignore_line_a_start_adds_is_never_part_of_the_target() {
+        let fake = fake();
+        let root = temp_root();
+        let repo = repo(&root);
+        fs::create_dir_all(repo.join(".noa")).unwrap();
+        fs::write(repo.join(".noa/.gitignore"), "logs/\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "noa"]);
+        let mut target = state_of(&repo);
+        target.kind = TargetKind::Diff;
+        target.base = Some("HEAD".into());
+        target.head = Head::Worktree;
+        let start = |target: &Target| new_start(&root, target.clone(), Isolation::Worktree, true);
+        let err = open_wired(&fake, start(&target)).err().unwrap();
+        assert!(err.contains("差分がありません"), "{err}");
+        assert_eq!(
+            fs::read_to_string(repo.join(".noa/.gitignore")).unwrap(),
+            "logs/\n"
+        );
+        assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+        nothing_left(&root, &repo);
+
+        fs::write(repo.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        let (runner, _, _) = open_wired(&fake, start(&target)).unwrap_or_else(|e| panic!("{e}"));
+        let s = runner.engine.session();
+        let files: Vec<&str> = s.manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(files, ["src/lib.rs"]);
+        let target_dir = store::target_dir(&runner.engine.reply_dir());
+        let patch = fs::read_to_string(target_dir.join("worktree.patch")).unwrap_or_default()
+            + &fs::read_to_string(target_dir.join("diff.patch")).unwrap_or_default();
+        assert!(!patch.contains(".noa/"), "{patch}");
+        assert_eq!(
+            fs::read_to_string(repo.join(".noa/.gitignore")).unwrap(),
+            "logs/\n/verify/\n",
+            "the start ignores its folder"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

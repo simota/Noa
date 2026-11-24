@@ -198,19 +198,39 @@ const VERIFY_IGNORE_LINE: &str = "/verify/";
 /// ignore refuses the start with the reason. A `.noa` (or anything below
 /// it) that is a link is refused.
 pub fn prepare_workdir(workdir: &Path) -> io::Result<()> {
+    if make_workdir(workdir)? {
+        return Ok(());
+    }
+    ignore_verify_dir(workdir)
+}
+
+/// The first half of [`prepare_workdir`]: `<workdir>/.noa/verify/`, and a
+/// `.noa/.gitignore` holding `*` when there is none. Nothing a capture
+/// reads changes: everything at the top's `.noa/` is left out of a target
+/// unless tracked, and a tracked `.gitignore` is kept as it is. Whether
+/// it wrote the `.gitignore`.
+pub fn make_workdir(workdir: &Path) -> io::Result<bool> {
     let dir = workdir.join(".noa");
     fsx::create_dirs(workdir, &dir.join(VERIFY_DIR))?;
-    let gitignore = dir.join(".gitignore");
     // `create_new` does not follow a link left at the name.
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&gitignore)
+        .open(dir.join(".gitignore"))
     {
-        Ok(mut file) => return file.write_all(b"*\n"),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
+        Ok(mut file) => file.write_all(b"*\n").map(|()| true),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e),
     }
+}
+
+/// The second half of [`prepare_workdir`]: when git does not ignore
+/// `.noa/verify/`, [`VERIFY_IGNORE_LINE`] is appended to `.noa/.gitignore`
+/// (made by [`make_workdir`]); a folder git still does not ignore is an
+/// error with the reason. A start runs it only once the target is
+/// captured, so a tracked `.gitignore` it changes is never in the target.
+pub fn ignore_verify_dir(workdir: &Path) -> io::Result<()> {
+    let gitignore = workdir.join(".noa").join(".gitignore");
     if verify_dir_ignored(workdir)? {
         return Ok(());
     }

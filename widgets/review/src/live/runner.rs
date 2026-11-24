@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -36,6 +37,12 @@ const TRUST_KEYS_MAX: u8 = 4;
 const TRUST_KEY_SHOWS_IN: Millis = 2_000;
 const REPLY_STABLE_FOR: Millis = 600;
 const MAX_SPAWNS: u8 = 2;
+/// The largest brief pasted as it is, measured JSON-encoded as it goes in
+/// a `noa.sendText` frame: Noa's control server takes frames of at most
+/// 256 KiB (`crates/noa-ipc/src/server.rs`, `MAX_WS_FRAME_SIZE`), so a
+/// longer brief is written to a file in the round's folder and the agent
+/// is sent where to read it.
+const BRIEF_PASTE_MAX: usize = 128 * 1024;
 /// Noa's most panes in one row or column of a tab (`MAX_PANES_PER_AXIS`,
 /// crates/noa-app/src/split_tree/tree/types.rs): a split along a full one
 /// is refused. A tab of three columns of three holds the lead and the
@@ -330,7 +337,9 @@ struct WatchedReply {
     round: RoundNo,
     part: PartId,
     path: PathBuf,
-    seen: Option<(String, Millis)>,
+    /// What the file held when last read (its bytes, or why it could not
+    /// be read) and since when.
+    seen: Option<(Result<Vec<u8>, String>, Millis)>,
 }
 
 struct Runner<C: Connect, K: Clock> {
@@ -685,15 +694,16 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let Some(round) = self.engine.session().current_round() else {
             return;
         };
+        let base = self.engine.reply_base();
         for brief in round.briefs.iter().chain(&round.lead_brief) {
             let Some(digest) = brief.receipt.rejected_digest else {
                 continue;
             };
             if brief.receipt.sent.is_none()
-                && let Ok(Some(text)) = store::read_reply(&brief.reply_path)
-                && store::digest(&text) == digest
+                && let Ok(Some(bytes)) = store::read_reply(&base, &brief.reply_path)
+                && review::capture::digest_bytes(&bytes) == digest
             {
-                let _ = store::clear_reply(&brief.reply_path);
+                let _ = store::clear_reply(&base, &brief.reply_path);
             }
         }
     }
@@ -759,9 +769,19 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             self.emit_session();
         }
         let now = self.clock.now();
+        let mut failed = Vec::new();
         for effect in output.effects {
             match effect {
                 Effect::SendBrief { round, part, body } => {
+                    let body = match self.oversized_brief(round, &part, body) {
+                        Ok(body) => body,
+                        Err(error) => {
+                            self.sends.retain(|s| !(s.round == round && s.part == part));
+                            // Recorded after this output's effects are applied.
+                            failed.push((round, part, error));
+                            continue;
+                        }
+                    };
                     self.sends.retain(|s| !(s.round == round && s.part == part));
                     self.sends.push(PendingSend {
                         round,
@@ -772,7 +792,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     });
                 }
                 Effect::WatchReply { round, part, path } => {
-                    if let Err(e) = store::prepare_reply(&path) {
+                    if let Err(e) = store::prepare_reply(&self.engine.reply_base(), &path) {
                         self.notice(format!("返答フォルダの作成に失敗しました: {e}"));
                     }
                     self.watches
@@ -785,13 +805,43 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     });
                 }
                 Effect::ClearReply { path } => {
-                    let _ = store::clear_reply(&path);
+                    let _ = store::clear_reply(&self.engine.reply_base(), &path);
                     self.watches.retain(|w| w.path != path);
                 }
                 Effect::WriteReport => self.write_report(),
             }
         }
+        for (round, part, error) in failed {
+            match self.engine.handle(Input::SendFailed { round, part, error }) {
+                Ok(out) => self.apply_output(out)?,
+                Err(EngineError::Rejected(why)) => self.notice(why),
+                Err(EngineError::Reduce(e)) => return Err(e.to_string()),
+            }
+        }
         Ok(())
+    }
+
+    /// `body` as it can be pasted: itself when it fits a control frame,
+    /// else a short pointer to a file in the round's folder holding it.
+    fn oversized_brief(
+        &self,
+        round: RoundNo,
+        part: &PartId,
+        body: String,
+    ) -> Result<String, String> {
+        let encoded = serde_json::to_string(&body).map_or(usize::MAX, |s| s.len());
+        if encoded <= BRIEF_PASTE_MAX {
+            return Ok(body);
+        }
+        let base = self.engine.reply_base();
+        let path = brief_file(&self.engine.reply_dir(), round, part);
+        if let Some(parent) = path.parent() {
+            review::fsx::create_dirs(&base, parent)
+                .map_err(|e| format!("ブリーフを書けません: {e}"))?;
+        }
+        review::fsx::write_replace(&base, &path, body.as_bytes())
+            .map_err(|e| format!("ブリーフを書けません: {e}"))?;
+        Ok(brief_pointer(&path))
     }
 
     fn deliver_sends(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
@@ -889,6 +939,21 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                         match e {
                             NoaError::PaneGone => {
                                 self.panes.remove(&self.sends[idx].part);
+                                idx += 1;
+                                continue;
+                            }
+                            // The agent left between the paste and the
+                            // Enter (its input went with it): the brief
+                            // waits for it to come back and goes again.
+                            NoaError::NotReady => {
+                                let part = self.sends[idx].part.clone();
+                                if let Some(p) = self.panes.get_mut(&part) {
+                                    p.ready = false;
+                                    p.quiet = None;
+                                }
+                                self.notice(format!(
+                                    "{part} への送信の確定（Enter）をやめました: シェルに戻っています"
+                                ));
                                 idx += 1;
                                 continue;
                             }
@@ -1106,6 +1171,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
 
     fn poll_replies(&mut self) -> Result<(), Fail> {
         let now = self.clock.now();
+        let base = self.engine.reply_base();
         let mut ready = Vec::new();
         let mut idx = 0;
         while idx < self.watches.len() {
@@ -1114,33 +1180,53 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 self.watches.remove(idx);
                 continue;
             }
-            match store::read_reply(&watch.path) {
-                Ok(Some(text)) => match &watch.seen {
-                    Some((prev, since)) if *prev == text => {
-                        if now.saturating_sub(*since) >= REPLY_STABLE_FOR {
-                            let w = self.watches.remove(idx);
-                            ready.push((w.round, w.part, text));
-                            continue;
-                        }
-                    }
-                    _ => {
-                        watch.seen = Some((text, now));
-                    }
-                },
+            // A read error that stays is turned down like a bad reply
+            // (it counts against the retries), never waited on for ever.
+            let read = match store::read_reply(&base, &watch.path) {
+                Ok(Some(bytes)) => Ok(bytes),
                 Ok(None) => {
                     watch.seen = None;
+                    idx += 1;
+                    continue;
                 }
-                Err(_) => {}
+                Err(e) => Err(e.to_string()),
+            };
+            match &watch.seen {
+                Some((prev, since)) if *prev == read => {
+                    if now.saturating_sub(*since) >= REPLY_STABLE_FOR {
+                        let w = self.watches.remove(idx);
+                        ready.push((w.round, w.part, read));
+                        continue;
+                    }
+                }
+                _ => watch.seen = Some((read, now)),
             }
             idx += 1;
         }
-        for (round, part, content) in ready {
-            self.feed(Input::ReplyFileWritten {
-                round,
-                part,
-                content,
-                at: now,
-            })?;
+        for (round, part, read) in ready {
+            let input = match read.map(String::from_utf8) {
+                Ok(Ok(content)) => Input::ReplyFileWritten {
+                    round,
+                    part,
+                    content,
+                    at: now,
+                },
+                Ok(Err(e)) => Input::ReplyUnreadable {
+                    round,
+                    part,
+                    error: "返答が UTF-8 のテキストではありません".to_owned(),
+                    digest: review::capture::digest_bytes(e.as_bytes()),
+                    at: now,
+                },
+                Err(why) => Input::ReplyUnreadable {
+                    round,
+                    part,
+                    error: format!("返答を読めません: {why}"),
+                    digest: review::capture::digest_bytes(why.as_bytes()),
+                    at: now,
+                },
+            };
+            self.feed(input)?;
         }
         Ok(())
     }
@@ -1210,14 +1296,66 @@ fn open_log(
     Ok((engine, store))
 }
 
-fn unique_session_id(root: &Path, now: Millis) -> SessionId {
-    let mut candidate = SessionId::at(now);
-    let mut suffix = 1u32;
-    while store::session_dir(root, &candidate).exists() {
-        candidate = SessionId::new(format!("rev-{now}-{suffix}"));
-        suffix += 1;
+/// Where a brief too long to paste is written: `r<N>/brief-<part>.md`.
+fn brief_file(reply_dir: &Path, round: RoundNo, part: &PartId) -> PathBuf {
+    store::round_dir(reply_dir, round).join(format!("brief-{part}.md"))
+}
+
+/// What is pasted in place of a brief written to `path`.
+fn brief_pointer(path: &Path) -> String {
+    format!(
+        "This round's brief is too long to paste, so it is in a file. Read all of {} \
+         now and follow it exactly as your brief for this round: it says what to \
+         review and where to write your reply.",
+        path.display()
+    )
+}
+
+/// How many ids of one millisecond a start tries before it gives up.
+const ID_TRIES: u32 = 1000;
+
+/// A new review's id with its directories reserved: the store directory
+/// and (with a workdir) the reply dir, each created exclusively. An id
+/// taken in either place (another window, another data dir) moves on to
+/// the next suffix, so what a refused start removes is only its own.
+/// Returns the id, the store directory and the reply dir.
+fn reserve(
+    root: &Path,
+    workdir: Option<&Path>,
+    now: Millis,
+) -> Result<(SessionId, PathBuf, PathBuf), String> {
+    fs::create_dir_all(root).map_err(|e| format!("{} を作れません: {e}", root.display()))?;
+    if let Some(workdir) = workdir {
+        store::prepare_workdir(workdir)
+            .map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
     }
-    candidate
+    for suffix in 0..ID_TRIES {
+        let id = match suffix {
+            0 => SessionId::at(now),
+            n => SessionId::new(format!("rev-{now}-{n}")),
+        };
+        let dir = store::session_dir(root, &id);
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{} を作れません: {e}", dir.display())),
+        }
+        let Some(workdir) = workdir else {
+            return Ok((id, dir.clone(), dir));
+        };
+        // `.noa/reviews` was checked free of links by `prepare_workdir`.
+        let reply = store::workdir_reply_dir(workdir, &id);
+        match fs::create_dir(&reply) {
+            Ok(()) => return Ok((id, dir, reply)),
+            Err(e) => {
+                let _ = fs::remove_dir(&dir);
+                if e.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(format!("{} を作れません: {e}", reply.display()));
+                }
+            }
+        }
+    }
+    Err("新しいレビューの ID を確保できません".to_owned())
 }
 
 /// The directory the agents of a new review run in: the repository's top
@@ -1279,14 +1417,9 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
     {
         return Err(format!("{} はフォルダではありません", dir.display()));
     }
-    let id = unique_session_id(root, now);
-    let dir = store::session_dir(root, &id);
-    let reply_dir = match &workdir {
-        Some(workdir) => store::workdir_reply_dir(workdir, &id),
-        None => dir.clone(),
-    };
-    // The review's directories are new (`unique_session_id`): a refusal
-    // removes them whole.
+    let (id, dir, reply_dir) = reserve(root, workdir.as_deref(), now)?;
+    // This call made both directories (`reserve`): a refusal removes them
+    // whole, and nothing else.
     let undo = || {
         let _ = fs::remove_dir_all(&reply_dir);
         let _ = fs::remove_dir_all(&dir);
@@ -1298,12 +1431,6 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
             return Err(why);
         }
     };
-    if let Some(workdir) = &workdir
-        && let Err(e) = store::prepare_workdir(workdir)
-    {
-        undo();
-        return Err(format!("prepare {}: {e}", workdir.display()));
-    }
     let setup = Setup {
         request: &request,
         target,
@@ -1355,6 +1482,11 @@ mod tests {
         tabs: Vec<Vec<Vec<u64>>>,
         /// Panes that are gone by the time they are asked for a paste.
         gone_on_paste: bool,
+        /// Panes back at their shell: Noa refuses every write
+        /// (`refuseShell`) and writes nothing.
+        shell: BTreeSet<u64>,
+        /// The agent exits right after the next paste into this pane.
+        exits_after_paste: Option<u64>,
         rpc_panes: usize,
         rpc_changes: usize,
         rpc_paste_ready: usize,
@@ -1505,7 +1637,15 @@ mod tests {
         }
 
         fn type_text(&mut self, pane: u64, text: &str, _paste: bool) -> Result<(), NoaError> {
-            self.0.borrow_mut().typed.push((pane, text.to_owned()));
+            let mut w = self.0.borrow_mut();
+            if w.shell.contains(&pane) {
+                return Err(NoaError::NotReady);
+            }
+            w.typed.push((pane, text.to_owned()));
+            if text != "\r" && w.exits_after_paste == Some(pane) {
+                w.exits_after_paste = None;
+                w.shell.insert(pane);
+            }
             Ok(())
         }
 
@@ -2327,6 +2467,259 @@ mod tests {
         assert!(s.hold);
         assert_eq!(s.max_rounds, 5);
         assert_eq!(s.messages.last().unwrap().body, "認可も見て");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ac19_an_id_taken_anywhere_moves_on_and_a_refused_start_removes_only_its_own() {
+        let root = temp_root();
+        let work = root.join("work");
+        // Another review holds rev-5 in the store, another data dir holds
+        // rev-5-1 in this workdir.
+        fs::create_dir_all(root.join("store/rev-5")).unwrap();
+        fs::write(root.join("store/rev-5/events.jsonl"), "theirs").unwrap();
+        fs::create_dir_all(work.join(".noa/reviews/rev-5-1")).unwrap();
+        fs::write(work.join(".noa/reviews/rev-5-1/x"), "theirs").unwrap();
+        let (id, dir, reply) = reserve(&root.join("store"), Some(&work), 5).unwrap();
+        assert_eq!(id.as_str(), "rev-5-2");
+        assert_eq!((dir.is_dir(), reply.is_dir()), (true, true));
+        assert!(
+            !root.join("store/rev-5-1").exists(),
+            "a half-reserved id stayed"
+        );
+
+        // A start refused after the reservation (nothing to review) takes
+        // away its own directories and leaves the others alone.
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        let new = NewReview {
+            request: "r".into(),
+            target: Target {
+                kind: TargetKind::Files,
+                path: Some(empty.clone()),
+                base: None,
+                head: Head::Worktree,
+                paths: Vec::new(),
+                text: None,
+                workdir: None,
+            },
+            max_rounds: 1,
+            lead: AgentKind::Claude.into(),
+            panel: vec![
+                reviewer(AgentKind::Claude.into()),
+                reviewer(AgentKind::Codex.into()),
+            ],
+            root: root.join("store"),
+        };
+        assert!(new_review(new, CONFIG, 5).is_err());
+        let mut left: Vec<String> = fs::read_dir(root.join("store"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["rev-5", "rev-5-2"]);
+        assert_eq!(
+            fs::read_to_string(root.join("store/rev-5/events.jsonl")).unwrap(),
+            "theirs"
+        );
+        assert_eq!(
+            fs::read_to_string(work.join(".noa/reviews/rev-5-1/x")).unwrap(),
+            "theirs"
+        );
+        assert!(!empty.join(".noa/reviews").read_dir().unwrap().any(|_| true));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ac20_a_round_folder_or_snapshot_swapped_for_a_link_is_never_read_through() {
+        use std::os::unix::fs::symlink;
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_first_briefs(&fake, &root);
+        // The round folder now leads elsewhere, where a valid reply waits.
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("codex.json"), BLIND).unwrap();
+        fs::remove_dir_all(store::round_dir(&dir, 1)).unwrap();
+        symlink(&elsewhere, store::round_dir(&dir, 1)).unwrap();
+        let (mut runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir: dir.clone() });
+        let mut conn = fake.clone();
+        for _ in 0..2 {
+            step(&mut runner, &mut conn);
+            fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+        }
+        step(&mut runner, &mut conn);
+        let codex = runner
+            .engine
+            .session()
+            .round(1)
+            .unwrap()
+            .brief(&PartId::new("codex"))
+            .unwrap()
+            .clone();
+        assert!(
+            codex.receipt.replied.is_none(),
+            "a reply behind a link was taken in"
+        );
+        assert!(
+            codex
+                .receipt
+                .rejected
+                .as_deref()
+                .is_some_and(|r| r.contains("読めません")),
+            "{:?}",
+            codex.receipt
+        );
+        assert_eq!(
+            fs::read_to_string(elsewhere.join("codex.json")).unwrap(),
+            BLIND
+        );
+        drop(runner);
+        wait_unlocked(&dir);
+
+        // The snapshot folder swapped for a link to a faithful copy: refused.
+        fs::remove_file(store::round_dir(&dir, 1)).unwrap();
+        let copy = root.join("copy");
+        fs::rename(store::target_dir(&dir), &copy).unwrap();
+        symlink(&copy, store::target_dir(&dir)).unwrap();
+        let err = open_wired(&fake, Start::Resume { dir }).err().unwrap();
+        assert!(err.contains("場所が変わっています"), "{err}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_reply_that_is_not_utf8_is_turned_down_and_counts_against_the_retries() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let pane = fake.pane_of(":claude");
+        fake.report(pane, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        let claude = PartId::new("claude");
+        let path = store::reply_path(&runner.engine.reply_dir(), 1, &claude);
+        let receipt = |runner: &Runner<Fake, Fake>| {
+            runner
+                .engine
+                .session()
+                .round(1)
+                .unwrap()
+                .brief(&claude)
+                .unwrap()
+                .receipt
+                .clone()
+        };
+        for n in 1..=CONFIG.max_retries + 1 {
+            fs::write(&path, b"{\"summary\": \"\xff\xfe\"}").unwrap();
+            step(&mut runner, &mut conn);
+            fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+            step(&mut runner, &mut conn);
+            let r = receipt(&runner);
+            if n <= CONFIG.max_retries {
+                assert_eq!(r.retries, n, "{r:?}");
+                assert!(
+                    r.rejected.as_deref().is_some_and(|e| e.contains("UTF-8")),
+                    "{r:?}"
+                );
+                assert!(!path.exists(), "the unreadable reply was not cleared");
+            } else {
+                assert!(r.failed.is_some(), "it never failed: {r:?}");
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nothing_is_typed_into_a_pane_back_at_its_shell_and_a_refused_enter_sends_again() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let pane = fake.pane_of(":claude");
+        let claude = PartId::new("claude");
+        let sent = |runner: &Runner<Fake, Fake>| {
+            runner
+                .engine
+                .session()
+                .round(1)
+                .unwrap()
+                .brief(&claude)
+                .unwrap()
+                .receipt
+                .sent
+        };
+        // The agent leaves right after the paste: its Enter is refused.
+        fake.0.borrow_mut().exits_after_paste = Some(pane);
+        fake.report(pane, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(pane), 1);
+        assert!(
+            sent(&runner).is_none(),
+            "a brief without its Enter counted as sent"
+        );
+        assert!(
+            !fake
+                .0
+                .borrow()
+                .typed
+                .iter()
+                .any(|(p, t)| *p == pane && t == "\r")
+        );
+        // While the pane is at its shell nothing reaches it.
+        for _ in 0..3 {
+            fake.report(pane, "input", None);
+            step(&mut runner, &mut conn);
+        }
+        assert_eq!(fake.pasted(pane), 1);
+        // The agent is back: the brief goes again, whole, with its Enter.
+        fake.0.borrow_mut().shell.clear();
+        fake.report(pane, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        assert_eq!(fake.pasted(pane), 2);
+        assert!(sent(&runner).is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_brief_too_long_for_a_control_frame_goes_through_a_file() {
+        let fake = fake();
+        let root = temp_root();
+        let mut runner = rig(&fake, &root);
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let claude = PartId::new("claude");
+        // Quotes and newlines double in JSON: the encoded size decides.
+        let body = "\"\n".repeat(BRIEF_PASTE_MAX / 3);
+        assert!(body.len() < BRIEF_PASTE_MAX);
+        let output = review::engine::Output {
+            batches: Vec::new(),
+            effects: vec![Effect::SendBrief {
+                round: 1,
+                part: claude.clone(),
+                body: body.clone(),
+            }],
+        };
+        assert!(runner.apply_output(output).is_ok());
+        let path = brief_file(&runner.engine.reply_dir(), 1, &claude);
+        assert_eq!(fs::read_to_string(&path).unwrap(), body);
+        let pane = fake.pane_of(":claude");
+        fake.report(pane, "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        let typed: Vec<String> = fake
+            .0
+            .borrow()
+            .typed
+            .iter()
+            .filter(|(p, t)| *p == pane && t != "\r")
+            .map(|(_, t)| t.clone())
+            .collect();
+        assert_eq!(typed, [brief_pointer(&path)]);
         let _ = fs::remove_dir_all(root);
     }
 }

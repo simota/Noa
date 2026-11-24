@@ -14,8 +14,9 @@ use noa_ipc::{
 /// crates/noa-app/src/ctl.rs).
 const RPC_UNKNOWN_PANE: i64 = -32002;
 const RPC_PANE_CLOSED: i64 = -32004;
-/// A paste refused with `requirePasteMode`: the pane has not enabled
-/// bracketed paste yet, and nothing was written.
+/// A paste refused with `requirePasteMode` (the pane has not enabled
+/// bracketed paste yet) or `refuseShell` (the pane is back at its shell):
+/// nothing was written.
 const RPC_NOT_READY: i64 = -32010;
 const SCREEN_MAX_BYTES: usize = 8192;
 
@@ -106,6 +107,8 @@ pub trait Noa {
     /// Types `text` into `pane`: as one bracketed paste with `paste`
     /// (refused with [`NoaError::NotReady`] while the pane has not enabled
     /// it, when `text` holds a control character), else as raw bytes.
+    /// Refused with [`NoaError::NotReady`], nothing written, while the
+    /// pane's foreground process is a plain shell (the agent exited).
     fn type_text(&mut self, pane: u64, text: &str, paste: bool) -> Result<(), NoaError>;
     /// Brings `pane` (and its window and tab) to the front with keyboard
     /// focus (`noa.focusPane`).
@@ -150,12 +153,16 @@ impl Connect for IpcConnect {
             }
         };
         let url = control_url(&config.server_bind, config.server_port);
+        // An older Noa ignores `refuseShell` and would type into a shell.
+        if !server_version(&url, &token).is_some_and(|v| honours_refuse_shell(&v)) {
+            return Err(UNSAFE_SEND.to_owned());
+        }
         let scopes = ScopeSet::from_strings(["read", "control", "input"]);
         let mut client = match Client::connect(&url, &token, scopes) {
             Ok(client) => client,
             Err(ClientError::Rpc { .. }) => {
                 return Err(
-                    "討論にはエージェントの起動と入力が要ります（server-scopes = read,control,input）"
+                    "レビューにはエージェントの起動と入力が要ります（server-scopes = read,control,input）"
                         .into(),
                 );
             }
@@ -164,7 +171,7 @@ impl Connect for IpcConnect {
         let granted = client.granted_scopes();
         if !granted.contains(Scope::Control) || !granted.contains(Scope::Input) {
             return Err(
-                "討論にはエージェントの起動と入力が要ります（server-scopes = read,control,input）"
+                "レビューにはエージェントの起動と入力が要ります（server-scopes = read,control,input）"
                     .into(),
             );
         }
@@ -194,6 +201,62 @@ fn view(panel: &Panel) -> PaneView {
         agent_blocked: panel.agent.as_ref().and_then(|a| a.blocked.clone()),
         agent_detail: panel.agent.as_ref().and_then(|a| a.detail.clone()),
     }
+}
+
+/// Why the review sends nothing to a Noa not known to honour `refuseShell`.
+pub(crate) const UNSAFE_SEND: &str =
+    "この Noa はシェルに戻ったペインへの送信を防げません（Noa 0.9.12 以降が必要）";
+
+/// The first Noa whose `noa.sendText` honours `refuseShell`: an older one
+/// ignores the field (as `widgets/agent-dashboard` checks it).
+const REFUSE_SHELL_SINCE: (u64, u64, u64) = (0, 9, 12);
+
+/// Whether `version` (`noa.hello`'s `serverVersion`) is
+/// `REFUSE_SHELL_SINCE` or later. A version that does not parse is not.
+fn honours_refuse_shell(version: &str) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or("");
+    let parts: Vec<u64> = core.split('.').map_while(|n| n.parse().ok()).collect();
+    match parts[..] {
+        [major, minor, patch] => (major, minor, patch) >= REFUSE_SHELL_SINCE,
+        _ => false,
+    }
+}
+
+/// The server's version from a `noa.hello` of our own: `noa_ipc::Client`
+/// reads it but does not keep it. `None` when it cannot be read.
+fn server_version(url: &str, token: &str) -> Option<String> {
+    use tungstenite::stream::MaybeTlsStream;
+    let (mut socket, _) = tungstenite::connect(url).ok()?;
+    if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .ok()?;
+    }
+    let hello = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "noa.hello",
+        "params": {
+            "protocolVersion": noa_ipc::PROTOCOL_VERSION,
+            "token": token,
+            "scopes": ["read"],
+        },
+    });
+    socket
+        .send(tungstenite::Message::Text(hello.to_string()))
+        .ok()?;
+    let version = loop {
+        let tungstenite::Message::Text(text) = socket.read().ok()? else {
+            continue;
+        };
+        let reply: serde_json::Value = serde_json::from_str(&text).ok()?;
+        if reply["id"] == 1 {
+            break reply["result"]["serverVersion"].as_str().map(str::to_owned);
+        }
+    };
+    let _ = socket.close(None);
+    version
 }
 
 fn noa_error(err: ClientError) -> NoaError {
@@ -284,7 +347,9 @@ impl Noa for IpcNoa {
         let options = SendTextOptions {
             paste,
             require_paste_mode: paste && text.chars().any(char::is_control),
-            refuse_shell: false,
+            // A brief (or its Enter) typed into a shell would run as a
+            // command line: Noa probes the foreground process and refuses.
+            refuse_shell: true,
         };
         self.client
             .send_text_with(pane, text, options)
@@ -317,6 +382,20 @@ fn spawn_params(placement: Placement, spec: &PaneSpec) -> SpawnParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_noa_that_refuses_shell_sends_is_written_to() {
+        for (version, ok) in [
+            ("0.9.12", true),
+            ("0.9.14", true),
+            ("1.0.0-rc.1", true),
+            ("0.9.11", false),
+            ("0.9", false),
+            ("t", false),
+        ] {
+            assert_eq!(honours_refuse_shell(version), ok, "{version}");
+        }
+    }
 
     #[test]
     fn only_the_review_tab_turns_auto_approve_on() {

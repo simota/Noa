@@ -16,6 +16,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
+use crate::fsx;
 use crate::model::reduce::{self, Event, ReduceError};
 use crate::model::types::{Decision, Millis, PartId, RoundNo, Session, SessionId, TargetKind};
 
@@ -60,6 +61,19 @@ pub fn reply_dir(dir: &Path, session: &Session) -> PathBuf {
     }
 }
 
+/// The directory every path below `session`'s reply dir is checked
+/// against: its workdir (the person's choice) or its store directory.
+/// Nothing between it and a reply or snapshot file may be a link.
+pub fn reply_base(dir: &Path, session: &Session) -> PathBuf {
+    match &session.workdir {
+        Some(workdir) => workdir.clone(),
+        None => dir.to_owned(),
+    }
+}
+
+/// The largest reply file read; a bigger one is turned down unread.
+pub const MAX_REPLY_BYTES: u64 = 4 * 1024 * 1024;
+
 /// The snapshot directory under a reply dir.
 pub fn target_dir(reply_dir: &Path) -> PathBuf {
     reply_dir.join(TARGET_DIR)
@@ -67,9 +81,11 @@ pub fn target_dir(reply_dir: &Path) -> PathBuf {
 
 /// Makes `<workdir>/.noa/` with a `.gitignore` holding `*`, so review
 /// snapshots and replies never show in `git status`.
+/// A `.noa` (or anything below it) that is a link is refused.
 pub fn prepare_workdir(workdir: &Path) -> io::Result<()> {
     let dir = workdir.join(".noa");
-    fs::create_dir_all(&dir)?;
+    fsx::create_dirs(workdir, &dir.join("reviews"))?;
+    // `create_new` does not follow a link left at the name.
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -95,36 +111,51 @@ pub fn report_path(dir: &Path) -> PathBuf {
     dir.join(REPORT_FILE)
 }
 
-/// Writes the report through a temporary file, so a reader never sees half
-/// of it.
+/// Writes the report whole, through a temporary file created exclusively
+/// beside it, so a reader never sees half of it and a link left in the
+/// directory is never written through.
 pub fn write_report(dir: &Path, text: &str) -> io::Result<PathBuf> {
     let path = report_path(dir);
-    let tmp = dir.join(format!(".{REPORT_FILE}.tmp"));
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, &path)?;
+    fsx::write_replace(dir, &path, text.as_bytes())?;
     Ok(path)
 }
 
-pub fn prepare_reply(path: &Path) -> io::Result<()> {
+/// Makes the folder a reply goes to, below `base` ([`reply_base`]).
+pub fn prepare_reply(base: &Path, path: &Path) -> io::Result<()> {
     match path.parent() {
-        Some(parent) => fs::create_dir_all(parent),
+        Some(parent) => fsx::create_dirs(base, parent),
         None => Ok(()),
     }
 }
 
-pub fn clear_reply(path: &Path) -> io::Result<()> {
+/// Removes a reply file; a link on the way to it is refused.
+pub fn clear_reply(base: &Path, path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fsx::check_no_links(base, parent)?;
+    }
     match fs::remove_file(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         other => other,
     }
 }
 
-pub fn read_reply(path: &Path) -> io::Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+/// A reply file's bytes, or `None` while it is not there. A link on the
+/// way, a file that is not a plain file and one over [`MAX_REPLY_BYTES`]
+/// are errors.
+pub fn read_reply(base: &Path, path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let file = match fsx::open_read(base, path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let (bytes, over) = fsx::read_capped(file, MAX_REPLY_BYTES)?;
+    if over {
+        return Err(io::Error::other(format!(
+            "返答が大きすぎます（{} MiB 超）",
+            MAX_REPLY_BYTES / (1024 * 1024)
+        )));
     }
+    Ok(Some(bytes))
 }
 
 #[derive(Debug)]
@@ -516,5 +547,63 @@ mod tests {
         let leftovers: Vec<_> = fs::read_dir(&root).unwrap().collect();
         assert_eq!(leftovers.len(), 1);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_link_left_where_the_report_or_its_temporary_file_go_is_not_written_through() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root("report-link");
+        let victim = temp_root("report-victim");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("v"), "keep").unwrap();
+        symlink(victim.join("v"), root.join(format!(".{REPORT_FILE}.tmp"))).unwrap();
+        write_report(&root, "report").unwrap();
+        assert_eq!(fs::read_to_string(victim.join("v")).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(report_path(&root)).unwrap(), "report");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(victim);
+    }
+
+    #[test]
+    fn replies_are_read_cleared_and_prepared_only_below_their_base_without_links() {
+        use std::os::unix::fs::symlink;
+        let base = temp_root("reply-base");
+        let elsewhere = temp_root("reply-elsewhere");
+        fs::create_dir_all(base.join(".noa/reviews/rev-1")).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        let dir = base.join(".noa/reviews/rev-1");
+        // A round folder swapped for a link to somewhere else.
+        fs::write(elsewhere.join("a.json"), "{}").unwrap();
+        symlink(&elsewhere, dir.join("r1")).unwrap();
+        let path = dir.join("r1/a.json");
+        assert!(fsx::is_link_error(&read_reply(&base, &path).unwrap_err()));
+        assert!(clear_reply(&base, &path).is_err());
+        assert!(
+            elsewhere.join("a.json").exists(),
+            "a reply elsewhere was removed"
+        );
+        assert!(prepare_reply(&base, &dir.join("r1/sub/b.json")).is_err());
+        assert!(!elsewhere.join("sub").exists());
+        // `.noa` itself a link: the workdir is not prepared through it.
+        let work = temp_root("reply-work");
+        fs::create_dir_all(&work).unwrap();
+        symlink(&elsewhere, work.join(".noa")).unwrap();
+        assert!(prepare_workdir(&work).is_err());
+        assert!(!elsewhere.join(".gitignore").exists());
+        // A plain reply reads back; an oversized one is an error.
+        fs::create_dir_all(dir.join("r2")).unwrap();
+        fs::write(dir.join("r2/a.json"), "{}").unwrap();
+        assert_eq!(
+            read_reply(&base, &dir.join("r2/a.json")).unwrap().unwrap(),
+            b"{}"
+        );
+        assert_eq!(read_reply(&base, &dir.join("r2/none.json")).unwrap(), None);
+        let big = File::create(dir.join("r2/big.json")).unwrap();
+        big.set_len(MAX_REPLY_BYTES + 1).unwrap();
+        assert!(read_reply(&base, &dir.join("r2/big.json")).is_err());
+        for d in [base, elsewhere, work] {
+            let _ = fs::remove_dir_all(d);
+        }
     }
 }

@@ -88,6 +88,16 @@ pub enum Input {
         content: String,
         at: Millis,
     },
+    /// A watched reply file stayed unreadable (not UTF-8, too large, not a
+    /// plain file, or behind a link): it is turned down like an invalid
+    /// reply. `digest` identifies what was read.
+    ReplyUnreadable {
+        round: RoundNo,
+        part: PartId,
+        error: String,
+        digest: u64,
+        at: Millis,
+    },
     /// The user sends an instruction; `to` empty means everyone.
     UserIntervention {
         to: Vec<PartId>,
@@ -353,7 +363,10 @@ pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
             ));
         }
     }
-    crate::capture::verify(&store::target_dir(&reply_dir), &session.manifest)
+    let target = store::target_dir(&reply_dir);
+    crate::fsx::check_no_links(&store::reply_base(dir, session), &target)
+        .map_err(|e| format!("スナップショットの場所が変わっています: {e}"))?;
+    crate::capture::verify(&target, &session.manifest)
 }
 
 #[derive(Debug, Clone)]
@@ -438,6 +451,12 @@ impl Engine {
         store::reply_dir(&self.dir, &self.session)
     }
 
+    /// What every reply and snapshot path is checked against
+    /// ([`store::reply_base`]).
+    pub fn reply_base(&self) -> PathBuf {
+        store::reply_base(&self.dir, &self.session)
+    }
+
     pub fn session(&self) -> &Session {
         &self.session
     }
@@ -519,6 +538,19 @@ impl Engine {
                 at,
             } => {
                 self.reply(&mut out, round, &part, &content, at)?;
+                self.advance(&mut out)?;
+            }
+            Input::ReplyUnreadable {
+                round,
+                part,
+                error,
+                digest,
+                at,
+            } => {
+                if let Some(brief) = self.open_brief(round, &part).cloned() {
+                    self.mark_started(&mut out, round, &part, &brief, at)?;
+                    self.reject_reply(&mut out, round, &brief, digest, error)?;
+                }
                 self.advance(&mut out)?;
             }
             Input::UserIntervention { to, body, at } => {
@@ -914,18 +946,8 @@ impl Engine {
         let Some(brief) = self.open_brief(round, part).cloned() else {
             return Ok(());
         };
-        // A reply file written before Running was observed still proves the
-        // agent started.
-        if brief.receipt.started.is_none() {
-            self.commit(
-                out,
-                vec![Event::BriefStarted {
-                    round,
-                    to: part.clone(),
-                    at,
-                }],
-            )?;
-        }
+        self.mark_started(out, round, part, &brief, at)?;
+        let digest = store::digest(content);
         if self.is_lead(part) {
             match validate::parse_lead(content, &self.session, round) {
                 Ok(output) => {
@@ -962,7 +984,7 @@ impl Engine {
                         self.next_round(out, at)?;
                     }
                 }
-                Err(error) => self.reject_reply(out, round, &brief, content, error.to_string())?,
+                Err(error) => self.reject_reply(out, round, &brief, digest, error.to_string())?,
             }
         } else {
             match validate::parse_review(content, &self.session, part, round) {
@@ -987,8 +1009,31 @@ impl Engine {
                         ],
                     )?;
                 }
-                Err(error) => self.reject_reply(out, round, &brief, content, error.to_string())?,
+                Err(error) => self.reject_reply(out, round, &brief, digest, error.to_string())?,
             }
+        }
+        Ok(())
+    }
+
+    /// A reply file written before Running was observed still proves the
+    /// agent started.
+    fn mark_started(
+        &mut self,
+        out: &mut Output,
+        round: RoundNo,
+        part: &PartId,
+        brief: &Brief,
+        at: Millis,
+    ) -> Result<(), EngineError> {
+        if brief.receipt.started.is_none() {
+            self.commit(
+                out,
+                vec![Event::BriefStarted {
+                    round,
+                    to: part.clone(),
+                    at,
+                }],
+            )?;
         }
         Ok(())
     }
@@ -998,7 +1043,7 @@ impl Engine {
         out: &mut Output,
         round: RoundNo,
         brief: &Brief,
-        content: &str,
+        digest: u64,
         error: String,
     ) -> Result<(), EngineError> {
         out.effects.push(Effect::ClearReply {
@@ -1011,7 +1056,7 @@ impl Engine {
                     round,
                     to: brief.to.clone(),
                     error,
-                    digest: Some(store::digest(content)),
+                    digest: Some(digest),
                 }],
             )?;
             if let Some(updated) = self.open_brief(round, &brief.to).cloned() {

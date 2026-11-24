@@ -1,0 +1,1080 @@
+===== criteria brief to judge =====
+## 1. Verification request
+You are: the judge of a multi-agent verification. First you write the acceptance criteria the change is verified against; verifiers then run checks in their own copies, and you rule on every criterion from the evidence they record. You run nothing yourself.
+What the person asked for:
+Verify that new tabs inherit the cwd; it must stay "fast" & <safe>.
+
+## 2. Target
+Kind: git diff (a change: base … head)
+Label: feat/cwd … main（3 ファイル）
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/cwd (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (read-only): /golden/repo/.noa/verify/ver-golden/target
+- /golden/repo/.noa/verify/ver-golden/target/diff.patch: the diff from the merge base
+- /golden/repo/.noa/verify/ver-golden/target/spec.md: the spec the criteria come from
+Changed files (3):
+- M src/tab.rs (120 lines, +13 -3)
+- R src/cwd.rs (60 lines, +8 -3) from src/dir.rs
+- A docs/specs/cwd.md (12 lines, +12 -3)
+Left out of the snapshot:
+- assets/tab.png: バイナリ（テキストではない）
+Workspace (read-only context): /golden/repo
+
+## 3. Spec
+docs/specs/cwd.md (12 lines), copied to /golden/repo/.noa/verify/ver-golden/target/spec.md. It is the main source of criteria: cite a criterion taken from it as source "spec:<line>".
+
+## 4. Criteria the person gave
+Each line below must appear as exactly one criterion with source "user" and this wording kept as its statement (you may add how):
+- New tabs open in the focused pane's cwd
+
+## 5. How to write criteria
+- Each criterion is one checkable behaviour, stated so that a run can pass or fail it.
+- "how" is concrete enough to run: the command, the steps in the app, the input and what to look for.
+- must: the change does not work without it; should: expected, but not blocking on its own.
+- source: user (a line of section 4), spec:<line> (a line of the spec), request (the request text), inferred (what the change implies).
+- Cover what the change claims; do not add wishes it never claimed.
+
+## 6. Your output
+Write ONLY this JSON to the file:
+/golden/repo/.noa/verify/ver-golden/c/criteria.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "What the change claims and how the criteria cover it.",
+  "criteria": [
+    {"id": "AC-1", "statement": "Opening a tab inherits the focused pane's cwd.",
+     "how": "Run the app, cd /tmp in a pane, open a tab, check pwd.",
+     "priority": "must", "source": "user"}
+  ] }
+
+Rules:
+- 1 to 30 criteria; ids AC-1, AC-2, … from 1 without gaps
+- statement: one line, at most 300 characters; how: not empty
+- priority: must or should; source: user, request, inferred or spec:<line>
+- every line of section 4 appears once, with source user and its exact wording
+===== criteria correction to judge =====
+Your criteria JSON could not be used:
+- the person's criteria missing (each once, source user, their wording kept): "New tabs open in the focused pane's cwd"
+
+Fix it and write the whole file again at:
+/golden/repo/.noa/verify/ver-golden/c/criteria.json
+===== R1 brief to claude =====
+## 1. Request and round
+You are: verifier claude
+Round: 1 of 2 — INDEPENDENT verification (you see no other verifier's work)
+Rounds left after this one: 1
+What the person asked for:
+Verify that new tabs inherit the cwd; it must stay "fast" & <safe>.
+
+## 2. Target and your worktree
+Kind: git diff (a change: base … head)
+Label: feat/cwd … main（3 ファイル）
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/cwd (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (read-only): /golden/repo/.noa/verify/ver-golden/target
+- /golden/repo/.noa/verify/ver-golden/target/diff.patch: the diff from the merge base
+- /golden/repo/.noa/verify/ver-golden/target/spec.md: the spec the criteria come from
+Changed files (3):
+- M src/tab.rs (120 lines, +13 -3)
+- R src/cwd.rs (60 lines, +8 -3) from src/dir.rs
+- A docs/specs/cwd.md (12 lines, +12 -3)
+Left out of the snapshot:
+- assets/tab.png: バイナリ（テキストではない）
+Your worktree: /golden/repo-wt/verify-ver-golden-claude
+It is a detached git worktree of your own, built from bbbbbbbbbbbb. Run everything here. You may edit any file inside it (throwaway tests, debug prints); edit nothing anywhere else. It has its own build cache (target/ or the language's equivalent): the first build starts cold.
+Your reply dir: /golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden (everything you save goes under its r<N>/<you>/ folder).
+
+## 3. Criteria
+- AC-1 [must] (user) New tabs open in the focused pane's cwd
+  How: cd /tmp in a pane, open a tab with Cmd-T, run pwd
+- AC-2 [must] (spec:4) A cwd that no longer exists falls back to $HOME
+  How: cd into a temp dir, remove it, open a tab
+- AC-3 [should] (inferred) Opening a tab stays under 50 ms
+  How: hyperfine 'app --open-tab' (20 runs)
+- AC-5 [should] (user) Quitting keeps every tab's cwd for the next launch
+  How: Cmd-Q, relaunch, check each tab
+
+## 4. Your strategy
+Verify this way first and most thoroughly:
+conformance (仕様適合): Exercise each criterion's `how` as written. Record every command you run and save its output. Stop at the first deviation from what the criterion states and record it as the result, with the evidence that shows it.
+Whatever your strategy, report a result for every criterion you are asked about.
+
+## 5. Evidence
+Save every file you cite under /golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r1/claude and cite it by its path relative to that folder:
+- Command output under logs/, stdout and stderr together: `cmd > logs/3.log 2>&1; echo $?`. Report the exit status you saw.
+- Screenshots under shots/ and screen recordings under video/, made with the platform's own capture tools (on macOS: `screencapture -x shots/1.png`, `screencapture -v video/1.mov`). Every picture or recording needs a caption saying what it shows; a recording may list marks (moments to look at).
+- When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
+- An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
+- rerun/ is the widget's: save nothing there and cite nothing from it.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
+
+## 6. Rules
+- INDEPENDENT ROUND: verify on your own. You will see the other verifiers' results next round.
+- Run things: a result rests on what you executed and saved, not on reading the code.
+- Do not contact or type into other panes, and do not open other verifiers' worktrees or replies.
+- Do not push, publish, open pull requests or change anything outside your worktree.
+- Mark anything you could not verify as not_tested or blocked with the reason; never guess a pass.
+- Write the reply in the language of the person's request (English when there is none); keep ids, field names and enum values as given.
+
+## 7. User interventions
+(none)
+
+## 8. How to reply
+Write ONLY this JSON to the file:
+/golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r1/claude/reply.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "What I ran and what I found.",
+  "environment": "macOS 26.1, rustc 1.92, debug build",
+  "results": [{"criterion": "AC-1", "result": "fail", "note": "New tab opens in $HOME after `cd /tmp`.", "evidence": ["e1", "e2", "e3"]}],
+  "evidence": [
+    {"id": "e1", "kind": "command", "cmd": "cargo test -p app cwd_inherit", "cwd": ".", "exit": 101, "log": "logs/1.log", "rerun": true},
+    {"id": "e2", "kind": "file", "path": "shots/tab.png", "caption": "pwd in the new tab"},
+    {"id": "e3", "kind": "file", "path": "video/new-tab.mov", "caption": "cd /tmp, new tab, pwd",
+     "marks": [{"t": "00:04", "note": "new tab opened"}, {"t": "00:06.5", "note": "it shows $HOME"}]},
+    {"id": "e4", "kind": "observation", "text": "The tab bar flickers once."}],
+  "defects": [{"id": "1", "claim": "one line", "severity": "high", "category": "falsify", "confidence": "high",
+                "location": {"path": "src/a.rs", "line": 40}, "repro": "1. … 2. …", "evidence": ["e4"]}] }
+
+Rules:
+- results: exactly one per criterion of section 3
+- result: pass (needs at least one command or file evidence), fail (needs evidence and a note), blocked or not_tested (need a note saying why)
+- evidence ids: 1-16 letters, digits, '-' or '_', unique in the reply; every id cited exists and every item is cited at least once
+- command: cmd 1-2000 characters (several lines allowed), cwd relative to your worktree without "..", exit an integer, log the saved output; rerun true or false
+- paths (log, file): relative to your r<N>/<you>/ folder, no "..", no leading "/", not under rerun/; a regular file, not a link
+- file: an image (PNG, JPEG, GIF, WebP) or video (MP4, MOV, WebM) must have an extension matching its content and a caption of 1-300 characters; marks only on a video, at most 20, t as mm:ss[.f] or hh:mm:ss[.f] in time order; shows (optional) lists the criteria a picture shows
+- defects (optional, at most 20): problems no criterion covers; each id new, claim one line at most 300 characters, severity critical/high/medium/low/info, confidence high/medium/low, repro required, evidence at least one id; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
+===== R1 brief to codex =====
+## 1. Request and round
+You are: verifier codex
+Round: 1 of 2 — INDEPENDENT verification (you see no other verifier's work)
+Rounds left after this one: 1
+What the person asked for:
+Verify that new tabs inherit the cwd; it must stay "fast" & <safe>.
+
+## 2. Target and your worktree
+Kind: git diff (a change: base … head)
+Label: feat/cwd … main（3 ファイル）
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/cwd (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (read-only): /golden/repo/.noa/verify/ver-golden/target
+- /golden/repo/.noa/verify/ver-golden/target/diff.patch: the diff from the merge base
+- /golden/repo/.noa/verify/ver-golden/target/spec.md: the spec the criteria come from
+Changed files (3):
+- M src/tab.rs (120 lines, +13 -3)
+- R src/cwd.rs (60 lines, +8 -3) from src/dir.rs
+- A docs/specs/cwd.md (12 lines, +12 -3)
+Left out of the snapshot:
+- assets/tab.png: バイナリ（テキストではない）
+Your worktree: /golden/repo-wt/verify-ver-golden-codex
+It is a detached git worktree of your own, built from bbbbbbbbbbbb. Run everything here. You may edit any file inside it (throwaway tests, debug prints); edit nothing anywhere else. It has its own build cache (target/ or the language's equivalent): the first build starts cold.
+Your reply dir: /golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden (everything you save goes under its r<N>/<you>/ folder).
+
+## 3. Criteria
+- AC-1 [must] (user) New tabs open in the focused pane's cwd
+  How: cd /tmp in a pane, open a tab with Cmd-T, run pwd
+- AC-2 [must] (spec:4) A cwd that no longer exists falls back to $HOME
+  How: cd into a temp dir, remove it, open a tab
+- AC-3 [should] (inferred) Opening a tab stays under 50 ms
+  How: hyperfine 'app --open-tab' (20 runs)
+- AC-5 [should] (user) Quitting keeps every tab's cwd for the next launch
+  How: Cmd-Q, relaunch, check each tab
+
+## 4. Your strategy
+Verify this way first and most thoroughly:
+falsify (反証): Try to make each criterion fail: boundaries, invalid input, empty and huge data, concurrency, interrupted runs. Write throwaway tests in your worktree. A criterion you could not break is a pass only with your attempts as evidence.
+Whatever your strategy, report a result for every criterion you are asked about.
+
+## 5. Evidence
+Save every file you cite under /golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex and cite it by its path relative to that folder:
+- Command output under logs/, stdout and stderr together: `cmd > logs/3.log 2>&1; echo $?`. Report the exit status you saw.
+- Screenshots under shots/ and screen recordings under video/, made with the platform's own capture tools (on macOS: `screencapture -x shots/1.png`, `screencapture -v video/1.mov`). Every picture or recording needs a caption saying what it shows; a recording may list marks (moments to look at).
+- When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
+- An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
+- rerun/ is the widget's: save nothing there and cite nothing from it.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
+
+## 6. Rules
+- INDEPENDENT ROUND: verify on your own. You will see the other verifiers' results next round.
+- Run things: a result rests on what you executed and saved, not on reading the code.
+- Do not contact or type into other panes, and do not open other verifiers' worktrees or replies.
+- Do not push, publish, open pull requests or change anything outside your worktree.
+- Mark anything you could not verify as not_tested or blocked with the reason; never guess a pass.
+- Write the reply in the language of the person's request (English when there is none); keep ids, field names and enum values as given.
+
+## 7. User interventions
+(none)
+
+## 8. How to reply
+Write ONLY this JSON to the file:
+/golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/reply.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "What I ran and what I found.",
+  "environment": "macOS 26.1, rustc 1.92, debug build",
+  "results": [{"criterion": "AC-1", "result": "fail", "note": "New tab opens in $HOME after `cd /tmp`.", "evidence": ["e1", "e2", "e3"]}],
+  "evidence": [
+    {"id": "e1", "kind": "command", "cmd": "cargo test -p app cwd_inherit", "cwd": ".", "exit": 101, "log": "logs/1.log", "rerun": true},
+    {"id": "e2", "kind": "file", "path": "shots/tab.png", "caption": "pwd in the new tab"},
+    {"id": "e3", "kind": "file", "path": "video/new-tab.mov", "caption": "cd /tmp, new tab, pwd",
+     "marks": [{"t": "00:04", "note": "new tab opened"}, {"t": "00:06.5", "note": "it shows $HOME"}]},
+    {"id": "e4", "kind": "observation", "text": "The tab bar flickers once."}],
+  "defects": [{"id": "1", "claim": "one line", "severity": "high", "category": "falsify", "confidence": "high",
+                "location": {"path": "src/a.rs", "line": 40}, "repro": "1. … 2. …", "evidence": ["e4"]}] }
+
+Rules:
+- results: exactly one per criterion of section 3
+- result: pass (needs at least one command or file evidence), fail (needs evidence and a note), blocked or not_tested (need a note saying why)
+- evidence ids: 1-16 letters, digits, '-' or '_', unique in the reply; every id cited exists and every item is cited at least once
+- command: cmd 1-2000 characters (several lines allowed), cwd relative to your worktree without "..", exit an integer, log the saved output; rerun true or false
+- paths (log, file): relative to your r<N>/<you>/ folder, no "..", no leading "/", not under rerun/; a regular file, not a link
+- file: an image (PNG, JPEG, GIF, WebP) or video (MP4, MOV, WebM) must have an extension matching its content and a caption of 1-300 characters; marks only on a video, at most 20, t as mm:ss[.f] or hh:mm:ss[.f] in time order; shows (optional) lists the criteria a picture shows
+- defects (optional, at most 20): problems no criterion covers; each id new, claim one line at most 300 characters, severity critical/high/medium/low/info, confidence high/medium/low, repro required, evidence at least one id; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
+===== R1 brief to agy =====
+## 1. Request and round
+You are: verifier agy
+Round: 1 of 2 — INDEPENDENT verification (you see no other verifier's work)
+Rounds left after this one: 1
+What the person asked for:
+Verify that new tabs inherit the cwd; it must stay "fast" & <safe>.
+
+## 2. Target and your worktree
+Kind: git diff (a change: base … head)
+Label: feat/cwd … main（3 ファイル）
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/cwd (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (read-only): /golden/repo/.noa/verify/ver-golden/target
+- /golden/repo/.noa/verify/ver-golden/target/diff.patch: the diff from the merge base
+- /golden/repo/.noa/verify/ver-golden/target/spec.md: the spec the criteria come from
+Changed files (3):
+- M src/tab.rs (120 lines, +13 -3)
+- R src/cwd.rs (60 lines, +8 -3) from src/dir.rs
+- A docs/specs/cwd.md (12 lines, +12 -3)
+Left out of the snapshot:
+- assets/tab.png: バイナリ（テキストではない）
+Your worktree: /golden/repo-wt/verify-ver-golden-agy
+It is a detached git worktree of your own, built from bbbbbbbbbbbb. Run everything here. You may edit any file inside it (throwaway tests, debug prints); edit nothing anywhere else. It has its own build cache (target/ or the language's equivalent): the first build starts cold.
+Your reply dir: /golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden (everything you save goes under its r<N>/<you>/ folder).
+
+## 3. Criteria
+- AC-1 [must] (user) New tabs open in the focused pane's cwd
+  How: cd /tmp in a pane, open a tab with Cmd-T, run pwd
+- AC-2 [must] (spec:4) A cwd that no longer exists falls back to $HOME
+  How: cd into a temp dir, remove it, open a tab
+- AC-3 [should] (inferred) Opening a tab stays under 50 ms
+  How: hyperfine 'app --open-tab' (20 runs)
+- AC-5 [should] (user) Quitting keeps every tab's cwd for the next launch
+  How: Cmd-Q, relaunch, check each tab
+
+## 4. Your strategy
+Verify this way first and most thoroughly:
+custom (custom): Odd locales & very long paths
+Whatever your strategy, report a result for every criterion you are asked about.
+
+## 5. Evidence
+Save every file you cite under /golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r1/agy and cite it by its path relative to that folder:
+- Command output under logs/, stdout and stderr together: `cmd > logs/3.log 2>&1; echo $?`. Report the exit status you saw.
+- Screenshots under shots/ and screen recordings under video/, made with the platform's own capture tools (on macOS: `screencapture -x shots/1.png`, `screencapture -v video/1.mov`). Every picture or recording needs a caption saying what it shows; a recording may list marks (moments to look at).
+- When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
+- An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
+- rerun/ is the widget's: save nothing there and cite nothing from it.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
+
+## 6. Rules
+- INDEPENDENT ROUND: verify on your own. You will see the other verifiers' results next round.
+- Run things: a result rests on what you executed and saved, not on reading the code.
+- Do not contact or type into other panes, and do not open other verifiers' worktrees or replies.
+- Do not push, publish, open pull requests or change anything outside your worktree.
+- Mark anything you could not verify as not_tested or blocked with the reason; never guess a pass.
+- Write the reply in the language of the person's request (English when there is none); keep ids, field names and enum values as given.
+
+## 7. User interventions
+(none)
+
+## 8. How to reply
+Write ONLY this JSON to the file:
+/golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r1/agy/reply.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "What I ran and what I found.",
+  "environment": "macOS 26.1, rustc 1.92, debug build",
+  "results": [{"criterion": "AC-1", "result": "fail", "note": "New tab opens in $HOME after `cd /tmp`.", "evidence": ["e1", "e2", "e3"]}],
+  "evidence": [
+    {"id": "e1", "kind": "command", "cmd": "cargo test -p app cwd_inherit", "cwd": ".", "exit": 101, "log": "logs/1.log", "rerun": true},
+    {"id": "e2", "kind": "file", "path": "shots/tab.png", "caption": "pwd in the new tab"},
+    {"id": "e3", "kind": "file", "path": "video/new-tab.mov", "caption": "cd /tmp, new tab, pwd",
+     "marks": [{"t": "00:04", "note": "new tab opened"}, {"t": "00:06.5", "note": "it shows $HOME"}]},
+    {"id": "e4", "kind": "observation", "text": "The tab bar flickers once."}],
+  "defects": [{"id": "1", "claim": "one line", "severity": "high", "category": "falsify", "confidence": "high",
+                "location": {"path": "src/a.rs", "line": 40}, "repro": "1. … 2. …", "evidence": ["e4"]}] }
+
+Rules:
+- results: exactly one per criterion of section 3
+- result: pass (needs at least one command or file evidence), fail (needs evidence and a note), blocked or not_tested (need a note saying why)
+- evidence ids: 1-16 letters, digits, '-' or '_', unique in the reply; every id cited exists and every item is cited at least once
+- command: cmd 1-2000 characters (several lines allowed), cwd relative to your worktree without "..", exit an integer, log the saved output; rerun true or false
+- paths (log, file): relative to your r<N>/<you>/ folder, no "..", no leading "/", not under rerun/; a regular file, not a link
+- file: an image (PNG, JPEG, GIF, WebP) or video (MP4, MOV, WebM) must have an extension matching its content and a caption of 1-300 characters; marks only on a video, at most 20, t as mm:ss[.f] or hh:mm:ss[.f] in time order; shows (optional) lists the criteria a picture shows
+- defects (optional, at most 20): problems no criterion covers; each id new, claim one line at most 300 characters, severity critical/high/medium/low/info, confidence high/medium/low, repro required, evidence at least one id; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
+===== R1 correction to claude =====
+Your reply JSON could not be used:
+- evidence[0] (e1).log "../e1.log" must be a plain relative path, without ".."
+- results: missing AC-2, AC-3, AC-5 (one result per criterion in round 1)
+
+Fix it and write the whole file again at:
+/golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r1/claude/reply.json
+===== R1 re-run brief to claude =====
+## Re-run
+Round 1: the widget runs the commands you marked rerun: true again, in this pane.
+Run exactly this with your shell tool, detached so your tool's own time limit does not cut it short, and do nothing else until the next brief:
+
+    nohup sh '/golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r1/claude/rerun/run.sh' >/dev/null 2>&1 &
+
+Do not edit any file under /golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r1/claude/rerun and do not touch your worktree. Reply nothing.
+===== R1 re-run brief to codex =====
+## Re-run
+Round 1: the widget runs the commands you marked rerun: true again, in this pane.
+Run exactly this with your shell tool, detached so your tool's own time limit does not cut it short, and do nothing else until the next brief:
+
+    nohup sh '/golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun/run.sh' >/dev/null 2>&1 &
+
+Do not edit any file under /golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun and do not touch your worktree. Reply nothing.
+===== R1 re-run brief to agy =====
+## Re-run
+Round 1: the widget runs the commands you marked rerun: true again, in this pane.
+Run exactly this with your shell tool, detached so your tool's own time limit does not cut it short, and do nothing else until the next brief:
+
+    nohup sh '/golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r1/agy/rerun/run.sh' >/dev/null 2>&1 &
+
+Do not edit any file under /golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r1/agy/rerun and do not touch your worktree. Reply nothing.
+===== R1 brief to judge =====
+## 1. Request and round
+You are: the judge (you rule from the recorded evidence; you run nothing yourself)
+Round: 1 of 2 — ruling on the independent round (each verifier worked alone)
+Rounds left after this one: 1
+What the person asked for:
+Verify that new tabs inherit the cwd; it must stay "fast" & <safe>.
+
+## 2. Criteria
+- AC-1 [must] (user) New tabs open in the focused pane's cwd
+  How: cd /tmp in a pane, open a tab with Cmd-T, run pwd
+- AC-2 [must] (spec:4) A cwd that no longer exists falls back to $HOME
+  How: cd into a temp dir, remove it, open a tab
+- AC-3 [should] (inferred) Opening a tab stays under 50 ms
+  How: hyperfine 'app --open-tab' (20 runs)
+- AC-5 [should] (user) Quitting keeps every tab's cwd for the next launch
+  How: Cmd-Q, relaunch, check each tab
+
+## 3. Panel and receipts
+Isolation: one detached worktree per verifier; re-runs in each verifier's own pane
+- claude (claude): replied
+  Strategy: conformance (仕様適合): Exercise each criterion's `how` as written. Record every command you run and save its output. Stop at the first deviation from what the criterion states and record it as the result, with the evidence that shows it.
+  Summary: Ran the cwd tests and checked a new tab by hand.
+  Environment: macOS 26.1, rustc 1.92, debug build
+- codex (codex): replied
+  Strategy: falsify (反証): Try to make each criterion fail: boundaries, invalid input, empty and huge data, concurrency, interrupted runs. Write throwaway tests in your worktree. A criterion you could not break is a pass only with your attempts as evidence.
+  Summary: Tried odd directories: a removed cwd breaks the new tab.
+  Environment: macOS 26.1 (sandboxed)
+- agy (agy): replied
+  Strategy: custom (custom): Odd locales & very long paths
+  Summary: Long paths and a Japanese locale.
+
+## 4. Results this round
+### AC-1 [must] New tabs open in the focused pane's cwd
+- claude: pass — pwd shows /tmp.
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
+  - claude/r1/e2: PNG image shots/new tab.png — "pwd in the new tab shows /tmp"
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/shots/new tab.png (1036 bytes, digest 56af731184d382ca)
+- codex: fail — With a symlinked cwd the tab opens in $HOME.
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
+    log tail:
+```
+running cargo test -p app cwd_symlink -- --exact
+test cwd_inherit ... FAILED
+exit 101
+```
+  - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
+- agy: pass
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
+### AC-2 [must] A cwd that no longer exists falls back to $HOME
+- claude: pass
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
+- codex: pass
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
+- agy: pass
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
+### AC-3 [should] Opening a tab stays under 50 ms
+- claude: pass — 31 ms median.
+  - claude/r1/e3: command of 3 lines (cwd bench) exit 0
+    ```
+    for i in $(seq 20); do
+      ./bench open-tab
+    done
+    ```
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
+- codex: blocked — No display in the sandbox.
+- agy: pass
+  - agy/r1/e2: command `./bench open-tab --long-path` (cwd bench) exit 0
+    stored: missing (gone before ingest)
+### AC-5 [should] Quitting keeps every tab's cwd for the next launch
+- claude: not_tested — Out of my strategy's reach this round.
+- codex: pass
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
+- agy: blocked — Quitting kills my pane.
+  - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
+
+Media the person attached (cite as user/<n>):
+  - user/1: PNG image Screenshot 2026-11-24.png — "pwd shows /tmp in the new tab"
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/user/1.png (1019 bytes, digest d08a6e548ee8ef4f)
+    shows: AC-1
+
+You may open images by their stored path when your CLI can read images. You cannot watch videos: a video's claim rests on its caption and marks. When a verified or failed ruling rests on video evidence alone (no command, image or other file among the stored evidence it cites), its rationale must name the caption and marks it relied on; an empty rationale there is refused.
+
+## 5. Cross-checks
+(none this round)
+
+## 6. Defects
+Raw defects this round (place each one):
+### codex/1 · high · falsify · medium · src/cwd.rs:4
+Claim: A symlinked cwd is resolved to its target's parent
+Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
+Evidence: codex/r1/e1
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
+
+Defects so far:
+(none)
+
+## 7. Evidence standard
+- Every criterion gets one ruling per round; "ruling": "same" carries the previous one over unchanged. Cited evidence keys exist.
+- Each rule reads the criterion's whole history: every result on it from every verifier and round, every cross-check on one of those results, every cross-check on a defect, and the evidence they cite.
+- A cross-check of round N on <verifier>/<criterion> is about that verifier's latest result on the criterion as of round N-1, the one its brief named; once the verifier has reported a later result, the later checks on that subject are about the later result.
+- Evidence is for a criterion when a result on it cites it, or a cross-check about a result on it, or it is media whose shows names it (media with shows is evidence only for the criteria it names). It counts when its file was stored (an observation has no file and counts as text); a command or file missing at ingest counts for nothing. Evidence cited for verified or failed must be evidence for that criterion.
+- A pass of any round counts when the ruling cites a command or file of it that counts, unless it is contested. A pass is contested once a not_reproduced cross-check about that very result cites evidence that counts, until a later pass on the criterion (of a round after that check, from any verifier, its own included) that is not itself contested; a contested pass is neither one of two sources nor the pass whose matched re-run is cited. A disputed check contests nothing. Each verifier is one source however many of its passes count; media the person attached (user/<n>) whose shows names the criterion is one more source, so it counts only together with a verifier's pass. A cross-check is no pass, whatever its outcome; only a not_reproduced that contests a pass takes one away.
+- A fail of any round is open until a not_reproduced cross-check about that very result cites evidence that counts. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.
+- verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each); a contested pass gives neither.
+- failed needs cited evidence that counts and that a fail result on the criterion cites, or a reproduced cross-check about a fail result on it, or a reproduced cross-check on a defect (also one merged since); a cross-check about a pass backs no failure.
+- inconclusive and not_applicable need a rationale.
+- Defect ops: every raw defect of this round goes into exactly one add or merge "from", or one dismiss.
+The widget enforces this standard: a ruling past it is turned down.
+
+## 8. This round
+User interventions:
+- [m1 R1 to codex] Try a cwd behind a symlink too.
+
+1 round(s) left after this one. In "assign", give each verifier the results (<verifier>/<criterion>, never its own) and defects (D<n>) to reproduce or refute next round; with none, every fail and every pass resting on a single verifier is assigned round-robin. Leave "verdict" out unless you close.
+"close" is allowed in round 1 only when every criterion is verified by two or more verifiers with re-runs that matched, its ruling citing each one's matched command.
+
+## 9. Your output
+Write ONLY this JSON to the file:
+/golden/repo/.noa/verify/ver-golden/r1/judge.json
+Write the whole file in one go when you are done. Do not answer in the terminal.
+
+{ "summary": "what this round showed and what is still open",
+  "rulings": [{"criterion": "AC-1", "ruling": "failed", "rationale": "…", "evidence": ["claude/r1/e1"]},
+               {"criterion": "AC-2", "ruling": "verified", "rationale": "…", "evidence": ["codex/r1/e2", "agy/r1/e1"]}],
+  "defect_ops": [{"op": "add", "id": "D1", "from": ["claude/1"], "claim": "one line", "repro": "1. … 2. …",
+                 "location": {"path": "src/a.rs", "line": 40}, "severity": "high", "category": "falsify",
+                 "confidence": "high", "status": "open", "rationale": "…", "fix": "…"},
+                {"op": "merge", "id": "D1", "from": ["codex/2"]},
+                {"op": "update", "id": "D2", "severity": "medium", "status": "agreed", "rationale": "…"},
+                {"op": "dismiss", "raw": "agy/5", "reason": "…"}],
+  "assign": {"codex": ["claude/AC-1"], "claude": ["D1"]},
+  "close": false }
+
+Rules:
+- rulings: one per criterion: verified, failed, inconclusive, not_applicable, or same (the previous one unchanged); evidence lists the keys it rests on
+- defect ops: every raw defect of section 6 in exactly one add or merge "from", or one dismiss with a reason; new ids are free (the next is D1); status open, agreed, disputed or rejected (rejected needs a rationale)
+- severity: critical, high, medium, low, info; confidence: high, medium, low; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
+- assign: verifier ids: claude, codex, agy; values <verifier>/<criterion> of another verifier, or a live defect id
+- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back
+- verdict: only in the last round or with "close": true
+===== R2 brief to claude =====
+## 1. Request and round
+You are: verifier claude
+Round: 2 of 2 — CROSS-CHECK (every result so far is shown; reproduce or refute what you are assigned)
+This is the FINAL round.
+What the person asked for:
+Verify that new tabs inherit the cwd; it must stay "fast" & <safe>.
+
+## 2. Target and your worktree
+Kind: git diff (a change: base … head)
+Label: feat/cwd … main（3 ファイル）
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/cwd (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (read-only): /golden/repo/.noa/verify/ver-golden/target
+- /golden/repo/.noa/verify/ver-golden/target/diff.patch: the diff from the merge base
+- /golden/repo/.noa/verify/ver-golden/target/spec.md: the spec the criteria come from
+Changed files (3):
+- M src/tab.rs (120 lines, +13 -3)
+- R src/cwd.rs (60 lines, +8 -3) from src/dir.rs
+- A docs/specs/cwd.md (12 lines, +12 -3)
+Left out of the snapshot:
+- assets/tab.png: バイナリ（テキストではない）
+Your worktree: /golden/repo-wt/verify-ver-golden-claude
+It is a detached git worktree of your own, built from bbbbbbbbbbbb. Run everything here. You may edit any file inside it (throwaway tests, debug prints); edit nothing anywhere else. It has its own build cache (target/ or the language's equivalent): the first build starts cold.
+Your reply dir: /golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden (everything you save goes under its r<N>/<you>/ folder).
+
+## 3. Criteria
+- AC-1 [must] (user) New tabs open in the focused pane's cwd
+  How: cd /tmp in a pane, open a tab with Cmd-T, run pwd
+- AC-2 [must] (spec:4) A cwd that no longer exists falls back to $HOME
+  How: cd into a temp dir, remove it, open a tab
+- AC-3 [should] (inferred) Opening a tab stays under 50 ms
+  How: hyperfine 'app --open-tab' (20 runs)
+- AC-5 [should] (user) Quitting keeps every tab's cwd for the next launch
+  How: Cmd-Q, relaunch, check each tab
+
+## 4. Your strategy
+Verify this way first and most thoroughly:
+conformance (仕様適合): Exercise each criterion's `how` as written. Record every command you run and save its output. Stop at the first deviation from what the criterion states and record it as the result, with the evidence that shows it.
+Whatever your strategy, report a result for every criterion you are asked about.
+
+## 5. Rulings and results so far
+The judge's summary of R1:
+AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; AC-5 is untested.
+
+### AC-1 — failed (R1): codex's symlink test fails and the recording shows $HOME.
+- claude R1: pass — pwd shows /tmp.
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
+  - claude/r1/e2: PNG image shots/new tab.png — "pwd in the new tab shows /tmp"
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/shots/new tab.png (1036 bytes, digest 56af731184d382ca)
+- codex R1: fail — With a symlinked cwd the tab opens in $HOME.
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
+  - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
+- agy R1: pass
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
+### AC-2 — verified (R1): claude's test re-ran with the same status.
+- claude R1: pass
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
+- codex R1: pass
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
+- agy R1: pass
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
+### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
+- claude R1: pass — 31 ms median.
+  - claude/r1/e3: command of 3 lines (cwd bench) exit 0
+    ```
+    for i in $(seq 20); do
+      ./bench open-tab
+    done
+    ```
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
+- codex R1: blocked — No display in the sandbox.
+- agy R1: pass
+  - agy/r1/e2: command `./bench open-tab --long-path` (cwd bench) exit 0
+    stored: missing (gone before ingest)
+### AC-5 — inconclusive (R1): Only codex passed it, on a test that does not quit.
+- claude R1: not_tested — Out of my strategy's reach this round.
+- codex R1: pass
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
+- agy R1: blocked — Quitting kills my pane.
+  - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
+### D1 — open · high · falsify: A symlinked cwd is resolved to its target's parent
+Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
+- codex/1 (R1): A symlinked cwd is resolved to its target's parent
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
+
+## 6. Your assignments
+Reproduce or refute each of these in your own worktree, with your own evidence:
+- codex/AC-1: fail (R1) — With a symlinked cwd the tab opens in $HOME.
+- D1 [high] A symlinked cwd is resolved to its target's parent
+  Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
+
+## 7. Evidence
+Save every file you cite under /golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r2/claude and cite it by its path relative to that folder:
+- Command output under logs/, stdout and stderr together: `cmd > logs/3.log 2>&1; echo $?`. Report the exit status you saw.
+- Screenshots under shots/ and screen recordings under video/, made with the platform's own capture tools (on macOS: `screencapture -x shots/1.png`, `screencapture -v video/1.mov`). Every picture or recording needs a caption saying what it shows; a recording may list marks (moments to look at).
+- When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
+- An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
+- rerun/ is the widget's: save nothing there and cite nothing from it.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
+
+Rules:
+- Run things: a result rests on what you executed and saved, not on reading the code.
+- Do not contact or type into other panes, and do not open other verifiers' worktrees or replies.
+- Do not push, publish, open pull requests or change anything outside your worktree.
+- Mark anything you could not verify as not_tested or blocked with the reason; never guess a pass.
+- Write the reply in the language of the person's request (English when there is none); keep ids, field names and enum values as given.
+
+## 8. User interventions
+(none)
+
+## 9. How to reply
+Write ONLY this JSON to the file:
+/golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r2/claude/reply.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "What I ran and what I found.",
+  "environment": "macOS 26.1, rustc 1.92, debug build",
+  "results": [{"criterion": "AC-1", "result": "fail", "note": "New tab opens in $HOME after `cd /tmp`.", "evidence": ["e1", "e2", "e3"]}],
+  "evidence": [
+    {"id": "e1", "kind": "command", "cmd": "cargo test -p app cwd_inherit", "cwd": ".", "exit": 101, "log": "logs/1.log", "rerun": true},
+    {"id": "e2", "kind": "file", "path": "shots/tab.png", "caption": "pwd in the new tab"},
+    {"id": "e3", "kind": "file", "path": "video/new-tab.mov", "caption": "cd /tmp, new tab, pwd",
+     "marks": [{"t": "00:04", "note": "new tab opened"}, {"t": "00:06.5", "note": "it shows $HOME"}]},
+    {"id": "e4", "kind": "observation", "text": "The tab bar flickers once."}],
+  "defects": [{"id": "1", "claim": "one line", "severity": "high", "category": "falsify", "confidence": "high",
+                "location": {"path": "src/a.rs", "line": 40}, "repro": "1. … 2. …", "evidence": ["e4"]}],
+  "cross_checks": [{"subject": "codex/AC-2", "outcome": "not_reproduced", "note": "…", "evidence": ["e1"]}] }
+
+Rules:
+- results: optional in this round; give one only to update your own result on a criterion, with new evidence
+- result: pass (needs at least one command or file evidence), fail (needs evidence and a note), blocked or not_tested (need a note saying why)
+- evidence ids: 1-16 letters, digits, '-' or '_', unique in the reply; every id cited exists and every item is cited at least once
+- command: cmd 1-2000 characters (several lines allowed), cwd relative to your worktree without "..", exit an integer, log the saved output; rerun true or false
+- paths (log, file): relative to your r<N>/<you>/ folder, no "..", no leading "/", not under rerun/; a regular file, not a link
+- file: an image (PNG, JPEG, GIF, WebP) or video (MP4, MOV, WebM) must have an extension matching its content and a caption of 1-300 characters; marks only on a video, at most 20, t as mm:ss[.f] or hh:mm:ss[.f] in time order; shows (optional) lists the criteria a picture shows
+- defects (optional, at most 20): problems no criterion covers; each id new, claim one line at most 300 characters, severity critical/high/medium/low/info, confidence high/medium/low, repro required, evidence at least one id; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
+- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note
+===== R2 brief to codex =====
+## 1. Request and round
+You are: verifier codex
+Round: 2 of 2 — CROSS-CHECK (every result so far is shown; reproduce or refute what you are assigned)
+This is the FINAL round.
+What the person asked for:
+Verify that new tabs inherit the cwd; it must stay "fast" & <safe>.
+
+## 2. Target and your worktree
+Kind: git diff (a change: base … head)
+Label: feat/cwd … main（3 ファイル）
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/cwd (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (read-only): /golden/repo/.noa/verify/ver-golden/target
+- /golden/repo/.noa/verify/ver-golden/target/diff.patch: the diff from the merge base
+- /golden/repo/.noa/verify/ver-golden/target/spec.md: the spec the criteria come from
+Changed files (3):
+- M src/tab.rs (120 lines, +13 -3)
+- R src/cwd.rs (60 lines, +8 -3) from src/dir.rs
+- A docs/specs/cwd.md (12 lines, +12 -3)
+Left out of the snapshot:
+- assets/tab.png: バイナリ（テキストではない）
+Your worktree: /golden/repo-wt/verify-ver-golden-codex
+It is a detached git worktree of your own, built from bbbbbbbbbbbb. Run everything here. You may edit any file inside it (throwaway tests, debug prints); edit nothing anywhere else. It has its own build cache (target/ or the language's equivalent): the first build starts cold.
+Your reply dir: /golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden (everything you save goes under its r<N>/<you>/ folder).
+
+## 3. Criteria
+- AC-1 [must] (user) New tabs open in the focused pane's cwd
+  How: cd /tmp in a pane, open a tab with Cmd-T, run pwd
+- AC-2 [must] (spec:4) A cwd that no longer exists falls back to $HOME
+  How: cd into a temp dir, remove it, open a tab
+- AC-3 [should] (inferred) Opening a tab stays under 50 ms
+  How: hyperfine 'app --open-tab' (20 runs)
+- AC-5 [should] (user) Quitting keeps every tab's cwd for the next launch
+  How: Cmd-Q, relaunch, check each tab
+
+## 4. Your strategy
+Verify this way first and most thoroughly:
+falsify (反証): Try to make each criterion fail: boundaries, invalid input, empty and huge data, concurrency, interrupted runs. Write throwaway tests in your worktree. A criterion you could not break is a pass only with your attempts as evidence.
+Whatever your strategy, report a result for every criterion you are asked about.
+
+## 5. Rulings and results so far
+The judge's summary of R1:
+AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; AC-5 is untested.
+
+### AC-1 — failed (R1): codex's symlink test fails and the recording shows $HOME.
+- claude R1: pass — pwd shows /tmp.
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
+  - claude/r1/e2: PNG image shots/new tab.png — "pwd in the new tab shows /tmp"
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/shots/new tab.png (1036 bytes, digest 56af731184d382ca)
+- codex R1: fail — With a symlinked cwd the tab opens in $HOME.
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
+  - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
+- agy R1: pass
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
+### AC-2 — verified (R1): claude's test re-ran with the same status.
+- claude R1: pass
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
+- codex R1: pass
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
+- agy R1: pass
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
+### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
+- claude R1: pass — 31 ms median.
+  - claude/r1/e3: command of 3 lines (cwd bench) exit 0
+    ```
+    for i in $(seq 20); do
+      ./bench open-tab
+    done
+    ```
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
+- codex R1: blocked — No display in the sandbox.
+- agy R1: pass
+  - agy/r1/e2: command `./bench open-tab --long-path` (cwd bench) exit 0
+    stored: missing (gone before ingest)
+### AC-5 — inconclusive (R1): Only codex passed it, on a test that does not quit.
+- claude R1: not_tested — Out of my strategy's reach this round.
+- codex R1: pass
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
+- agy R1: blocked — Quitting kills my pane.
+  - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
+### D1 — open · high · falsify: A symlinked cwd is resolved to its target's parent
+Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
+- codex/1 (R1): A symlinked cwd is resolved to its target's parent
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
+
+## 6. Your assignments
+(none this round; you may still update your own results with new evidence)
+
+## 7. Evidence
+Save every file you cite under /golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r2/codex and cite it by its path relative to that folder:
+- Command output under logs/, stdout and stderr together: `cmd > logs/3.log 2>&1; echo $?`. Report the exit status you saw.
+- Screenshots under shots/ and screen recordings under video/, made with the platform's own capture tools (on macOS: `screencapture -x shots/1.png`, `screencapture -v video/1.mov`). Every picture or recording needs a caption saying what it shows; a recording may list marks (moments to look at).
+- When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
+- An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
+- rerun/ is the widget's: save nothing there and cite nothing from it.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
+
+Rules:
+- Run things: a result rests on what you executed and saved, not on reading the code.
+- Do not contact or type into other panes, and do not open other verifiers' worktrees or replies.
+- Do not push, publish, open pull requests or change anything outside your worktree.
+- Mark anything you could not verify as not_tested or blocked with the reason; never guess a pass.
+- Write the reply in the language of the person's request (English when there is none); keep ids, field names and enum values as given.
+
+## 8. User interventions
+- [m1 R1] Try a cwd behind a symlink too.
+
+## 9. How to reply
+Write ONLY this JSON to the file:
+/golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r2/codex/reply.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "What I ran and what I found.",
+  "environment": "macOS 26.1, rustc 1.92, debug build",
+  "results": [{"criterion": "AC-1", "result": "fail", "note": "New tab opens in $HOME after `cd /tmp`.", "evidence": ["e1", "e2", "e3"]}],
+  "evidence": [
+    {"id": "e1", "kind": "command", "cmd": "cargo test -p app cwd_inherit", "cwd": ".", "exit": 101, "log": "logs/1.log", "rerun": true},
+    {"id": "e2", "kind": "file", "path": "shots/tab.png", "caption": "pwd in the new tab"},
+    {"id": "e3", "kind": "file", "path": "video/new-tab.mov", "caption": "cd /tmp, new tab, pwd",
+     "marks": [{"t": "00:04", "note": "new tab opened"}, {"t": "00:06.5", "note": "it shows $HOME"}]},
+    {"id": "e4", "kind": "observation", "text": "The tab bar flickers once."}],
+  "defects": [{"id": "1", "claim": "one line", "severity": "high", "category": "falsify", "confidence": "high",
+                "location": {"path": "src/a.rs", "line": 40}, "repro": "1. … 2. …", "evidence": ["e4"]}],
+  "cross_checks": [{"subject": "codex/AC-2", "outcome": "not_reproduced", "note": "…", "evidence": ["e1"]}] }
+
+Rules:
+- results: optional in this round; give one only to update your own result on a criterion, with new evidence
+- result: pass (needs at least one command or file evidence), fail (needs evidence and a note), blocked or not_tested (need a note saying why)
+- evidence ids: 1-16 letters, digits, '-' or '_', unique in the reply; every id cited exists and every item is cited at least once
+- command: cmd 1-2000 characters (several lines allowed), cwd relative to your worktree without "..", exit an integer, log the saved output; rerun true or false
+- paths (log, file): relative to your r<N>/<you>/ folder, no "..", no leading "/", not under rerun/; a regular file, not a link
+- file: an image (PNG, JPEG, GIF, WebP) or video (MP4, MOV, WebM) must have an extension matching its content and a caption of 1-300 characters; marks only on a video, at most 20, t as mm:ss[.f] or hh:mm:ss[.f] in time order; shows (optional) lists the criteria a picture shows
+- defects (optional, at most 20): problems no criterion covers; each id new, claim one line at most 300 characters, severity critical/high/medium/low/info, confidence high/medium/low, repro required, evidence at least one id; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
+- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note
+===== R2 brief to agy =====
+## 1. Request and round
+You are: verifier agy
+Round: 2 of 2 — CROSS-CHECK (every result so far is shown; reproduce or refute what you are assigned)
+This is the FINAL round.
+What the person asked for:
+Verify that new tabs inherit the cwd; it must stay "fast" & <safe>.
+
+## 2. Target and your worktree
+Kind: git diff (a change: base … head)
+Label: feat/cwd … main（3 ファイル）
+Base: main (aaaaaaaaaaaaaaaa)
+Head: feat/cwd (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+Merge base: cccccccccccccccc
+Snapshot (read-only): /golden/repo/.noa/verify/ver-golden/target
+- /golden/repo/.noa/verify/ver-golden/target/diff.patch: the diff from the merge base
+- /golden/repo/.noa/verify/ver-golden/target/spec.md: the spec the criteria come from
+Changed files (3):
+- M src/tab.rs (120 lines, +13 -3)
+- R src/cwd.rs (60 lines, +8 -3) from src/dir.rs
+- A docs/specs/cwd.md (12 lines, +12 -3)
+Left out of the snapshot:
+- assets/tab.png: バイナリ（テキストではない）
+Your worktree: /golden/repo-wt/verify-ver-golden-agy
+It is a detached git worktree of your own, built from bbbbbbbbbbbb. Run everything here. You may edit any file inside it (throwaway tests, debug prints); edit nothing anywhere else. It has its own build cache (target/ or the language's equivalent): the first build starts cold.
+Your reply dir: /golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden (everything you save goes under its r<N>/<you>/ folder).
+
+## 3. Criteria
+- AC-1 [must] (user) New tabs open in the focused pane's cwd
+  How: cd /tmp in a pane, open a tab with Cmd-T, run pwd
+- AC-2 [must] (spec:4) A cwd that no longer exists falls back to $HOME
+  How: cd into a temp dir, remove it, open a tab
+- AC-3 [should] (inferred) Opening a tab stays under 50 ms
+  How: hyperfine 'app --open-tab' (20 runs)
+- AC-5 [should] (user) Quitting keeps every tab's cwd for the next launch
+  How: Cmd-Q, relaunch, check each tab
+
+## 4. Your strategy
+Verify this way first and most thoroughly:
+custom (custom): Odd locales & very long paths
+Whatever your strategy, report a result for every criterion you are asked about.
+
+## 5. Rulings and results so far
+The judge's summary of R1:
+AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; AC-5 is untested.
+
+### AC-1 — failed (R1): codex's symlink test fails and the recording shows $HOME.
+- claude R1: pass — pwd shows /tmp.
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
+  - claude/r1/e2: PNG image shots/new tab.png — "pwd in the new tab shows /tmp"
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/shots/new tab.png (1036 bytes, digest 56af731184d382ca)
+- codex R1: fail — With a symlinked cwd the tab opens in $HOME.
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
+  - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
+- agy R1: pass
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
+### AC-2 — verified (R1): claude's test re-ran with the same status.
+- claude R1: pass
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
+- codex R1: pass
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
+- agy R1: pass
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
+### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
+- claude R1: pass — 31 ms median.
+  - claude/r1/e3: command of 3 lines (cwd bench) exit 0
+    ```
+    for i in $(seq 20); do
+      ./bench open-tab
+    done
+    ```
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/3.log (1029 bytes, digest 233e39392ce9da75)
+- codex R1: blocked — No display in the sandbox.
+- agy R1: pass
+  - agy/r1/e2: command `./bench open-tab --long-path` (cwd bench) exit 0
+    stored: missing (gone before ingest)
+### AC-5 — inconclusive (R1): Only codex passed it, on a test that does not quit.
+- claude R1: not_tested — Out of my strategy's reach this round.
+- codex R1: pass
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
+- agy R1: blocked — Quitting kills my pane.
+  - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
+### D1 — open · high · falsify: A symlinked cwd is resolved to its target's parent
+Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
+- codex/1 (R1): A symlinked cwd is resolved to its target's parent
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
+
+## 6. Your assignments
+Reproduce or refute each of these in your own worktree, with your own evidence:
+- codex/AC-5: pass (R1)
+
+## 7. Evidence
+Save every file you cite under /golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r2/agy and cite it by its path relative to that folder:
+- Command output under logs/, stdout and stderr together: `cmd > logs/3.log 2>&1; echo $?`. Report the exit status you saw.
+- Screenshots under shots/ and screen recordings under video/, made with the platform's own capture tools (on macOS: `screencapture -x shots/1.png`, `screencapture -v video/1.mov`). Every picture or recording needs a caption saying what it shows; a recording may list marks (moments to look at).
+- When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
+- An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
+- rerun/ is the widget's: save nothing there and cite nothing from it.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
+
+Rules:
+- Run things: a result rests on what you executed and saved, not on reading the code.
+- Do not contact or type into other panes, and do not open other verifiers' worktrees or replies.
+- Do not push, publish, open pull requests or change anything outside your worktree.
+- Mark anything you could not verify as not_tested or blocked with the reason; never guess a pass.
+- Write the reply in the language of the person's request (English when there is none); keep ids, field names and enum values as given.
+
+## 8. User interventions
+(none)
+
+## 9. How to reply
+Write ONLY this JSON to the file:
+/golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r2/agy/reply.json
+Write the whole file in one go when you are done: the file appearing is how your reply is collected. Do not answer in the terminal.
+
+{ "summary": "What I ran and what I found.",
+  "environment": "macOS 26.1, rustc 1.92, debug build",
+  "results": [{"criterion": "AC-1", "result": "fail", "note": "New tab opens in $HOME after `cd /tmp`.", "evidence": ["e1", "e2", "e3"]}],
+  "evidence": [
+    {"id": "e1", "kind": "command", "cmd": "cargo test -p app cwd_inherit", "cwd": ".", "exit": 101, "log": "logs/1.log", "rerun": true},
+    {"id": "e2", "kind": "file", "path": "shots/tab.png", "caption": "pwd in the new tab"},
+    {"id": "e3", "kind": "file", "path": "video/new-tab.mov", "caption": "cd /tmp, new tab, pwd",
+     "marks": [{"t": "00:04", "note": "new tab opened"}, {"t": "00:06.5", "note": "it shows $HOME"}]},
+    {"id": "e4", "kind": "observation", "text": "The tab bar flickers once."}],
+  "defects": [{"id": "1", "claim": "one line", "severity": "high", "category": "falsify", "confidence": "high",
+                "location": {"path": "src/a.rs", "line": 40}, "repro": "1. … 2. …", "evidence": ["e4"]}],
+  "cross_checks": [{"subject": "codex/AC-2", "outcome": "not_reproduced", "note": "…", "evidence": ["e1"]}] }
+
+Rules:
+- results: optional in this round; give one only to update your own result on a criterion, with new evidence
+- result: pass (needs at least one command or file evidence), fail (needs evidence and a note), blocked or not_tested (need a note saying why)
+- evidence ids: 1-16 letters, digits, '-' or '_', unique in the reply; every id cited exists and every item is cited at least once
+- command: cmd 1-2000 characters (several lines allowed), cwd relative to your worktree without "..", exit an integer, log the saved output; rerun true or false
+- paths (log, file): relative to your r<N>/<you>/ folder, no "..", no leading "/", not under rerun/; a regular file, not a link
+- file: an image (PNG, JPEG, GIF, WebP) or video (MP4, MOV, WebM) must have an extension matching its content and a caption of 1-300 characters; marks only on a video, at most 20, t as mm:ss[.f] or hh:mm:ss[.f] in time order; shows (optional) lists the criteria a picture shows
+- defects (optional, at most 20): problems no criterion covers; each id new, claim one line at most 300 characters, severity critical/high/medium/low/info, confidence high/medium/low, repro required, evidence at least one id; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
+- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note
+===== R2 re-run brief to claude =====
+## Re-run
+Round 2: the widget runs the commands you marked rerun: true again, in this pane.
+Run exactly this with your shell tool, detached so your tool's own time limit does not cut it short, and do nothing else until the next brief:
+
+    nohup sh '/golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r2/claude/rerun/run.sh' >/dev/null 2>&1 &
+
+Do not edit any file under /golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r2/claude/rerun and do not touch your worktree. Reply nothing.
+===== R2 brief to judge =====
+## 1. Request and round
+You are: the judge (you rule from the recorded evidence; you run nothing yourself)
+Round: 2 of 2 — ruling on a cross-check round
+This is the FINAL round.
+What the person asked for:
+Verify that new tabs inherit the cwd; it must stay "fast" & <safe>.
+
+## 2. Criteria
+- AC-1 [must] (user) New tabs open in the focused pane's cwd
+  How: cd /tmp in a pane, open a tab with Cmd-T, run pwd
+- AC-2 [must] (spec:4) A cwd that no longer exists falls back to $HOME
+  How: cd into a temp dir, remove it, open a tab
+- AC-3 [should] (inferred) Opening a tab stays under 50 ms
+  How: hyperfine 'app --open-tab' (20 runs)
+- AC-5 [should] (user) Quitting keeps every tab's cwd for the next launch
+  How: Cmd-Q, relaunch, check each tab
+
+## 3. Panel and receipts
+Isolation: one detached worktree per verifier; re-runs in each verifier's own pane
+- claude (claude): replied
+  Strategy: conformance (仕様適合): Exercise each criterion's `how` as written. Record every command you run and save its output. Stop at the first deviation from what the criterion states and record it as the result, with the evidence that shows it.
+  Summary: codex's symlink test passes here; the defect is real for a nested link.
+- codex (codex): replied
+  Strategy: falsify (反証): Try to make each criterion fail: boundaries, invalid input, empty and huge data, concurrency, interrupted runs. Write throwaway tests in your worktree. A criterion you could not break is a pass only with your attempts as evidence.
+  Summary: Nothing assigned to me.
+- agy (agy): replied
+  Strategy: custom (custom): Odd locales & very long paths
+  Summary: codex's AC-5 test never quits the app; a cold start is slow.
+
+## 4. Results this round
+### AC-1 [must] New tabs open in the focused pane's cwd
+- (no new result this round)
+Your ruling so far (R1): failed — codex's symlink test fails and the recording shows $HOME.
+### AC-2 [must] A cwd that no longer exists falls back to $HOME
+- (no new result this round)
+Your ruling so far (R1): verified — claude's test re-ran with the same status.
+### AC-3 [should] Opening a tab stays under 50 ms
+- agy: fail — A cold start takes 72 ms.
+  - agy/r2/e1: command `./bench open-tab --cold` (cwd bench) exit 1
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r2/agy/logs/1.log (1026 bytes, digest e1baf61110e31231)
+    log tail:
+```
+running ./bench open-tab --cold
+test cwd_inherit ... FAILED
+exit 1
+```
+Your ruling so far (R1): inconclusive — Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
+### AC-5 [should] Quitting keeps every tab's cwd for the next launch
+- (no new result this round)
+Your ruling so far (R1): inconclusive — Only codex passed it, on a test that does not quit.
+
+Media the person attached (cite as user/<n>):
+  - user/1: PNG image Screenshot 2026-11-24.png — "pwd shows /tmp in the new tab"
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/user/1.png (1019 bytes, digest d08a6e548ee8ef4f)
+    shows: AC-1
+
+You may open images by their stored path when your CLI can read images. You cannot watch videos: a video's claim rests on its caption and marks. When a verified or failed ruling rests on video evidence alone (no command, image or other file among the stored evidence it cites), its rationale must name the caption and marks it relied on; an empty rationale there is refused.
+
+## 5. Cross-checks
+- claude on codex/AC-1: not_reproduced — cwd_symlink passes in my worktree.
+  - claude/r2/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 0; re-run matched (exit 0)
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r2/claude/logs/1.log (1029 bytes, digest b5c829dabcf4f722)
+- claude on D1: reproduced — A link inside a link resolves wrong.
+  - claude/r2/e2: command `./scripts/nested-link.sh` (cwd .) exit 1
+    stored: /golden/repo/.noa/verify/ver-golden/evidence/r2/claude/logs/2.log (1029 bytes, digest 034760f3b5757f7f)
+    log tail:
+```
+running ./scripts/nested-link.sh
+test cwd_inherit ... FAILED
+exit 1
+```
+- agy on codex/AC-5: disputed — cwd_gone does not exercise quitting at all.
+
+## 6. Defects
+Raw defects this round (place each one):
+(none)
+
+Defects so far:
+- D1 [open] high · falsify — A symlinked cwd is resolved to its target's parent (supported by 2, disputed by 0)
+
+## 7. Evidence standard
+- Every criterion gets one ruling per round; "ruling": "same" carries the previous one over unchanged. Cited evidence keys exist.
+- Each rule reads the criterion's whole history: every result on it from every verifier and round, every cross-check on one of those results, every cross-check on a defect, and the evidence they cite.
+- A cross-check of round N on <verifier>/<criterion> is about that verifier's latest result on the criterion as of round N-1, the one its brief named; once the verifier has reported a later result, the later checks on that subject are about the later result.
+- Evidence is for a criterion when a result on it cites it, or a cross-check about a result on it, or it is media whose shows names it (media with shows is evidence only for the criteria it names). It counts when its file was stored (an observation has no file and counts as text); a command or file missing at ingest counts for nothing. Evidence cited for verified or failed must be evidence for that criterion.
+- A pass of any round counts when the ruling cites a command or file of it that counts, unless it is contested. A pass is contested once a not_reproduced cross-check about that very result cites evidence that counts, until a later pass on the criterion (of a round after that check, from any verifier, its own included) that is not itself contested; a contested pass is neither one of two sources nor the pass whose matched re-run is cited. A disputed check contests nothing. Each verifier is one source however many of its passes count; media the person attached (user/<n>) whose shows names the criterion is one more source, so it counts only together with a verifier's pass. A cross-check is no pass, whatever its outcome; only a not_reproduced that contests a pass takes one away.
+- A fail of any round is open until a not_reproduced cross-check about that very result cites evidence that counts. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.
+- verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each); a contested pass gives neither.
+- failed needs cited evidence that counts and that a fail result on the criterion cites, or a reproduced cross-check about a fail result on it, or a reproduced cross-check on a defect (also one merged since); a cross-check about a pass backs no failure.
+- inconclusive and not_applicable need a rationale.
+- Defect ops: every raw defect of this round goes into exactly one add or merge "from", or one dismiss.
+The widget enforces this standard: a ruling past it is turned down.
+
+## 8. This round
+User interventions:
+- [m1 R1 to codex] Try a cwd behind a symlink too.
+
+This is the LAST round: "verdict" is required and no criterion may stay unruled.
+
+## 9. Your output
+Write ONLY this JSON to the file:
+/golden/repo/.noa/verify/ver-golden/r2/judge.json
+Write the whole file in one go when you are done. Do not answer in the terminal.
+
+{ "summary": "what this round showed and what is still open",
+  "rulings": [{"criterion": "AC-1", "ruling": "failed", "rationale": "…", "evidence": ["claude/r1/e1"]},
+               {"criterion": "AC-2", "ruling": "same"}],
+  "defect_ops": [{"op": "add", "id": "D2", "from": ["claude/1"], "claim": "one line", "repro": "1. … 2. …",
+                 "location": {"path": "src/a.rs", "line": 40}, "severity": "high", "category": "falsify",
+                 "confidence": "high", "status": "open", "rationale": "…", "fix": "…"},
+                {"op": "merge", "id": "D1", "from": ["codex/2"]},
+                {"op": "update", "id": "D2", "severity": "medium", "status": "agreed", "rationale": "…"},
+                {"op": "dismiss", "raw": "agy/5", "reason": "…"}],
+  "assign": {"codex": ["claude/AC-1"], "claude": ["D1"]},
+  "verdict": {"decision": "fail", "rationale": "…", "blocking": ["AC-1", "D1"]},
+  "close": false }
+
+Rules:
+- rulings: one per criterion: verified, failed, inconclusive, not_applicable, or same (the previous one unchanged); evidence lists the keys it rests on
+- defect ops: every raw defect of section 6 in exactly one add or merge "from", or one dismiss with a reason; new ids are free (the next is D2); status open, agreed, disputed or rejected (rejected needs a rationale)
+- severity: critical, high, medium, low, info; confidence: high, medium, low; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
+- assign: verifier ids: claude, codex, agy; values <verifier>/<criterion> of another verifier, or a live defect id
+- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back
+- verdict: only in the last round or with "close": true

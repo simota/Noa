@@ -1,0 +1,22 @@
+{"timestamp":"2026-11-21T00:00:00.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-00000000c0de","timestamp":"2026-11-21T00:00:00.000Z","cwd":"/home/synthetic/work/alpha","originator":"codex_cli_rs","cli_version":"0.0.0","source":"cli","model_provider":"openai","git":{"branch":"main"}}}
+{"timestamp":"2026-11-21T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/home/synthetic/work/alpha","model":"gpt-6.2-sol","effort":"medium","approval_policy":"on-request","sandbox_policy":{"type":"workspace-write"}}}
+{"timestamp":"2026-11-21T00:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2026-11-21T00:00:02.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic prompt"}]}}
+{"timestamp":"2026-11-21T00:00:03.000Z","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"c3ludGhldGlj"}}
+{"timestamp":"2026-11-21T00:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"call_1"}}
+{"timestamp":"2026-11-21T00:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"synthetic"}}
+{"timestamp":"2026-11-21T00:00:06.000Z","type":"token_usage_record","payload":{"response_id":"resp_1","turn_id":"t1","usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":0,"output_tokens":100,"reasoning_output_tokens":30,"total_tokens":1100}}}
+{"timestamp":"2026-11-21T00:00:06.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":0,"output_tokens":99999,"reasoning_output_tokens":0,"total_tokens":100999},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":0,"output_tokens":99999,"reasoning_output_tokens":0,"total_tokens":100999},"model_context_window":1000000}}}
+{"timestamp":"2026-11-21T00:00:07.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic"}]}}
+{"timestamp":"2026-11-21T00:00:08.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"synthetic","call_id":"call_2"}}
+{"timestamp":"2026-11-21T00:00:09.000Z","type":"token_usage_record","payload":{"response_id":"resp_2","turn_id":"t1","usage":{"input_tokens":500,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":540}}}
+{"timestamp":"2026-11-21T00:01:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}
+{"timestamp":"2026-11-21T00:01:00.100Z","type":"turn_context","payload":{"turn_id":"t2","cwd":"/home/synthetic/work/alpha","model":"gpt-6.1-sol","effort":"high"}}
+{"timestamp":"2026-11-21T00:01:01.000Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"call_3","status":"completed","action":{"type":"exec"}}}
+{"timestamp":"2026-11-21T00:01:02.000Z","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search"}}}
+{"timestamp":"2026-11-21T00:01:03.000Z","type":"token_usage_record","payload":{"response_id":"resp_3","turn_id":"t2","usage":{"input_tokens":300,"cached_input_tokens":200,"cache_write_input_tokens":50,"output_tokens":60,"reasoning_output_tokens":0,"total_tokens":360}}}
+{"timestamp":"2026-11-21T00:01:04.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic"}]}}
+{"timestamp":"2026-11-21T00:02:00.000Z","type":"turn_context","payload":{"turn_id":"t3","cwd":"/home/synthetic/work/alpha","model":"codex-auto-review"}}
+{"timestamp":"2026-11-21T00:02:01.000Z","type":"token_usage_record","payload":{"response_id":"resp_4","turn_id":"t3","usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15}}}
+{"timestamp":"2026-11-21T00:02:02.000Z","type":"world_state","payload":{"synthetic":true}}
+{"timestamp":"2026-11-21T00:02:03.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t2"}}

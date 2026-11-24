@@ -10,7 +10,9 @@ use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use competition::model::aggregate::{PanelScores, SPREAD_WARN};
-use competition::model::types::{PartId, Participant, RoundKind, RoundNo, Session};
+use competition::model::types::{
+    Brief, PartId, Participant, Round, RoundKind, RoundNo, Session,
+};
 
 use super::{Action, caption, gap, heading, keep_scroll, scroll_column, spacer, tag};
 
@@ -234,6 +236,25 @@ fn panel_scores(
     }
 }
 
+/// The brief a judge card shows the status of: the judge's brief of
+/// `round`, the lead's verdict brief while it is awaited. A verdict the
+/// competition ended without (終了, or a winner chosen by hand) is not
+/// awaited, so the lead's card then shows its scorecard brief.
+fn judge_status_brief<'a>(
+    session: &Session,
+    round: &'a Round,
+    judge: &Participant,
+) -> Option<&'a Brief> {
+    if judge.id == session.judge.id
+        && round.verdict_pending()
+        && !super::judge::awaits_verdict(session, round)
+    {
+        round.judge_brief.as_ref()
+    } else {
+        round.brief(&judge.id)
+    }
+}
+
 /// `judge 80 · judge-2 83 · judge-3 81`.
 fn judge_scores(panel: &PanelScores) -> String {
     let parts: Vec<String> = panel
@@ -287,7 +308,7 @@ fn judge_card(
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
     );
     if let Some(cur) = session.current_round()
-        && let Some(brief) = cur.brief(&judge.id)
+        && let Some(brief) = judge_status_brief(session, cur, judge)
     {
         let (status_text, tone) = super::progress::delivery(&brief.receipt);
         tag(tree, row, format!("R{} {status_text}", cur.no), tone);

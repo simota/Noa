@@ -252,7 +252,16 @@ fn panel_details(tree: &mut UiTree, card: WidgetId, session: &Session, round: &R
                 .wrap(true),
         );
     }
-    if round.verdict_pending() {
+    if awaits_verdict(session, round) {
         note(tree, card, format!("最終講評を待っています（{JUDGE_ID}）"));
     }
+}
+
+/// Whether `round` still waits for the lead's verdict: asked for, not in,
+/// and the competition still running. 終了 and a winner chosen by hand
+/// both close the session (`UserSelectWinner` commits `SessionClosed` with
+/// the winner), and the verdict is then never written. A round that waits
+/// is the session's last, since a closed round cannot be extended past.
+pub(super) fn awaits_verdict(session: &Session, round: &Round) -> bool {
+    !session.closed && round.verdict_pending()
 }

@@ -5,13 +5,13 @@
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
-use noa_gpui_core::widgets::{Button, Container, ControlSize, PopUpButton, TextArea};
+use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, PopUpButton, TextArea};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
-use competition::model::types::{Author, JUDGE_ID, PartId, Session};
+use competition::model::types::{Author, JUDGE_ID, PartId, Phase, Round, Session};
 
-use super::{caption, clear_children, fill, gap, note};
+use super::{caption, clear_children, fill, gap};
 
 pub(super) struct Parts {
     pub(super) root: WidgetId,
@@ -19,7 +19,44 @@ pub(super) struct Parts {
     pub(super) recipients: WidgetId,
     pub(super) area: WidgetId,
     pub(super) send: WidgetId,
+    /// Where an intervention to the chosen recipients will reach.
+    pub(super) hint: WidgetId,
     built_for: Option<String>,
+}
+
+const NEXT_ROUND_HINT: &str =
+    "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）";
+const VERDICT_HINT: &str = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます（他パネルへの個別指示はブラインド維持）";
+
+/// Where an intervention to `to` (empty: everyone) reaches, as the hint
+/// under the composer says it. In a panel's deciding round being scored,
+/// one that reaches the lead goes into the verdict brief issued later in
+/// the same round (L1-6.1); otherwise into the next round's briefs.
+pub(crate) fn hint(session: &Session, to: &[PartId]) -> &'static str {
+    let reaches_lead = to.is_empty() || to.contains(&session.judge.id);
+    if session.is_panel()
+        && reaches_lead
+        && !session.closed
+        && session
+            .current_round()
+            .is_some_and(|round| verdict_ahead(session, round))
+    {
+        VERDICT_HINT
+    } else {
+        NEXT_ROUND_HINT
+    }
+}
+
+/// Whether `round` is being scored, ends the competition (the last round,
+/// or one the lead's scorecard closes), and its verdict brief is not
+/// issued yet.
+fn verdict_ahead(session: &Session, round: &Round) -> bool {
+    let deciding = session.max_rounds.is_some_and(|max| round.no >= max)
+        || round
+            .scorecards
+            .get(&session.judge.id)
+            .is_some_and(|card| card.close);
+    round.phase == Phase::Judging && round.verdict_brief.is_none() && deciding
 }
 
 pub(crate) fn choices(session: &Session) -> Vec<(String, Vec<PartId>)> {
@@ -91,10 +128,12 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
             .default_button(true)
             .control_size(ControlSize::Small),
     );
-    note(
-        tree,
-        root,
-        "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）",
+    let hint = tree.insert(
+        Some(root),
+        Label::new(NEXT_ROUND_HINT)
+            .font_size(11.5)
+            .color(Role::Muted)
+            .wrap(true),
     );
     Parts {
         root,
@@ -102,6 +141,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         recipients,
         area,
         send,
+        hint,
         built_for: None,
     }
 }
@@ -118,6 +158,14 @@ pub(super) fn sync(tree: &mut UiTree, parts: &mut Parts, session: &Session, text
         Some(parts.recipients_host),
         PopUpButton::new(labels).control_size(ControlSize::Small),
     );
+}
+
+/// Says under the composer where an intervention to the chosen recipients
+/// reaches now.
+pub(super) fn sync_hint(tree: &mut UiTree, parts: &Parts, session: &Session) {
+    let (_, to) = recipient(tree, parts, session);
+    let text = hint(session, &to);
+    tree.update::<Label, _>(parts.hint, |l, cx| l.set_text(cx, text));
 }
 
 pub(super) fn recipient(tree: &UiTree, parts: &Parts, session: &Session) -> (String, Vec<PartId>) {

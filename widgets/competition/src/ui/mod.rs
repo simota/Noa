@@ -608,6 +608,7 @@ impl Competition {
             return;
         }
         composer::sync(&mut self.tree, &mut self.composer, session, text);
+        composer::sync_hint(&mut self.tree, &self.composer, session);
         if let Some(pending) = &self.pending_intervention
             && session
                 .messages
@@ -1110,6 +1111,14 @@ impl Screen for Competition {
     }
 
     fn handle(&mut self, message: UiMessage, text: &mut TextStore) {
+        if message.source == self.composer.recipients
+            && message.downcast_ref::<SelectionChanged>().is_some()
+        {
+            if let Some(session) = &self.session {
+                composer::sync_hint(&mut self.tree, &self.composer, session);
+            }
+            return;
+        }
         if message.source == self.start.judge
             && message.downcast_ref::<SelectionChanged>().is_some()
         {
@@ -2856,6 +2865,105 @@ mod tests {
         let texts = texts_under(&single.tree, single.progress_host);
         let judges: Vec<&String> = texts.iter().filter(|t| t.contains("(judge")).collect();
         assert_eq!(judges, ["審判 (judge)"]);
+    }
+
+    #[test]
+    fn a_verdict_the_competition_ended_without_is_not_awaited() {
+        use competition::model::reduce::{Event, apply};
+        let winner = PartId::new("claude");
+        for (how, batch) in [
+            ("終了", vec![Event::SessionClosed]),
+            (
+                "a winner chosen by hand",
+                vec![Event::WinnerSelected { winner }, Event::SessionClosed],
+            ),
+        ] {
+            // Every judge scored, the verdict asked of the lead, then ended.
+            let mut session = crate::demo::panel_session();
+            apply(&mut session, &batch).unwrap();
+            let screen =
+                Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+            let right = texts_under(&screen.tree, screen.right_host);
+            assert!(
+                !right.iter().any(|t| t.starts_with("最終講評を待って")),
+                "{how}: {right:?}"
+            );
+            // The lead's card shows its scorecard, not the verdict it
+            // will not write.
+            let left = texts_under(&screen.tree, screen.left_host);
+            assert!(left.iter().any(|t| t == "R6 提出済"), "{how}: {left:?}");
+            assert!(!left.iter().any(|t| t == "R6 待機中"), "{how}: {left:?}");
+            let progress = texts_under(&screen.tree, screen.progress_host);
+            assert!(
+                !progress.iter().any(|t| t == "講評 (judge)"),
+                "{how}: {progress:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_intervention_to_the_lead_in_a_deciding_round_reaches_its_verdict_brief() {
+        let ids = |v: &[&str]| v.iter().map(|x| PartId::new(*x)).collect::<Vec<_>>();
+        let next = "追加指示は次のラウンドのブリーフで宛先パネルに届きます（他パネルへの個別指示はブラインド維持）";
+        let verdict = "追加指示はこのラウンドでこのあと出る最終講評のブリーフでリード審判に届きます（他パネルへの個別指示はブラインド維持）";
+        // The last round, being scored, its verdict brief not issued yet.
+        let mut session = crate::demo::panel_session();
+        let last = session.rounds.len() - 1;
+        session.rounds[last].verdict_brief = None;
+        for to in [ids(&[]), ids(&["judge"]), ids(&["judge", "judge-2", "judge-3"])] {
+            assert_eq!(composer::hint(&session, &to), verdict, "{to:?}");
+        }
+        // Neither a co-judge nor a contestant is briefed again this round.
+        for to in [ids(&["judge-2"]), ids(&["claude"])] {
+            assert_eq!(composer::hint(&session, &to), next, "{to:?}");
+        }
+
+        // A round before the last: the next round's briefs, until the
+        // lead's scorecard closes the competition.
+        let mut early = session.clone();
+        early.max_rounds = Some(last as RoundNo + 3);
+        assert_eq!(composer::hint(&early, &ids(&["judge"])), next);
+        early.rounds[last]
+            .scorecards
+            .get_mut(&PartId::new(JUDGE_ID))
+            .unwrap()
+            .close = true;
+        assert_eq!(composer::hint(&early, &ids(&["judge"])), verdict);
+
+        // Before judging, and once the verdict brief is out, it is not.
+        let mut competing = session.clone();
+        competing.rounds[last].phase = Phase::Competing;
+        assert_eq!(composer::hint(&competing, &[]), next);
+        assert_eq!(composer::hint(&crate::demo::panel_session(), &[]), next);
+
+        // A single judge's hint is as it was, in its deciding round too.
+        let mut single = crate::demo::session();
+        let last_single = single.rounds.len() - 1;
+        single.max_rounds = Some(single.rounds.len() as RoundNo);
+        single.rounds[last_single].phase = Phase::Judging;
+        assert_eq!(composer::hint(&single, &[]), next);
+        assert_eq!(composer::hint(&single, &ids(&["judge"])), next);
+
+        // On screen, the hint follows the chosen recipients.
+        let mut text = TextStore::new(Default::default());
+        let mut screen =
+            Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        screen.prepare(VIEW, &mut text);
+        let hint = |screen: &Competition| {
+            screen
+                .tree
+                .get::<Label>(screen.composer.hint)
+                .unwrap()
+                .text()
+                .to_owned()
+        };
+        assert_eq!(hint(&screen), verdict, "全員");
+        let popup = screen.composer.recipients;
+        for want in [verdict, verdict, next] {
+            // 審判全員, 審判 (Judge), then judge-2.
+            press_down(&mut screen, popup, &mut text);
+            assert_eq!(hint(&screen), want);
+        }
     }
 
     #[test]

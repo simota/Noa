@@ -9,8 +9,10 @@
 //! ([`IndexCopy`]), so the index and the work tree are never written; file
 //! identity from NUL-separated machine output; files read without
 //! following symbolic links (see `fsx`) and never past their cap. A ref's
-//! files are taken as its checkout gives them.
+//! files are taken as its checkout gives them, with no filter driver run:
+//! one a driver's command would give is left out ([`FILTER_REASON`]).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -58,6 +60,13 @@ const CAPTURE_TRIES: usize = 3;
 const NOT_GIT: &str = "検証は git の作業ツリーでのみ行えます";
 const LINK_REASON: &str = "シンボリックリンク（リンク先は取り込みません）";
 const SUBMODULE_REASON: &str = "サブモジュール（中身は取り込みません）";
+/// Why a file of a ref is not in the snapshot when its `filter` attribute
+/// names a driver the person's settings give a `smudge` or `process`
+/// command (git-lfs and similar): what its checkout holds is that
+/// command's output, and the capture runs no driver in the person's
+/// checkout (L1-1).
+pub(crate) const FILTER_REASON: &str =
+    "チェックアウト時にフィルタ（git-lfs など）を通すファイル（中身は取り込みません）";
 
 /// What one capture gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +199,8 @@ fn git(dir: &Path) -> Command {
 /// information back to the index, even with optional locks off; the
 /// capture's commands that read the index are given a copy through
 /// `GIT_INDEX_FILE` instead, so that write goes to the copy and the
-/// person's index is never written.
+/// person's index is never written. The copy keeps the index's mtime,
+/// which git reads changes against as it would the original's.
 struct IndexCopy {
     path: PathBuf,
 }
@@ -237,6 +247,13 @@ impl IndexCopy {
         match fs::File::open(&index) {
             Ok(mut source) => {
                 io::copy(&mut source, &mut file).map_err(cannot)?;
+                // The index's own mtime: git compares an entry's with it to
+                // tell a change made in the second the entry was written
+                // (same size and mtime) from none, and a copy dated later
+                // would hide that change.
+                let modified = source.metadata().and_then(|m| m.modified());
+                file.set_modified(modified.map_err(cannot)?)
+                    .map_err(cannot)?;
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 fs::remove_file(&copy.path).map_err(cannot)?;
@@ -772,19 +789,31 @@ struct RecipeView {
 }
 
 fn recipe_view(repo: &Path, head_sha: &str) -> Result<RecipeView, String> {
+    // Every option that shapes the patch is given, so none of the person's
+    // settings (`diff.context=0` would leave hunks `git apply` refuses)
+    // reaches it: three lines of context, hunks joined only where git
+    // joins them by default, blank context lines written as a space, the
+    // default submodule lines and path order, no external diff or text
+    // conversion, no color.
     let (mut cmd, _index) = git_indexed(repo)?;
-    cmd.arg("diff").args([
-        "--binary",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-color",
-        "--no-relative",
-        "--no-renames",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-        head_sha,
-        "--",
-    ]);
+    cmd.args(["-c", "diff.suppressBlankEmpty=false"])
+        .arg("diff")
+        .args([
+            "--binary",
+            "--unified=3",
+            "--inter-hunk-context=0",
+            "--submodule=short",
+            "-O/dev/null",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-relative",
+            "--no-renames",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            head_sha,
+            "--",
+        ]);
     let patch = match run_capped(cmd, &[0], MAX_WORKTREE_PATCH_BYTES) {
         Ok(patch) => patch,
         Err(RunError::TooLarge) => {
@@ -1039,6 +1068,27 @@ fn capture_diff(
         omitted: Vec::new(),
         bytes: 0,
     };
+    // A ref's files are read through git's checkout conversions; which
+    // filter driver each names, and which drivers would run a command.
+    let (drivers, running) = match &target.head {
+        Head::Worktree => (BTreeMap::new(), BTreeSet::new()),
+        Head::Ref(_) => {
+            let read: Vec<&str> = view
+                .raw
+                .iter()
+                .filter(|e| {
+                    e.status != 'D'
+                        && ![e.new_mode.as_str(), e.old_mode.as_str()].contains(&"160000")
+                        && e.new_mode != "120000"
+                })
+                .map(|e| e.path.as_str())
+                .collect();
+            (
+                filter_drivers(repo, head_sha, &read)?,
+                checkout_filters(repo)?,
+            )
+        }
+    };
     let mut stats = stats.into_iter();
     for entry in &view.raw {
         let mut stat = stats.next().unwrap_or_default();
@@ -1089,24 +1139,10 @@ fn capture_diff(
         }
         let read = match &target.head {
             Head::Worktree => read_worktree(repo, &entry.path, MAX_FILE_BYTES),
-            Head::Ref(_) => {
-                // The file as a checkout of the head gives it (line-ending
-                // conversion and the other filters its attributes name, the
-                // attributes read from the head itself), which is what a
-                // verifier's worktree holds and is checked against.
-                let mut cmd = git(repo);
-                cmd.arg(format!("--attr-source={head_sha}")).args([
-                    "cat-file",
-                    "--filters",
-                    &format!("--path={}", entry.path),
-                    &entry.new_sha,
-                ]);
-                match run_capped(cmd, &[0], MAX_FILE_BYTES) {
-                    Ok(bytes) => Ok((bytes, false)),
-                    Err(RunError::TooLarge) => Ok((Vec::new(), true)),
-                    Err(RunError::Failed(why)) => Err(format!("読めません: {why}")),
-                }
-            }
+            Head::Ref(_) => match drivers.get(&entry.path) {
+                Some(driver) if running.contains(driver) => Err(FILTER_REASON.to_owned()),
+                driver => read_checked_out(repo, head_sha, entry, driver.map(String::as_str)),
+            },
         };
         match read {
             Ok(read) => collector.add(&entry.path, status, read, stat)?,
@@ -1147,6 +1183,131 @@ fn capture_diff(
         captured_at: 0,
     };
     Ok((manifest, view))
+}
+
+/// The file `entry` of the head `head_sha` as its checkout gives it
+/// (`cat-file --filters`: line endings, `ident` and
+/// `working-tree-encoding`, the attributes read from the head itself),
+/// which is what a verifier's worktree holds and is checked against;
+/// over [`MAX_FILE_BYTES`] it reads as cut. `driver`, the filter driver
+/// its `filter` attribute names, is given no command (only one no
+/// setting gives a `smudge` or `process` command is read so, see
+/// [`checkout_filters`]), so no driver runs in the person's checkout
+/// whatever the settings say by then.
+fn read_checked_out(
+    repo: &Path,
+    head_sha: &str,
+    entry: &RawEntry,
+    driver: Option<&str>,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut cmd = git(repo);
+    if let Some(driver) = driver {
+        // Settings from the environment, which take any driver name as it
+        // is (`-c` would split one holding `=`).
+        let settings = [("smudge", ""), ("process", ""), ("required", "false")];
+        cmd.env("GIT_CONFIG_COUNT", settings.len().to_string());
+        for (i, (name, value)) in settings.into_iter().enumerate() {
+            cmd.env(
+                format!("GIT_CONFIG_KEY_{i}"),
+                format!("filter.{driver}.{name}"),
+            )
+            .env(format!("GIT_CONFIG_VALUE_{i}"), value);
+        }
+    }
+    cmd.arg(format!("--attr-source={head_sha}")).args([
+        "cat-file",
+        "--filters",
+        &format!("--path={}", entry.path),
+        &entry.new_sha,
+    ]);
+    match run_capped(cmd, &[0], MAX_FILE_BYTES) {
+        Ok(bytes) => Ok((bytes, false)),
+        Err(RunError::TooLarge) => Ok((Vec::new(), true)),
+        Err(RunError::Failed(why)) => Err(format!("読めません: {why}")),
+    }
+}
+
+/// The filter driver each of `paths` names in its `filter` attribute, as
+/// the head `head_sha` gives its attributes (`check-attr`, read as
+/// `cat-file --filters` reads them), for the paths that name one.
+fn filter_drivers(
+    repo: &Path,
+    head_sha: &str,
+    paths: &[&str],
+) -> Result<BTreeMap<String, String>, String> {
+    // Paths go as arguments, a bounded number of bytes per command.
+    const ARG_BYTES: usize = 128 * 1024;
+    let mut out = BTreeMap::new();
+    let mut rest = paths;
+    while !rest.is_empty() {
+        let mut bytes = 0;
+        let take = rest
+            .iter()
+            .take_while(|path| {
+                bytes += path.len() + 1;
+                bytes <= ARG_BYTES
+            })
+            .count()
+            .max(1);
+        let (chunk, after) = rest.split_at(take);
+        rest = after;
+        let mut cmd = git(repo);
+        cmd.arg(format!("--attr-source={head_sha}"))
+            .args(["check-attr", "-z", "filter", "--"])
+            .args(chunk);
+        let listing = run(cmd, MAX_LISTING_BYTES)?;
+        let fields: Vec<&[u8]> = listing.split(|&b| b == 0).collect();
+        for found in fields.chunks_exact(3) {
+            let value = String::from_utf8_lossy(found[2]);
+            if !matches!(&*value, "unspecified" | "unset" | "set") {
+                out.insert(
+                    String::from_utf8_lossy(found[0]).into_owned(),
+                    value.into_owned(),
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The filter drivers the person's settings give a `smudge` or `process`
+/// command (`filter.<driver>.smudge`, `.process`, its last value not
+/// empty, as git takes the last): a checkout runs it on every file whose
+/// `filter` attribute names the driver. A setting without a value counts
+/// as one.
+fn checkout_filters(repo: &Path) -> Result<BTreeSet<String>, String> {
+    let mut cmd = git(repo);
+    cmd.args([
+        "config",
+        "-z",
+        "--get-regexp",
+        r"^filter\..*\.(smudge|process)$",
+    ]);
+    // Exit 1: no such setting.
+    let listing = run_capped(cmd, &[0, 1], MAX_LISTING_BYTES).map_err(|e| match e {
+        RunError::TooLarge => "git の設定が大きすぎます".to_owned(),
+        RunError::Failed(why) => why,
+    })?;
+    // Each setting's last value: whether it gives a command.
+    let mut last: BTreeMap<String, bool> = BTreeMap::new();
+    for setting in listing.split(|&b| b == 0).filter(|s| !s.is_empty()) {
+        let (key, value) = match setting.iter().position(|&b| b == b'\n') {
+            Some(at) => (&setting[..at], Some(&setting[at + 1..])),
+            None => (setting, None),
+        };
+        last.insert(
+            String::from_utf8_lossy(key).into_owned(),
+            value.is_none_or(|value| !value.is_empty()),
+        );
+    }
+    Ok(last
+        .into_iter()
+        .filter(|(_, command)| *command)
+        .filter_map(|(key, _)| {
+            let (driver, _) = key.strip_prefix("filter.")?.rsplit_once('.')?;
+            Some(driver.to_owned())
+        })
+        .collect())
 }
 
 /// A state target (L1-1 item 2): no base and no changed files; the diff
@@ -1386,6 +1547,114 @@ pub(crate) mod tests {
             .unwrap()
             .set_modified(at)
             .unwrap();
+    }
+
+    #[test]
+    fn ac01_a_change_only_the_index_time_tells_is_captured() {
+        // A file changed in the second its index entry was written, its
+        // size and mtime as recorded (ctime not compared here): git tells
+        // the change only because the entry is not older than the index
+        // file ("racily clean") and so compares the content.
+        let repo = repo();
+        sh(&repo, &["config", "core.trustctime", "false"]);
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        let set_mtime = |path: &Path| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap()
+        };
+        set_mtime(&repo.join("a.txt"));
+        sh(&repo, &["add", "a.txt"]);
+        fs::write(repo.join("a.txt"), "one\nTWO\nthree\nFOUR\n").unwrap();
+        set_mtime(&repo.join("a.txt"));
+        let index = PathBuf::from(sh(&repo, &["rev-parse", "--git-path", "index"]).trim());
+        set_mtime(&repo.join(index));
+
+        let dest = temp("racy-dest").join("target");
+        let captured = capture(&diff_target(&repo, Head::Worktree), &dest, 0).unwrap();
+        let patch = fs::read_to_string(dest.join(WORKTREE_PATCH)).unwrap();
+        assert!(patch.contains("+FOUR\n"), "{patch}");
+        let a = captured.manifest.file("a.txt").unwrap();
+        assert_eq!(a.digest, digest_bytes(b"one\nTWO\nthree\nFOUR\n"));
+    }
+
+    #[test]
+    fn ac01_a_ref_head_runs_no_filter_driver_in_the_persons_checkout() {
+        let repo = temp("smudge");
+        let marker = temp("smudge-marker").join("ran");
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        // A smudge filter that writes a file each time it runs.
+        let smudge = format!("touch '{}'; cat", marker.display());
+        for (key, value) in [
+            ("filter.mark.smudge", smudge.as_str()),
+            ("filter.mark.clean", "cat"),
+            ("filter.mark.required", "true"),
+            // Given a command, then none: git takes the last value.
+            ("filter.off.smudge", smudge.as_str()),
+            ("filter.off.smudge", ""),
+        ] {
+            sh(&repo, &["config", "--add", key, value]);
+        }
+        fs::write(
+            repo.join(".gitattributes"),
+            "*.dat filter=mark\n*.raw filter=unset-driver\n*.off filter=off\n",
+        )
+        .unwrap();
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        sh(&repo, &["checkout", "-q", "-b", "feat"]);
+        fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        fs::write(repo.join("b.dat"), "payload\n").unwrap();
+        fs::write(repo.join("c.raw"), "raw\n").unwrap();
+        fs::write(repo.join("d.off"), "off\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "feat"]);
+        let _ = fs::remove_file(&marker);
+        let before = index_and_tree(&repo);
+
+        let dest = temp("smudge-dest").join("target");
+        let captured = capture(&diff_target(&repo, Head::Ref("feat".into())), &dest, 0).unwrap();
+        assert!(
+            !marker.exists(),
+            "a smudge filter ran in the person's checkout"
+        );
+        assert_eq!(index_and_tree(&repo), before);
+        // The file a checkout would run the driver on is left out, said
+        // why; one naming a driver no setting gives a command is taken as
+        // it is.
+        let manifest = &captured.manifest;
+        assert_eq!(
+            manifest.omitted,
+            vec![Omitted {
+                path: "b.dat".into(),
+                reason: FILTER_REASON.into()
+            }]
+        );
+        assert!(manifest.file("b.dat").is_none());
+        for (path, text) in [
+            ("a.txt", "one\ntwo\n"),
+            ("c.raw", "raw\n"),
+            ("d.off", "off\n"),
+        ] {
+            assert!(manifest.file(path).is_some(), "{path}");
+            let copy = snapshot_path(&dest, path).unwrap();
+            assert_eq!(fs::read_to_string(copy).unwrap(), text);
+        }
+        // A verifier's worktree still gets the file from its own checkout,
+        // and the rest checks out as captured.
+        let main = crate::worktree::main_worktree(&repo).unwrap();
+        let path = crate::worktree::path_for(
+            &main,
+            &crate::model::types::SessionId::new("ver-1"),
+            &crate::model::types::PartId::new("claude"),
+        );
+        crate::worktree::add(&repo, &path, &dest, manifest, &captured.rebuild).unwrap();
+        assert_eq!(fs::read_to_string(path.join("b.dat")).unwrap(), "payload\n");
+        crate::worktree::remove(&repo, &path).unwrap();
     }
 
     #[test]

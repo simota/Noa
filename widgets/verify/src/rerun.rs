@@ -8,11 +8,12 @@
 //! are pure; the rest does I/O.
 
 use std::collections::BTreeMap;
-use std::ffi::{CString, OsStr};
+use std::collections::btree_map::Entry;
+use std::ffi::{CStr, CString, OsStr};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, Read};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -89,8 +90,10 @@ pub struct ItemStatus {
     pub alive: bool,
     /// From `<n>.exit`, once written.
     pub exit: Option<i32>,
-    /// How it ended, once it has; `None` while it waits for its turn or
-    /// runs (also while its group is being killed past its limit).
+    /// How it ended, once its turn is over (nothing of its process group
+    /// left, its log final); `None` while it waits for its turn or runs,
+    /// while what it left in its group is still there, and while its
+    /// group is being killed past its limit.
     pub end: Option<End>,
 }
 
@@ -112,7 +115,8 @@ pub struct Limits {
     pub run: Millis,
     /// How long after one command ended the next one's `.pid` may take;
     /// past it, that command and every later one are `not_run` ("re-run did
-    /// not finish"): the engine's start timeout.
+    /// not finish"): the engine's start timeout. The last command, its
+    /// group seen gone, waits as long for `done`.
     pub next_start: Millis,
 }
 
@@ -129,8 +133,13 @@ pub struct Watch {
     procs: BTreeMap<u32, Proc>,
     /// When each command's process group was sent SIGTERM past its limit.
     term: BTreeMap<u32, Millis>,
-    /// How each command ended and when that was first seen: once decided,
-    /// an outcome stays.
+    /// How each command ended, once its files or the kill past its limit
+    /// said: it stays, and is given once the command's turn is over.
+    decided: BTreeMap<u32, End>,
+    /// When the widget first saw nothing left of each decided command's
+    /// process group.
+    gone: BTreeMap<u32, Millis>,
+    /// The outcome given for each command and when: once given, it stays.
     ended: BTreeMap<u32, (End, Millis)>,
 }
 
@@ -141,6 +150,8 @@ impl Watch {
             seen: BTreeMap::new(),
             procs: BTreeMap::new(),
             term: BTreeMap::new(),
+            decided: BTreeMap::new(),
+            gone: BTreeMap::new(),
             ended: BTreeMap::new(),
         }
     }
@@ -199,6 +210,19 @@ impl Proc {
         let gone = unsafe { libc::getpgid(self.pid) } == -1
             && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
         gone && group_exists(self.pid)
+    }
+
+    /// Whether nothing of its process group is left as far as the widget
+    /// can tell: [`Proc::group_left`] says no for a command it checked at
+    /// first sight; for a pid it never took for the run's command, no
+    /// process may be in a group of that id (one there may be another's:
+    /// the turn then waits for the script, or the run's limit).
+    fn group_gone(&self) -> bool {
+        if self.sid.is_some() {
+            !self.group_left()
+        } else {
+            !group_exists(self.pid)
+        }
     }
 
     /// Sends `signal` to its process group, checked just before as still
@@ -311,6 +335,12 @@ pub fn nonce() -> io::Result<String> {
 /// Writes `<dir>/<n>.cmd` for each of `commands` (n from 1) and
 /// `<dir>/run.sh`, creating `dir` below `base` exclusively, and returns
 /// what [`crate::model::types::Event::RerunRequested`] logs.
+///
+/// A `dir` already there is taken only as what an earlier call, cut short
+/// before its request was logged, left: holding nothing but regular files
+/// of the names this writes (see [`clear_partial`]), which are written
+/// afresh with a new nonce. Anything else in it refuses the request with
+/// `AlreadyExists`, the files left as they are.
 pub fn write_request(
     base: &Path,
     dir: &Path,
@@ -327,10 +357,17 @@ pub fn write_request(
     let c_name = CString::new(name.as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "名前に NUL が含まれます"))?;
     // SAFETY: `parent_fd` is an open directory and `c_name` a C string.
-    if unsafe { libc::mkdirat(parent_fd.as_raw_fd(), c_name.as_ptr(), 0o755) } != 0 {
-        return Err(io::Error::last_os_error());
+    let made = unsafe { libc::mkdirat(parent_fd.as_raw_fd(), c_name.as_ptr(), 0o755) } == 0;
+    if !made {
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::AlreadyExists {
+            return Err(err);
+        }
     }
     let fd = fsx::open_dir(base, dir, false)?;
+    if !made {
+        clear_partial(&fd, commands.len())?;
+    }
     let mut items = Vec::new();
     let mut pairs = Vec::new();
     for (i, command) in commands.iter().enumerate() {
@@ -351,6 +388,88 @@ pub fn write_request(
         items,
         script_digest: digest_bytes(text.as_bytes()),
     })
+}
+
+/// The names in the open directory `dir`, `.` and `..` left out, read
+/// through a duplicate of its descriptor (never its path).
+fn names_in(dir: &OwnedFd) -> io::Result<Vec<CString>> {
+    // SAFETY: `dir` is an open descriptor; the duplicate is owned by the
+    // directory stream made from it below.
+    let dup = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `dup` is an open directory descriptor nothing else owns.
+    let stream = unsafe { libc::fdopendir(dup) };
+    if stream.is_null() {
+        let err = io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so `dup` is still ours to close.
+        unsafe { libc::close(dup) };
+        return Err(err);
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `stream` is open; the entry is read before the next call.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is NUL-terminated.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if !matches!(name.to_bytes(), b"." | b"..") {
+            names.push(name.to_owned());
+        }
+    }
+    // SAFETY: `stream` is open; this closes `dup` with it.
+    unsafe { libc::closedir(stream) };
+    Ok(names)
+}
+
+/// Makes `rerun/` (open as `dir`), found already there, ready for a
+/// request written again after an earlier write was cut short past making
+/// it: when it holds only regular files of the names [`write_request`]
+/// writes for `commands` commands (`<n>.cmd`, `run.sh`), they are removed
+/// (never followed); anything else there (a run's files, the verifier's,
+/// a link, a folder) refuses with `AlreadyExists` and nothing is removed.
+fn clear_partial(dir: &OwnedFd, commands: usize) -> io::Result<()> {
+    let ours: Vec<String> = (1..=commands)
+        .map(|n| format!("{n}.cmd"))
+        .chain([SCRIPT_FILE.to_owned()])
+        .collect();
+    let names = names_in(dir)?;
+    for name in &names {
+        // SAFETY: `stat` is plain data the call fills in.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `dir` is open, `name` a C string, `st` writable.
+        let found = unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        let regular = found == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
+        let known = name
+            .to_str()
+            .is_ok_and(|name| ours.iter().any(|o| o == name));
+        if !(regular && known) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "{RERUN_DIR}/ に書きかけの依頼ではない {} があります",
+                    name.to_string_lossy()
+                ),
+            ));
+        }
+    }
+    for name in &names {
+        // SAFETY: as above; removes the entry itself, never what it names.
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// A small file the script writes in `dir` (below `base`), read without
@@ -391,18 +510,30 @@ fn group_exists(pid: i32) -> bool {
 }
 
 /// What `dir` shows of `request`'s commands at `now`, each with its
-/// outcome once it has one (L1-5 steps 3–4), timed by `watch`:
-/// - an `.exit` ends it [`End::Exited`];
-/// - a `.nocwd` (its `cd` failed) ends it [`End::NotRun`] ([`NO_CWD`]);
-/// - a process gone without an `.exit` ends it [`End::NotRun`] at once
-///   ("the re-run was stopped before it finished; …");
-/// - past `watch`'s run limit, its process group gets SIGTERM, SIGKILL
-///   [`RERUN_KILL_GRACE`](crate::model::types::RERUN_KILL_GRACE) later
-///   (again at every poll while any of the group is left), and it ends
-///   [`End::TimedOut`] once nothing of its group is left;
-/// - no next `.pid` within the next-start limit after one ended ends that
-///   command and every later one [`End::NotRun`] ("re-run did not
-///   finish").
+/// outcome once it has one (L1-5 steps 3–4), timed by `watch`.
+///
+/// How a command ended is decided as its files say: an `.exit` ends it
+/// [`End::Exited`], a `.nocwd` (its `cd` failed) [`End::NotRun`]
+/// ([`NO_CWD`]), and its process gone without either [`End::NotRun`]
+/// ([`STOPPED`]). That outcome is given only once the command's turn is
+/// over, its log final: once nothing of its process group is left, which
+/// the script says by starting the next command (its `.pid`) or writing
+/// `done`, as it does only then, or which the widget sees itself (for the
+/// last command, only past the next-start limit after that: `done` is
+/// what says the run is through, and a script gone without writing it is
+/// waited for no longer than it would be for a next `.pid`). So every
+/// command has an outcome before `done` only when the script is gone.
+///
+/// While a command's turn is not over, past `watch`'s run limit (counted
+/// from its `.pid` first seen) its process group gets SIGTERM, SIGKILL
+/// [`RERUN_KILL_GRACE`](crate::model::types::RERUN_KILL_GRACE) later
+/// (again at every poll while any of the group is left); one with no
+/// outcome by then is [`End::TimedOut`], one that had exited keeps its
+/// status, and either is given once nothing of its group is left. No next
+/// `.pid` within the next-start limit after one command's outcome was
+/// given ends that command and every later one [`End::NotRun`] ("re-run
+/// did not finish"), or gives the outcome of one whose `.exit` came
+/// before its `.pid`.
 ///
 /// A command's pid is read once, when its `.pid` is first seen, and
 /// checked then against the `run.sh` pid beside it: it must lead a process
@@ -423,17 +554,23 @@ pub fn poll(
     now: Millis,
 ) -> io::Result<Status> {
     let limits = watch.limits;
+    // `done`, then every `.pid`, then each `.exit`: the script writes each
+    // of them only after the ones before it, so none read later is older.
+    let done = read_small(dir, dir, DONE_FILE, 256)?
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned());
+    for item in &request.items {
+        if !watch.procs.contains_key(&item.n)
+            && let Some((pid, run)) = read_pid(dir, item.n)?
+        {
+            watch.seen.insert(item.n, now);
+            watch.procs.insert(item.n, Proc::first_seen(pid, run));
+        }
+    }
     let mut items = Vec::new();
     let mut previous_end: Option<Millis> = None;
     let mut stalled = false;
-    for item in &request.items {
+    for (i, item) in request.items.iter().enumerate() {
         let n = item.n;
-        if !watch.procs.contains_key(&n)
-            && let Some((pid, run)) = read_pid(dir, n)?
-        {
-            watch.seen.insert(n, now);
-            watch.procs.insert(n, Proc::first_seen(pid, run));
-        }
         let proc = watch.procs.get(&n).copied();
         let alive = proc.is_some_and(|proc| proc.leads());
         // Read after the liveness check: the subshell writes them before
@@ -441,39 +578,68 @@ pub fn poll(
         let exit = read_number(dir, &format!("{n}.exit"))?;
         let no_cwd = read_small(dir, dir, &format!("{n}.nocwd"), 64)?.is_some();
         if !watch.ended.contains_key(&n) {
-            let decided = if let (Some(proc), Some(&term_at)) = (proc, watch.term.get(&n)) {
-                if !proc.group_left() {
-                    Some(End::TimedOut)
+            if let Entry::Vacant(slot) = watch.decided.entry(n) {
+                let end = if let Some(code) = exit {
+                    Some(End::Exited(code))
+                } else if no_cwd {
+                    Some(End::NotRun(NO_CWD.to_owned()))
+                } else if proc.is_some() && !alive {
+                    Some(End::NotRun(STOPPED.to_owned()))
                 } else {
-                    if now.saturating_sub(term_at) >= RERUN_KILL_GRACE {
+                    None
+                };
+                if let Some(end) = end {
+                    slot.insert(end);
+                }
+            }
+            if let Some(proc) = proc
+                && watch.decided.contains_key(&n)
+                && !watch.gone.contains_key(&n)
+                && proc.group_gone()
+            {
+                watch.gone.insert(n, now);
+            }
+            // The script gone before this command's `.pid` (none within the
+            // next-start limit after the one before ended).
+            let overdue = stalled
+                || previous_end.is_some_and(|at| now.saturating_sub(at) >= limits.next_start);
+            let last = i + 1 == request.items.len();
+            let next_seen = request
+                .items
+                .get(i + 1)
+                .is_some_and(|next| watch.procs.contains_key(&next.n));
+            let mut over = done.is_some()
+                || next_seen
+                || watch
+                    .gone
+                    .get(&n)
+                    .is_some_and(|&at| !last || now.saturating_sub(at) >= limits.next_start)
+                || (proc.is_none() && overdue);
+            if let Some(proc) = proc
+                && !(over && watch.decided.contains_key(&n))
+            {
+                match watch.term.get(&n) {
+                    None if now.saturating_sub(watch.seen[&n]) >= limits.run => {
+                        proc.signal(Signal::Term);
+                        watch.term.insert(n, now);
+                        watch.decided.entry(n).or_insert(End::TimedOut);
+                    }
+                    Some(&at) if now.saturating_sub(at) >= RERUN_KILL_GRACE => {
                         proc.signal(Signal::Kill);
                     }
-                    None
+                    _ => {}
                 }
-            } else if let Some(code) = exit {
-                Some(End::Exited(code))
-            } else if no_cwd {
-                Some(End::NotRun(NO_CWD.to_owned()))
-            } else if let Some(proc) = proc {
-                if !alive {
-                    Some(End::NotRun(STOPPED.to_owned()))
-                } else if now.saturating_sub(watch.seen[&n]) >= limits.run {
-                    proc.signal(Signal::Term);
-                    watch.term.insert(n, now);
-                    None
-                } else {
-                    None
-                }
-            } else if stalled
-                || previous_end.is_some_and(|at| now.saturating_sub(at) >= limits.next_start)
-            {
+                // Killed: over once nothing of its group is left (at once for
+                // a pid never the run's command, which is never signalled).
+                over |= watch.term.contains_key(&n) && !proc.group_left();
+            }
+            if let Some(end) = watch.decided.get(&n).filter(|_| over) {
+                watch.ended.insert(n, (end.clone(), now));
+            } else if proc.is_none() && overdue {
                 stalled = true;
-                Some(End::NotRun(DID_NOT_FINISH.to_owned()))
-            } else {
-                None
-            };
-            if let Some(end) = decided {
-                watch.ended.insert(n, (end, now));
+                watch
+                    .ended
+                    .insert(n, (End::NotRun(DID_NOT_FINISH.to_owned()), now));
             }
         }
         let ended = watch.ended.get(&n);
@@ -486,8 +652,6 @@ pub fn poll(
             end: ended.map(|(end, _)| end.clone()),
         });
     }
-    let done = read_small(dir, dir, DONE_FILE, 256)?
-        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned());
     Ok(Status { items, done })
 }
 
@@ -870,6 +1034,65 @@ mod tests {
     }
 
     #[test]
+    fn ac10_a_command_ends_only_once_its_log_is_final_and_the_run_only_at_done() {
+        // Each exits 0 at once, leaving a child that ignores SIGTERM and
+        // writes to the log a second later (the script's SIGTERM does not
+        // stop it; it ends before the SIGKILL).
+        let writer = "echo early; ( trap '' TERM; sleep 1; echo late ) & exit 0";
+        let (worktree, dir) = layout("late-writer");
+        let commands = [command("e1", writer, "."), command("e2", writer, ".")];
+        let request = write_request(&worktree, &dir, &worktree, &commands).unwrap();
+        let mut child = start(&dir);
+        // Each log as it was when its command was first given an outcome,
+        // and whether `done` was there then.
+        let mut at_end: [Option<(String, bool)>; 2] = [None, None];
+        let status = watch_all(&dir, &request, LIMITS, |status| {
+            for (seen, item) in at_end.iter_mut().zip(&status.items) {
+                if seen.is_none() && item.end.is_some() {
+                    let log = fs::read_to_string(dir.join(format!("{}.log", item.n))).unwrap();
+                    *seen = Some((log, status.done.is_some()));
+                }
+            }
+        });
+        child.wait().unwrap();
+        for (n, seen) in at_end.iter().enumerate() {
+            let (log, _) = seen.as_ref().unwrap();
+            assert_eq!(log, "early\nlate\n", "command {}", n + 1);
+        }
+        assert!(at_end[1].as_ref().unwrap().1, "the run ended before `done`");
+        let ends: Vec<End> = status
+            .items
+            .iter()
+            .map(|i| i.end.clone().unwrap())
+            .collect();
+        assert_eq!(ends, [End::Exited(0), End::Exited(0)]);
+
+        // A `run.sh` gone after the last command's `.exit` (it never
+        // writes `done`): the command ends once nothing of its group is
+        // left and the start timeout has passed since, as a next command
+        // would have been `not_run` by then.
+        let (worktree, dir) = layout("no-done");
+        let request =
+            write_request(&worktree, &dir, &worktree, &[command("e1", "exit 0", ".")]).unwrap();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id() as i32;
+        gone.wait().unwrap();
+        fs::write(dir.join("1.pid"), format!("{gone_pid}\n")).unwrap();
+        fs::write(dir.join("1.exit"), "0\n").unwrap();
+        let mut watch = Watch::new(LIMITS);
+        for now in [0, LIMITS.next_start - 1] {
+            let status = poll(&dir, &request, &mut watch, now).unwrap();
+            assert_eq!(status.items[0].end, None, "at {now}");
+        }
+        let status = poll(&dir, &request, &mut watch, LIMITS.next_start).unwrap();
+        assert_eq!(status.items[0].end, Some(End::Exited(0)));
+        // With `done` there, at once.
+        fs::write(dir.join(DONE_FILE), format!("{}\n", request.nonce)).unwrap();
+        let status = poll(&dir, &request, &mut Watch::new(LIMITS), 0).unwrap();
+        assert_eq!(status.items[0].end, Some(End::Exited(0)));
+    }
+
+    #[test]
     fn ac10_the_timeout_kill_works_whatever_sh_starts_the_script() {
         // macOS's `/bin/sh` (bash), dash, which turns job control off
         // without a terminal, and zsh as `sh`, which refuses `set -m`.
@@ -1159,6 +1382,80 @@ mod tests {
         assert_eq!(status.items[2].pid, None);
         assert!(kill_group(1, Signal::Term).is_err());
         assert!(kill_group(0, Signal::Term).is_err());
+    }
+
+    #[test]
+    fn a_request_cut_short_is_written_again_over_only_its_own_files() {
+        let (worktree, dir) = layout("retry");
+        let commands = [command("e1", "exit 0", "."), command("e2", "exit 3", ".")];
+        // Cut short after `rerun/` was made: empty, then with a whole and a
+        // half-written `.cmd`, then with a half-written `run.sh` as well.
+        for partial in [
+            &[][..],
+            &[("1.cmd", "exit 0"), ("2.cmd", "ex")],
+            &[
+                ("1.cmd", "exit 0"),
+                ("2.cmd", "exit 3"),
+                (SCRIPT_FILE, "#!/bin/sh\n"),
+            ],
+        ] {
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            for (name, text) in partial {
+                fs::write(dir.join(name), text).unwrap();
+            }
+            let request = write_request(&worktree, &dir, &worktree, &commands).unwrap();
+            assert_eq!(fs::read_to_string(dir.join("2.cmd")).unwrap(), "exit 3");
+            check_digests(&worktree, &dir, &request).unwrap();
+        }
+        // Anything else there (the verifier's files, a run's files, a
+        // `.cmd` of no command, a link, a folder) refuses it, and is left.
+        let elsewhere = temp("rerun-elsewhere").join("x");
+        fs::write(&elsewhere, "exit 0").unwrap();
+        for (what, make) in [
+            (
+                "a .pid",
+                &(|dir: &Path| fs::write(dir.join("1.pid"), "1 1\n").unwrap()) as &dyn Fn(&Path),
+            ),
+            ("notes", &|dir: &Path| {
+                fs::write(dir.join("notes.txt"), "").unwrap()
+            }),
+            ("a 3.cmd", &|dir: &Path| {
+                fs::write(dir.join("3.cmd"), "").unwrap()
+            }),
+            ("a link", &|dir: &Path| {
+                std::os::unix::fs::symlink(&elsewhere, dir.join("1.cmd")).unwrap()
+            }),
+            ("a folder", &|dir: &Path| {
+                fs::create_dir(dir.join("2.cmd")).unwrap()
+            }),
+        ] {
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(SCRIPT_FILE), "#!/bin/sh\n").unwrap();
+            make(&dir);
+            let before: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            let err = write_request(&worktree, &dir, &worktree, &commands).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{what}: {err}");
+            let mut after: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            let mut before = before;
+            before.sort();
+            after.sort();
+            assert_eq!(before, after, "{what}");
+        }
+        assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "exit 0");
+        // `rerun/` itself a link: refused, nothing written through it.
+        let _ = fs::remove_dir_all(&dir);
+        let target = temp("rerun-link-target");
+        std::os::unix::fs::symlink(&target, &dir).unwrap();
+        assert!(write_request(&worktree, &dir, &worktree, &commands).is_err());
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
     }
 
     #[test]

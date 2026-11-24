@@ -51,24 +51,35 @@ pub fn sniff(head: &[u8]) -> Option<Media> {
     }
     // ISO base media: a first box of type `ftyp`, its major brand saying
     // QuickTime (`qt  `), or it or one of the compatible brands after it
-    // (from byte 16 to the end of the box) saying MP4 video, unless the
-    // major brand says an image or audio.
-    if head.len() >= 12 && &head[4..8] == b"ftyp" {
-        let major = &head[8..12];
+    // (after the four-byte minor version, to the end of the box) saying
+    // MP4 video, unless the major brand says an image or audio.
+    if head.len() >= 8 && &head[4..8] == b"ftyp" {
+        // A size of 0 runs the box to the end of the file; 1 gives it in
+        // the eight bytes after the type (a 64-bit size), which moves the
+        // brands eight bytes on. The box is read as far as `head` goes.
+        let size = u32::from_be_bytes(head[..4].try_into().expect("four bytes"));
+        let (brands, end) = match size {
+            0 => (8, head.len()),
+            1 => {
+                let large = u64::from_be_bytes(head.get(8..16)?.try_into().expect("eight bytes"));
+                (
+                    16,
+                    usize::try_from(large).unwrap_or(usize::MAX).min(head.len()),
+                )
+            }
+            size => (8, (size as usize).min(head.len())),
+        };
+        let major = head.get(brands..brands + 4)?;
         if major == b"qt  " {
             return Some(Media::QuickTime);
         }
         if not_video(major) {
             return None;
         }
-        // A size of 0 runs the box to the end of the file, 1 gives it in
-        // eight more bytes: either way, as far as `head` goes.
-        let size = u32::from_be_bytes(head[..4].try_into().expect("four bytes")) as usize;
-        let end = match size {
-            0 | 1 => head.len(),
-            size => size.min(head.len()),
-        };
-        let compatible = head.get(16..end).unwrap_or_default().chunks_exact(4);
+        let compatible = head
+            .get(brands + 8..end)
+            .unwrap_or_default()
+            .chunks_exact(4);
         return std::iter::once(major)
             .chain(compatible)
             .any(|brand| MP4_BRANDS.iter().any(|mp4| brand == &mp4[..]))
@@ -324,6 +335,27 @@ pub(crate) mod tests {
         let mut short = ftyp(b"zzzz", b"");
         short.extend_from_slice(b"mp42");
         assert_eq!(sniff(&short), None);
+
+        // A 64-bit size (size field 1, the size in the eight bytes after
+        // the type): the major brand follows it, at byte 16.
+        let large = |brand: &[u8; 4], compatible: &[u8]| {
+            let mut out = 1u32.to_be_bytes().to_vec();
+            out.extend_from_slice(b"ftyp");
+            out.extend_from_slice(&(24 + compatible.len() as u64).to_be_bytes());
+            out.extend_from_slice(brand);
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            out.extend_from_slice(compatible);
+            out
+        };
+        assert_eq!(sniff(&large(b"qt  ", b"qt  ")), Some(Media::QuickTime));
+        assert_eq!(sniff(&large(b"isom", b"isom")), Some(Media::Mp4));
+        assert_eq!(sniff(&large(b"zzzz", b"zzzzmp42")), Some(Media::Mp4));
+        assert_eq!(sniff(&large(b"heic", b"mif1heiciso8")), None);
+        let mut short = large(b"zzzz", b"");
+        short.extend_from_slice(b"mp42");
+        assert_eq!(sniff(&short), None);
+        // Cut before its major brand: not media.
+        assert_eq!(sniff(&large(b"qt  ", b"")[..18]), None);
 
         let webm = ebml(b"webm");
         assert_eq!(&webm[31..35], b"webm", "past the first 32 bytes");

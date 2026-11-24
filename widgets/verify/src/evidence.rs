@@ -261,7 +261,11 @@ fn write_below(base: &Path, dir: &Path, rel: &Path, bytes: &[u8]) -> io::Result<
 /// The source is read as [`inspect`] looks at it (a link on the way,
 /// also a parent folder swapped for one after validation, refuses it; a
 /// FIFO cannot block); one grown past its cap since validation is refused
-/// rather than cut. The copy is created exclusively. Items citing the same
+/// rather than cut. The copy is created exclusively; a file already at its
+/// name (an ingest of the same round cut short before `EvidenceIngested`
+/// was logged) is taken as the copy only when it is a regular file,
+/// reached without a link, holding the same bytes, and is otherwise
+/// refused and left as it is. Items citing the same
 /// path share one copy: it is read and stored once (to the largest of
 /// their caps) and each gets the same [`Stored`], or the same error, an
 /// item whose own cap the file passes getting the cap error.
@@ -303,8 +307,14 @@ pub fn ingest(
                 if over {
                     return Err(grown(&item.path, cap));
                 }
-                write_below(reply_base, &into, rel, &bytes)
-                    .map_err(|e| format!("{} を保存できません: {e}", item.path))?;
+                match write_below(reply_base, &into, rel, &bytes) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                        same_copy(reply_base, &into, rel, &bytes)
+                            .map_err(|why| format!("{} を保存できません: {why}", item.path))?;
+                    }
+                    Err(e) => return Err(format!("{} を保存できません: {e}", item.path)),
+                }
                 Ok(Stored {
                     path: recorded.join(rel),
                     bytes: bytes.len() as u64,
@@ -318,6 +328,21 @@ pub fn ingest(
             (item.key.clone(), copied)
         })
         .collect()
+}
+
+/// Whether the file already at `dir/rel` (below `base`), where an ingest
+/// found its exclusive create taken, is the copy of `bytes` an earlier
+/// ingest of the same round made (cut short by a crash before it was
+/// logged): a regular file, reached without a link, of the same size and
+/// bytes (so the same digest). Anything else is said, and left as it is.
+fn same_copy(base: &Path, dir: &Path, rel: &Path, bytes: &[u8]) -> Result<(), String> {
+    let (file, size) = open_below(base, dir, rel).map_err(|refused| refused.message(rel))?;
+    let (there, over) = fsx::read_capped(file, bytes.len() as u64)
+        .map_err(|e| format!("既にあるコピーを読めません: {e}"))?;
+    if size != bytes.len() as u64 || over || there != bytes {
+        return Err("既に別の内容のコピーがあります（上書きしません）".to_owned());
+    }
+    Ok(())
 }
 
 fn grown(path: &str, cap: u64) -> String {
@@ -756,7 +781,9 @@ mod tests {
                 ".noa/verify/ver-1/evidence/r1/claude/shots/tab.png",
             ]
         );
-        // A second ingest of the same item never writes over the copy.
+        // Ingest again (a crash after the copy, before `EvidenceIngested`
+        // was logged): the copy there is the file, byte for byte, so it is
+        // kept and given again.
         let again = ingest(
             &f.src_base,
             &f.src_dir,
@@ -764,9 +791,47 @@ mod tests {
             &f.reply_dir,
             1,
             &part(),
-            &items[..1],
+            &items,
         );
-        assert!(again[0].1.is_err());
+        let again: Vec<Stored> = again.into_iter().map(|(_, r)| r.unwrap()).collect();
+        assert_eq!(again, stored);
+        // A copy that is not the file is never written over nor taken: of
+        // the same size with other bytes, cut short, or a link (to a file
+        // holding the right bytes).
+        let copy = f.reply_dir.join(&stored[0].path);
+        let elsewhere = temp("elsewhere").join("1.log");
+        fs::write(&elsewhere, "test result: ok\n").unwrap();
+        for (what, make) in [
+            (
+                "other bytes",
+                &(|| fs::write(&copy, "test result: no\n").unwrap()) as &dyn Fn(),
+            ),
+            ("cut short", &|| fs::write(&copy, "test result").unwrap()),
+            ("a link", &|| symlink(&elsewhere, &copy).unwrap()),
+        ] {
+            let _ = fs::remove_file(&copy);
+            make();
+            let before = fs::symlink_metadata(&copy).unwrap();
+            let again = ingest(
+                &f.src_base,
+                &f.src_dir,
+                &f.reply_base,
+                &f.reply_dir,
+                1,
+                &part(),
+                &items[..1],
+            );
+            let err = again[0].1.clone().unwrap_err();
+            assert!(err.contains("logs/1.log"), "{what}: {err}");
+            let after = fs::symlink_metadata(&copy).unwrap();
+            assert_eq!(
+                (before.len(), before.file_type()),
+                (after.len(), after.file_type()),
+                "{what}"
+            );
+        }
+        fs::remove_file(&copy).unwrap();
+        fs::write(&copy, "test result: ok\n").unwrap();
 
         let evidence: Vec<Evidence> = stored
             .iter()

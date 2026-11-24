@@ -545,6 +545,37 @@ mod tests {
     }
 
     #[test]
+    fn ac03_the_persons_diff_settings_leave_the_rebuild_patch_as_it_applies() {
+        let repo = repo();
+        for (key, value) in [
+            ("diff.context", "0"),
+            ("diff.interHunkContext", "0"),
+            ("diff.suppressBlankEmpty", "true"),
+        ] {
+            sh(&repo, &["config", key, value]);
+        }
+        fs::write(repo.join("long.txt"), "a\n\nb\nc\n\nd\ne\n\nf\n").unwrap();
+        sh(&repo, &["add", "long.txt"]);
+        sh(&repo, &["commit", "-q", "-m", "long"]);
+        fs::write(repo.join("a.txt"), "one\n2\nthree\nfour\n").unwrap();
+        fs::write(repo.join("long.txt"), "a\n\nb\nC\n\nd\ne\n\nF\n").unwrap();
+        let (c, target_dir, path) = setup(&repo, Head::Worktree);
+        let patch = fs::read_to_string(target_dir.join(WORKTREE_PATCH)).unwrap();
+        // Three lines of context, a blank one written as a space.
+        assert!(patch.contains("\n three\n four\n"), "{patch}");
+        assert!(patch.contains("\n \n d\n"), "{patch}");
+        add(&repo, &path, &target_dir, &c.manifest, &c.rebuild).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("a.txt")).unwrap(),
+            "one\n2\nthree\nfour\n"
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("long.txt")).unwrap(),
+            "a\n\nb\nC\n\nd\ne\n\nF\n"
+        );
+    }
+
+    #[test]
     fn ac03_a_tampered_patch_refuses_round_one_naming_the_files() {
         let repo = repo();
         dirty(&repo);

@@ -131,8 +131,9 @@ elif [ "${#changed[@]}" -gt 0 ]; then
     case $path in widgets/competition/*) comp=1 ;; esac
     case $path in widgets/review/*) rev=1 ;; esac
     case $path in widgets/verify/*) ver=1 ;; esac
-    # The tasks widget's tests read the noa-tasks skill's examples (AC-9).
-    case $path in widgets/tasks/* | skills/noa-tasks/*) tsk=1 ;; esac
+    # The tasks widget's tests read the noa-tasks skill's examples (AC-9), and
+    # hold the drift test that keeps the three copies of links.rs identical.
+    case $path in widgets/tasks/* | skills/noa-tasks/* | widgets/review/src/links.rs | widgets/verify/src/links.rs) tsk=1 ;; esac
     case $path in widgets/agent-usage/*) use=1 ;; esac
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
     case $path in scripts/install-agent-skill.sh | scripts/test_install_agent_skill.py | skills/*) skill=1 ;; esac

@@ -681,7 +681,10 @@ fn capture_git(
     }
     // Whether the snapshot holds changes not in `head_sha`, read before a
     // last look at HEAD: a commit since `head_sha` was read takes it again.
-    let uncommitted = target.head == Head::Worktree && dirty(&repo, &target.paths)?;
+    let uncommitted = target.head == Head::Worktree
+        && (!view.untracked.is_empty()
+            || !view.links.is_empty()
+            || differs(&repo, &head_sha, &target.paths)?);
     if target.head == Head::Worktree && commit_of(&repo, "HEAD").as_ref() != Some(&head_sha) {
         return Ok(None);
     }
@@ -713,27 +716,30 @@ fn capture_git(
     }))
 }
 
-/// Whether the work tree has changes or untracked files under `paths`
-/// (all of it when empty) that are not in HEAD.
-fn dirty(repo: &Path, paths: &[String]) -> Result<bool, String> {
+/// Whether the work tree's tracked files under `paths` (all when empty)
+/// differ from `head`: the work tree against the commit, as the snapshot is
+/// read, so a change only staged and undone in the work tree is none.
+fn differs(repo: &Path, head: &str, paths: &[String]) -> Result<bool, String> {
     let output = git(repo)
         .args([
-            "status",
-            "--porcelain",
-            "-z",
-            "--untracked-files=normal",
+            "diff",
+            "--quiet",
+            "--no-ext-diff",
+            "--no-textconv",
+            head,
             "--",
         ])
         .args(paths)
         .output()
-        .map_err(|e| format!("git status: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git status: {}",
+        .map_err(|e| format!("git diff: {e}"))?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(format!(
+            "git diff: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        )),
     }
-    Ok(!output.stdout.is_empty())
 }
 
 /// Skipped by a walk outside git: hidden entries, build and package dirs.
@@ -1087,6 +1093,33 @@ mod tests {
         verify(&dest, &manifest).unwrap();
         fs::write(dest.join(FILES_DIR).join("a.txt"), "edited").unwrap();
         assert!(verify(&dest, &manifest).is_err());
+    }
+
+    /// `uncommitted` says whether the captured work tree differs from the
+    /// captured HEAD: a change staged and then undone in the work tree is
+    /// not one; an edit or an untracked file is.
+    #[test]
+    fn the_work_tree_mode_marks_uncommitted_by_the_work_tree_against_head() {
+        let take = |repo: &Path| {
+            let dest = temp("dest").join("target");
+            capture(&git_target(repo, Head::Worktree), &dest, 7)
+                .unwrap()
+                .uncommitted
+        };
+        let repo = repo();
+        assert!(!take(&repo), "clean");
+        fs::write(repo.join("a.txt"), "staged\n").unwrap();
+        sh(&repo, &["add", "a.txt"]);
+        fs::write(repo.join("a.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+        assert_eq!(sh(&repo, &["diff", "HEAD", "--"]), "");
+        assert!(!take(&repo), "staged, then undone in the work tree");
+        sh(&repo, &["reset", "-q"]);
+        fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        assert!(take(&repo), "an edit");
+        sh(&repo, &["checkout", "--", "a.txt"]);
+        fs::write(repo.join("draft.txt"), "wip\n").unwrap();
+        assert!(take(&repo), "an untracked file");
+        let _ = fs::remove_dir_all(&repo);
     }
 
     #[test]

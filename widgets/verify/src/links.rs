@@ -868,7 +868,12 @@ fn git_cmd(dir: &Path) -> Command {
 
 /// `git -C dir <args>`'s stdout, or why it failed.
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = git_cmd(dir)
+    run_git(git_cmd(dir), args)
+}
+
+/// `cmd <args>`'s stdout, or why it failed.
+fn run_git(mut cmd: Command, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = cmd
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -881,10 +886,10 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     }
 }
 
-/// `git -C dir <args>`'s stdout, read up to `cap` bytes: `Ok(None)` past
-/// that (git is stopped).
-fn git_capped(dir: &Path, args: &[&str], cap: u64) -> Result<Option<Vec<u8>>, String> {
-    let mut child = git_cmd(dir)
+/// `cmd <args>`'s stdout, read up to `cap` bytes: `Ok(None)` past that
+/// (git is stopped).
+fn git_capped(mut cmd: Command, args: &[&str], cap: u64) -> Result<Option<Vec<u8>>, String> {
+    let mut child = cmd
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -968,7 +973,9 @@ const NOT_NOA: &str = ":(exclude).noa";
 ///   diff and untracked bytes: `Err(TOO_LARGE)`.
 ///
 /// `HEAD` is read again once the state is read: when it moved meanwhile,
-/// `Err` (the id would name one commit over a state on another).
+/// `Err` (the id would name one commit over a state on another). The
+/// tree's index is never written: the state is read through a copy of it
+/// ([`IndexCopy`]).
 ///
 /// Equal states get equal ids, whichever widget names them.
 pub fn snapshot_id(workdir: &Path) -> Result<ChangeId, String> {
@@ -1002,10 +1009,71 @@ fn read_head(top: &Path) -> Result<String, String> {
         .map_err(|_| format!("{} にはまだコミットがありません", top.display()))
 }
 
+/// A private copy of the index of the work tree `top`, removed with its
+/// folder when dropped. A snapshot's git calls read and write only it
+/// ([`IndexCopy::git`]): `git diff` writes the stat info it refreshes back
+/// to the index it read, `--no-optional-locks` or not, and the tree's own
+/// index belongs to the agent at work there.
+struct IndexCopy {
+    dir: PathBuf,
+    index: PathBuf,
+}
+
+impl IndexCopy {
+    fn of(top: &Path) -> Result<IndexCopy, String> {
+        use std::os::unix::fs::DirBuilderExt as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let own = top.join(printed_path(git(
+            top,
+            &["rev-parse", "--git-path", "index"],
+        )?));
+        let dir = std::env::temp_dir().join(format!(
+            "noa-links-index-{}-{}-{}",
+            std::process::id(),
+            now_millis(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| format!("{} を作れません: {e}", dir.display()))?;
+        let copy = IndexCopy {
+            index: dir.join("index"),
+            dir,
+        };
+        match fs::copy(&own, &copy.index) {
+            // No index yet: git reads none as an empty one, here as there.
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                Err(format!("{} を読めません: {e}", own.display()))
+            }
+            _ => Ok(copy),
+        }
+    }
+
+    /// [`git_cmd`] on this copy; `core.splitIndex` off, so a write of the
+    /// copy never writes a shared index into the repository.
+    fn git(&self, top: &Path) -> Command {
+        let mut cmd = git_cmd(top);
+        cmd.args(["-c", "core.splitIndex=false"])
+            .env("GIT_INDEX_FILE", &self.index);
+        cmd
+    }
+}
+
+impl Drop for IndexCopy {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// The id of the state of the work tree `top` on `head` ([`snapshot_id`]).
+/// Its git calls read a copy of the index ([`IndexCopy`]), never write
+/// the tree's own.
 fn state_id(top: &Path, head: &str) -> Result<ChangeId, String> {
-    let status = git(
-        top,
+    let index = IndexCopy::of(top)?;
+    let status = run_git(
+        index.git(top),
         &[
             "status",
             "--porcelain=v2",
@@ -1026,12 +1094,12 @@ fn state_id(top: &Path, head: &str) -> Result<ChangeId, String> {
     hash.update(b"noa-snap-v1\0");
     hash.update(head.as_bytes());
     hash.update(b"\0");
-    let diff =
-        git_capped(top, &SNAPSHOT_DIFF, SNAPSHOT_MAX_BYTES)?.ok_or_else(|| TOO_LARGE.to_owned())?;
+    let diff = git_capped(index.git(top), &SNAPSHOT_DIFF, SNAPSHOT_MAX_BYTES)?
+        .ok_or_else(|| TOO_LARGE.to_owned())?;
     hash.update(&diff);
     let mut budget = SNAPSHOT_MAX_BYTES - diff.len() as u64;
-    let listing = git(
-        top,
+    let listing = run_git(
+        index.git(top),
         &[
             "ls-files",
             "--others",
@@ -1179,8 +1247,9 @@ pub fn task_current(set: &LinkSet, task: &TaskKey, repo: &Path) -> Option<Curren
 ///    fails, counts as a tip (nothing places it under another).
 /// 2. One tip: that commit. Several (a rebase, history that split): the
 ///    tip of the latest recorded change on any of them.
-/// 3. A snapshot on that commit wins over the commit (uncommitted work on
-///    it came after it); of several, the latest recorded.
+/// 3. Of that commit and the snapshots on it, the latest recorded (work
+///    restored to the commit after a snapshot of it is recorded after the
+///    snapshot).
 ///
 /// `None` when the run produced nothing recorded.
 fn last_produced(set: &LinkSet, run: &Node, repo: &Path) -> Option<ChangeId> {
@@ -1197,10 +1266,10 @@ fn last_produced(set: &LinkSet, run: &Node, repo: &Path) -> Option<ChangeId> {
         .rev()
         .filter_map(|c| c.head())
         .find(|head| tips.contains(head))?;
-    let on_tip = || produced.iter().rev().filter(|c| c.head() == Some(tip));
-    on_tip()
-        .find(|c| matches!(c, ChangeId::Snapshot(_)))
-        .or_else(|| on_tip().next())
+    produced
+        .iter()
+        .rev()
+        .find(|c| c.head() == Some(tip))
         .map(|c| (*c).clone())
 }
 
@@ -1272,8 +1341,10 @@ pub enum Presence {
     Missing {
         what: String,
     },
-    /// Not known: git failed, nothing recorded to look at, a GitHub issue
-    /// (not checked over the network).
+    /// Not known: git failed, nothing recorded to look at, a snapshot with
+    /// no capture dir whose work tree is still there (whether that tree is
+    /// still at it is not checked), a GitHub issue (not checked over the
+    /// network).
     Unknown,
 }
 
@@ -1302,10 +1373,11 @@ fn id_ok(id: &str, prefix: &str) -> bool {
 
 /// A local task's id as Tasks takes one (`t-` and at least one more
 /// character: `t-<millis>[-n]`, or a name given by hand such as
-/// `t-fix-ui`), and never a path out of the tasks folder: no `/`, NUL or
-/// `..`.
+/// `t-fix-ui` or `t-review-v1..v2`), and never a path out of the tasks
+/// folder: no `/` or NUL (so `..` is never a component of its own, and
+/// the `t-` prefix rules out an id that is `.` or `..`).
 fn local_task_id(id: &str) -> bool {
-    id.len() > 2 && id.starts_with("t-") && !id.contains(['/', '\0']) && !id.contains("..")
+    id.len() > 2 && id.starts_with("t-") && !id.contains(['/', '\0'])
 }
 
 /// The presence of every node of `set` (`data`: `<data dir>/noa`; `repo`:
@@ -1391,16 +1463,31 @@ fn presence_of(
         },
         // Found while any of its capture dirs is: a review's and a
         // verification's capture of one snapshot are each a record of it.
-        Node::Change(ChangeId::Snapshot(id)) => match set.captures.get(node) {
-            Some(dirs) if dirs.iter().any(|dir| dir.is_dir()) => Presence::Found,
-            Some(dirs) => Presence::Missing {
+        // With none recorded, missing once every work tree it was taken
+        // in (its own, its producing runs') is gone: nothing can show it.
+        Node::Change(ChangeId::Snapshot(id)) => {
+            let gone = |dirs: Vec<&PathBuf>| Presence::Missing {
                 what: std::iter::once(id.clone())
                     .chain(dirs.iter().map(|dir| dir.display().to_string()))
                     .collect::<Vec<_>>()
                     .join(" "),
-            },
-            None => Presence::Unknown,
-        },
+            };
+            match set.captures.get(node) {
+                Some(dirs) if dirs.iter().any(|dir| dir.is_dir()) => Presence::Found,
+                Some(dirs) => gone(dirs.iter().collect()),
+                None => {
+                    let trees: BTreeSet<&PathBuf> = std::iter::once(node)
+                        .chain(set.links_to(node, Rel::Produced).map(|l| &l.from))
+                        .filter_map(|n| set.info.get(n)?.workdir.as_ref())
+                        .collect();
+                    if trees.is_empty() || trees.iter().any(|dir| dir.is_dir()) {
+                        Presence::Unknown
+                    } else {
+                        gone(trees.into_iter().collect())
+                    }
+                }
+            }
+        }
         Node::Review(id) => match review_dir(data, id) {
             Some(dir) => file(id, dir.join("events.jsonl")),
             None => missing(id, None),
@@ -3140,6 +3227,35 @@ mod tests {
     }
 
     #[test]
+    fn the_current_change_never_writes_the_index() {
+        let tmp = Tmp::new("snap-index");
+        let repo = tmp.path().join("app");
+        repo_at(&repo);
+        fs::write(repo.join("b.txt"), "b\n").unwrap();
+        commit(&repo, "b");
+        // b.txt's bytes are as committed but its mtime is not what the
+        // index holds (git diff refreshes such an entry); a.txt changed,
+        // so the tree has a snapshot and the diff runs.
+        fs::File::options()
+            .write(true)
+            .open(repo.join("b.txt"))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+            .unwrap();
+        fs::write(repo.join("a.txt"), "two\n").unwrap();
+        let index = repo.join(".git/index");
+        let before = fs::read(&index).unwrap();
+        let id = current_change(&repo).unwrap();
+        assert!(matches!(id, ChangeId::Snapshot(_)), "{id:?}");
+        assert_eq!(fs::read(&index).unwrap(), before);
+        // A git that may write the index does rewrite it (the stat info
+        // was stale), and the state keeps its id.
+        sh(&repo, &["status", "--porcelain"]);
+        assert_ne!(fs::read(&index).unwrap(), before);
+        assert_eq!(current_change(&repo).unwrap(), id);
+    }
+
+    #[test]
     fn a_missing_record_is_marked_missing_and_its_links_are_kept() {
         let tmp = Tmp::new("presence");
         let main = tmp.path().join("app");
@@ -4083,8 +4199,7 @@ mod tests {
         );
         let current = || task_current(&replay(&log).unwrap(), &task("t-1"), &main);
         assert_eq!(current(), Some(at("run-1", &ChangeId::Commit(v2.clone()))));
-        // A snapshot on v1, recorded last, is older than v2; one on v2 is
-        // newer than v2, whenever it was recorded.
+        // A snapshot on v1, recorded last, is older than v2.
         let on = |head: &str, hex: &str| ChangeId::Snapshot(format!("snap-{head}-{hex}"));
         let produce = |change: &ChangeId| {
             append(
@@ -4100,6 +4215,7 @@ mod tests {
         };
         produce(&on(&v1, "00000000000000aa"));
         assert_eq!(current(), Some(at("run-1", &ChangeId::Commit(v2.clone()))));
+        // A snapshot on v2 recorded after v2 is the work on it since.
         produce(&on(&v2, "00000000000000bb"));
         assert_eq!(current(), Some(at("run-1", &on(&v2, "00000000000000bb"))));
         // History that split (a commit on the start, not on v2): neither
@@ -4108,6 +4224,138 @@ mod tests {
         let side = ChangeId::Commit(commit(&main, "side"));
         produce(&side);
         assert_eq!(current(), Some(at("run-1", &side)));
+    }
+
+    #[test]
+    fn work_restored_to_a_commit_after_its_snapshot_leaves_the_commit_current() {
+        let tmp = Tmp::new("restored");
+        let log = log_in(&tmp);
+        let c = sha(3);
+        let on_c = |hex: &str| ChangeId::Snapshot(format!("snap-{c}-{hex}"));
+        // Snapshot S on C reviewed, then the work restored to C and C
+        // recorded; the worktree is gone.
+        append(
+            &log,
+            &[
+                auto(Node::Task(task("t-1")), run("run-1"), Rel::Ran),
+                observe(
+                    run("run-1"),
+                    Info {
+                        workdir: Some(tmp.path().join("app-wt/task-run-1")),
+                        branch: Some("task-run-1".into()),
+                        ..Info::default()
+                    },
+                ),
+                auto(
+                    run("run-1"),
+                    Node::Change(on_c("00000000000000aa")),
+                    Rel::Produced,
+                ),
+                auto(run("run-1"), commit_node(&c), Rel::Produced),
+            ],
+            1,
+        )
+        .unwrap();
+        let current = || task_current(&replay(&log).unwrap(), &task("t-1"), tmp.path());
+        assert_eq!(current(), Some(at("run-1", &ChangeId::Commit(c.clone()))));
+        // New work on C, recorded after C: that snapshot.
+        let later = on_c("00000000000000bb");
+        append(
+            &log,
+            &[auto(
+                run("run-1"),
+                Node::Change(later.clone()),
+                Rel::Produced,
+            )],
+            2,
+        )
+        .unwrap();
+        assert_eq!(current(), Some(at("run-1", &later)));
+    }
+
+    #[test]
+    fn a_snapshot_without_a_capture_is_missing_once_its_work_tree_is_gone() {
+        let tmp = Tmp::new("snap-tree");
+        let log = log_in(&tmp);
+        let data = tmp.path().join("data");
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&wt).unwrap();
+        let id = |hex: &str| format!("snap-{}-{hex}", sha(7));
+        let node = |id: &str| Node::Change(ChangeId::Snapshot(id.into()));
+        let (own, by_run, bare) = (
+            id("00000000000000aa"),
+            id("00000000000000bb"),
+            id("00000000000000cc"),
+        );
+        append(
+            &log,
+            &[
+                // Its own work tree recorded, no capture dir.
+                observe(
+                    node(&own),
+                    Info {
+                        workdir: Some(wt.clone()),
+                        head: Some(sha(7)),
+                        ..Info::default()
+                    },
+                ),
+                // Only produced by a run: the run's work tree is its.
+                observe(
+                    run("run-1"),
+                    Info {
+                        workdir: Some(wt.clone()),
+                        ..Info::default()
+                    },
+                ),
+                auto(run("run-1"), node(&by_run), Rel::Produced),
+                // No work tree recorded anywhere.
+                auto(run("run-2"), node(&bare), Rel::Produced),
+            ],
+            1,
+        )
+        .unwrap();
+        let set = replay(&log).unwrap();
+        let of = |id: &str| presence(&set, &node(id), &data, tmp.path());
+        // The tree is there: whether it is still at the state is not known.
+        for id in [&own, &by_run, &bare] {
+            assert_eq!(of(id), Presence::Unknown, "{id}");
+        }
+        fs::remove_dir_all(&wt).unwrap();
+        for id in [&own, &by_run] {
+            assert_eq!(
+                of(id),
+                Presence::Missing {
+                    what: format!("{id} {}", wt.display())
+                }
+            );
+        }
+        assert_eq!(of(&bare), Presence::Unknown);
+    }
+
+    #[test]
+    fn a_local_task_id_with_two_dots_in_it_is_looked_up_in_the_tasks_folder() {
+        let tmp = Tmp::new("task-dots");
+        let repo = tmp.path();
+        let data = repo.join("data");
+        let set = LinkSet::default();
+        for id in ["t-review-v1..v2", "t-.."] {
+            let file = repo.join(".noa/tasks").join(format!("{id}.md"));
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, "# x\n").unwrap();
+            assert_eq!(
+                presence(&set, &Node::Task(task(id)), &data, repo),
+                Presence::Found,
+                "{id:?}"
+            );
+        }
+        // An id that is exactly `.` or `..` never is one.
+        for bad in [".", ".."] {
+            assert_eq!(
+                presence(&set, &Node::Task(task(bad)), &data, repo),
+                Presence::Missing { what: bad.into() },
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -4303,7 +4551,7 @@ mod tests {
         fs::write(&file, "# fix\n").unwrap();
         assert_eq!(presence(&set, &named, &data, repo), Presence::Found);
         // Never a path out of the folder, never an id Tasks refuses.
-        for bad in ["t-a/b", "t-..", "t-../x", "t-", "x-1", "t-a\0b"] {
+        for bad in ["t-a/b", "t-../x", "t-", "x-1", "t-a\0b"] {
             assert_eq!(
                 presence(&set, &Node::Task(task(bad)), &data, repo),
                 Presence::Missing { what: bad.into() },

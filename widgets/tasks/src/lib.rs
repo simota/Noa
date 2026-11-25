@@ -7,6 +7,7 @@
 pub mod code;
 pub mod fsx;
 pub mod github;
+pub mod links;
 pub mod local;
 pub mod model;
 pub mod runs;

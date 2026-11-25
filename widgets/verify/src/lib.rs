@@ -8,6 +8,7 @@ pub mod capture;
 pub mod engine;
 pub mod evidence;
 pub mod fsx;
+pub mod links;
 pub mod media;
 pub mod model;
 pub mod rerun;

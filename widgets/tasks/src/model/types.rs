@@ -481,4 +481,33 @@ mod tests {
             (Source::GitHub, "#7")
         );
     }
+
+    /// `links::TaskKey` (copied into Review and Verify, which cannot name
+    /// `TaskRef`) has `TaskRef`'s JSON shape, both ways. Here rather than in
+    /// `links.rs`, which is byte-identical in all three widgets.
+    mod links {
+        use super::*;
+        use crate::links::TaskKey;
+
+        #[test]
+        fn task_key_json_is_task_refs_both_ways() {
+            let refs = [
+                TaskRef::Local("t-1".into()),
+                TaskRef::GitHub {
+                    repo: "o/n".into(),
+                    number: 12,
+                },
+                TaskRef::Code {
+                    path: "src/a.rs".into(),
+                    key: "k".into(),
+                },
+            ];
+            for r in refs {
+                let json = serde_json::to_string(&r).unwrap();
+                let key: TaskKey = serde_json::from_str(&json).unwrap();
+                assert_eq!(serde_json::to_string(&key).unwrap(), json);
+                assert_eq!(serde_json::from_str::<TaskRef>(&json).unwrap(), r);
+            }
+        }
+    }
 }

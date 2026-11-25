@@ -2364,6 +2364,7 @@ fn open_log(
     }
     verify::engine::check_resumable(&session, &dir)
         .map_err(|why| format!("{} を再開できません: {why}", dir.display()))?;
+    check_shared_resume(&session)?;
     let mut engine = Engine::resume(session, &dir, config);
     let forgotten = forget_unregistered(&mut engine)?;
     // Refused before anything is written, in the log or the workdir.
@@ -2608,20 +2609,63 @@ fn check_shared_ref(
     .ok()
     .filter(|sha| !sha.is_empty())
     .ok_or_else(|| format!("比較先 {name:?} が見つかりません"))?;
+    check_shared_checkout(workdir, &want, false)?;
+    Ok(Some(want))
+}
+
+/// [`check_shared_ref`] on a resume or an extension of a 共有 verification
+/// of a ref: its checkout's HEAD must still be the captured head SHA and
+/// its work tree clean, or the rounds still to run would verify other code
+/// than the rounds before (L1-3, L1-10). Checked before anything is
+/// written to the log or the checkout.
+fn check_shared_resume(session: &Session) -> Result<(), String> {
+    if session.isolation != Isolation::Shared || !matches!(session.target.head, Head::Ref(_)) {
+        return Ok(());
+    }
+    check_shared_checkout(&session.workdir, &session.rebuild.head_sha, true)
+}
+
+/// That `git rev-parse HEAD` in `workdir` prints `want` and its work tree
+/// is clean. With `started`, the verification's start has run there: the
+/// ignore line it appended to a tracked `.noa/.gitignore` is its own
+/// change, not the person's.
+fn check_shared_checkout(workdir: &Path, want: &str, started: bool) -> Result<(), String> {
     let head = checkout_git(workdir, &["rev-parse", "--verify", "HEAD"])?;
     let head = String::from_utf8_lossy(&head).trim().to_owned();
     if head != want {
-        return Err(shared_head_moved(&head, &want));
+        return Err(shared_head_moved(&head, want));
     }
     // On a copy of the index: the person's is never written (L1-3).
     let status = verify::capture::worktree_status(workdir)
         .map_err(|e| format!("git status が失敗しました: {e}"))?;
-    if !status.is_empty() {
+    if !status.is_empty() && !(started && only_own_ignore_line(workdir, &status)) {
         return Err(format!(
             "{SHARED_REF_HEAD}。作業ツリーに未コミットの変更があります"
         ));
     }
-    Ok(Some(want))
+    Ok(())
+}
+
+/// Whether `status` lists only `.noa/.gitignore`, changed from HEAD's by
+/// nothing but the ignore line a start appends.
+fn only_own_ignore_line(workdir: &Path, status: &[u8]) -> bool {
+    if status != b" M .noa/.gitignore\n" {
+        return false;
+    }
+    let Ok(before) = checkout_git(workdir, &["cat-file", "blob", "HEAD:.noa/.gitignore"]) else {
+        return false;
+    };
+    IgnoreFile::open(&workdir.join(".noa").join(".gitignore"), false)
+        .and_then(|file| IgnoreFile::read(&file))
+        .is_some_and(|now| appended_only(&before, &now))
+}
+
+/// Whether `now` is `before` with the ignore line a start appends, and
+/// nothing else.
+fn appended_only(before: &[u8], now: &[u8]) -> bool {
+    now.len() > before.len()
+        && now.starts_with(before)
+        && now[before.len()..].trim_ascii() == APPENDED_IGNORE
 }
 
 /// What `store::prepare_workdir` appends to a `.noa/.gitignore` that does
@@ -2679,10 +2723,7 @@ impl IgnoreFile {
         let Some(now) = Self::read(&file) else {
             return;
         };
-        if now.len() > before.len()
-            && now.starts_with(before)
-            && now[before.len()..].trim_ascii() == APPENDED_IGNORE
-        {
+        if appended_only(before, &now) {
             let _ = file.set_len(before.len() as u64);
         }
     }
@@ -3457,9 +3498,18 @@ pub(crate) mod tests {
     /// The same, its runner still holding it; `before_ruling` runs on the
     /// session once the round is ingested, before the judge rules.
     fn run_to_a_failure(fake: &Fake, root: &Path, before_ruling: impl FnOnce(&Session)) -> Wired {
-        let fake = fake.clone();
         let repo = repo(root);
-        let mut start = new_start(root, state_of(&repo), Isolation::Worktree, false);
+        let start = new_start(root, state_of(&repo), Isolation::Worktree, false);
+        run_to_a_failure_from(fake, start, before_ruling)
+    }
+
+    /// [`run_to_a_failure`] from `start`, made a one-round verification.
+    fn run_to_a_failure_from(
+        fake: &Fake,
+        mut start: Start,
+        before_ruling: impl FnOnce(&Session),
+    ) -> Wired {
+        let fake = fake.clone();
         if let Start::New(new) = &mut start {
             new.max_rounds = 1;
         }
@@ -5957,6 +6007,103 @@ pub(crate) mod tests {
             runner.engine.session().rebuild.head_sha,
             git(&repo, &["rev-parse", "HEAD"])
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A repository under `root` whose tracked `.noa/.gitignore` does not
+    /// ignore `verify/` (a start appends its line to it), checked out
+    /// clean at `main`, and a 共有 start of the ref `main`.
+    fn shared_ref_start(root: &Path) -> (PathBuf, Start) {
+        let repo = repo(root);
+        fs::create_dir_all(repo.join(".noa")).unwrap();
+        fs::write(repo.join(".noa/.gitignore"), "notes/\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "noa"]);
+        let mut target = state_of(&repo);
+        target.head = Head::Ref("main".into());
+        (repo, new_start(root, target, Isolation::Shared, false))
+    }
+
+    /// `start` (a resume or an extension of the 共有 verification of a ref
+    /// logged in `dir`) refused while a tracked file of `repo` is edited,
+    /// HEAD unchanged, with nothing written to the log, the report or the
+    /// checkout; accepted once the edit is undone, the start's own ignore
+    /// line still in `.noa/.gitignore`.
+    fn shared_reopen_needs_a_clean_checkout(
+        fake: &Fake,
+        repo: &Path,
+        dir: &Path,
+        start: impl Fn() -> Start,
+    ) -> Wired {
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        assert_eq!(store::read_session(dir).unwrap().rebuild.head_sha, head);
+        assert_eq!(
+            git(repo, &["status", "--porcelain"]),
+            "M .noa/.gitignore",
+            "the start's ignore line"
+        );
+        let log = fs::read(dir.join(store::EVENTS_FILE)).unwrap();
+        let report = fs::read(store::report_path(dir)).ok();
+        let edited = "pub fn one() -> u32 { 2 }\n";
+        fs::write(repo.join("src/lib.rs"), edited).unwrap();
+        let err = open_wired(fake, start()).err().unwrap();
+        assert!(err.starts_with(SHARED_REF_HEAD), "{err}");
+        assert!(err.contains("未コミットの変更"), "{err}");
+        wait_unlocked(dir);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert!(
+            fs::read(dir.join(store::EVENTS_FILE)).unwrap() == log,
+            "the log was written"
+        );
+        assert_eq!(fs::read(store::report_path(dir)).ok(), report);
+        assert_eq!(fs::read_to_string(repo.join("src/lib.rs")).unwrap(), edited);
+        assert_eq!(
+            git(repo, &["status", "--porcelain"]),
+            "M .noa/.gitignore\n M src/lib.rs"
+        );
+
+        git(repo, &["checkout", "-q", "--", "src/lib.rs"]);
+        let wired = open_wired(fake, start()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(wired.0.engine.session().isolation, Isolation::Shared);
+        assert_eq!(wired.0.engine.session().rebuild.head_sha, head);
+        wired
+    }
+
+    /// AC-38, L1-10: 再開 of an interrupted 共有 verification of a ref
+    /// checks the checkout again.
+    #[test]
+    fn ac38_a_shared_ref_resume_is_refused_after_a_tracked_edit() {
+        let fake = fake();
+        let root = temp_root();
+        let (repo, start) = shared_ref_start(&root);
+        let (mut runner, _, _) = rig_on(&fake, start);
+        let mut conn = fake.clone();
+        brief_the_judge(&fake, &mut runner, &mut conn);
+        let dir = stop(runner);
+        assert!(!store::read_session(&dir).unwrap().closed);
+        shared_reopen_needs_a_clean_checkout(&fake, &repo, &dir, || Start::Resume {
+            dir: dir.clone(),
+        });
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// AC-38, L1-10: +N on a finished 共有 verification of a ref checks
+    /// the checkout again.
+    #[test]
+    fn ac38_a_shared_ref_extension_is_refused_after_a_tracked_edit() {
+        let fake = fake();
+        let root = temp_root();
+        let (repo, start) = shared_ref_start(&root);
+        let (runner, _, _) = run_to_a_failure_from(&fake, start, |_| {});
+        let dir = stop(runner);
+        assert!(store::read_session(&dir).unwrap().closed);
+        let (runner, _, _) =
+            shared_reopen_needs_a_clean_checkout(&fake, &repo, &dir, || Start::Extend {
+                dir: dir.clone(),
+                by: 1,
+            });
+        assert!(!runner.engine.session().closed);
+        assert_eq!(runner.engine.session().max_rounds, 2);
         let _ = fs::remove_dir_all(root);
     }
 }

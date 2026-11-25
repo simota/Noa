@@ -15,6 +15,17 @@ pub(super) fn after_stored_read() {
     }
 }
 
+thread_local! {
+    /// What `open_link` started, in order (tests start no program).
+    static LAUNCHED: RefCell<Vec<review::links::Nav>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Stands in for `links::launch` (tests only).
+pub(super) fn launch(nav: &review::links::Nav) -> Result<(), String> {
+    LAUNCHED.with(|l| l.borrow_mut().push(nav.clone()));
+    Ok(())
+}
+
 use review::model::types::{AgentKind, LensChoice, MIN_PANEL, ReviewerChoice, TargetKind};
 
 use crate::installed::Installed;
@@ -2818,4 +2829,271 @@ fn an_older_connections_version_arriving_late_does_not_win() {
     link.versions.send((3, "0.9.13".to_owned())).unwrap();
     screen.poll_live(&mut TextStore::new(Default::default()));
     assert!(!fix_actions(&screen).is_empty());
+}
+
+// ------------------------------------------------- back-links (AC4)
+
+mod back {
+    use super::*;
+    use review::links::{
+        self, BackChange, BackLinks, BackTask, ChangeId, Edit, Info, LinkId, Nav, Node, Origin,
+        Presence, Rel, TaskKey,
+    };
+
+    /// `git` in `dir`, without the person's `GIT_*` variables or identity.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let mut cmd = std::process::Command::new("git");
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+        let out = cmd
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    struct Fixture {
+        base: PathBuf,
+        repo: PathBuf,
+        /// The review's store directory, `<base>/noa/reviews/rev-demo`.
+        dir: PathBuf,
+        log: PathBuf,
+        sha: String,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// The finished demo review stored as run in a git repository with
+    /// one commit and the local task `t-1` (its file present when `task`).
+    fn fixture(name: &str, task: bool) -> Fixture {
+        let base =
+            std::env::temp_dir().join(format!("noa-review-ui-back-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+        let sha = git(&repo, &["rev-parse", "HEAD"]);
+        if task {
+            std::fs::create_dir_all(repo.join(".noa/tasks")).unwrap();
+            std::fs::write(repo.join(".noa/tasks/t-1.md"), "# Fix the UI\n").unwrap();
+        }
+        let dir = base.join("noa/reviews/rev-demo");
+        let mut log = crate::demo::log();
+        if let Some(review::model::reduce::Event::Created { workdir, .. }) = log[0].first_mut() {
+            *workdir = Some(repo.clone());
+        }
+        let mut store = Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+        let links_log = links::path(&base.join("noa/links"), &repo).unwrap();
+        Fixture {
+            base,
+            repo,
+            dir,
+            log: links_log,
+            sha,
+        }
+    }
+
+    fn link(from: Node, to: Node, rel: Rel) -> Edit {
+        Edit::Link {
+            from,
+            to,
+            rel,
+            origin: Origin::Auto,
+        }
+    }
+
+    /// Records the demo review as judging the commit, `About` task `t-1`
+    /// (titled "Fix the UI"), which produced the commit.
+    fn hand_off(f: &Fixture) {
+        let record = Node::Review("rev-demo".into());
+        let task = Node::Task(TaskKey::Local("t-1".into()));
+        let change = Node::Change(ChangeId::Commit(f.sha.clone()));
+        links::append(
+            &f.log,
+            &[
+                link(record.clone(), change.clone(), Rel::Judged),
+                link(record, task.clone(), Rel::About),
+                link(task.clone(), change, Rel::Produced),
+                Edit::Observe {
+                    node: task,
+                    info: Info {
+                        label: Some("Fix the UI".into()),
+                        ..Info::default()
+                    },
+                },
+            ],
+            1,
+        )
+        .unwrap();
+    }
+
+    fn card_labels(screen: &Review) -> Vec<String> {
+        labels_under(&screen.tree, screen.left_host)
+    }
+
+    fn task_nav(f: &Fixture) -> Nav {
+        Nav::Task {
+            repo: links::main_worktree(&f.repo).unwrap(),
+            select: "t-1".into(),
+        }
+    }
+
+    #[test]
+    fn ac4_the_target_card_names_the_task_and_the_version_and_opens_the_task() {
+        let f = fixture("shown", true);
+        hand_off(&f);
+        let mut screen = Review::stored(&f.dir).unwrap();
+        let labels = card_labels(&screen);
+        let short = f.sha[..7].to_owned();
+        for want in [
+            "タスク:",
+            "ローカル",
+            "Fix the UI",
+            "対象の版:",
+            short.as_str(),
+        ] {
+            assert!(labels.iter().any(|l| l == want), "{want}: {labels:?}");
+        }
+        assert!(!labels.iter().any(|l| l == backlinks::NO_TASK));
+        // タスクを開く and 版を開く (the change has the task) both open t-1.
+        let opens: Vec<Action> = acts(&screen)
+            .into_iter()
+            .filter(|a| matches!(a, Action::OpenLink(_)))
+            .collect();
+        assert_eq!(
+            opens,
+            [
+                Action::OpenLink(task_nav(&f)),
+                Action::OpenLink(task_nav(&f))
+            ]
+        );
+        LAUNCHED.with(|l| l.borrow_mut().clear());
+        act(&mut screen, Action::OpenLink(task_nav(&f)));
+        assert_eq!(LAUNCHED.with(|l| l.borrow().clone()), [task_nav(&f)]);
+        assert_eq!(
+            task_nav(&f).argv()[1],
+            "--select=t-1",
+            "Tasks opens with t-1 selected"
+        );
+    }
+
+    #[test]
+    fn ac4_a_missing_task_says_so_and_has_no_button() {
+        let f = fixture("missing", false);
+        hand_off(&f);
+        let screen = Review::stored(&f.dir).unwrap();
+        let labels = card_labels(&screen);
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.starts_with("記録が見つからない（") && l.contains("t-1")),
+            "{labels:?}"
+        );
+        // Only 版を開く is left (the commit is still there).
+        let opens = acts(&screen)
+            .into_iter()
+            .filter(|a| matches!(a, Action::OpenLink(_)))
+            .count();
+        assert_eq!(opens, 1);
+    }
+
+    #[test]
+    fn ac4_a_review_with_no_link_says_it_has_no_task_and_follows_a_later_one() {
+        let f = fixture("later", true);
+        let (channel, _link) = Channel::fake();
+        let mut screen = stored_ready(channel, &f.dir);
+        assert!(card_labels(&screen).iter().any(|l| l == backlinks::NO_TASK));
+        assert!(
+            !acts(&screen)
+                .iter()
+                .any(|a| matches!(a, Action::OpenLink(_)))
+        );
+        // Recorded meanwhile (a manual link in Tasks): the next look, at
+        // most a second later, shows it.
+        hand_off(&f);
+        let mut text = TextStore::new(Default::default());
+        screen.poll_live(&mut text);
+        assert!(card_labels(&screen).iter().any(|l| l == backlinks::NO_TASK));
+        screen.back.as_mut().unwrap().expire();
+        screen.poll_live(&mut text);
+        assert!(card_labels(&screen).iter().any(|l| l == "Fix the UI"));
+    }
+
+    fn back_of(tasks: Vec<TaskKey>) -> BackLinks {
+        let sha = "c".repeat(40);
+        BackLinks {
+            tasks: vec![BackTask {
+                task: TaskKey::Local("t-1".into()),
+                link: LinkId::new("lnk-1"),
+                info: Info::default(),
+            }],
+            runs: Vec::new(),
+            changes: vec![BackChange {
+                change: ChangeId::Commit(sha),
+                link: LinkId::new("lnk-2"),
+                info: Info::default(),
+                tasks,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_version_with_no_task_is_copied_and_a_missing_one_has_no_button() {
+        let repo = Path::new("/main");
+        let found = |_: &Node| Presence::Found;
+        let rows = backlinks::rows(&back_of(Vec::new()), &found, Some(repo));
+        assert_eq!(rows.tasks[0].text, "t-1", "untitled: its id");
+        assert_eq!(
+            rows.tasks[0].open,
+            Some((
+                "タスクを開く",
+                Nav::Task {
+                    repo: repo.to_owned(),
+                    select: "t-1".into()
+                }
+            ))
+        );
+        let change = rows.change.unwrap();
+        assert_eq!(change.text, "c".repeat(7));
+        assert_eq!(change.open, Some(("版を開く", Nav::Copy("c".repeat(40)))));
+
+        let gone = |node: &Node| match node {
+            Node::Change(_) => Presence::Missing {
+                what: "cccccccc".into(),
+            },
+            _ => Presence::Unknown,
+        };
+        let rows = backlinks::rows(
+            &back_of(vec![TaskKey::Local("t-1".into())]),
+            &gone,
+            Some(repo),
+        );
+        let change = rows.change.unwrap();
+        assert_eq!(change.open, None);
+        assert_eq!(
+            change.missing.as_deref(),
+            Some("記録が見つからない（cccccccc）")
+        );
+        assert!(rows.tasks[0].open.is_some(), "an unknown task still opens");
+        assert_eq!(
+            backlinks::rows(&BackLinks::default(), &found, Some(repo)),
+            backlinks::Rows::default()
+        );
+    }
 }

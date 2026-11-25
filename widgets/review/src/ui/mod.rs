@@ -1110,7 +1110,7 @@ impl Review {
             let close = self.tree.insert(
                 Some(self.status_trailing),
                 small("ペインをすべて閉じる")
-                    .tooltip("リードとレビュアーのペインを Noa でまとめて閉じます（修正依頼のタブは残します）"),
+                    .tooltip("リードとレビュアーのペインとボードタブを Noa でまとめて閉じます（修正依頼のタブは残します）"),
             );
             self.actions.push((close, Action::ClosePanes));
         }

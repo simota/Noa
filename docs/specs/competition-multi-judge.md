@@ -23,7 +23,7 @@ Acceptance criteria from the request, as this spec numbers them:
 
 - Problem: one judge agent scores every round alone (`JUDGE_ID = "judge"`). One model's taste and its blind spots decide the ranking, and nothing shows how far a second opinion would differ.
 - Job to be done: seat 1–3 judges (agent, model, effort each), let every judge score every round alone, rank on the mean, and show where the judges disagree.
-- Success definition: a competition with three judges (for instance claude/opus, codex, agy) runs to its final round in one Noa tab. Each round's score per entry is the mean of three independent scorecards, and the leaderboard, the judge board, the Markdown report and `compare.html` show each judge's score and the spread. The lead judge writes the final verdict after seeing the combined scores. A competition stored by v0.9.15 opens, resumes and renders exactly as it did.
+- Success definition: a competition with three judges (for instance claude/opus, codex, agy) runs to its final round on one Noa board tab (agent-orchestration D20). Each round's score per entry is the mean of three independent scorecards, and the leaderboard, the judge board, the Markdown report and `compare.html` show each judge's score and the spread. The lead judge writes the final verdict after seeing the combined scores. A competition stored by v0.9.15 opens, resumes and renders exactly as it did.
 
 ## What exists today (read from the code, HEAD 23b98f3f)
 
@@ -32,7 +32,7 @@ Acceptance criteria from the request, as this spec numbers them:
 - The judge replies `r<N>/judge.json` (`store::judge_reply_path`). `validate::parse_judge(text, session, round)` checks it (`deny_unknown_fields`, every contestant scored and ranked once, `winner` + `final_verdict` required on the last round or with `close`, breakdown sums, evidence bases, amendments only to earlier judged rounds). Each problem is its own line. A rejected reply goes back through `brief::correction_note` and fails after `Config::max_retries` (2).
 - An accepted judgment commits `ReplyAccepted`, `JudgeAccepted { round, output: JudgeOutput }`, a `Judgment` message with the overview, a `FinalVerdict` message when the judge names a winner, `PhaseChanged(Closed)` and, with `close`, `SessionClosed`. `reduce` applies amendments to earlier rounds' `outcome` (clearing their breakdown, noting `AmendNote`, re-sorting that round by score) and sets `session.winner`.
 - Everything downstream reads `Round.outcome`: `Session::score_history`, `latest_score`, `current_ranking`, `checklist_before`, `latest_evaluation_before`, `final_verdict`; `brief::contestant_brief` (feedback, standing line, score corrections, peer scores in reveal rounds); `ui/leaderboard.rs`, `ui/judge.rs`, `ui/compare.rs`, `ui/map.rs`, `model/map.rs`; `model/export.rs::result_markdown` (the Markdown report, copy and `adopt-<winner>.md`); `model/viewer.rs` (`compare.html`, with a `ViewerCache` whose `RoundStamp` decides when a closed round's JSON is reused).
-- The runner spawns the judge's pane lazily on its first send (label `comp:<id>:judge`), in the 3×3 grid (`PANES_PER_AXIS`), so six contestants and the judge fit in one tab today. `in_play` and `all_parts` name the judge explicitly.
+- The runner spawns the judge's pane lazily on its first send (label `comp:<id>:judge`), as a float stowed on the session's board tab (D20; the board holds 20), so six contestants and the judge fit on one board today. The first agent opens the board (`Placement::Board`: `noa.newTab {board:true, autoApprove:true}`, then the agent as a float with `parentPaneId` = the board); every later agent is `Placement::Float(board)`. The adopt tab stays a plain tab (`Placement::Tab`). `in_play` and `all_parts` name the judge explicitly.
 - The UI has one judge row in the start view (`Form.judge`, `Parts.judge`/`judge_setup`), one judge card in the leaderboard, one `審判 (judge)` chip in the progress strip, and one `審判 (Judge)` composer target. A rematch (`Form::of_session`) copies the judge.
 - Fixed outputs: `tests/golden.rs` pins `briefs.txt` and five `compare-*.html` byte for byte; `src/model/testdata/before-round-control.events.jsonl` is a log from before round control, read by `store::tests::a_log_from_before_round_control_reads_as_it_did`. The Markdown report has no golden.
 
@@ -61,7 +61,7 @@ The request names `export/report/compare.html`; in this crate the Markdown repor
 2. Seat order is row order. The first row is the lead judge (caption: 「1人目がリード審判です。早期終了と最終講評はリード審判が決め、ほかの審判は採点だけを行います」).
 3. Ids follow the seat, not the kind: `judge`, `judge-2`, `judge-3`. One kind may sit in several rows (three claude judges on opus, sonnet and haiku is valid). Contestant ids are kind names (`claude`, `codex-2`), so the two never collide.
 4. Every setup passes `AgentSetup::check`. `Engine::create_in` refuses 0 or more than 3 judges with 「審判は1〜3人です」.
-5. Each judge runs in its own Noa pane, labelled `comp:<id>:<judge id>`, spawned lazily on its first send, as the judge is today. Six contestants and three judges are nine panes, which fills the 3×3 grid exactly.
+5. Each judge runs in its own Noa pane, labelled `comp:<id>:<judge id>`, spawned lazily on its first send, as the judge is today. Six contestants and three judges are nine panes, which are nine floats on one board, well under its 20.
 6. The clean form, and the form after the installed-agents check on a pristine form, has one judge row (today's default). A competition with one judge is a single-judge session and behaves exactly as today (L2-8).
 
 ### L1-2. Independent scoring per round (C2)
@@ -344,7 +344,7 @@ Unit tests live beside their modules; goldens under `tests/`. GUI behaviour agai
 
 1. AC-1 (C1) `Engine::create_in` takes 1, 2 and 3 judges and refuses 0 and 4 with 「審判は1〜3人です」; ids are `judge`, `judge-2`, `judge-3` whatever the kinds, including three judges of one kind; every judge's setup is checked.
 2. AC-2 (C1) The start view adds judge rows up to three (the add button then disabled) and removes any row after the first; `start::read` returns them in order; each row's model/effort controls follow its kind.
-3. AC-3 (C1) Six contestants and three judges fit in one Noa tab against the fake Noa; each judge has its own pane labelled `comp:<id>:judge-N`.
+3. AC-3 (C1) Six contestants and three judges are nine floats on one board against the fake Noa (`parentPaneId` = the board); each judge has its own pane labelled `comp:<id>:judge-N`.
 4. AC-4 (C2) Judging starts in one batch with a brief per judge; each brief names only its own reply path; no judge brief in any round of the multi-judge golden scenario contains another judge's overview, feedback, score or reply path.
 5. AC-5 (C2) A rejected reply from `judge-2` is cleared, corrected and logged with its digest, without any effect on `judge` or `judge-3`; after `max_retries` only `judge-2`'s brief fails.
 6. AC-6 (C2/C5) Validation table: a co-judge's `close`, `winner`, `final_verdict` and `checklist` are each their own problem; a panel lead's `winner`/`final_verdict` are refused; an amendment of another judge's score, or of a round without that judge's scorecard, is refused; a single judge's rules are unchanged (every existing `validate` test passes unchanged).
@@ -361,7 +361,7 @@ Unit tests live beside their modules; goldens under `tests/`. GUI behaviour agai
 17. AC-17 (C4) The Markdown report of a panel session lists the judges, per-judge scores and the spread per round and in the leaderboard (golden `tests/golden/multi/report.md`); a single-judge report is byte-identical to its golden generated before the change (`tests/golden/report-r3-final.md`).
 18. AC-18 (C4) `compare.html` of a panel session shows means, per-judge scores and the spread (goldens `tests/golden/multi/compare-*.html`); the cached render equals the uncached one across an amendment that moves one judge's score but not the rounded mean; the five single-judge goldens are unchanged.
 19. AC-19 (C7) `scripts/verify.sh --full` passes (it builds `widgets/competition` with `--all-targets`, so `examples/perf_probe.rs` and `examples/viewer_mem_probe.rs` must compile, and runs its tests on macOS).
-20. AC-20 (manual) A live competition with three judges (two of one kind) runs two rounds and ends in the lead's verdict in one Noa tab; ペインを開く on each judge card focuses its pane; quitting mid-judging and 再開 takes the panes back.
+20. AC-20 (manual) A live competition with three judges (two of one kind) runs two rounds and ends in the lead's verdict on one board tab; ペインを開く on each judge card focuses its pane; quitting mid-judging and 再開 takes the panes back.
 
 ## Implementation units
 
@@ -398,7 +398,7 @@ Three units, merged in order **1 → 2 → 3**. Unit 1 is the base for both othe
   - `engine::tests::{every_judge_is_briefed_in_one_batch, the_round_settles_only_after_every_judge, a_rejected_judge_reply_is_corrected_alone, a_failed_judge_holds_the_round_until_retried, the_lead_writes_the_verdict_after_the_combined_scores, a_co_judges_close_is_refused_and_the_leads_goes_to_the_verdict, a_held_panel_waits_after_the_combined_judgment, an_intervention_during_judging_reaches_the_verdict_and_next_briefs, a_panel_extended_after_its_verdict_has_a_new_verdict_step, resume_mid_judging_briefs_only_judges_without_a_scorecard, resume_while_the_verdict_is_pending_sends_it, a_single_judge_log_cut_while_judging_resumes_as_before}`
   - the `Logged` harness extended to three judges with `folds()` after each step
   - `brief::tests::{co_judge_briefs_say_they_only_score, a_judge_brief_holds_nothing_from_another_judge, contestant_brief_carries_the_mean_and_each_judges_feedback, verdict_brief_lists_combined_scores_and_the_top_set}`
-  - `runner tests::{six_entries_and_three_judges_fit_in_one_tab, resume_takes_up_every_judges_pane, a_dead_judge_pane_is_restarted_for_its_brief}`
+  - `runner tests::{six_entries_and_three_judges_fit_on_one_board, resume_takes_up_every_judges_pane, a_dead_judge_pane_is_restarted_for_its_brief}`
   - `tests/golden_multi.rs::multi_judge_briefs_match_the_fixture` (fixture generated once by this unit, reviewed by hand in its PR, covering AC-4 over every round)
   - `tests/golden.rs` unchanged and passing.
 
@@ -472,3 +472,12 @@ Open points the request left open, resolved here. Each can be changed before imp
 ## Needs the maintainer's agreement before implementation
 
 Nothing under `AGENTS.md` Safety: no new dependency, no `Cargo.lock` change, no change to `scripts/verify.sh`, CI or `AGENTS.md`. The goldens that exist stay unchanged, and new ones are added.
+
+## Update 2026-11-25: board tab and floats (agent-orchestration D20)
+
+- A session opens one board tab (`Client::spawn_board_tab`, focus off, `autoApprove: true`, the work directory as `cwd`) and every agent pane is a float stowed on it (`noa.split` float, `parentPaneId` = the board, `maxChildren` 20, no `autoApprove`: the float takes the tab's). The split placements, the column layout and `PANES_PER_AXIS` are gone.
+- The runner keeps the board's id. After a resume it is read back from an adopted pane's `parentPaneId`; when the board is closed or a spawn on it answers `PaneGone`, it is forgotten and the next spawn opens a new board.
+- ペインをすべて閉じる closes the agents' panes, then the board.
+- A Noa whose `noa.hello` lists no `boardTab` capability (older than 0.9.16) would open a plain shell tab: the runner starts no agent and ends with 「この Noa（…）はボードのタブを開けないため、エージェントを起動できません」.
+- Not changed: the adopt tab (採用して実装) is a plain focused tab.
+- Tests (`runner tests`): `the_first_agent_opens_a_board_and_the_rest_float_on_it`, `a_board_that_is_gone_is_replaced_by_a_new_one`, `a_resume_recovers_the_board_from_the_agents_it_takes_back`, `an_older_noa_starts_no_agents`, `panes_close_together_only_after_the_competition_ends` (board closed last), `{four,six}_entries_and_the_judge_fit_on_one_board`; `live::ipc tests`: `only_the_board_tab_turns_auto_approve_on`, `a_float_is_stowed_on_its_board`.

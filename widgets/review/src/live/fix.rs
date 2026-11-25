@@ -202,6 +202,10 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| "0.9.13".into())
         }
+        fn supports_board_tab(&self) -> bool {
+            true
+        }
+
         fn hello_seq(&self) -> u64 {
             7
         }

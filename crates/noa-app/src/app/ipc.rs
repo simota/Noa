@@ -586,6 +586,7 @@ impl App {
         // which acknowledges their notifications; nobody looked at them.
         let unread_before = self.session_store.unread_flags();
         let board_of = board_orchestrator(params.label.as_deref());
+        let board_tab = matches!(target, noa_ipc::SpawnTarget::BoardTab { .. });
         let result = self.ipc_spawn_pane(event_loop, target, params);
         let focused_after = self.window_focused_panes();
         let restores = focus_to_restore(
@@ -621,6 +622,18 @@ impl App {
             self.restow_handed_back_floats(window_id, pane_id, orchestrator);
         }
         let ipc_id = self.mint_ipc_pane(window_id, pane_id);
+        // D20: the board tab is named after its own id, known only now; set
+        // before the snapshot below, so the float a client spawns over it
+        // right after this reply is stowed on it.
+        if board_tab
+            && let Some(orchestration) = self
+                .windows
+                .get_mut(&window_id)
+                .and_then(|state| state.surfaces.get_mut(&pane_id))
+                .and_then(|surface| surface.orchestration.as_mut())
+        {
+            orchestration.label = Some(board_tab_label(ipc_id));
+        }
         // Rebuild the snapshot before replying, so a client that lists panes
         // right after this reply already sees the new worker.
         self.ipc_snapshot_sig = 0;
@@ -646,18 +659,29 @@ impl App {
         target: noa_ipc::SpawnTarget,
         params: noa_ipc::SpawnParams,
     ) -> Result<(WindowId, PaneId), noa_ipc::IpcError> {
+        let board_tab = matches!(target, noa_ipc::SpawnTarget::BoardTab { .. });
         let config = params.config.unwrap_or_default();
         let spawn_cwd = usable_cwd(config.cwd.clone());
+        // D20: a board tab runs this Noa's own board; the server checked
+        // that the request named no command of its own.
+        let argv = match target {
+            noa_ipc::SpawnTarget::BoardTab { .. } => {
+                Some(board_tab_argv(noa_bin_path().ok_or_else(|| {
+                    noa_ipc::IpcError::Internal("cannot find this Noa binary".to_string())
+                })?))
+            }
+            _ => config.command.clone(),
+        };
         let spawn = ScriptSpawn {
             cwd: spawn_cwd.clone(),
-            argv: config.command.clone(),
+            argv: argv.clone(),
             env: config.env.clone().into_iter().collect(),
             wait_after_command: config.wait_after_command,
             ..ScriptSpawn::default()
         };
 
         let created = match target {
-            noa_ipc::SpawnTarget::Tab { window } => {
+            noa_ipc::SpawnTarget::Tab { window } | noa_ipc::SpawnTarget::BoardTab { window } => {
                 let window = match window {
                     Some(id) => Some(self.resolve_ipc_window_or_group(id)?),
                     None => None,
@@ -756,7 +780,7 @@ impl App {
         };
         let (window_id, pane_id) = created;
 
-        if (params.parent_pane_id.is_some() || params.label.is_some())
+        if (params.parent_pane_id.is_some() || params.label.is_some() || board_tab)
             && let Some(surface) = self
                 .windows
                 .get_mut(&window_id)
@@ -768,7 +792,7 @@ impl App {
                 cwd: spawn_cwd,
             });
         }
-        if let Some(argv) = config.command
+        if let Some(argv) = argv
             && let Some(surface) = self
                 .windows
                 .get_mut(&window_id)
@@ -1240,6 +1264,25 @@ fn stows_on(
         .into_iter()
         .flatten()
         .any(|orchestrator| label == format!("board:{orchestrator}"))
+}
+
+/// agent-orchestration D20: what a board tab's pane runs — this Noa's own
+/// board, scoped to the workers of the pane it runs in.
+fn board_tab_argv(exe: String) -> Vec<String> {
+    vec![
+        exe,
+        "+ctl".to_string(),
+        "board".to_string(),
+        "--of".to_string(),
+        "self".to_string(),
+    ]
+}
+
+/// agent-orchestration D20: a board tab's pane is the board of itself:
+/// labelled `board:<its own IPC id>` (D10's label, which [`stows_on`] and
+/// `+ctl` read). It has no parent, so it is nobody's worker.
+fn board_tab_label(ipc_id: u64) -> String {
+    format!("board:{ipc_id}")
 }
 
 /// agent-orchestration D10: the orchestrator a pane labelled
@@ -2109,6 +2152,34 @@ mod auto_split_tests {
         assert!(!stows_on(Some("board:7"), Some(12), Some(8)));
         assert!(!stows_on(Some("board:7"), Some(12), None));
         assert!(!stows_on(None, Some(12), Some(7)));
+    }
+
+    // D20: a board tab is its own orchestrator, labelled after its own id
+    // by the server: its floats are stowed on it, and so are their workers.
+    #[test]
+    fn a_board_tabs_floats_and_their_workers_are_stowed_on_it() {
+        let label = board_tab_label(7);
+        assert_eq!(board_orchestrator(Some(&label)), Some(7));
+        assert!(stows_on(Some(&label), Some(7), None));
+        assert!(stows_on(Some(&label), Some(12), Some(7)));
+        // Another pane's worker is not.
+        assert!(!stows_on(Some(&label), Some(8), None));
+    }
+
+    // D20: a board tab runs this Noa's board on its own pane's workers, in
+    // a form `+ctl` reads.
+    #[test]
+    fn a_board_tab_runs_this_noas_board_of_its_own_pane() {
+        let argv = board_tab_argv("/Applications/Noa.app/Contents/MacOS/noa".to_string());
+        assert_eq!(argv[0], "/Applications/Noa.app/Contents/MacOS/noa");
+        assert_eq!(argv[1], "+ctl");
+        assert_eq!(
+            crate::ctl::parse_args(&argv[2..]),
+            Ok(crate::ctl::Command::Board {
+                of: Some(crate::ctl::BoardOf::Own),
+                open: None,
+            })
+        );
     }
 
     #[test]

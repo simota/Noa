@@ -631,6 +631,10 @@ pub struct HelloResult {
     /// 2026-09 audit). Empty when talking to a server predating the field.
     #[serde(default)]
     pub server_instance_id: String,
+    /// Features this server has beyond its protocol version, by name
+    /// ([`SERVER_CAPABILITIES`]); empty from a server predating the field.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 // ---- noa.listPanels ----
@@ -794,9 +798,27 @@ pub struct ResizePaneParams {
 pub struct NewTabParams {
     #[serde(default)]
     pub window_id: Option<WireId>,
+    /// agent-orchestration D20: the tab's pane is a board that orchestrates
+    /// itself. The server runs its own `+ctl board --of self` there and
+    /// labels the pane `board:<its own IPC id>`, so floats a client then
+    /// spawns over it with `parentPaneId` set to it are stowed on it. Takes
+    /// the `input` scope; `label`, `parentPaneId` and every `config` field
+    /// but `cwd` and `env` are refused, since the server sets them.
+    #[serde(default)]
+    pub board: bool,
     #[serde(flatten)]
     pub spawn: SpawnParams,
 }
+
+/// agent-orchestration D20: the `noa.hello` capability a Noa whose
+/// `noa.newTab` takes `board: true` advertises. An older one ignores the
+/// field and opens a plain shell tab, so a client checks for this before
+/// asking for a board tab. A capability, not a version: a development build
+/// keeps the last release's version while it already has the feature.
+pub const CAPABILITY_BOARD_TAB: &str = "boardTab";
+
+/// Every capability this server advertises in `noa.hello`.
+pub const SERVER_CAPABILITIES: &[&str] = &[CAPABILITY_BOARD_TAB];
 
 /// What a new pane runs (agent-orchestration D2): the IPC form of the
 /// AppleScript `surface configuration`. `command` is an argv, spawned
@@ -1587,5 +1609,51 @@ mod subscription_tests {
             serde_json::to_value(&absent).unwrap(),
             serde_json::json!({ "subscriptionId": "4" })
         );
+    }
+}
+
+#[cfg(test)]
+mod board_tab_tests {
+    use super::*;
+
+    // agent-orchestration D20: `board: true` rides on `noa.newTab` beside
+    // the spawn extensions; a request without it reads as before.
+    #[test]
+    fn new_tab_reads_board_beside_the_spawn_extensions() {
+        let p: NewTabParams = serde_json::from_value(serde_json::json!({
+            "windowId": "3",
+            "board": true,
+            "focus": false,
+            "autoApprove": true,
+            "config": { "cwd": "/repo", "env": { "LANG": "ja_JP.UTF-8" } },
+        }))
+        .unwrap();
+        assert!(p.board);
+        assert_eq!(p.window_id, Some(WireId(3)));
+        assert_eq!(p.spawn.focus, Some(false));
+        assert_eq!(p.spawn.auto_approve, Some(true));
+        let config = p.spawn.config.unwrap();
+        assert_eq!(config.cwd.as_deref(), Some("/repo"));
+        assert_eq!(config.env["LANG"], "ja_JP.UTF-8");
+
+        let plain: NewTabParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!plain.board);
+        assert!(!plain.spawn.is_extended());
+    }
+
+    #[test]
+    fn hello_capabilities_default_to_none_from_an_older_server() {
+        let old: HelloResult = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1, "grantedScopes": [], "serverVersion": "0.9.15"
+        }))
+        .unwrap();
+        assert!(old.capabilities.is_empty());
+        let new: HelloResult = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1, "grantedScopes": [], "serverVersion": "0.9.15",
+            "capabilities": ["boardTab"]
+        }))
+        .unwrap();
+        assert_eq!(new.capabilities, vec![CAPABILITY_BOARD_TAB.to_string()]);
+        assert!(SERVER_CAPABILITIES.contains(&CAPABILITY_BOARD_TAB));
     }
 }

@@ -233,9 +233,11 @@ Commands:
                                 start of needs --task-file.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
-  board [--of PANE]             Show an orchestrator's workers in this pane
+  board [--of PANE|self]        Show an orchestrator's workers in this pane
                                 (default: this pane's own orchestrator, else
-                                every worker). Keys are listed at the bottom.
+                                every worker; self: this pane's own, for a
+                                board that is its own orchestrator). Keys are
+                                listed at the bottom.
   board --open [--split right|down | --tab]
                                 Open a board on this pane's workers next to it
                                 (an open one is printed with \"existing\":true).
@@ -281,7 +283,7 @@ pub(crate) enum Command {
         detail: String,
     },
     Board {
-        of: Option<u64>,
+        of: Option<BoardOf>,
         /// `--open`: start a board pane next to this one instead.
         open: Option<Placement>,
     },
@@ -538,10 +540,16 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
             let placement = parse_placement(&mut rest)?;
             let of = rest
                 .value("--of")?
-                .map(|v| parse_u64("--of", &v))
+                .map(|v| match v.as_str() {
+                    "self" => Ok(BoardOf::Own),
+                    _ => parse_u64("--of", &v).map(BoardOf::Pane),
+                })
                 .transpose()?;
             if !opening && placement != Placement::Auto {
                 return Err("--split and --tab go with --open".to_string());
+            }
+            if opening && of == Some(BoardOf::Own) {
+                return Err("--of self runs the board here; it does not go with --open".to_string());
             }
             Command::Board {
                 of,
@@ -1582,6 +1590,14 @@ pub(crate) fn board_before_spawn(
     }
 }
 
+/// `board --of`: whose workers the board shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BoardOf {
+    Pane(u64),
+    /// `--of self`: the board's own pane's (agent-orchestration D20).
+    Own,
+}
+
 /// The label of `own`'s board pane, which a later spawn looks for.
 pub(crate) fn board_label(own: u64) -> String {
     format!("{BOARD_LABEL_PREFIX}{own}")
@@ -2036,10 +2052,13 @@ impl Session {
     /// `board`: run the board here, or with `--open` start one next to
     /// this pane. The board pane has no parent, so it never counts as one
     /// of this pane's workers.
-    fn board(&mut self, of: Option<u64>, open: Option<Placement>) -> Result<i32, Failure> {
+    fn board(&mut self, of: Option<BoardOf>, open: Option<Placement>) -> Result<i32, Failure> {
         let Some(placement) = open else {
             let of = match of {
-                Some(of) => Some(of),
+                Some(BoardOf::Pane(of)) => Some(of),
+                // D20: a board tab orchestrates itself; its pane's workers
+                // are the ones shown.
+                Some(BoardOf::Own) => Some(self.require_own()?),
                 None => self.own.and_then(|own| {
                     self.client
                         .list_panels()
@@ -5226,10 +5245,18 @@ mod tests {
         assert_eq!(
             parse_args(&args(&["board", "--of", "3"])),
             Ok(Command::Board {
-                of: Some(3),
+                of: Some(BoardOf::Pane(3)),
                 open: None
             })
         );
+        assert_eq!(
+            parse_args(&args(&["board", "--of", "self"])),
+            Ok(Command::Board {
+                of: Some(BoardOf::Own),
+                open: None
+            })
+        );
+        assert!(parse_args(&args(&["board", "--open", "--of", "self"])).is_err());
         assert_eq!(
             parse_args(&args(&["board", "--open", "--split", "down"])),
             Ok(Command::Board {

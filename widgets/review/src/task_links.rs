@@ -452,7 +452,9 @@ pub fn record_outcome(
 }
 
 /// What Tasks' `--select=` takes for `task`: `t-…` for a local task, `#N`
-/// for an issue, `code:<key>` for a code marker.
+/// for an issue, `code:<key>:<path>` for a code marker. The key alone is not
+/// enough (markers with the same text in two files share it); it holds no
+/// `:`, so the first `:` after `code:` ends it and the rest is the path.
 pub fn select_arg(task: &TaskKey) -> Option<String> {
     let object = task.0.as_object()?;
     if let Some(id) = object.get("local") {
@@ -462,7 +464,9 @@ pub fn select_arg(task: &TaskKey) -> Option<String> {
         return issue.get("number")?.as_u64().map(|n| format!("#{n}"));
     }
     if let Some(marker) = object.get("code") {
-        return marker.get("key")?.as_str().map(|key| format!("code:{key}"));
+        let key = marker.get("key")?.as_str()?;
+        let path = marker.get("path")?.as_str()?;
+        return Some(format!("code:{key}:{path}"));
     }
     None
 }
@@ -1071,7 +1075,30 @@ mod tests {
         );
         assert_eq!(
             select_arg(&key(r#"{"code":{"path":"src/a.rs","key":"k1"}}"#)).as_deref(),
-            Some("code:k1")
+            Some("code:k1:src/a.rs")
+        );
+        // The same marker text in two files: same key, different arguments.
+        let a = select_arg(&key(
+            r#"{"code":{"path":"src/a.rs","key":"0123456789abcdef"}}"#,
+        ));
+        let b = select_arg(&key(
+            r#"{"code":{"path":"src/b.rs","key":"0123456789abcdef"}}"#,
+        ));
+        assert_ne!(a, b);
+        // A path holding `:` still splits back at the first `:` after `code:`.
+        let arg = select_arg(&key(
+            r#"{"code":{"path":"dir:x/a.rs","key":"0123456789abcdef-2"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            arg.strip_prefix("code:")
+                .and_then(|rest| rest.split_once(':')),
+            Some(("0123456789abcdef-2", "dir:x/a.rs"))
+        );
+        assert_eq!(
+            select_arg(&key(r#"{"code":{"key":"k1"}}"#)),
+            None,
+            "a marker without its path cannot be selected"
         );
         assert_eq!(select_arg(&key(r#"{"jira":"X-1"}"#)), None);
         assert_eq!(select_arg(&key(r#""t-1""#)), None);
@@ -1096,7 +1123,7 @@ mod tests {
             ),
             (
                 key(r#"{"code":{"path":"src/a.rs","key":"k1"}}"#),
-                "--select=code:k1",
+                "--select=code:k1:src/a.rs",
             ),
         ] {
             assert_eq!(

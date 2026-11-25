@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use noa_ipc::{
     Client, ClientError, EventKind, Notification, Panel, Scope, ScopeSet, SendTextOptions,
-    SpawnConfig, SpawnParams, SplitPlacement, TextSource,
+    SpawnConfig, SpawnParams, SplitPlacement, TextSource, WireId,
 };
 
 /// JSON-RPC codes the runner tells apart (as `noa +ctl` does,
@@ -53,6 +53,9 @@ impl std::fmt::Display for NoaError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneView {
     pub pane_id: u64,
+    /// The pane it is stowed on (`Panel.parentPaneId`): a session's board
+    /// for an agent's float.
+    pub parent_pane_id: Option<u64>,
     /// The label it was spawned with.
     pub label: Option<String>,
     /// `running` / `permission` / `input` / `finished` / `error`: the agent's
@@ -100,12 +103,15 @@ pub struct PaneSpec {
 /// Where a new pane goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
-    /// A tab of its own (in the window Noa picks).
+    /// A plain tab of its own (in the window Noa picks): a fix request's.
     NewTab,
-    /// Split off to the right of this pane.
-    Right(u64),
-    /// Split off below this pane.
-    Below(u64),
+    /// A new tab that is a board (`noa.newTab` with `board: true`); the
+    /// result is the board's pane id, and only the spec's cwd and env are
+    /// used. The agents of a session float on it.
+    Board,
+    /// A float stowed on this board (`noa.split` float with the board as
+    /// its parent).
+    Float(u64),
 }
 
 /// The Noa a session runner talks to over one connection.
@@ -255,6 +261,7 @@ fn control_url(bind: &str, port: u16) -> String {
 fn view(panel: &Panel) -> PaneView {
     PaneView {
         pane_id: panel.pane_id.0,
+        parent_pane_id: panel.parent_pane_id.map(|id| id.0),
         label: panel.label.clone(),
         agent_state: panel.agent.as_ref().and_then(|a| a.state.clone()),
         agent_seq: panel.agent.as_ref().map_or(0, |a| a.seq),
@@ -453,13 +460,10 @@ impl Noa for IpcNoa {
         let params = spawn_params(placement, spec);
         let pane = match placement {
             Placement::NewTab => self.client.spawn_tab(None, &params),
-            Placement::Right(pane) => {
+            Placement::Board => self.client.spawn_board_tab(None, &params),
+            Placement::Float(board) => {
                 self.client
-                    .spawn_split(pane, SplitPlacement::Horizontal, &params)
-            }
-            Placement::Below(pane) => {
-                self.client
-                    .spawn_split(pane, SplitPlacement::Vertical, &params)
+                    .spawn_split(board, SplitPlacement::Float, &params)
             }
         };
         pane.map_err(noa_error)
@@ -526,25 +530,62 @@ impl Noa for IpcNoa {
     }
 }
 
-/// The `noa.newTab`/`noa.split` request for one verification pane.
+/// The most agents a board holds (`MAX_STOWED_PER_BOARD`, agent-orchestration
+/// D12): a float over it is refused. The judge and the largest panel fit.
+const BOARD_MAX_CHILDREN: u32 = 20;
+
+/// The `noa.newTab`/`noa.split` request for one pane.
 fn spawn_params(placement: Placement, spec: &PaneSpec) -> SpawnParams {
-    SpawnParams {
-        config: Some(SpawnConfig {
-            command: Some(spec.argv.clone()),
-            cwd: Some(spec.cwd.to_string_lossy().into_owned()),
-            env: spec.env.iter().cloned().collect(),
-            ..SpawnConfig::default()
-        }),
-        label: Some(spec.label.clone()),
-        focus: Some(spec.attended),
-        // Verifiers and the judge run unattended in their own tab, so
-        // its agent prompts are answered without the user (the later
-        // splits share the tab's setting). A fix edits the work tree: its
-        // tab is set to ask the person, said outright, since a tab Noa
-        // opens otherwise takes the global `auto-approve` setting.
-        auto_approve: matches!(placement, Placement::NewTab).then_some(!spec.attended),
-        ..SpawnParams::default()
+    let cwd = Some(spec.cwd.to_string_lossy().into_owned());
+    match placement {
+        // The server sets a board's command and label itself and refuses
+        // them: only cwd and env. Its auto approval is the session's, said
+        // outright, and every float takes the tab's setting.
+        Placement::Board => SpawnParams {
+            config: Some(SpawnConfig {
+                cwd,
+                env: spec.env.iter().cloned().collect(),
+                ..SpawnConfig::default()
+            }),
+            focus: Some(false),
+            auto_approve: Some(!spec.attended),
+            ..SpawnParams::default()
+        },
+        Placement::NewTab | Placement::Float(_) => SpawnParams {
+            config: Some(SpawnConfig {
+                command: Some(spec.argv.clone()),
+                cwd,
+                env: spec.env.iter().cloned().collect(),
+                ..SpawnConfig::default()
+            }),
+            label: Some(spec.label.clone()),
+            focus: Some(spec.attended),
+            // A fix edits the work tree: its tab is set to ask the person,
+            // said outright, since a tab Noa opens otherwise takes the
+            // global `auto-approve` setting. A float shares its board
+            // tab's setting.
+            auto_approve: matches!(placement, Placement::NewTab).then_some(!spec.attended),
+            parent_pane_id: match placement {
+                Placement::Float(board) => Some(WireId(board)),
+                _ => None,
+            },
+            max_children: matches!(placement, Placement::Float(_)).then_some(BOARD_MAX_CHILDREN),
+        },
     }
+}
+
+/// Whether a Noa of `version` opens a board tab (`noa.newTab` with
+/// `board: true`, [`noa_ipc::BOARD_TAB_SINCE`]); an older one opens a plain
+/// shell tab instead.
+pub(crate) fn supports_board_tab(version: &str) -> bool {
+    noa_ipc::server_version_at_least(version, noa_ipc::BOARD_TAB_SINCE)
+}
+
+/// Why no agents start on an older Noa.
+pub(crate) fn no_board_tab(version: &str) -> String {
+    format!(
+        "この Noa（{version}）はボードのタブを開けないため、エージェントを起動できません（Noa 0.9.16 以降が必要）"
+    )
 }
 
 #[cfg(test)]
@@ -592,49 +633,74 @@ mod tests {
         assert!(no_tab_auto_approve("0.9.12").contains("0.9.13 以降が必要"));
     }
 
-    #[test]
-    fn only_the_verification_tab_turns_auto_approve_on() {
-        let spec = PaneSpec {
+    fn spec(attended: bool) -> PaneSpec {
+        PaneSpec {
             argv: vec!["codex".into()],
             cwd: PathBuf::from("/tmp"),
             label: "codex".into(),
-            attended: false,
-            env: Vec::new(),
-        };
-        assert_eq!(
-            spawn_params(Placement::NewTab, &spec).auto_approve,
-            Some(true)
-        );
-        assert_eq!(spawn_params(Placement::NewTab, &spec).focus, Some(false));
-        for split in [Placement::Right(7), Placement::Below(7)] {
-            assert_eq!(spawn_params(split, &spec).auto_approve, None);
+            attended,
+            env: vec![("K".into(), "v".into())],
         }
     }
 
     #[test]
-    fn an_attended_pane_takes_focus_and_never_auto_approves() {
-        let spec = PaneSpec {
-            argv: vec!["codex".into()],
-            cwd: PathBuf::from("/tmp"),
-            label: "fix · ver-1".into(),
-            attended: true,
-            env: vec![("K".into(), "v".into())],
-        };
+    fn only_the_board_tab_turns_auto_approve_on_and_it_takes_only_cwd_and_env() {
+        let board = spawn_params(Placement::Board, &spec(false));
+        assert_eq!(board.auto_approve, Some(true));
+        assert_eq!(board.focus, Some(false));
+        assert_eq!(board.label, None);
+        assert_eq!(board.parent_pane_id, None);
+        assert_eq!(board.max_children, None);
+        let config = board.config.unwrap();
+        // The server refuses a command (and a label) on a board tab.
+        assert_eq!(config.command, None);
+        assert_eq!(config.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(config.env.get("K").map(String::as_str), Some("v"));
+    }
+
+    #[test]
+    fn a_float_names_its_board_as_parent_and_sends_no_auto_approve() {
+        let float = spawn_params(Placement::Float(7), &spec(false));
+        assert_eq!(float.parent_pane_id, Some(WireId(7)));
+        assert_eq!(float.max_children, Some(20));
+        // It takes the board tab's setting.
+        assert_eq!(float.auto_approve, None);
+        assert_eq!(float.focus, Some(false));
+        assert_eq!(float.label.as_deref(), Some("codex"));
+        assert_eq!(
+            float.config.unwrap().command,
+            Some(vec!["codex".to_owned()])
+        );
+    }
+
+    #[test]
+    fn an_attended_plain_tab_takes_focus_and_never_auto_approves() {
         // A new tab is told outright not to auto-approve: left out, Noa
         // would give it the global `auto-approve` setting.
-        let tab = spawn_params(Placement::NewTab, &spec);
+        let tab = spawn_params(Placement::NewTab, &spec(true));
         assert_eq!(tab.auto_approve, Some(false));
         assert_eq!(tab.focus, Some(true));
+        assert_eq!(tab.parent_pane_id, None);
         assert_eq!(
             tab.config.unwrap().env.get("K").map(String::as_str),
             Some("v")
         );
-        // A split shares its tab's setting, so it sends none.
-        for placement in [Placement::Right(7), Placement::Below(7)] {
-            let params = spawn_params(placement, &spec);
-            assert_eq!(params.auto_approve, None, "{placement:?}");
-            assert_eq!(params.focus, Some(true), "{placement:?}");
+    }
+
+    #[test]
+    fn only_a_noa_from_0_9_16_opens_a_board_tab() {
+        for (version, ok) in [
+            ("0.9.16", true),
+            ("0.9.16-rc.1", true),
+            ("0.10.0", true),
+            ("0.9.15", false),
+            ("0.9.13", false),
+            ("v0.9.16", false),
+            ("t", false),
+        ] {
+            assert_eq!(supports_board_tab(version), ok, "{version}");
         }
+        assert!(no_board_tab("0.9.15").contains("0.9.16 以降が必要"));
     }
 
     #[test]

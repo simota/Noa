@@ -1,4 +1,4 @@
-//! The 新規 / 編集 / 実行 forms, shown in the side pane in place of the
+//! The 新規 / 編集 / 実行 / リンクを追加 forms, shown in the side pane in place of the
 //! detail. The screen inserts a form once when it opens, passes it every
 //! message, and closes it on `Cancel` (or Escape) and on `Submit`, whose
 //! intent it sends.
@@ -15,6 +15,7 @@ use noa_gpui_core::{Message, Role, Style, UiTree, WidgetId};
 use tasks::model::types::{AgentKind, Isolation, Task, TaskRef};
 
 use super::Intent;
+use super::related::{LinkKind, check_link_id};
 use super::style::{self, DETAIL_WIDTH, gap};
 
 /// What a message did to the form.
@@ -42,6 +43,10 @@ enum Kind {
         task: TaskRef,
         agents: Vec<AgentKind>,
     },
+    /// リンクを追加 under `task`'s 関連成果.
+    Link {
+        task: TaskRef,
+    },
 }
 
 /// The widgets [`Form::insert`] made that [`Form::handle`] reads.
@@ -51,6 +56,8 @@ struct Ids {
     fields: Option<(WidgetId, WidgetId, WidgetId)>,
     /// Agent, isolation (実行).
     choices: Option<(WidgetId, WidgetId)>,
+    /// 種類, ID, and the label saying why an ID is refused (リンクを追加).
+    link: Option<(WidgetId, WidgetId, WidgetId)>,
     submit: WidgetId,
     cancel: WidgetId,
 }
@@ -117,6 +124,18 @@ impl Form {
         )
     }
 
+    /// リンクを追加 on `task` (titled `title`): 種類 and ID; submits
+    /// `Intent::Link` once the ID has its kind's form, else says why.
+    pub fn link(task: &TaskRef, title: &str) -> Form {
+        Form::new(
+            Kind::Link { task: task.clone() },
+            format!("リンクを追加: {title}"),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
+    }
+
     /// Builds the form's widgets under `host`.
     pub fn insert(&self, tree: &mut UiTree, host: WidgetId) {
         // Scrolls, as the detail does: the body field grows with its text,
@@ -145,6 +164,7 @@ impl Form {
         };
         let mut fields = None;
         let mut choices = None;
+        let mut link = None;
         let submit_label = match &self.kind {
             Kind::New | Kind::Edit { .. } => {
                 muted(tree, "タイトル（必須）");
@@ -206,6 +226,38 @@ impl Form {
                 choices = Some((agent, isolation));
                 "実行"
             }
+            Kind::Link { .. } => {
+                muted(tree, "種類");
+                let kind = tree.insert(
+                    Some(column),
+                    SegmentedControl::new(
+                        LinkKind::ALL.map(LinkKind::label),
+                        SegmentMode::SelectOne,
+                    )
+                    .control_size(ControlSize::Small)
+                    .with_selected(&[0]),
+                );
+                muted(tree, "ID（rev-…、ver-…、7 文字以上の SHA、run-…）");
+                let id = tree.insert(Some(column), TextField::new("ID", field_width));
+                let why = tree.insert(
+                    Some(column),
+                    Label::new("")
+                        .font_size(12.0)
+                        .wrap(true)
+                        .color(noa_gpui_scene::Color::hex(0xff9f0a)),
+                );
+                // As 新規: shown where it goes, so the ID field takes focus.
+                let hidden: Vec<WidgetId> = tree
+                    .ancestors(host)
+                    .filter(|id| tree.is_hidden(*id))
+                    .collect();
+                for id in hidden {
+                    tree.set_hidden(id, false);
+                }
+                tree.set_focus(Some(id));
+                link = Some((kind, id, why));
+                "追加"
+            }
         };
         let buttons = tree.insert(Some(column), Container::new(style::row(8.0)));
         let submit = tree.insert(Some(buttons), Button::new(submit_label));
@@ -213,13 +265,14 @@ impl Form {
         self.ids.set(Some(Ids {
             fields,
             choices,
+            link,
             submit,
             cancel,
         }));
     }
 
     /// Takes in `message` (from any widget; the form's own are recognised).
-    pub fn handle(&mut self, message: &Message, tree: &UiTree) -> FormOutcome {
+    pub fn handle(&mut self, message: &Message, tree: &mut UiTree) -> FormOutcome {
         let Some(ids) = self.ids.get() else {
             return FormOutcome::Pending;
         };
@@ -227,13 +280,34 @@ impl Form {
         if clicked && message.source == ids.cancel {
             return FormOutcome::Cancel;
         }
-        // Return in the title submits too.
+        // Return in the title (the ID) submits too.
         let submitted = message.downcast_ref::<TextSubmitted>().is_some()
-            && ids
+            && (ids
                 .fields
-                .is_some_and(|(title, _, _)| title == message.source);
+                .is_some_and(|(title, _, _)| title == message.source)
+                || ids.link.is_some_and(|(_, id, _)| id == message.source));
         if !(clicked && message.source == ids.submit) && !submitted {
             return FormOutcome::Pending;
+        }
+        if let (Kind::Link { task }, Some((kind, id, why))) = (&self.kind, ids.link) {
+            let kind = chosen(tree, kind)
+                .and_then(|i| LinkKind::ALL.get(i).copied())
+                .unwrap_or(LinkKind::Review);
+            let typed = tree
+                .get::<TextField>(id)
+                .map(|f| f.text().to_owned())
+                .unwrap_or_default();
+            return match check_link_id(kind, &typed) {
+                Ok(id) => FormOutcome::Submit(Intent::Link {
+                    task: task.clone(),
+                    kind,
+                    id,
+                }),
+                Err(reason) => {
+                    tree.update::<Label, _>(why, |l, cx| l.set_text(cx, reason));
+                    FormOutcome::Pending
+                }
+            };
         }
         self.intent(&ids, tree)
             .map_or(FormOutcome::Pending, FormOutcome::Submit)
@@ -273,19 +347,23 @@ impl Form {
             }
             Kind::Run { task, agents } => {
                 let (agent, isolation) = ids.choices?;
-                let chosen = |id| {
-                    tree.get::<SegmentedControl>(id)
-                        .and_then(|c| c.selected().iter().position(|on| *on))
-                        .unwrap_or(0)
-                };
+                let chosen = |id| chosen(tree, id).unwrap_or(0);
                 Some(Intent::Run {
                     task: task.clone(),
                     agent: *agents.get(chosen(agent))?,
                     isolation: ISOLATIONS.get(chosen(isolation))?.1,
                 })
             }
+            // Submitted in `handle`, where a refused ID is said.
+            Kind::Link { .. } => None,
         }
     }
+}
+
+/// The segment chosen in the control `id`.
+fn chosen(tree: &UiTree, id: WidgetId) -> Option<usize> {
+    tree.get::<SegmentedControl>(id)
+        .and_then(|c| c.selected().iter().position(|on| *on))
 }
 
 #[cfg(test)]

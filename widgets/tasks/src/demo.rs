@@ -1,17 +1,22 @@
 //! The canned data of `--demo` (and `--snapshot`): a repository with
 //! cards in every column, local tasks `t-1`… and issues `#12`…, a local
-//! file that does not parse, and runs with reports. Nothing is read,
-//! started or written.
+//! file that does not parse, runs with reports, and `t-3`'s 関連成果 (a
+//! run, its two versions, a review of the first and a verification of
+//! the second). Nothing is read, started or written.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+use tasks::links::{
+    self, ChangeId, Current, Info, LinkEvent, LinkId, Node, Origin, Presence, Rel, TaskKey,
+};
 
 use tasks::model::types::{
     AgentKind, AgentState, Comment, GitHubView, IssueDetail, Liveness, Millis, Report, ResultFact,
     Run, RunId, RunView, State, Task, TaskRef,
 };
 
-use crate::ui::{Feed, Intent, View};
+use crate::ui::{Feed, Intent, RelatedView, View};
 
 /// The demo's clock: 2026-11-25 10:00 JST.
 pub const NOW: Millis = 1_795_568_400_000;
@@ -271,11 +276,113 @@ pub fn view() -> View {
     }
 }
 
+/// `t-3`'s run (the demo's `run-<started>`).
+fn t3_run() -> String {
+    format!("run-{}", NOW - 19 * 60 * MIN)
+}
+
+/// The first version `t-3`'s run committed, and the second, after the
+/// review of the first.
+pub const V1: &str = "3f9c2a71d04be5c8a6e1f27b9d3c4e5f60718293";
+pub const V2: &str = "8b1e4d0c97a2f365e8d7c1b2a4f6e9d0c3b5a718";
+/// The demo's data dir (where reviews and verifications live).
+const DATA: &str = "/Users/demo/Library/Application Support/noa";
+
+/// The 関連成果 of `task` in the demo: `t-3`'s run, v1 judged by a review
+/// (旧版), v2 current and judged by a verification; none for the others.
+pub fn related(task: &TaskRef) -> RelatedView {
+    let me = TaskKey::Local("t-3".into());
+    let run = Node::Run(t3_run());
+    let change = |sha: &str| Node::Change(ChangeId::Commit(sha.to_owned()));
+    let mut n = 0;
+    let mut link = |from: Node, to: Node, rel: Rel| {
+        n += 1;
+        LinkEvent::Linked {
+            id: LinkId::new(format!("lnk-{n}")),
+            from,
+            to,
+            rel,
+            origin: Origin::Auto,
+            at: NOW - 19 * 60 * MIN + n * MIN,
+        }
+    };
+    let observe = |node: Node, info: Info| LinkEvent::Observed {
+        node,
+        info,
+        at: NOW,
+    };
+    let review = Node::Review(format!("rev-{}", NOW - 18 * 60 * MIN));
+    let verify = Node::Verify(format!("ver-{}", NOW - 16 * 60 * MIN));
+    let events = vec![
+        link(Node::Task(me.clone()), run.clone(), Rel::Ran),
+        observe(
+            run.clone(),
+            Info {
+                label: Some(format!("claude · task:{}", t3_run())),
+                workdir: Some(PathBuf::from(format!("/src/noa-wt/task-{}", t3_run()))),
+                branch: Some(format!("task-{}", t3_run())),
+                ..Info::default()
+            },
+        ),
+        link(run.clone(), change(V1), Rel::Produced),
+        link(review.clone(), change(V1), Rel::Judged),
+        link(review.clone(), Node::Task(me.clone()), Rel::About),
+        observe(
+            review,
+            Info {
+                outcome: Some("要修正（指摘 2 件）".into()),
+                ..Info::default()
+            },
+        ),
+        link(run.clone(), change(V2), Rel::Produced),
+        link(verify.clone(), change(V2), Rel::Judged),
+        link(verify.clone(), run, Rel::About),
+        observe(
+            verify,
+            Info {
+                outcome: Some("合格".into()),
+                ..Info::default()
+            },
+        ),
+    ];
+    let set = links::fold(&events);
+    let key = match task {
+        TaskRef::Local(id) => TaskKey::Local(id.clone()),
+        TaskRef::GitHub { repo, number } => TaskKey::GitHub {
+            repo: repo.clone(),
+            number: *number,
+        },
+        TaskRef::Code { path, key } => TaskKey::Code {
+            path: path.clone(),
+            key: key.clone(),
+        },
+    };
+    let current = (key == me).then(|| Current {
+        run: t3_run(),
+        change: ChangeId::Commit(V2.to_owned()),
+    });
+    RelatedView {
+        task: task.clone(),
+        related: Ok(links::related(&set, &key, current.as_ref())),
+        current,
+        presence: set
+            .nodes()
+            .into_iter()
+            .map(|node| (node.clone(), Presence::Found))
+            .collect(),
+        data: PathBuf::from(DATA),
+        repo: PathBuf::from("/src/noa"),
+        at: NOW,
+    }
+}
+
 /// The demo's [`Feed`]: [`view`], with 完了にする / 再開 applied in memory
 /// and every other intent answered with a notice.
 pub struct DemoFeed {
     view: View,
     changed: bool,
+    /// The task whose detail is open, until its 関連成果 is handed out.
+    watched: Option<TaskRef>,
 }
 
 impl Default for DemoFeed {
@@ -283,6 +390,7 @@ impl Default for DemoFeed {
         DemoFeed {
             view: view(),
             changed: true,
+            watched: None,
         }
     }
 }
@@ -312,5 +420,13 @@ impl Feed for DemoFeed {
         };
         self.view.notice = Some(notice);
         self.changed = true;
+    }
+
+    fn watch(&mut self, task: Option<&TaskRef>) {
+        self.watched = task.cloned();
+    }
+
+    fn related(&mut self) -> Option<RelatedView> {
+        self.watched.take().map(|task| related(&task))
     }
 }

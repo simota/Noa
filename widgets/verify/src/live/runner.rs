@@ -503,8 +503,10 @@ struct Runner<C: Connect, K: Clock> {
     /// The artifact links store of the verification's repository
     /// ([`handoff::log_path`]).
     links_log: PathBuf,
-    /// The verdict label last recorded there, so a report written again
-    /// with the same verdict records nothing.
+    /// The outcome the store holds for the verification: the verdict
+    /// label (or [`handoff::NO_VERDICT`]) last recorded, read from the
+    /// store on a resume or an extension; a report written again with the
+    /// same outcome records nothing.
     outcome_seen: Option<String>,
 }
 
@@ -529,12 +531,15 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             engine.dir().parent().unwrap_or(engine.dir()),
             &engine.session().main_worktree,
         );
+        let outcome_seen = resumed
+            .then(|| handoff::stored_outcome(&links_log, engine.session().id.as_str()))
+            .flatten();
         let rebuilt = if resumed {
             rebuilt_in_log(store.dir())?
         } else {
             BTreeSet::new()
         };
-        let runner = Self {
+        let mut runner = Self {
             engine,
             store,
             connector,
@@ -557,12 +562,17 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             stale: Vec::new(),
             link_state: Link::Connecting,
             links_log,
-            outcome_seen: None,
+            outcome_seen,
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
         if let Some(notice) = links_notice {
             runner.notice(notice);
+        }
+        // An extension through the log took the verdict away before this
+        // runner was made: the store hears of it now.
+        if resumed {
+            runner.record_outcome();
         }
         Ok(runner)
     }
@@ -1165,22 +1175,35 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         Ok(())
     }
 
-    /// Writes `report.md`, and records the verdict label in the links
-    /// store when it changed (L1-5); a link that cannot be recorded is a
-    /// notice, never a failure.
+    /// Writes `report.md`, and records the outcome in the links store when
+    /// it changed (L1-5); a link that cannot be recorded is a notice, never
+    /// a failure.
     fn write_report(&mut self) {
         let text = store::report_text(self.engine.session());
         if let Err(e) = store::write_report(self.engine.dir(), &text) {
             self.notice(format!("レポートの書き出しに失敗しました: {e}"));
             return;
         }
-        let label = handoff::outcome_label(self.engine.session());
-        if let Some(label) = label.filter(|l| self.outcome_seen.as_ref() != Some(l)) {
-            let id = self.engine.session().id.to_string();
-            match handoff::observe_outcome(&self.links_log, &id, &label, self.clock.now()) {
-                Ok(()) => self.outcome_seen = Some(label),
-                Err(why) => self.notice(why),
-            }
+        self.record_outcome();
+    }
+
+    /// Records the session's outcome when it differs from what the store
+    /// holds: its verdict's label, or [`handoff::NO_VERDICT`] once a
+    /// recorded verdict is gone (a round added after it), so the store
+    /// never keeps a verdict the report no longer has.
+    fn record_outcome(&mut self) {
+        let label = handoff::outcome_label(self.engine.session()).or_else(|| {
+            self.outcome_seen
+                .is_some()
+                .then(|| handoff::NO_VERDICT.to_owned())
+        });
+        let Some(label) = label.filter(|l| self.outcome_seen.as_ref() != Some(l)) else {
+            return;
+        };
+        let id = self.engine.session().id.to_string();
+        match handoff::observe_outcome(&self.links_log, &id, &label, self.clock.now()) {
+            Ok(()) => self.outcome_seen = Some(label),
+            Err(why) => self.notice(why),
         }
     }
 
@@ -2746,6 +2769,10 @@ thread_local! {
     /// read again (a test's stand-in for an edit made during the capture).
     static AFTER_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    /// Run once right before a start's capture, after the work tree was
+    /// first read (a test's stand-in for a checkout made meanwhile).
+    static BEFORE_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 /// Captures the target and creates the verification's log: nothing is
@@ -2785,6 +2812,10 @@ fn new_verification(
     // that moved meanwhile gets no `Judged` link.
     let work_tree = matches!(target.head, Head::Worktree);
     let before = work_tree.then(|| verify::links::current_change(&workdir));
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_CAPTURE.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
     let captured = match verify::capture::capture(&target, &store::target_dir(&reply_dir), now) {
         Ok(captured) => captured,
         Err(why) => {
@@ -6498,6 +6529,48 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ac02_a_tree_back_at_its_change_after_being_elsewhere_while_captured_gets_no_judged_link() {
+        let fake = fake();
+        let root = temp_root();
+        let repo = repo(&root);
+        git(&repo, &["checkout", "-q", "-b", "other"]);
+        fs::write(repo.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "two"]);
+        let b = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        // At A when first read, at B while captured, at A again after.
+        let (to_b, to_a) = (repo.clone(), repo.clone());
+        BEFORE_CAPTURE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                git(&to_b, &["checkout", "-q", "other"]);
+            }));
+        });
+        AFTER_CAPTURE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                git(&to_a, &["checkout", "-q", "main"]);
+            }));
+        });
+        let (runner, _, updates) = open_wired(
+            &fake,
+            new_start(&root, state_of(&repo), Isolation::Worktree, true),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            runner.engine.session().rebuild.head_sha,
+            b,
+            "B was captured"
+        );
+        let (set, back) = back_of(&root, &repo, &runner);
+        assert!(back.changes.is_empty(), "{:?}", back.changes);
+        assert!(
+            set.info
+                .contains_key(&Node::Verify(runner.engine.session().id.to_string()))
+        );
+        assert_eq!(notices(&updates), vec![handoff::TREE_MOVED.to_owned()]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn ac02_a_runs_worktree_records_about_its_run_and_task() {
         let fake = fake();
         let root = temp_root();
@@ -6562,6 +6635,128 @@ pub(crate) mod tests {
         assert!(
             set.live(&run, &Node::Change(change), Rel::Produced)
                 .is_some()
+        );
+        assert_eq!(notices(&updates), Vec::<String>::new());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A verification of the dirty linked worktree that task `t-1`'s run
+    /// made (`<root>/repo-wt/task-run-1`, its links recorded at the
+    /// hand-off), stopped, and that worktree then removed with git. Returns
+    /// its store dir, the main worktree (`t-1`'s file in it) and the
+    /// snapshot it judged. Every path is canonical ([`temp_root`]).
+    pub(crate) fn verified_in_a_removed_worktree(root: &Path) -> (PathBuf, PathBuf, ChangeId) {
+        let fake = fake();
+        let repo = repo(root);
+        fs::create_dir_all(repo.join(".noa/tasks")).unwrap();
+        fs::write(repo.join(".noa/tasks/t-1.md"), "# Fix it\n").unwrap();
+        let start = git(&repo, &["rev-parse", "HEAD"]);
+        let wt = root.join("repo-wt").join("task-run-1");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task-run-1",
+                wt.to_str().unwrap(),
+            ],
+        );
+        fs::write(wt.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        let run = Node::Run("run-1".into());
+        links::append(
+            &links_log(root, &repo),
+            &[
+                Edit::Link {
+                    from: Node::Task(TaskKey::Local("t-1".into())),
+                    to: run.clone(),
+                    rel: Rel::Ran,
+                    origin: Origin::Auto,
+                },
+                Edit::Observe {
+                    node: run,
+                    info: links::Info {
+                        workdir: Some(wt.clone()),
+                        branch: Some("task-run-1".into()),
+                        head: Some(start),
+                        ..Default::default()
+                    },
+                },
+            ],
+            1,
+        )
+        .unwrap();
+        let (runner, _, updates) = open_wired(
+            &fake,
+            new_start(root, state_of(&wt), Isolation::Worktree, true),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(notices(&updates), Vec::<String>::new());
+        let (_, back) = back_of(root, &repo, &runner);
+        let judged = judged_of(&back);
+        assert!(
+            matches!(judged.as_slice(), [ChangeId::Snapshot(_)]),
+            "{judged:?}"
+        );
+        assert!(store::target_dir(&runner.engine.reply_dir()).starts_with(&wt));
+        let dir = stop(runner);
+        git(
+            &repo,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+        assert!(!wt.exists());
+        (dir, repo, judged[0].clone())
+    }
+
+    /// The outcome the store holds for the verification `runner` runs.
+    fn stored_outcome(root: &Path, runner: &Runner<Fake, Fake>) -> Option<String> {
+        let repo = &runner.engine.session().main_worktree;
+        let set = links::replay(&links_log(root, repo)).unwrap();
+        set.info_of(&Node::Verify(runner.engine.session().id.to_string()))
+            .outcome
+    }
+
+    #[test]
+    fn a_round_added_after_a_verdict_records_that_there_is_none_any_more() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, actions, updates) = run_to_a_failure(&fake, &root, |_| {});
+        assert_eq!(stored_outcome(&root, &runner).as_deref(), Some("不合格"));
+        let mut conn = fake.clone();
+        actions.send(Action::Extend { by: 1 }).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(runner.engine.session().verdict().is_none());
+        assert_eq!(
+            stored_outcome(&root, &runner).as_deref(),
+            Some(handoff::NO_VERDICT)
+        );
+        // Ended by the person with no new verdict: it stays 判定なし.
+        actions.send(Action::Close).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(runner.engine.session().closed);
+        assert_eq!(
+            stored_outcome(&root, &runner).as_deref(),
+            Some(handoff::NO_VERDICT)
+        );
+        assert!(
+            !notices(&updates).iter().any(|n| n.contains("リンク")),
+            "recorded without a notice"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_extension_through_the_log_records_that_the_verdict_is_gone() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = finished_with_a_failure_on(&fake, &root);
+        let (runner, _, updates) =
+            open_wired(&fake, Start::Extend { dir, by: 1 }).unwrap_or_else(|e| panic!("{e}"));
+        assert!(runner.engine.session().verdict().is_none());
+        assert_eq!(
+            stored_outcome(&root, &runner).as_deref(),
+            Some(handoff::NO_VERDICT)
         );
         assert_eq!(notices(&updates), Vec::<String>::new());
         let _ = fs::remove_dir_all(root);

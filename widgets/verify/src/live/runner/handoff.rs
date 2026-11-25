@@ -36,8 +36,10 @@ pub(super) type Around = (Result<ChangeId, String>, Result<ChangeId, String>);
 ///
 /// - A ref head: the commit the capture took (`head_sha`).
 /// - The work tree: its change when it was the same before and after the
-///   capture; [`TREE_MOVED`] when it differs (the result is never tied to
-///   a state it did not see); git's reason when it could not be named.
+///   capture and sits on the commit the capture took (`head_sha`);
+///   [`TREE_MOVED`] otherwise (a tree at A before and after but at B while
+///   captured: the result is never tied to a state it did not see); git's
+///   reason when it could not be named.
 pub(super) fn judged(
     head: &Head,
     head_sha: &str,
@@ -45,7 +47,11 @@ pub(super) fn judged(
 ) -> Result<ChangeId, String> {
     match (head, around) {
         (Head::Ref(_), _) => Ok(ChangeId::Commit(head_sha.to_owned())),
-        (Head::Worktree, Some((Ok(before), Ok(after)))) if before == after => Ok(before),
+        (Head::Worktree, Some((Ok(before), Ok(after))))
+            if before == after && before.head() == Some(head_sha) =>
+        {
+            Ok(before)
+        }
         (Head::Worktree, Some((Ok(_), Ok(_)))) => Err(TREE_MOVED.to_owned()),
         (Head::Worktree, Some((Err(why), _) | (_, Err(why)))) => {
             Err(format!("対象の版を記録していません: {why}"))
@@ -91,9 +97,22 @@ fn join_notices(a: Option<String>, b: Option<String>) -> Option<String> {
     }
 }
 
+/// The outcome recorded for a verification that has no verdict (any
+/// more): one that a later round or the person's end left without one.
+pub(super) const NO_VERDICT: &str = "判定なし";
+
 /// What `session`'s report says it ended with: its verdict's label.
 pub(super) fn outcome_label(session: &Session) -> Option<String> {
     session.verdict().map(|v| v.decision.label().to_owned())
+}
+
+/// The outcome the store holds for verification `id`; `None` when it
+/// holds none or cannot be read.
+pub(super) fn stored_outcome(log: &Path, id: &str) -> Option<String> {
+    links::replay(log)
+        .ok()?
+        .info_of(&Node::Verify(id.to_owned()))
+        .outcome
 }
 
 /// Records `label` as verification `id`'s outcome. `Err` is the notice.
@@ -140,29 +159,59 @@ mod tests {
 
     #[test]
     fn the_work_tree_judges_its_change_only_when_it_held_still() {
+        let a = "a".repeat(40);
         assert_eq!(
             judged(
                 &Head::Worktree,
-                "",
+                &a,
                 Some((Ok(commit('a')), Ok(commit('a'))))
             ),
             Ok(commit('a'))
         );
+        let snap = ChangeId::Snapshot(format!("snap-{a}-{}", "0".repeat(16)));
         assert_eq!(
             judged(
                 &Head::Worktree,
-                "",
+                &a,
+                Some((Ok(snap.clone()), Ok(snap.clone())))
+            ),
+            Ok(snap)
+        );
+        assert_eq!(
+            judged(
+                &Head::Worktree,
+                &a,
                 Some((Ok(commit('a')), Ok(commit('b'))))
             ),
             Err(TREE_MOVED.to_owned())
         );
         let err = judged(
             &Head::Worktree,
-            "",
+            &a,
             Some((Ok(commit('a')), Err(links::TOO_LARGE.to_owned()))),
         )
         .unwrap_err();
         assert!(err.contains(links::TOO_LARGE), "{err}");
+    }
+
+    #[test]
+    fn a_tree_that_was_elsewhere_while_captured_is_not_judged() {
+        // At A before and after, but the capture took B.
+        let b = "b".repeat(40);
+        assert_eq!(
+            judged(
+                &Head::Worktree,
+                &b,
+                Some((Ok(commit('a')), Ok(commit('a'))))
+            ),
+            Err(TREE_MOVED.to_owned())
+        );
+        // A snapshot on A, the capture on B.
+        let snap = ChangeId::Snapshot(format!("snap-{}-{}", "a".repeat(40), "0".repeat(16)));
+        assert_eq!(
+            judged(&Head::Worktree, &b, Some((Ok(snap.clone()), Ok(snap)))),
+            Err(TREE_MOVED.to_owned())
+        );
     }
 
     #[test]

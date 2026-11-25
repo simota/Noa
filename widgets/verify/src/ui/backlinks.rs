@@ -95,7 +95,10 @@ pub(crate) fn rows(
                 kind: "対象の版",
                 badge: None,
                 text: change.change.short(),
-                open: Some(("版を開く", change_nav(&change.change, &change.tasks, repo))),
+                open: Some((
+                    "版を開く",
+                    change_nav(&change.change, &change.tasks, presence, repo),
+                )),
             },
         };
         rows.push(row);
@@ -103,9 +106,22 @@ pub(crate) fn rows(
     rows
 }
 
-/// 版を開く: the task whose 関連成果 lists the change, else a copy of its id.
-fn change_nav(change: &links::ChangeId, tasks: &[TaskKey], repo: &Path) -> Nav {
-    match tasks.first() {
+/// 版を開く: the first task whose 関連成果 lists the change and whose record
+/// can be found (as a task row's 開く: one `presence` says is missing is
+/// passed over), else a copy of its id.
+fn change_nav(
+    change: &links::ChangeId,
+    tasks: &[TaskKey],
+    presence: &dyn Fn(&Node) -> Presence,
+    repo: &Path,
+) -> Nav {
+    let found = tasks.iter().find(|task| {
+        !matches!(
+            presence(&Node::Task((*task).clone())),
+            Presence::Missing { .. }
+        )
+    });
+    match found {
         Some(task) => Nav::task(repo, task),
         None => Nav::Copy(change.as_str().to_owned()),
     }

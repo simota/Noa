@@ -3116,4 +3116,90 @@ mod links_card {
             card_labels(&screen)
         );
     }
+
+    #[test]
+    fn the_version_opens_the_first_task_that_can_be_found() {
+        let rig = Rig::new("links-version-task");
+        let change = Node::Change(ChangeId::Commit(sha('d')));
+        // t-2 (its file gone) produced the change first, then t-1.
+        rig.write(&[
+            rig.link(rig.me(), change.clone(), Rel::Judged),
+            rig.link(
+                Node::Task(TaskKey::Local("t-2".into())),
+                change.clone(),
+                Rel::Produced,
+            ),
+            rig.link(
+                Node::Task(TaskKey::Local("t-1".into())),
+                change,
+                Rel::Produced,
+            ),
+        ]);
+        let (screen, _) = rig.screen();
+        let offered = acts(&screen);
+        assert!(offered.contains(&task_nav(&rig, "t-1")), "{offered:?}");
+        assert!(!offered.contains(&task_nav(&rig, "t-2")), "{offered:?}");
+        assert!(!offered.contains(&Action::OpenLink(Nav::Copy(sha('d')))));
+    }
+
+    #[test]
+    fn the_version_copies_its_id_when_no_task_of_it_can_be_found() {
+        let rig = Rig::new("links-version-gone");
+        let change = Node::Change(ChangeId::Commit(sha('e')));
+        rig.write(&[
+            rig.link(rig.me(), change.clone(), Rel::Judged),
+            rig.link(
+                Node::Task(TaskKey::Local("t-2".into())),
+                change,
+                Rel::Produced,
+            ),
+        ]);
+        let (screen, _) = rig.screen();
+        let offered = acts(&screen);
+        assert!(!offered.contains(&task_nav(&rig, "t-2")), "{offered:?}");
+        assert!(offered.contains(&Action::OpenLink(Nav::Copy(sha('e')))));
+    }
+
+    #[test]
+    fn a_stored_verification_whose_worktree_was_removed_still_shows_its_links() {
+        let root = crate::session::runner::tests::temp_root();
+        let (dir, repo, judged) =
+            crate::session::runner::tests::verified_in_a_removed_worktree(&root);
+        let (channel, _link) = Channel::fake();
+        // The --session window.
+        let mut screen = Verify::session_window(channel, installed_all(), &dir);
+        screen.links = backlinks::Reader::new(Some(root.join("links")), Some(root.clone()));
+        screen.rebuild(&mut TextStore::new(Default::default()));
+        let labels = card_labels(&screen);
+        for expected in ["タスク:", "ローカル", "t-1", "対象の版:"] {
+            assert!(
+                labels.iter().any(|l| l == expected),
+                "{expected}: {labels:?}"
+            );
+        }
+        let main = std::fs::canonicalize(&repo).unwrap();
+        let open = Action::OpenLink(Nav::Task {
+            repo: main.clone(),
+            select: "t-1".into(),
+        });
+        assert!(acts(&screen).contains(&open), "{:?}", acts(&screen));
+        // The snapshot's capture went with the worktree.
+        let session = store::read_session(&dir).unwrap();
+        assert_eq!(std::fs::canonicalize(&session.main_worktree).unwrap(), main);
+        let capture = store::target_dir(&store::reply_dir(&session));
+        assert!(!capture.exists());
+        let gone = format!(
+            "記録が見つからない（{} {}）",
+            judged.as_str(),
+            capture.display()
+        );
+        assert!(labels.contains(&gone), "{gone}: {labels:?}");
+        assert!(
+            !acts(&screen)
+                .iter()
+                .any(|a| *a == Action::OpenLink(Nav::Copy(judged.as_str().to_owned()))),
+            "a missing version has no button"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

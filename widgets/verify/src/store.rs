@@ -853,64 +853,83 @@ mod tests {
     /// The lock goes with the store, once no other copy of its file is
     /// open. A child forked anywhere in the process (another test's
     /// `pre_exec` spawn) holds a copy of every open file until its exec,
-    /// which is why [`LOCK_GRACE`] exists; this test forks one itself, so
-    /// that copy is always there when the store is dropped, and the lock
-    /// counts as released once it goes, within the grace, as
-    /// [`Store::open`] waits for it.
+    /// which is why [`LOCK_GRACE`] exists. This test forks one itself and
+    /// keeps it before its exec, holding that copy, until the store is
+    /// dropped: the log is still locked then, on every run, and once the
+    /// child is told to go on, [`Store::open`] waits for its copy to go.
     #[test]
     fn a_second_open_of_a_held_log_is_busy_and_a_read_still_works() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
         use std::os::unix::process::CommandExt as _;
+        /// A pipe whose ends no exec'd child keeps.
+        fn pipe() -> (OwnedFd, OwnedFd) {
+            let mut fds = [0; 2];
+            // SAFETY: `fds` holds the two descriptors `pipe` writes.
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            for fd in fds {
+                // SAFETY: an fd of the pipe just made.
+                assert_eq!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                    0
+                );
+            }
+            // SAFETY: both fds were just made and are owned by nothing else.
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+        }
         let root = temp_root("busy");
         let dir = root.join("ver-1");
         let store = Store::create(&dir, &created("ver-1", 1)).unwrap();
         assert!(is_busy(&dir));
         assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
         assert_eq!(read_session(&dir).unwrap().id.as_str(), "ver-1");
-        // A child forked with the store open, told to wait before its exec;
-        // it says through a pipe once it is forked.
-        let mut fds = [0; 2];
-        // SAFETY: `fds` holds the two descriptors `pipe` writes.
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        let [read_end, write_end] = fds;
-        for fd in fds {
-            // SAFETY: an fd of the pipe just made.
-            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-        }
+        // A child forked with the store open says so through `forked`, then
+        // waits before its exec for a byte (or the end) on `go`.
+        let (forked_rx, forked_tx) = pipe();
+        let (go_rx, go_tx) = pipe();
+        let (forked_fd, go_rx_fd, go_tx_fd) =
+            (forked_tx.as_raw_fd(), go_rx.as_raw_fd(), go_tx.as_raw_fd());
         let child = std::thread::spawn(move || {
             let mut cmd = Command::new("true");
-            // SAFETY: `write` and `usleep` are async-signal-safe and touch
-            // no memory of the parent's.
+            // SAFETY: `write`, `close` and `read` are async-signal-safe and
+            // touch no memory of the parent's.
             unsafe {
                 cmd.pre_exec(move || {
-                    libc::write(write_end, b"f".as_ptr().cast(), 1);
-                    libc::usleep(300_000);
+                    // Its own copy of the write end would keep `go` from
+                    // ending if the test fails before it says go.
+                    libc::close(go_tx_fd);
+                    libc::write(forked_fd, b"f".as_ptr().cast(), 1);
+                    let mut byte = 0u8;
+                    libc::read(go_rx_fd, (&raw mut byte).cast(), 1);
                     Ok(())
                 });
             }
-            cmd.status().unwrap()
+            let status = cmd.status();
+            // The thread's ends close here whatever the spawn did: a child
+            // never forked ends `forked` for the test instead of a byte.
+            drop((forked_tx, go_rx));
+            status
         });
-        let mut byte = [0u8; 1];
+        let mut byte = 0u8;
         // SAFETY: reads one byte into `byte`.
+        let read = unsafe { libc::read(forked_rx.as_raw_fd(), (&raw mut byte).cast(), 1) };
+        if read != 1 {
+            panic!("the child was not forked: {:?}", child.join());
+        }
+        drop(store);
+        assert!(
+            is_busy(&dir),
+            "the child holds its copy of the log until it is told to go on"
+        );
+        // SAFETY: writes one byte from a live buffer.
         assert_eq!(
-            unsafe { libc::read(read_end, byte.as_mut_ptr().cast(), 1) },
+            unsafe { libc::write(go_tx.as_raw_fd(), b"g".as_ptr().cast(), 1) },
             1
         );
-        drop(store);
-        let until = std::time::Instant::now() + LOCK_GRACE;
-        while is_busy(&dir) {
-            assert!(
-                std::time::Instant::now() < until,
-                "the log is still locked {LOCK_GRACE:?} after its store was dropped"
-            );
-            std::thread::sleep(LOCK_POLL);
-        }
-        let (again, _) = Store::open(&dir).unwrap();
+        let (again, _) = Store::open(&dir).unwrap_or_else(|e| {
+            panic!("the log is still locked {LOCK_GRACE:?} after the child went on: {e}")
+        });
         drop(again);
-        assert!(child.join().unwrap().success());
-        for fd in fds {
-            // SAFETY: the pipe's fds, used no more.
-            unsafe { libc::close(fd) };
-        }
+        assert!(child.join().unwrap().unwrap().success());
         let _ = fs::remove_dir_all(root);
     }
 

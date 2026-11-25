@@ -5932,11 +5932,18 @@ pub(crate) mod tests {
         git(&repo, &["commit", "-q", "-m", "noa"]);
         let mut target = state_of(&repo);
         target.head = Head::Ref("main".into());
-        target.spec = Some("docs/missing.md".into());
-        let start = |target: &Target| new_start(&root, target.clone(), Isolation::Shared, true);
-        // The capture refuses the spec file the reservation was made for.
-        let err = open_wired(&fake, start(&target)).err().unwrap();
-        assert!(err.contains("docs/missing.md"), "{err}");
+        let start = |max_rounds: RoundNo| {
+            let mut start = new_start(&root, target.clone(), Isolation::Shared, true);
+            let Start::New(new) = &mut start else {
+                unreachable!()
+            };
+            new.max_rounds = max_rounds;
+            start
+        };
+        // The target is captured and the ignore line appended; only then
+        // is the setup refused, for a round limit out of range.
+        let err = open_wired(&fake, start(0)).err().unwrap();
+        assert!(err.contains("ラウンド上限"), "{err}");
         assert_eq!(
             fs::read_to_string(repo.join(".noa/.gitignore")).unwrap(),
             "notes/\n"
@@ -5944,8 +5951,7 @@ pub(crate) mod tests {
         assert_eq!(git(&repo, &["status", "--porcelain"]), "");
         nothing_left(&root, &repo);
         // Corrected, the same start goes.
-        target.spec = None;
-        let (runner, _, _) = open_wired(&fake, start(&target)).unwrap_or_else(|e| panic!("{e}"));
+        let (runner, _, _) = open_wired(&fake, start(2)).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             runner.engine.session().rebuild.head_sha,
             git(&repo, &["rev-parse", "HEAD"])

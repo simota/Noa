@@ -850,16 +850,67 @@ mod tests {
         assert!(!rerun.starts_with(&reported));
     }
 
+    /// The lock goes with the store, once no other copy of its file is
+    /// open. A child forked anywhere in the process (another test's
+    /// `pre_exec` spawn) holds a copy of every open file until its exec,
+    /// which is why [`LOCK_GRACE`] exists; this test forks one itself, so
+    /// that copy is always there when the store is dropped, and the lock
+    /// counts as released once it goes, within the grace, as
+    /// [`Store::open`] waits for it.
     #[test]
     fn a_second_open_of_a_held_log_is_busy_and_a_read_still_works() {
+        use std::os::unix::process::CommandExt as _;
         let root = temp_root("busy");
         let dir = root.join("ver-1");
         let store = Store::create(&dir, &created("ver-1", 1)).unwrap();
         assert!(is_busy(&dir));
         assert!(matches!(Store::open(&dir), Err(StoreError::Busy)));
         assert_eq!(read_session(&dir).unwrap().id.as_str(), "ver-1");
+        // A child forked with the store open, told to wait before its exec;
+        // it says through a pipe once it is forked.
+        let mut fds = [0; 2];
+        // SAFETY: `fds` holds the two descriptors `pipe` writes.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let [read_end, write_end] = fds;
+        for fd in fds {
+            // SAFETY: an fd of the pipe just made.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        let child = std::thread::spawn(move || {
+            let mut cmd = Command::new("true");
+            // SAFETY: `write` and `usleep` are async-signal-safe and touch
+            // no memory of the parent's.
+            unsafe {
+                cmd.pre_exec(move || {
+                    libc::write(write_end, b"f".as_ptr().cast(), 1);
+                    libc::usleep(300_000);
+                    Ok(())
+                });
+            }
+            cmd.status().unwrap()
+        });
+        let mut byte = [0u8; 1];
+        // SAFETY: reads one byte into `byte`.
+        assert_eq!(
+            unsafe { libc::read(read_end, byte.as_mut_ptr().cast(), 1) },
+            1
+        );
         drop(store);
-        assert!(!is_busy(&dir));
+        let until = std::time::Instant::now() + LOCK_GRACE;
+        while is_busy(&dir) {
+            assert!(
+                std::time::Instant::now() < until,
+                "the log is still locked {LOCK_GRACE:?} after its store was dropped"
+            );
+            std::thread::sleep(LOCK_POLL);
+        }
+        let (again, _) = Store::open(&dir).unwrap();
+        drop(again);
+        assert!(child.join().unwrap().success());
+        for fd in fds {
+            // SAFETY: the pipe's fds, used no more.
+            unsafe { libc::close(fd) };
+        }
         let _ = fs::remove_dir_all(root);
     }
 

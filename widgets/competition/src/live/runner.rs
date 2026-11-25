@@ -23,7 +23,9 @@ use competition::model::viewer::ViewerCache;
 use competition::store::{self, Store};
 use competition::{check, preview, shots};
 
-use super::ipc::{Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement};
+use super::ipc::{
+    Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement, no_board_tab,
+};
 
 const POLL: Duration = Duration::from_millis(200);
 const TICK_EVERY: Millis = 1_000;
@@ -38,12 +40,6 @@ const TRUST_KEYS_MAX: u8 = 4;
 const TRUST_KEY_SHOWS_IN: Millis = 2_000;
 const REPLY_STABLE_FOR: Millis = 600;
 const MAX_SPAWNS: u8 = 2;
-/// Noa's most panes in one row or column of a tab (`MAX_PANES_PER_AXIS`,
-/// crates/noa-app/src/split_tree/tree/types.rs): a split along a full one
-/// is refused. A tab of three columns of three holds the most judges and
-/// the largest panel.
-const PANES_PER_AXIS: usize = 3;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
     New {
@@ -387,9 +383,10 @@ struct Runner<C: Connect, K: Clock> {
     /// Panes asked to close whose outcome Noa could not tell (a timeout,
     /// a lost link): when one closes after all, it goes without a notice.
     closing: BTreeSet<u64>,
-    /// The competition tab's panes, column by column (each top to bottom),
-    /// as this runner placed them.
-    layout: Vec<Vec<u64>>,
+    /// The board tab the agents' floats are stowed on: opened with the first
+    /// agent, taken back from an agent's `parent_pane_id` on a resume, and
+    /// forgotten once it is gone.
+    board: Option<u64>,
     sends: Vec<PendingSend>,
     watches: Vec<WatchedReply>,
     last_tick: Millis,
@@ -466,7 +463,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             wake,
             panes: BTreeMap::new(),
             closing: BTreeSet::new(),
-            layout: Vec::new(),
+            board: None,
             sends: Vec::new(),
             watches: Vec::new(),
             last_tick: now,
@@ -610,6 +607,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                         .find(|v| v.label.as_deref() == Some(label.as_str()))
                 });
             if let Some(view) = found {
+                if self.board.is_none() {
+                    self.board = view.parent_pane_id.filter(|b| by_id.contains_key(b));
+                }
                 let mut pane = self
                     .panes
                     .get(&part)
@@ -627,6 +627,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
         }
         self.panes = alive;
+        if self.board.is_some_and(|b| !by_id.contains_key(&b)) {
+            self.board = None;
+        }
         // Panes gone while the link was down need no quiet closing.
         let live: BTreeSet<u64> = self.panes.values().map(|p| p.id).collect();
         self.closing.retain(|id| live.contains(id));
@@ -640,6 +643,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         }
         let now = self.clock.now();
         for removed in changes.removed {
+            if self.board == Some(removed) {
+                self.board = None;
+            }
             let part = self
                 .panes
                 .iter()
@@ -767,7 +773,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             self.notice("ペインはコンペが終わってから閉じられます");
             return;
         }
-        if self.panes.is_empty() {
+        if self.panes.is_empty() && self.board.is_none() {
             self.notice("閉じるペインはありません");
             return;
         }
@@ -787,6 +793,16 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     self.closing.insert(pane.id);
                     self.panes.insert(part, pane);
                 }
+            }
+        }
+        // The board goes once its agents are closed. Closing it closes any
+        // float left on it, so it stays while one could not be closed.
+        if failed.is_empty()
+            && let Some(board) = self.board
+        {
+            match conn.close_pane(board) {
+                Ok(()) | Err(NoaError::PaneGone) => self.board = None,
+                Err(err) => failed.push(format!("ボード: {err}")),
             }
         }
         self.notice(if failed.is_empty() {
@@ -898,7 +914,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             cwd: workdir,
             label: format!("adopt:{}", self.engine.session().id),
         };
-        match conn.spawn(Placement::NewTab, &spec) {
+        match conn.spawn(Placement::Tab, &spec) {
             Ok(_) => self.notice(format!(
                 "{} で優勝案 ({winner}) の採用実装タブを開きました",
                 agent.command()
@@ -1197,96 +1213,32 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             cwd,
             label: self.pane_label(part),
         };
-        let mut refused = String::new();
-        for placement in self.placements() {
+        // A board still listed is tried first; one gone is forgotten and the
+        // next agent opens a new board.
+        let mut placement = self.board.map_or(Placement::Board, Placement::Float);
+        loop {
+            if placement == Placement::Board
+                && let Err(version) = conn.board_tab_support()
+            {
+                return Err(Fail::Fatal(no_board_tab(&version)));
+            }
             match conn.spawn(placement, &spec) {
-                Ok(pane_id) => {
-                    self.place(placement, pane_id);
-                    self.panes.insert(part.clone(), Pane::new(pane_id));
+                Ok(spawned) => {
+                    self.board = spawned.board;
+                    self.panes.insert(part.clone(), Pane::new(spawned.pane));
                     return self.feed(Input::PaneSpawned {
                         part: part.clone(),
-                        pane_id,
+                        pane_id: spawned.pane,
                     });
                 }
-                // No room there (or the anchor just closed): the next place.
-                Err(NoaError::Refused(why)) => refused = why,
-                Err(NoaError::PaneGone) => {}
-                Err(other) => return Err(link(other)),
-            }
-        }
-        Err(Fail::Link(format!(
-            "{part} のペインを開けません: {refused}"
-        )))
-    }
-
-    /// Where a new pane may go, best first: a new column while the top row
-    /// has room, then under the shortest column, then next to any pane of
-    /// the competition (those taken up on a resume are not in the layout),
-    /// and last a tab of its own.
-    fn placements(&mut self) -> Vec<Placement> {
-        let alive: BTreeSet<u64> = self.panes.values().map(|p| p.id).collect();
-        for column in &mut self.layout {
-            column.retain(|id| alive.contains(id));
-        }
-        self.layout.retain(|column| !column.is_empty());
-        let mut out = Vec::new();
-        if alive.is_empty() {
-            out.push(Placement::NewTab);
-            return out;
-        }
-        if self.layout.len() < PANES_PER_AXIS
-            && let Some(column) = self.layout.last()
-        {
-            out.push(Placement::Right(column[0]));
-        }
-        let mut columns: Vec<&Vec<u64>> = self
-            .layout
-            .iter()
-            .filter(|c| c.len() < PANES_PER_AXIS)
-            .collect();
-        columns.sort_by_key(|c| c.len());
-        out.extend(
-            columns
-                .iter()
-                .filter_map(|c| c.last())
-                .map(|&id| Placement::Below(id)),
-        );
-        for &id in &alive {
-            for placement in [Placement::Below(id), Placement::Right(id)] {
-                if !out.contains(&placement) {
-                    out.push(placement);
+                Err(NoaError::PaneGone) if placement != Placement::Board => {
+                    self.board = None;
+                    placement = Placement::Board;
                 }
-            }
-        }
-        out.push(Placement::NewTab);
-        out
-    }
-
-    /// Records where `pane` went.
-    fn place(&mut self, placement: Placement, pane: u64) {
-        let column_of = |layout: &mut Vec<Vec<u64>>, anchor: u64| {
-            layout
-                .iter()
-                .position(|c| c.contains(&anchor))
-                .unwrap_or_else(|| {
-                    layout.push(vec![anchor]);
-                    layout.len() - 1
-                })
-        };
-        match placement {
-            Placement::NewTab => self.layout.push(vec![pane]),
-            Placement::Right(anchor) => {
-                let at = column_of(&mut self.layout, anchor);
-                self.layout.insert(at + 1, vec![pane]);
-            }
-            Placement::Below(anchor) => {
-                let at = column_of(&mut self.layout, anchor);
-                let column = &mut self.layout[at];
-                let below = column
-                    .iter()
-                    .position(|&id| id == anchor)
-                    .map_or(column.len(), |i| i + 1);
-                column.insert(below, pane);
+                Err(NoaError::Refused(why)) => {
+                    return Err(Fail::Link(format!("{part} のペインを開けません: {why}")));
+                }
+                Err(other) => return Err(link(other)),
             }
         }
     }
@@ -1503,6 +1455,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    use super::super::ipc::Spawned;
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -1513,6 +1466,8 @@ mod tests {
         state: Option<String>,
         blocked: Option<String>,
         seq: u64,
+        /// The board a float is stowed on.
+        parent: Option<u64>,
     }
 
     #[derive(Default)]
@@ -1529,9 +1484,14 @@ mod tests {
         /// Panes closed through `close_pane`.
         closed: Vec<u64>,
         spawned: usize,
-        /// Each tab's panes, column by column, split as Noa splits them
-        /// (at most [`PANES_PER_AXIS`] along a row or a column).
-        tabs: Vec<Vec<Vec<u64>>>,
+        /// Board tabs opened, in order (each is also in `panes`).
+        boards: Vec<u64>,
+        /// Plain tabs opened (the adopt tab).
+        plain_tabs: Vec<u64>,
+        /// Every placement `spawn` was asked for.
+        spawn_log: Vec<Placement>,
+        /// A Noa that predates board tabs.
+        old_noa: bool,
         /// Panes that are gone by the time they are asked for a paste.
         gone_on_paste: bool,
         rpc_panes: usize,
@@ -1553,6 +1513,7 @@ mod tests {
                 agent_seq: pane.seq,
                 agent_blocked: pane.blocked.clone(),
                 agent_detail: None,
+                parent_pane_id: pane.parent,
             }
         }
 
@@ -1619,42 +1580,42 @@ mod tests {
             Ok(w.events.pop_front())
         }
 
-        fn spawn(&mut self, placement: Placement, spec: &PaneSpec) -> Result<u64, NoaError> {
+        fn spawn(&mut self, placement: Placement, spec: &PaneSpec) -> Result<Spawned, NoaError> {
             let mut w = self.0.borrow_mut();
-            let id = w.next_pane;
-            let World { tabs, panes, .. } = &mut *w;
-            for tab in tabs.iter_mut() {
-                for column in tab.iter_mut() {
-                    column.retain(|p| panes.contains_key(p));
-                }
-                tab.retain(|column| !column.is_empty());
-            }
-            let find = |tabs: &Vec<Vec<Vec<u64>>>, anchor: u64| {
-                tabs.iter().enumerate().find_map(|(t, tab)| {
-                    tab.iter().position(|c| c.contains(&anchor)).map(|c| (t, c))
-                })
+            w.spawn_log.push(placement);
+            let next = |w: &mut World| {
+                let id = w.next_pane;
+                w.next_pane += 1;
+                id
             };
-            let full = || NoaError::Refused("split did not create a pane".into());
-            match placement {
-                Placement::NewTab => tabs.push(vec![vec![id]]),
-                Placement::Right(anchor) => {
-                    let (t, c) = find(tabs, anchor).ok_or(NoaError::PaneGone)?;
-                    if tabs[t].len() >= PANES_PER_AXIS {
-                        return Err(full());
+            let (board, parent) = match placement {
+                Placement::Tab => (None, None),
+                Placement::Float(board) => {
+                    if !w.panes.contains_key(&board) {
+                        return Err(NoaError::PaneGone);
                     }
-                    tabs[t].insert(c + 1, vec![id]);
+                    (Some(board), Some(board))
                 }
-                Placement::Below(anchor) => {
-                    let (t, c) = find(tabs, anchor).ok_or(NoaError::PaneGone)?;
-                    let column = &mut tabs[t][c];
-                    if column.len() >= PANES_PER_AXIS {
-                        return Err(full());
-                    }
-                    let at = column.iter().position(|&p| p == anchor).unwrap() + 1;
-                    column.insert(at, id);
+                Placement::Board => {
+                    let board = next(&mut w);
+                    w.boards.push(board);
+                    w.panes.insert(
+                        board,
+                        FakePane {
+                            label: Some(format!("board:{board}")),
+                            state: None,
+                            blocked: None,
+                            seq: 0,
+                            parent: None,
+                        },
+                    );
+                    (Some(board), Some(board))
                 }
+            };
+            let id = next(&mut w);
+            if board.is_none() {
+                w.plain_tabs.push(id);
             }
-            w.next_pane += 1;
             w.spawned += 1;
             w.panes.insert(
                 id,
@@ -1663,9 +1624,18 @@ mod tests {
                     state: None,
                     blocked: None,
                     seq: 0,
+                    parent,
                 },
             );
-            Ok(id)
+            Ok(Spawned { pane: id, board })
+        }
+
+        fn board_tab_support(&self) -> Result<(), String> {
+            if self.0.borrow().old_noa {
+                Err("0.9.15".to_owned())
+            } else {
+                Ok(())
+            }
         }
 
         fn paste_ready(&mut self, pane: u64) -> Result<bool, NoaError> {
@@ -1702,9 +1672,19 @@ mod tests {
             if w.panes.remove(&pane).is_none() {
                 return Err(NoaError::PaneGone);
             }
+            // Closing a board closes the floats stowed on it.
+            let floats: Vec<u64> = w
+                .panes
+                .iter()
+                .filter(|(_, p)| p.parent == Some(pane))
+                .map(|(id, _)| *id)
+                .collect();
+            for float in &floats {
+                w.panes.remove(float);
+            }
             w.closed.push(pane);
             w.events.push_back(Changes {
-                removed: vec![pane],
+                removed: std::iter::once(pane).chain(floats).collect(),
                 ..Changes::default()
             });
             if w.close_unsure {
@@ -1977,10 +1957,16 @@ mod tests {
         actions.send(Action::Close).unwrap();
         actions.send(Action::ClosePanes).unwrap();
         runner.drain_actions(Some(&mut conn)).unwrap();
+        let board = fake.0.borrow().boards[0];
         let mut closed = fake.0.borrow().closed.clone();
         closed.sort_unstable();
-        assert_eq!(closed, contestants);
+        let mut want = contestants.to_vec();
+        want.push(board);
+        want.sort_unstable();
+        assert_eq!(closed, want, "the agents and then the board");
+        assert_eq!(fake.0.borrow().closed.last(), Some(&board));
         assert!(runner.panes.is_empty());
+        assert_eq!(runner.board, None);
         let spawned = fake.0.borrow().spawned;
         for _ in 0..3 {
             step(&mut runner, &mut conn);
@@ -2263,7 +2249,7 @@ mod tests {
     }
 
     /// Runs round 1 of `n` claude entries until the judge is briefed: every
-    /// pane (the judge's too) must find room in the competition's tab.
+    /// pane (the judge's too) must float on the session's one board.
     fn judge_is_briefed_after(n: usize) {
         let fake = fake();
         let root = temp_root();
@@ -2299,9 +2285,14 @@ mod tests {
         assert_eq!(fake.pasted(judge_pane), 1, "the judge was not briefed");
         let w = fake.0.borrow();
         assert_eq!(w.spawned, n + 1);
-        assert_eq!(w.tabs.len(), 1, "{:?}", w.tabs);
-        assert!(w.tabs[0].len() <= PANES_PER_AXIS);
-        assert!(w.tabs[0].iter().all(|c| c.len() <= PANES_PER_AXIS));
+        assert_eq!(w.boards.len(), 1, "one board for the whole session");
+        assert!(w.plain_tabs.is_empty());
+        assert!(
+            w.panes
+                .iter()
+                .filter(|(id, _)| !w.boards.contains(id))
+                .all(|(_, p)| p.parent == Some(w.boards[0]))
+        );
         drop(w);
         let _ = fs::remove_dir_all(root);
     }
@@ -2309,12 +2300,100 @@ mod tests {
     const JUDGE_ID_FOR_TESTS: &str = competition::model::types::JUDGE_ID;
 
     #[test]
-    fn four_entries_and_the_judge_fit_in_one_tab() {
+    fn the_first_agent_opens_a_board_and_the_rest_float_on_it() {
+        let fake = fake();
+        let root = temp_root();
+        let panel = vec![AgentKind::Claude.into(), AgentKind::Codex.into()];
+        let (mut runner, _actions, _updates) = rig_on(&fake, new_start(&root, panel));
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let w = fake.0.borrow();
+        assert_eq!(w.boards.len(), 1);
+        let board = w.boards[0];
+        assert_eq!(w.spawn_log, [Placement::Board, Placement::Float(board)]);
+        for pane in runner.panes.values() {
+            assert_eq!(w.panes[&pane.id].parent, Some(board));
+        }
+        assert_eq!(runner.board, Some(board));
+        drop(w);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_board_that_is_gone_is_replaced_by_a_new_one() {
+        let fake = fake();
+        let root = temp_root();
+        let panel = vec![AgentKind::Claude.into(), AgentKind::Codex.into()];
+        let (mut runner, _actions, _updates) = rig_on(&fake, new_start(&root, panel));
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        let old = fake.0.borrow().boards[0];
+        // The user closes the board tab: it and its floats are gone, but the
+        // runner has not heard of it yet.
+        conn.close_pane(old).unwrap();
+        runner.panes.clear();
+        let part = PartId::new("claude");
+        assert_eq!(runner.board, Some(old));
+        assert!(runner.spawn_pane(&mut conn, &part).is_ok());
+        let w = fake.0.borrow();
+        assert_eq!(w.boards.len(), 2);
+        let new = w.boards[1];
+        assert_eq!(
+            w.spawn_log[2..],
+            [Placement::Float(old), Placement::Board],
+            "the dead board is tried once, then replaced"
+        );
+        assert_eq!(runner.board, Some(new));
+        assert_eq!(w.panes[&runner.panes[&part].id].parent, Some(new));
+        drop(w);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resume_recovers_the_board_from_the_agents_it_takes_back() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_first_briefs(&fake, &root);
+        let board = fake.0.borrow().boards[0];
+        let (mut runner, _actions, _updates) = rig_on(&fake, Start::Resume { dir });
+        assert_eq!(runner.board, Some(board));
+        // An agent started after the resume joins that board.
+        let mut conn = fake.clone();
+        let part = PartId::new("claude");
+        runner.panes.remove(&part);
+        assert!(runner.spawn_pane(&mut conn, &part).is_ok());
+        let w = fake.0.borrow();
+        assert_eq!(w.boards, [board], "no second board");
+        assert_eq!(w.spawn_log.last(), Some(&Placement::Float(board)));
+        drop(w);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_older_noa_starts_no_agents() {
+        let fake = fake();
+        fake.0.borrow_mut().old_noa = true;
+        let root = temp_root();
+        let panel = vec![AgentKind::Claude.into(), AgentKind::Codex.into()];
+        let (mut runner, _actions, _updates) = rig_on(&fake, new_start(&root, panel));
+        let mut conn = fake.clone();
+        let Err(Fail::Fatal(why)) = runner.deliver_sends(&mut conn) else {
+            panic!("the agents were started");
+        };
+        assert!(why.contains("0.9.15") && why.contains("0.9.16"), "{why}");
+        let w = fake.0.borrow();
+        assert!(w.spawn_log.is_empty() && w.panes.is_empty());
+        drop(w);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn four_entries_and_the_judge_fit_on_one_board() {
         judge_is_briefed_after(4);
     }
 
     #[test]
-    fn six_entries_and_the_judge_fit_in_one_tab() {
+    fn six_entries_and_the_judge_fit_on_one_board() {
         judge_is_briefed_after(6);
     }
 
@@ -2376,7 +2455,7 @@ mod tests {
     }
 
     #[test]
-    fn six_entries_and_three_judges_fit_in_one_tab() {
+    fn six_entries_and_three_judges_fit_on_one_board() {
         let fake = fake();
         let root = temp_root();
         let (mut runner, _actions, _updates) = rig_on(&fake, panel_start(&root, 6, 3));
@@ -2392,12 +2471,13 @@ mod tests {
         }
         let w = fake.0.borrow();
         assert_eq!(w.spawned, 9);
-        assert_eq!(w.tabs.len(), 1, "{:?}", w.tabs);
-        assert_eq!(w.tabs[0].len(), PANES_PER_AXIS, "{:?}", w.tabs);
-        assert!(
-            w.tabs[0].iter().all(|c| c.len() == PANES_PER_AXIS),
-            "{:?}",
-            w.tabs
+        assert_eq!(w.boards.len(), 1, "one board holds all nine");
+        assert_eq!(
+            w.panes
+                .values()
+                .filter(|p| p.parent == Some(w.boards[0]))
+                .count(),
+            9
         );
         drop(w);
         let _ = fs::remove_dir_all(root);
@@ -2515,6 +2595,7 @@ mod tests {
                 state: Some("input".into()),
                 blocked: None,
                 seq: 0,
+                parent: None,
             },
         );
         own.seq = 0;

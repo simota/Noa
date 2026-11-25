@@ -11,6 +11,7 @@ use verify::model::types::{
     BriefKind, Isolation, Millis, Outcome, Participant, Session, WorktreeState, short_id,
 };
 
+use super::backlinks::Row;
 use super::progress::{delivery, elapsed};
 use super::{Action, caption, card, heading, keep_scroll, note, scroll_column, spacer, tag};
 
@@ -214,6 +215,50 @@ pub(super) fn insert(
         actions.push((open, Action::FocusPane(session.judge.id.clone())));
     }
     target
+}
+
+/// The target card [`insert`] put under `host`: the first card of the
+/// list that follows the heading.
+pub(super) fn target_card(tree: &UiTree, host: WidgetId) -> Option<WidgetId> {
+    let scroll = *tree.children(host).get(1)?;
+    let list = *tree.children(scroll).first()?;
+    tree.children(list).first().copied()
+}
+
+/// The target card's link rows (L1-5): 「タスク: <badge> <title>」 and
+/// 「対象の版: <short id>」, each with 開く when its record can be found.
+pub(super) fn insert_links(
+    tree: &mut UiTree,
+    target: WidgetId,
+    rows: &[Row],
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
+    for row in rows {
+        let line = tree.insert(
+            Some(target),
+            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        );
+        caption(tree, line, format!("{}:", row.kind));
+        if let Some(badge) = row.badge {
+            tag(tree, line, badge, Tone::Neutral);
+        }
+        tree.insert(
+            Some(line),
+            Label::new(row.text.clone())
+                .font_size(11.5)
+                .max_lines(1)
+                .truncation(Truncation::Tail),
+        );
+        spacer(tree, line);
+        if let Some((name, nav)) = &row.open {
+            let open = tree.insert(
+                Some(line),
+                Button::new("開く").control_size(ControlSize::Small),
+            );
+            tree.set_accessible_label(open, *name);
+            actions.push((open, Action::OpenLink(nav.clone())));
+        }
+    }
 }
 
 fn setup_line(part: &Participant) -> String {

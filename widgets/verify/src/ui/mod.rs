@@ -9,6 +9,7 @@
 //! keeps is view state: the tab, the filters, the selection, the drafts,
 //! the open log, the file waiting for its caption.
 
+mod backlinks;
 mod board;
 mod cards;
 mod composer;
@@ -148,6 +149,9 @@ pub enum Action {
         agent: AgentKind,
         scope: FixScope,
     },
+    /// 開く on a link row of the target card: Tasks on a task, or the
+    /// change's id copied.
+    OpenLink(verify::links::Nav),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +293,9 @@ pub struct Verify {
     attach_current: Option<evidence::AttachDraft>,
     attach_queue: VecDeque<evidence::AttachDraft>,
     opener: Opener,
+    /// The target card's links: where the verification came from.
+    links: backlinks::Reader,
+    launcher: backlinks::Launcher,
 
     start: start::Parts,
     editor: criteria::Editor,
@@ -482,6 +489,10 @@ impl Verify {
         let attach = evidence::insert_attach(&mut tree, attach_host);
         let right_host = tree.insert(Some(right_col), Container::new(fill()));
         let status = StatusBar::insert(&mut tree, root);
+        let links = match source {
+            Source::Demo => backlinks::Reader::none(),
+            Source::Snapshot | Source::Live(_) => backlinks::Reader::default_store(),
+        };
 
         let mut screen = Self {
             tree,
@@ -522,6 +533,8 @@ impl Verify {
             attach_current: None,
             attach_queue: VecDeque::new(),
             opener: system_opener(),
+            links,
+            launcher: backlinks::system_launcher(),
             start,
             editor: criteria::Editor::default(),
             board,
@@ -598,6 +611,7 @@ impl Verify {
         self.tree.set_hidden(self.board, !started);
         if started {
             self.rebuild_left(text);
+            self.rebuild_links();
             self.rebuild_header(text);
             self.rebuild_progress(text);
             self.rebuild_center(text);
@@ -673,6 +687,7 @@ impl Verify {
         self.read_only = false;
         self.stored_dir = None;
         self.stored_panes = None;
+        self.links.forget();
         self.extending = false;
         self.tab = CenterTab::Criteria;
         self.defect_filters = defects::Filters::default();
@@ -1228,7 +1243,44 @@ impl Verify {
         self.rebuild_if_changed(text);
     }
 
+    /// The target card's link rows, for the session on screen.
+    fn rebuild_links(&mut self) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(target) = cards::target_card(&self.tree, self.left_host) else {
+            return;
+        };
+        let rows = self.links.rows(&session).to_vec();
+        cards::insert_links(&mut self.tree, target, &rows, &mut self.actions);
+    }
+
+    /// 開く on a link row: a change with no task is copied; anything else
+    /// opens in its program.
+    fn open_link(&mut self, nav: verify::links::Nav) {
+        if let verify::links::Nav::Copy(id) = &nav {
+            let clipboard = self.tree.clipboard();
+            clipboard.write_text(id);
+            let message = match clipboard.read_text() {
+                Some(held) if held == *id => format!("{id} をコピーしました"),
+                Some(_) => format!("{id} をコピーできませんでした"),
+                None => format!(
+                    "{id} をコピーしましたが、クリップボードを読み返して確かめられませんでした"
+                ),
+            };
+            return self.toast(message);
+        }
+        if let Err(why) = (self.launcher)(&nav) {
+            self.toast(why);
+        }
+    }
+
     fn rebuild_if_changed(&mut self, text: &mut TextStore) {
+        if let Some(session) = self.session.clone()
+            && self.links.refresh(&session, std::time::Instant::now())
+        {
+            self.built = None;
+        }
         let next = self.built_key();
         if let Some(prev) = &self.built {
             if prev == &next {
@@ -1645,6 +1697,7 @@ impl Verify {
             }
             Action::StartVerify => self.send_cmd(Command::StartVerify),
             Action::OpenSnapshot => self.open_snapshot(),
+            Action::OpenLink(nav) => self.open_link(nav),
             Action::OpenWorktree(part) => {
                 let path = self
                     .session

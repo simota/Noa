@@ -2879,3 +2879,241 @@ fn a_filter_that_hides_the_selected_defect_lets_it_go() {
     act(&mut screen, Action::ToggleCategory("conformance".into()));
     assert_eq!(screen.selected, Some(Selected::Defect("D1".into())));
 }
+
+// ------------------------------------------------- artifact links (AC4)
+
+mod links_card {
+    use super::*;
+    use verify::links::{self, ChangeId, Edit, Info, Nav, Node, Origin, Rel, TaskKey};
+
+    /// A store root `<tmp>/data` with `links/` under it, a main worktree
+    /// `<tmp>/repo` holding task `t-1`'s file, and the finished demo as if
+    /// it had been verified there.
+    struct Rig {
+        data: PathBuf,
+        repo: PathBuf,
+        session: Session,
+    }
+
+    impl Rig {
+        fn new(name: &str) -> Self {
+            let dir = temp(name);
+            let repo = dir.join("repo");
+            std::fs::create_dir_all(repo.join(".noa/tasks")).unwrap();
+            std::fs::write(repo.join(".noa/tasks/t-1.md"), "# Fix the bug\n").unwrap();
+            let mut session = crate::demo::session();
+            session.main_worktree = repo.clone();
+            Self {
+                data: dir.join("data"),
+                repo,
+                session,
+            }
+        }
+
+        fn log(&self) -> PathBuf {
+            self.data
+                .join("links")
+                .join(links::repo_key(&self.repo))
+                .join(links::LINKS_FILE)
+        }
+
+        fn me(&self) -> Node {
+            Node::Verify(self.session.id.to_string())
+        }
+
+        fn link(&self, from: Node, to: Node, rel: Rel) -> Edit {
+            Edit::Link {
+                from,
+                to,
+                rel,
+                origin: Origin::Auto,
+            }
+        }
+
+        fn write(&self, edits: &[Edit]) {
+            let outcomes = links::append(&self.log(), edits, links::now_millis()).unwrap();
+            assert!(
+                !outcomes
+                    .iter()
+                    .any(|o| matches!(o, links::Outcome::Refused(_))),
+                "{outcomes:?}"
+            );
+        }
+
+        /// The live screen showing the session, reading this store, its
+        /// launches recorded.
+        fn screen(&self) -> (Verify, Rc<RefCell<Vec<Nav>>>) {
+            let (mut screen, _) = live_with(self.session.clone());
+            screen.links =
+                backlinks::Reader::new(Some(self.data.join("links")), Some(self.data.clone()));
+            let seen = Rc::new(RefCell::new(Vec::new()));
+            let into = Rc::clone(&seen);
+            screen.launcher = Box::new(move |nav| {
+                into.borrow_mut().push(nav.clone());
+                Ok(())
+            });
+            screen.rebuild(&mut TextStore::new(Default::default()));
+            (screen, seen)
+        }
+    }
+
+    fn sha(c: char) -> String {
+        c.to_string().repeat(40)
+    }
+
+    fn task_nav(rig: &Rig, select: &str) -> Action {
+        Action::OpenLink(Nav::Task {
+            repo: rig.repo.clone(),
+            select: select.into(),
+        })
+    }
+
+    fn card_labels(screen: &Verify) -> Vec<String> {
+        let card = cards::target_card(&screen.tree, screen.left_host).unwrap();
+        labels_under(&screen.tree, card)
+    }
+
+    #[test]
+    fn ac04_the_target_card_shows_the_task_and_version_and_opens_the_task() {
+        let rig = Rig::new("links-card");
+        let task = Node::Task(TaskKey::Local("t-1".into()));
+        let change = Node::Change(ChangeId::Commit(sha('a')));
+        rig.write(&[
+            Edit::Observe {
+                node: task.clone(),
+                info: Info {
+                    label: Some("Fix the bug".into()),
+                    ..Info::default()
+                },
+            },
+            rig.link(rig.me(), change.clone(), Rel::Judged),
+            rig.link(rig.me(), task.clone(), Rel::About),
+            rig.link(task, change, Rel::Produced),
+        ]);
+        let (mut screen, launched) = rig.screen();
+        let labels = card_labels(&screen);
+        for expected in ["タスク:", "ローカル", "Fix the bug", "対象の版:", "aaaaaaa"] {
+            assert!(
+                labels.iter().any(|l| l == expected),
+                "{expected}: {labels:?}"
+            );
+        }
+        // タスクを開く and 版を開く (the change has a task) both open t-1.
+        let open = task_nav(&rig, "t-1");
+        let buttons: Vec<_> = acts(&screen).into_iter().filter(|a| *a == open).collect();
+        assert_eq!(buttons.len(), 2, "{:?}", acts(&screen));
+        press_button(&mut screen, &open);
+        assert_eq!(
+            *launched.borrow(),
+            vec![Nav::Task {
+                repo: rig.repo.clone(),
+                select: "t-1".into()
+            }]
+        );
+        assert_eq!(
+            Nav::Task {
+                repo: rig.repo.clone(),
+                select: "t-1".into()
+            }
+            .argv(),
+            [
+                format!("--repo={}", rig.repo.display()),
+                "--select=t-1".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn ac04_a_task_that_cannot_be_found_has_no_button_and_a_lone_change_copies_its_id() {
+        let rig = Rig::new("links-missing");
+        let gone = Node::Task(TaskKey::Local("t-2".into()));
+        rig.write(&[
+            rig.link(
+                rig.me(),
+                Node::Change(ChangeId::Commit(sha('b'))),
+                Rel::Judged,
+            ),
+            rig.link(rig.me(), gone, Rel::About),
+        ]);
+        let (screen, _) = rig.screen();
+        let labels = card_labels(&screen);
+        let path = rig.repo.join(".noa/tasks/t-2.md");
+        let want = format!("記録が見つからない（t-2 {}）", path.display());
+        assert!(labels.contains(&want), "{want}: {labels:?}");
+        let offered = acts(&screen);
+        assert!(!offered.contains(&task_nav(&rig, "t-2")), "{offered:?}");
+        // No task produced the change: 版を開く copies its id.
+        assert!(offered.contains(&Action::OpenLink(Nav::Copy(sha('b')))));
+    }
+
+    #[test]
+    fn ac04_with_no_link_the_card_says_there_is_no_related_task() {
+        let rig = Rig::new("links-none");
+        let (screen, _) = rig.screen();
+        let labels = card_labels(&screen);
+        assert!(labels.iter().any(|l| l == backlinks::NO_TASK), "{labels:?}");
+        assert!(
+            !acts(&screen)
+                .iter()
+                .any(|a| matches!(a, Action::OpenLink(_)))
+        );
+    }
+
+    #[test]
+    fn the_links_are_read_again_at_most_once_a_second() {
+        let rig = Rig::new("links-recheck");
+        let mut reader =
+            backlinks::Reader::new(Some(rig.data.join("links")), Some(rig.data.clone()));
+        let t0 = std::time::Instant::now();
+        assert!(reader.refresh(&rig.session, t0), "the first read");
+        assert_eq!(reader.rows(&rig.session)[0].text, backlinks::NO_TASK);
+        rig.write(&[rig.link(
+            rig.me(),
+            Node::Task(TaskKey::Local("t-1".into())),
+            Rel::About,
+        )]);
+        let soon = t0 + std::time::Duration::from_millis(500);
+        assert!(!reader.refresh(&rig.session, soon), "read within a second");
+        let later = t0 + std::time::Duration::from_millis(1_500);
+        assert!(reader.refresh(&rig.session, later));
+        assert_eq!(reader.rows(&rig.session)[0].text, "t-1");
+        // Nothing new: nothing changes.
+        let after = later + std::time::Duration::from_secs(2);
+        assert!(!reader.refresh(&rig.session, after));
+    }
+
+    #[test]
+    fn a_stored_view_reads_the_links_when_shown() {
+        let rig = Rig::new("links-stored");
+        let root = rig.data.join("verifications");
+        let dir = stored_demo(&root);
+        // The stored demo's main worktree is not the rig's: the links of
+        // that one are read.
+        let stored = store::read_session(&dir).unwrap();
+        let log = rig
+            .data
+            .join("links")
+            .join(links::repo_key(&stored.main_worktree))
+            .join(links::LINKS_FILE);
+        links::append(
+            &log,
+            &[Edit::Link {
+                from: Node::Verify(stored.id.to_string()),
+                to: Node::Change(ChangeId::Commit(sha('c'))),
+                rel: Rel::Judged,
+                origin: Origin::Auto,
+            }],
+            1,
+        )
+        .unwrap();
+        let (channel, _link) = Channel::fake();
+        let mut screen = live_ready(channel);
+        screen.links = backlinks::Reader::new(Some(rig.data.join("links")), Some(rig.data.clone()));
+        act(&mut screen, Action::OpenPast(dir));
+        assert!(
+            acts(&screen).contains(&Action::OpenLink(Nav::Copy(sha('c')))),
+            "{:?}",
+            card_labels(&screen)
+        );
+    }
+}

@@ -36,6 +36,8 @@ use super::ipc::{
 };
 use crate::live::Attachment;
 
+mod handoff;
+
 const POLL: Duration = Duration::from_millis(200);
 const TICK_EVERY: Millis = 1_000;
 const BACKOFF_MIN: Millis = 500;
@@ -498,6 +500,12 @@ struct Runner<C: Connect, K: Clock> {
     /// Panes of [`Self::rebuilt`] verifiers waiting to be closed.
     stale: Vec<(PartId, u64)>,
     link_state: Link,
+    /// The artifact links store of the verification's repository
+    /// ([`handoff::log_path`]).
+    links_log: PathBuf,
+    /// The verdict label last recorded there, so a report written again
+    /// with the same verdict records nothing.
+    outcome_seen: Option<String>,
 }
 
 impl<C: Connect, K: Clock> Runner<C, K> {
@@ -512,11 +520,15 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     ) -> Result<Self, String> {
         let now = clock.now();
         let resumed = matches!(start, Start::Resume { .. } | Start::Extend { .. });
-        let (engine, store) = match start {
+        let (engine, store, links_notice) = match start {
             Start::New(new) => new_verification(*new, config, now)?,
-            Start::Resume { dir } => open_log(dir, None, config, now)?,
-            Start::Extend { dir, by } => open_log(dir, Some(by), config, now)?,
+            Start::Resume { dir } => with_no_notice(open_log(dir, None, config, now)?),
+            Start::Extend { dir, by } => with_no_notice(open_log(dir, Some(by), config, now)?),
         };
+        let links_log = handoff::log_path(
+            engine.dir().parent().unwrap_or(engine.dir()),
+            &engine.session().main_worktree,
+        );
         let rebuilt = if resumed {
             rebuilt_in_log(store.dir())?
         } else {
@@ -544,9 +556,14 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             rebuilt,
             stale: Vec::new(),
             link_state: Link::Connecting,
+            links_log,
+            outcome_seen: None,
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
+        if let Some(notice) = links_notice {
+            runner.notice(notice);
+        }
         Ok(runner)
     }
 
@@ -1148,10 +1165,22 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         Ok(())
     }
 
-    fn write_report(&self) {
+    /// Writes `report.md`, and records the verdict label in the links
+    /// store when it changed (L1-5); a link that cannot be recorded is a
+    /// notice, never a failure.
+    fn write_report(&mut self) {
         let text = store::report_text(self.engine.session());
         if let Err(e) = store::write_report(self.engine.dir(), &text) {
             self.notice(format!("レポートの書き出しに失敗しました: {e}"));
+            return;
+        }
+        let label = handoff::outcome_label(self.engine.session());
+        if let Some(label) = label.filter(|l| self.outcome_seen.as_ref() != Some(l)) {
+            let id = self.engine.session().id.to_string();
+            match handoff::observe_outcome(&self.links_log, &id, &label, self.clock.now()) {
+                Ok(()) => self.outcome_seen = Some(label),
+                Err(why) => self.notice(why),
+            }
         }
     }
 
@@ -2707,13 +2736,26 @@ impl IgnoreFile {
     }
 }
 
+fn with_no_notice((engine, store): (Engine, Store)) -> (Engine, Store, Option<String>) {
+    (engine, store, None)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run once right after a start's capture, before the work tree is
+    /// read again (a test's stand-in for an edit made during the capture).
+    static AFTER_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 /// Captures the target and creates the verification's log: nothing is
-/// left behind when the capture or the setup is refused.
+/// left behind when the capture or the setup is refused. Then records its
+/// artifact links (L1-5); the notice says what could not be recorded.
 fn new_verification(
     new: NewVerification,
     config: Config,
     now: Millis,
-) -> Result<(Engine, Store), String> {
+) -> Result<(Engine, Store, Option<String>), String> {
     let NewVerification {
         request,
         target,
@@ -2739,6 +2781,10 @@ fn new_verification(
         let _ = fs::remove_dir_all(&dir);
         ignore.restore();
     };
+    // The work tree's change, read around the capture (L1-3): a tree
+    // that moved meanwhile gets no `Judged` link.
+    let work_tree = matches!(target.head, Head::Worktree);
+    let before = work_tree.then(|| verify::links::current_change(&workdir));
     let captured = match verify::capture::capture(&target, &store::target_dir(&reply_dir), now) {
         Ok(captured) => captured,
         Err(why) => {
@@ -2746,6 +2792,20 @@ fn new_verification(
             return Err(why);
         }
     };
+    #[cfg(test)]
+    if let Some(hook) = AFTER_CAPTURE.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+    let around = before.map(|before| (before, verify::links::current_change(&workdir)));
+    let judged = handoff::judged(&target.head, &captured.rebuild.head_sha, around);
+    let links_log = handoff::log_path(&root, &main_worktree);
+    let links_info = verify::links::Info {
+        label: Some(captured.manifest.label.clone()),
+        record: Some(dir.join(store::EVENTS_FILE)),
+        ..Default::default()
+    };
+    let links_workdir = workdir.clone();
+    let capture_dir = store::target_dir(&reply_dir);
     // The ref moved between the check and the capture.
     if let Some(head) = shared_head
         && head != captured.rebuild.head_sha
@@ -2786,7 +2846,15 @@ fn new_verification(
         undo();
         format!("create {}: {e}", dir.display())
     })?;
-    Ok((engine, store))
+    let notice = handoff::record(
+        &links_log,
+        engine.session().id.as_str(),
+        judged,
+        &links_workdir,
+        links_info,
+        &capture_dir,
+    );
+    Ok((engine, store, notice))
 }
 
 /// The stored verification in `dir` and the labels of its judge's and
@@ -6316,6 +6384,205 @@ pub(crate) mod tests {
         assert_eq!(runner.engine.session().max_rounds, 2);
         step(&mut runner, &mut conn);
         assert_eq!(runner.engine.session().rounds.len(), 2, "round 2 started");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // ------------------------------------------------- artifact links (AC2)
+
+    use verify::links::{self, ChangeId, Edit, LinkSet, Node, Origin, Rel, TaskKey};
+
+    /// The links store a verification of `repo` (a main worktree) under
+    /// `root` records in.
+    fn links_log(root: &Path, repo: &Path) -> PathBuf {
+        handoff::log_path(&root.join("store"), repo)
+    }
+
+    /// The store, and what the verification `runner` holds links to.
+    fn back_of(
+        root: &Path,
+        repo: &Path,
+        runner: &Runner<Fake, Fake>,
+    ) -> (LinkSet, links::BackLinks) {
+        let set = links::replay(&links_log(root, repo)).unwrap();
+        let node = Node::Verify(runner.engine.session().id.to_string());
+        let back = links::backlinks(&set, &node);
+        (set, back)
+    }
+
+    fn judged_of(back: &links::BackLinks) -> Vec<ChangeId> {
+        back.changes.iter().map(|c| c.change.clone()).collect()
+    }
+
+    #[test]
+    fn ac02_a_ref_target_records_the_commit_it_judged() {
+        let fake = fake();
+        let root = temp_root();
+        let repo = repo(&root);
+        git(&repo, &["checkout", "-q", "-b", "feat"]);
+        fs::write(repo.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "two"]);
+        let feat = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        // The work tree is dirty: the ref, not the tree, is what is judged.
+        fs::write(repo.join("notes.txt"), "draft\n").unwrap();
+        let mut target = state_of(&repo);
+        target.head = Head::Ref("feat".into());
+        let (runner, _, updates) =
+            open_wired(&fake, new_start(&root, target, Isolation::Worktree, true))
+                .unwrap_or_else(|e| panic!("{e}"));
+        let (set, back) = back_of(&root, &repo, &runner);
+        assert_eq!(judged_of(&back), vec![ChangeId::Commit(feat)]);
+        let info = set.info_of(&Node::Verify(runner.engine.session().id.to_string()));
+        assert_eq!(
+            info.record,
+            Some(runner.engine.dir().join(store::EVENTS_FILE))
+        );
+        assert!(info.label.is_some());
+        // No run made it: no source, and nothing to tell.
+        assert!(back.tasks.is_empty() && back.runs.is_empty());
+        assert_eq!(notices(&updates), Vec::<String>::new());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ac02_a_dirty_work_tree_records_its_snapshot_and_capture_dir() {
+        let fake = fake();
+        let root = temp_root();
+        let repo = repo(&root);
+        fs::write(repo.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        let want = links::current_change(&repo).unwrap();
+        assert!(matches!(want, ChangeId::Snapshot(_)), "{want:?}");
+        let (runner, _, updates) = open_wired(
+            &fake,
+            new_start(&root, state_of(&repo), Isolation::Worktree, true),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let (set, back) = back_of(&root, &repo, &runner);
+        assert_eq!(judged_of(&back), vec![want.clone()]);
+        let capture = store::target_dir(&runner.engine.reply_dir());
+        assert!(capture.is_dir());
+        assert_eq!(
+            set.captures.get(&Node::Change(want)).cloned(),
+            Some(BTreeSet::from([capture]))
+        );
+        assert_eq!(notices(&updates), Vec::<String>::new());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ac02_a_tree_edited_during_the_capture_gets_no_judged_link() {
+        let fake = fake();
+        let root = temp_root();
+        let repo = repo(&root);
+        let edit = repo.join("src/lib.rs");
+        AFTER_CAPTURE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                fs::write(edit, "pub fn one() -> u32 { 3 }\n").unwrap();
+            }));
+        });
+        let (runner, _, updates) = open_wired(
+            &fake,
+            new_start(&root, state_of(&repo), Isolation::Worktree, true),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let (set, back) = back_of(&root, &repo, &runner);
+        assert!(back.changes.is_empty(), "{:?}", back.changes);
+        // The verification itself is recorded, and it goes on.
+        assert!(
+            set.info
+                .contains_key(&Node::Verify(runner.engine.session().id.to_string()))
+        );
+        assert!(!runner.engine.session().closed);
+        assert_eq!(notices(&updates), vec![handoff::TREE_MOVED.to_owned()]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ac02_a_runs_worktree_records_about_its_run_and_task() {
+        let fake = fake();
+        let root = temp_root();
+        let repo = repo(&root);
+        let start = git(&repo, &["rev-parse", "HEAD"]);
+        let wt = root.join("repo-wt").join("task-run-1");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task-run-1",
+                wt.to_str().unwrap(),
+            ],
+        );
+        fs::write(wt.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        git(&wt, &["commit", "-q", "-am", "fix"]);
+        let fixed = git(&wt, &["rev-parse", "HEAD"]);
+        let task = TaskKey::Local("t-1".into());
+        let run = Node::Run("run-1".into());
+        links::append(
+            &links_log(&root, &repo),
+            &[
+                Edit::Link {
+                    from: Node::Task(task.clone()),
+                    to: run.clone(),
+                    rel: Rel::Ran,
+                    origin: Origin::Auto,
+                },
+                Edit::Observe {
+                    node: run.clone(),
+                    info: links::Info {
+                        workdir: Some(wt.clone()),
+                        branch: Some("task-run-1".into()),
+                        head: Some(start),
+                        ..Default::default()
+                    },
+                },
+            ],
+            1,
+        )
+        .unwrap();
+        let (runner, _, updates) = open_wired(
+            &fake,
+            new_start(&root, state_of(&wt), Isolation::Worktree, true),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let (set, back) = back_of(&root, &repo, &runner);
+        let change = ChangeId::Commit(fixed);
+        assert_eq!(judged_of(&back), vec![change.clone()]);
+        assert_eq!(
+            back.runs.iter().map(|r| r.run.as_str()).collect::<Vec<_>>(),
+            ["run-1"]
+        );
+        assert_eq!(
+            back.tasks.iter().map(|t| &t.task).collect::<Vec<_>>(),
+            [&task]
+        );
+        assert_eq!(back.changes[0].tasks, [task]);
+        assert!(
+            set.live(&run, &Node::Change(change), Rel::Produced)
+                .is_some()
+        );
+        assert_eq!(notices(&updates), Vec::<String>::new());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_verdict_label_is_recorded_only_when_it_changes() {
+        let root = temp_root();
+        let log = root.join("links.jsonl");
+        handoff::observe_outcome(&log, "ver-1", "合格", 1).unwrap();
+        handoff::observe_outcome(&log, "ver-1", "合格", 2).unwrap();
+        handoff::observe_outcome(&log, "ver-1", "不合格", 3).unwrap();
+        let events = links::read_events(&log).unwrap();
+        assert_eq!(events.len(), 2, "{events:?}");
+        let set = links::fold(&events);
+        assert_eq!(
+            set.info_of(&Node::Verify("ver-1".into()))
+                .outcome
+                .as_deref(),
+            Some("不合格")
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

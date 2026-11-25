@@ -7,8 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.17] - 2026-11-25
+
+A tasks widget that hands local tasks, GitHub issues and code markers to
+agents, and skill statistics in Agent Usage.
+
 ### Added
 
+- Tasks (`widgets/tasks`): View → Tasks (and the command palette's Open
+  Tasks) opens a window per repository that lists its local tasks
+  (`.noa/tasks/*.md`), its GitHub issues (read-only, through `gh`) and the
+  `TODO:` / `FIXME:` / `#TODO(agent):` markers in its tracked files
+  together, in four columns derived from what happened (未着手 / 実行中 /
+  確認待ち / 完了), or as a list, a 14-day timeline or a month calendar.
+  実行 hands a task to claude, codex or agy, attended, in this work tree or
+  a new worktree, as a float on the repository's board tab; the agent's
+  report shows beside the task. Nothing auto-closes: 完了 is the person's
+  call. `skills/noa-tasks` documents the local task format for agents.
+  `scripts/bundle-macos.sh` ships it as `Noa Tasks`. (#259)
 - Agent Usage: the 統計 tab lists skill uses (skill, agent, uses, sessions,
   projects, last use) for the chosen period and agent, and the project table
   counts each project's skill uses. Claude Code's come from `Skill` tool

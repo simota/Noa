@@ -160,6 +160,23 @@ fn fake_gh(dir: &Path, script: &str) {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// A POSIX shell for `run_shell` that is interactive but not a login shell.
+/// `invocation` passes `-l`, and a macOS login shell runs `/etc/profile`,
+/// whose `path_helper` puts the system directories ahead of the test's
+/// `PATH`, so a `gh` installed on the host (as on CI runners) shadows the
+/// fake one. This script drops that `-l` and runs `/bin/sh` with the rest.
+fn sh() -> String {
+    let dir = scratch("shell");
+    let path = dir.join("sh");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\n[ \"$1\" = -l ] && shift\nexec /bin/sh \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
 fn path_with(dir: &Path) -> String {
     format!(
         "{}:{}",
@@ -189,7 +206,7 @@ fn ac24_a_call_past_the_timeout_is_killed() {
     let path = path_with(&dir);
     let started = Instant::now();
     let got = run_shell(
-        "/bin/sh",
+        &sh(),
         &dir,
         &["issue".into(), "list".into()],
         Duration::from_millis(400),
@@ -209,16 +226,25 @@ fn ac24_the_timeout_kills_what_gh_started_too() {
         &format!("sleep 30 &\necho $! > '{}'\nwait", pid.display()),
     );
     let path = path_with(&dir);
-    let started = Instant::now();
-    let got = run_shell(
-        "/bin/sh",
-        &dir,
-        &["issue".into(), "list".into()],
-        Duration::from_millis(400),
-        &[("PATH", &path)],
-    );
-    assert_eq!(got, Err(GhFailure::Timeout));
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // On a loaded macOS a shell can sit in dyld for seconds before its first
+    // line; killed before the fake gh wrote the pid, a run proves nothing,
+    // so it is tried again.
+    for tries in 1.. {
+        let started = Instant::now();
+        let got = run_shell(
+            &sh(),
+            &dir,
+            &["issue".into(), "list".into()],
+            Duration::from_secs(2),
+            &[("PATH", &path)],
+        );
+        assert_eq!(got, Err(GhFailure::Timeout));
+        assert!(started.elapsed() < Duration::from_secs(8));
+        if std::fs::read_to_string(&pid).is_ok_and(|s| !s.trim().is_empty()) {
+            break;
+        }
+        assert!(tries < 5, "gh never started in {tries} tries");
+    }
     assert_dies(&pid);
 }
 
@@ -240,7 +266,7 @@ fn ac24_a_pipe_held_open_by_an_rc_job_loses_no_output() {
 
     fake_gh(&dir, "echo '[1]'");
     let started = Instant::now();
-    let got = run_shell("/bin/sh", &dir, &args, Duration::from_secs(10), &envs);
+    let got = run_shell(&sh(), &dir, &args, Duration::from_secs(10), &envs);
     assert_eq!(got.unwrap().trim(), "[1]");
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_dies(&pid);
@@ -249,7 +275,7 @@ fn ac24_a_pipe_held_open_by_an_rc_job_loses_no_output() {
         &dir,
         "echo 'To get started, please run:  gh auth login' >&2\nexit 4",
     );
-    let got = run_shell("/bin/sh", &dir, &args, Duration::from_secs(10), &envs);
+    let got = run_shell(&sh(), &dir, &args, Duration::from_secs(10), &envs);
     assert_eq!(got, Err(GhFailure::NotAuthenticated));
     assert_dies(&pid);
 }
@@ -258,7 +284,7 @@ fn ac24_a_pipe_held_open_by_an_rc_job_loses_no_output() {
 fn ac24_a_missing_gh_through_the_shell_is_no_gh() {
     let dir = scratch("nogh");
     let got = run_shell(
-        "/bin/sh",
+        &sh(),
         &dir,
         &["repo".into(), "view".into()],
         Duration::from_secs(10),
@@ -685,7 +711,7 @@ fn ac27_arguments_reach_gh_word_for_word() {
     .map(String::from)
     .to_vec();
     let got = run_shell(
-        "/bin/sh",
+        &sh(),
         &dir,
         &args,
         Duration::from_secs(10),
@@ -709,7 +735,7 @@ fn ac27_rc_noise_on_stdout_is_dropped() {
     // reach the JSON.
     std::fs::write(home.join("rc"), "echo banner\n").unwrap();
     let got = run_shell(
-        "/bin/sh",
+        &sh(),
         &dir,
         &["issue".into(), "list".into()],
         Duration::from_secs(10),

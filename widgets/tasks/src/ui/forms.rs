@@ -1,4 +1,4 @@
-//! The 新規 / 編集 / 実行 forms, shown in the side pane in place of the
+//! The 新規 / 編集 / 実行 / 関連を追加 forms, shown in the side pane in place of the
 //! detail. The screen inserts a form once when it opens, passes it every
 //! message, and closes it on `Cancel` (or Escape) and on `Submit`, whose
 //! intent it sends.
@@ -42,6 +42,9 @@ enum Kind {
         task: TaskRef,
         agents: Vec<AgentKind>,
     },
+    AddLink {
+        task: TaskRef,
+    },
 }
 
 /// The widgets [`Form::insert`] made that [`Form::handle`] reads.
@@ -51,6 +54,8 @@ struct Ids {
     fields: Option<(WidgetId, WidgetId, WidgetId)>,
     /// Agent, isolation (実行).
     choices: Option<(WidgetId, WidgetId)>,
+    /// The PR's URL or number (関連を追加).
+    link: Option<WidgetId>,
     submit: WidgetId,
     cancel: WidgetId,
 }
@@ -117,6 +122,18 @@ impl Form {
         )
     }
 
+    /// 関連を追加 on `task`: one field, a PR's URL or number; submits
+    /// `Intent::AddLink` with what was typed (the feed parses it).
+    pub fn add_link(task: TaskRef) -> Form {
+        Form::new(
+            Kind::AddLink { task },
+            "関連を追加".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
+    }
+
     /// Builds the form's widgets under `host`.
     pub fn insert(&self, tree: &mut UiTree, host: WidgetId) {
         // Scrolls, as the detail does: the body field grows with its text,
@@ -145,6 +162,18 @@ impl Form {
         };
         let mut fields = None;
         let mut choices = None;
+        let mut link = None;
+        // The form is shown where it goes (the screen shows its host and the
+        // side pane next anyway); a hidden field takes no focus.
+        let show = |tree: &mut UiTree| {
+            let hidden: Vec<WidgetId> = tree
+                .ancestors(host)
+                .filter(|id| tree.is_hidden(*id))
+                .collect();
+            for id in hidden {
+                tree.set_hidden(id, false);
+            }
+        };
         let submit_label = match &self.kind {
             Kind::New | Kind::Edit { .. } => {
                 muted(tree, "タイトル（必須）");
@@ -161,15 +190,7 @@ impl Form {
                 tree.update::<TextField, _>(title, |f, cx| f.set_text(cx, self.title.clone()));
                 tree.update::<TextArea, _>(body, |f, cx| f.set_text(cx, self.body.clone()));
                 tree.update::<TextField, _>(labels, |f, cx| f.set_text(cx, self.labels.clone()));
-                // The form is shown where it goes (the screen shows its host
-                // and the side pane next anyway); a hidden field takes no focus.
-                let hidden: Vec<WidgetId> = tree
-                    .ancestors(host)
-                    .filter(|id| tree.is_hidden(*id))
-                    .collect();
-                for id in hidden {
-                    tree.set_hidden(id, false);
-                }
+                show(tree);
                 tree.set_focus(Some(title));
                 fields = Some((title, body, labels));
                 if matches!(self.kind, Kind::New) {
@@ -206,6 +227,20 @@ impl Form {
                 choices = Some((agent, isolation));
                 "実行"
             }
+            Kind::AddLink { .. } => {
+                muted(tree, "PR の URL または番号");
+                let input = tree.insert(
+                    Some(column),
+                    TextField::new(
+                        "https://github.com/<owner>/<name>/pull/45 か #45",
+                        field_width,
+                    ),
+                );
+                show(tree);
+                tree.set_focus(Some(input));
+                link = Some(input);
+                "追加"
+            }
         };
         let buttons = tree.insert(Some(column), Container::new(style::row(8.0)));
         let submit = tree.insert(Some(buttons), Button::new(submit_label));
@@ -213,6 +248,7 @@ impl Form {
         self.ids.set(Some(Ids {
             fields,
             choices,
+            link,
             submit,
             cancel,
         }));
@@ -227,11 +263,12 @@ impl Form {
         if clicked && message.source == ids.cancel {
             return FormOutcome::Cancel;
         }
-        // Return in the title submits too.
+        // Return in the title (or the link's field) submits too.
         let submitted = message.downcast_ref::<TextSubmitted>().is_some()
-            && ids
+            && (ids
                 .fields
-                .is_some_and(|(title, _, _)| title == message.source);
+                .is_some_and(|(title, _, _)| title == message.source)
+                || ids.link == Some(message.source));
         if !(clicked && message.source == ids.submit) && !submitted {
             return FormOutcome::Pending;
         }
@@ -282,6 +319,16 @@ impl Form {
                     task: task.clone(),
                     agent: *agents.get(chosen(agent))?,
                     isolation: ISOLATIONS.get(chosen(isolation))?.1,
+                })
+            }
+            Kind::AddLink { task } => {
+                let input = tree.get::<TextField>(ids.link?)?.text().trim().to_owned();
+                if input.is_empty() {
+                    return None;
+                }
+                Some(Intent::AddLink {
+                    task: task.clone(),
+                    input,
                 })
             }
         }

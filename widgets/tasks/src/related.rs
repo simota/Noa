@@ -158,7 +158,7 @@ pub fn fold(runs: &[Run], events: &[LinkEvent]) -> BTreeMap<TaskRef, Related> {
     // 2. The runs of each task, newest first.
     let mut out: BTreeMap<TaskRef, Related> = BTreeMap::new();
     let mut sorted: Vec<&Run> = runs.iter().collect();
-    sorted.sort_by(|a, b| b.started.cmp(&a.started));
+    sorted.sort_by_key(|r| std::cmp::Reverse(r.started));
     for run in &sorted {
         out.entry(run.task.clone())
             .or_default()

@@ -1043,23 +1043,28 @@ impl IndexCopy {
             index: dir.join("index"),
             dir,
         };
+        // Bytes and mtime come from one open file: git replaces the index
+        // by rename, never in place, so both are of one version of it.
+        let mut source = match fs::File::open(&own) {
+            Ok(source) => source,
+            // No index yet: git reads none as an empty one, here as there.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(copy),
+            Err(e) => return Err(format!("{} を読めません: {e}", own.display())),
+        };
         // The copy keeps the index's mtime: git reads an entry by content
         // when its file is not older than the index (racy git), and a copy
-        // newer than the file would report a same-size rewrite clean. Read
-        // after the copy, a newer index's mtime only makes more entries racy.
-        let copied = fs::copy(&own, &copy.index).and_then(|_| {
-            let modified = fs::metadata(&own)?.modified()?;
-            fs::File::options()
-                .write(true)
-                .open(&copy.index)?
-                .set_modified(modified)
+        // newer than the file would report a same-size rewrite clean. The
+        // copy is created here, not with the index's permissions, so a
+        // read-only index still gives a copy that can be written.
+        let copied = source.metadata().and_then(|meta| {
+            let modified = meta.modified()?;
+            let mut file = fs::File::create_new(&copy.index)?;
+            io::copy(&mut source, &mut file)?;
+            file.set_modified(modified)
         });
         match copied {
-            // No index yet: git reads none as an empty one, here as there.
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                Err(format!("{} を読めません: {e}", own.display()))
-            }
-            _ => Ok(copy),
+            Ok(()) => Ok(copy),
+            Err(e) => Err(format!("{} を写せません: {e}", own.display())),
         }
     }
 
@@ -3272,46 +3277,51 @@ mod tests {
         let tmp = Tmp::new("snap-racy");
         let repo = tmp.path().join("app");
         repo_at(&repo);
+        // A rewrite's ctime would tell it apart without the racy check.
+        sh(&repo, &["config", "core.trustctime", "false"]);
         let file = repo.join("a.txt");
-        let secs = |path: &Path| {
-            fs::metadata(path)
+        let index = repo.join(".git/index");
+        let at = |path: &Path, secs: u64| {
+            fs::File::options()
+                .write(true)
+                .open(path)
                 .unwrap()
-                .modified()
-                .unwrap()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
+                .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
         };
-        // Only a rewrite in the index's own second is racy: count those
-        // until there are enough, so a slow machine cannot pass by luck.
-        let (mut racy, mut tries) = (0, 0);
-        while racy < 3 {
-            tries += 1;
-            assert!(tries <= 30, "only {racy} racy rewrites in {tries}");
-            fs::write(&file, "aaaa\n").unwrap();
-            let head = commit(&repo, "a");
-            // Same length, other bytes: only the content tells it apart.
-            fs::write(&file, "bbbb\n").unwrap();
-            let index = secs(&repo.join(".git/index"));
-            if secs(&file) == index {
-                racy += 1;
-            }
-            // Read in a later second, so a copy of the index written now
-            // would be newer than the file.
-            while SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-                < u128::from(index + 1) * 1000 + 50
-            {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            let id = current_change(&repo).unwrap();
-            assert!(
-                matches!(&id, ChangeId::Snapshot(s) if s.starts_with(&format!("snap-{head}-"))),
-                "{id:?}"
-            );
-        }
+        let second = 1_000_000_000;
+        fs::write(&file, "aaaa\n").unwrap();
+        at(&file, second);
+        let head = commit(&repo, "a");
+        // Same length, other bytes, the recorded mtime: only the content
+        // tells it apart, and git reads it only when the entry is racy.
+        fs::write(&file, "bbbb\n").unwrap();
+        at(&file, second);
+        // The index was written in the file's second: racy.
+        at(&index, second);
+        let id = current_change(&repo).unwrap();
+        assert!(
+            matches!(&id, ChangeId::Snapshot(s) if s.starts_with(&format!("snap-{head}-"))),
+            "{id:?}"
+        );
+        // An index newer than the file (as a copy with its own mtime would
+        // be) is not racy: the same tree reads clean.
+        at(&index, second + 1);
+        assert_eq!(current_change(&repo).unwrap(), ChangeId::Commit(head));
+    }
+
+    #[test]
+    fn a_read_only_index_is_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = Tmp::new("snap-ro-index");
+        let repo = tmp.path().join("app");
+        let head = repo_at(&repo);
+        let index = repo.join(".git/index");
+        fs::set_permissions(&index, fs::Permissions::from_mode(0o444)).unwrap();
+        assert_eq!(current_change(&repo).unwrap(), ChangeId::Commit(head));
+        fs::write(repo.join("a.txt"), "two\n").unwrap();
+        let id = current_change(&repo).unwrap();
+        assert!(matches!(id, ChangeId::Snapshot(_)), "{id:?}");
     }
 
     #[test]

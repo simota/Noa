@@ -1481,8 +1481,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 request: request.clone(),
                 watch: rerun::Watch::new(rerun::Limits {
                     // The same for every kind: a foreground re-run brief
-                    // asks for a tool timeout covering every command's
-                    // limit (`rerun::foreground_limit`, L1-5 step 3).
+                    // tells the agent to keep waiting on the run for as
+                    // long as every command's limit allows
+                    // (`rerun::foreground_limit`, L1-5 step 3).
                     run: RERUN_TIMEOUT,
                     next_start: self.config.start_timeout,
                 }),

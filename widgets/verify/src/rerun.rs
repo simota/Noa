@@ -62,7 +62,12 @@ pub const CUT_MARK: &str = "\n[Noa Verify: output cut at 8 MiB; the rest was not
 /// end after the call returned when started with its `run_in_background`
 /// option: `true`, and the brief asks for that option. Codex ran a 150 s
 /// command to its end in the foreground with a long enough tool timeout:
-/// `false`, and the brief asks for at least [`foreground_limit`].
+/// `false`. Its shell tool has no run deadline to set, only how long it
+/// waits before it returns control (per a review on 2026-11-25, not
+/// measured), so the brief has it start the script
+/// once, keep waiting on that same process until it ends, never start it
+/// again or stop it, and states [`foreground_limit`] as how long the whole
+/// run can take.
 /// #TODO(agent): agy is unverified; it gets the foreground form until a
 /// live Noa shows how its shell tool treats a long or background command.
 pub const fn detached(kind: AgentKind) -> bool {
@@ -74,13 +79,13 @@ pub const fn detached(kind: AgentKind) -> bool {
 }
 
 /// What a foreground re-run brief adds to its commands' limits when it
-/// asks for a tool timeout (L1-5 step 3): the kill grace of each command
-/// and the gaps between them.
+/// states how long the whole run can take (L1-5 step 3): the kill grace of
+/// each command and the gaps between them.
 pub const FOREGROUND_MARGIN: Millis = 5 * 60_000;
 
-/// The tool timeout a foreground re-run brief asks for, for a script of
-/// `items` commands: each may run [`RERUN_TIMEOUT`], plus
-/// [`FOREGROUND_MARGIN`], so the tool never cuts the run short before the
+/// How long a foreground re-run brief says the whole run can take, for a
+/// script of `items` commands: each may run [`RERUN_TIMEOUT`], plus
+/// [`FOREGROUND_MARGIN`], so the agent keeps waiting on the run until the
 /// widget's own limits end it.
 pub const fn foreground_limit(items: usize) -> Millis {
     items as Millis * RERUN_TIMEOUT + FOREGROUND_MARGIN
@@ -130,8 +135,9 @@ pub struct Status {
 pub struct Limits {
     /// How long one command may run, counted from its `.pid` being first
     /// seen: [`RERUN_TIMEOUT`] for every kind; a foreground re-run brief
-    /// asks for a tool timeout of at least [`foreground_limit`], so the
-    /// tool does not end the run first (L1-5 step 3).
+    /// tells the agent to keep waiting on the run, never stopping it, for
+    /// up to [`foreground_limit`], so the agent does not end the run first
+    /// (L1-5 step 3).
     pub run: Millis,
     /// How long after one command ended the next one's `.pid` may take;
     /// past it, that command and every later one are `not_run` ("re-run did

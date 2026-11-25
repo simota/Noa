@@ -340,17 +340,21 @@ Do not edit any file under /golden/repo-wt/verify-ver-golden-claude/.noa/verify/
 ===== R1 re-run brief to codex =====
 ## Re-run
 Round 1: the widget runs the commands you marked rerun: true again, in this pane.
-Run exactly this with your shell tool in the foreground and wait until it ends, with your tool's timeout set to at least 1500 seconds (the script runs 2 commands, each allowed up to 10 minutes, plus a margin). Do not stop it early and do not start it in the background. Do nothing else until the next brief:
+Start exactly this once with your shell tool in the foreground:
 
     sh '/golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun/run.sh'
+
+The script runs 2 commands, each allowed up to 10 minutes, so the whole run can take up to 25 minutes. If your tool returns control before the script has finished, keep waiting on that same running process (poll it or read its output) until it ends. Never start it a second time and never stop it. Do nothing else until the next brief.
 
 Do not edit any file under /golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun and do not touch your worktree. Reply nothing.
 ===== R1 re-run brief to agy =====
 ## Re-run
 Round 1: the widget runs the commands you marked rerun: true again, in this pane.
-Run exactly this with your shell tool in the foreground and wait until it ends, with your tool's timeout set to at least 900 seconds (the script runs 1 command, each allowed up to 10 minutes, plus a margin). Do not stop it early and do not start it in the background. Do nothing else until the next brief:
+Start exactly this once with your shell tool in the foreground:
 
     sh '/golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r1/agy/rerun/run.sh'
+
+The script runs 1 command, allowed up to 10 minutes, so the whole run can take up to 15 minutes. If your tool returns control before the script has finished, keep waiting on that same running process (poll it or read its output) until it ends. Never start it a second time and never stop it. Do nothing else until the next brief.
 
 Do not edit any file under /golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r1/agy/rerun and do not touch your worktree. Reply nothing.
 ===== R1 brief to judge =====

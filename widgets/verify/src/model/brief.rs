@@ -1277,10 +1277,12 @@ pub fn judge_brief(
 
 /// Verifier `to`'s re-run brief for `round`: the one command line that
 /// starts `script` (absolute), in the background through Claude Code's
-/// `run_in_background` option or in the foreground with a tool timeout of
-/// at least [`crate::rerun::foreground_limit`] for the request's items
-/// ([`crate::rerun::detached`], L1-5 step 3), the reminder not to edit
-/// `rerun_dir` or the worktree, and "reply nothing".
+/// `run_in_background` option or once in the foreground, waited on until
+/// it ends however often the tool returns control, never started again or
+/// stopped, with [`crate::rerun::foreground_limit`] for the request's
+/// items as the bound on the whole run ([`crate::rerun::detached`], L1-5
+/// step 3), the reminder not to edit `rerun_dir` or the worktree, and
+/// "reply nothing".
 pub fn rerun_brief(
     session: &Session,
     to: &PartId,
@@ -1309,15 +1311,15 @@ pub fn rerun_brief(
             .and_then(|r| r.reruns.get(to))
             .map_or(0, |r| r.items.len());
         let commands = if items == 1 {
-            "1 command".to_owned()
+            "1 command, allowed".to_owned()
         } else {
-            format!("{items} commands")
+            format!("{items} commands, each allowed")
         };
         let _ = writeln!(
             body,
-            "Run exactly this with your shell tool in the foreground and wait until it ends, with your tool's timeout set to at least {} seconds (the script runs {commands}, each allowed up to {} minutes, plus a margin). Do not stop it early and do not start it in the background. Do nothing else until the next brief:\n\n    sh {quoted}\n",
-            crate::rerun::foreground_limit(items) / 1000,
+            "Start exactly this once with your shell tool in the foreground:\n\n    sh {quoted}\n\nThe script runs {commands} up to {} minutes, so the whole run can take up to {} minutes. If your tool returns control before the script has finished, keep waiting on that same running process (poll it or read its output) until it ends. Never start it a second time and never stop it. Do nothing else until the next brief.\n",
             crate::model::types::RERUN_TIMEOUT / 60_000,
+            crate::rerun::foreground_limit(items) / 60_000,
         );
     }
     let _ = writeln!(

@@ -133,6 +133,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::OpenCompetition => "Open Competition",
         AppCommand::OpenReview => "Open Review",
         AppCommand::OpenVerify => "Open Verify",
+        AppCommand::OpenAgentUsage => "Open Agent Usage",
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
         // (this whole `match`) — following that established convention
@@ -283,6 +284,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::OpenVerify => {
             "Verify a change against acceptance criteria with several agents running checks in isolated worktrees, recorded evidence and a verdict, in a window of its own."
         }
+        AppCommand::OpenAgentUsage => {
+            "Show Claude Code, Codex and Antigravity usage limits and statistics in a window of its own."
+        }
         AppCommand::OpenThemePicker => "Choose a color theme.",
         AppCommand::ToggleProcessMonitor => "Show the processes running in each terminal.",
         AppCommand::NextNotification => "Go to the next session with an unread notification.",
@@ -386,6 +390,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::OpenCompetition,
         AppCommand::OpenReview,
         AppCommand::OpenVerify,
+        AppCommand::OpenAgentUsage,
         AppCommand::SetTabTitle,
         AppCommand::CloseTab,
         AppCommand::NextTab,
@@ -688,7 +693,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::OpenDiscussion
         | AppCommand::OpenCompetition
         | AppCommand::OpenReview
-        | AppCommand::OpenVerify => CommandCategory::View,
+        | AppCommand::OpenVerify
+        | AppCommand::OpenAgentUsage => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
         AppCommand::CopyMode(_) => CommandCategory::Clipboard,
@@ -1058,9 +1064,21 @@ mod tests {
             AppCommand::OpenCompetition,
             AppCommand::OpenReview,
             AppCommand::OpenVerify,
+            AppCommand::OpenAgentUsage,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
         commands
+    }
+
+    #[test]
+    fn agent_usage_is_found_by_the_name_of_each_agent_it_shows() {
+        for query in ["Claude Code", "Codex", "Antigravity"] {
+            let found: Vec<AppCommand> = command_palette_matches(&default_palette_entries(), query)
+                .iter()
+                .map(|m| m.command)
+                .collect();
+            assert!(found.contains(&AppCommand::OpenAgentUsage), "{query}");
+        }
     }
 
     #[test]

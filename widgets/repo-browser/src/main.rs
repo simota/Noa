@@ -93,9 +93,20 @@ const FIRST_SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
 /// merge conflict's text after the listing.
 const CONTENT_WAIT: Duration = Duration::from_secs(3);
 
+/// The window title. Off macOS, winit draws the title bar itself on Wayland
+/// (GNOME) with a single font and no glyph fallback, so a Japanese title shows
+/// as boxes there: it stays English.
+fn window_title() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Noa · Repo Browser（横断リポジトリ＆差分レビュー）"
+    } else {
+        "Noa · Repo Browser"
+    }
+}
+
 fn options() -> AppOptions {
     AppOptions {
-        title: "Noa · Repo Browser（横断リポジトリ＆差分レビュー）".into(),
+        title: window_title().into(),
         size: (1440.0, 900.0),
         ..AppOptions::new("Noa Repo Browser")
     }

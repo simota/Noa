@@ -423,6 +423,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenCompetition
         | AppCommand::OpenReview
         | AppCommand::OpenVerify
+        | AppCommand::OpenAgentUsage
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
         | AppCommand::CloseWindow
@@ -490,6 +491,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenCompetition
         | AppCommand::OpenReview
         | AppCommand::OpenVerify
+        | AppCommand::OpenAgentUsage
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar => CommandScope::App,
         // Off macOS it opens a window of its own, so it is held back like

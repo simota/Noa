@@ -116,6 +116,10 @@ pub enum AppCommand {
     /// change against acceptance criteria with isolated worktrees and
     /// recorded evidence, as a program of its own beside Noa.
     OpenVerify,
+    /// Start the agent usage window (`widgets/agent-usage`), the limits and
+    /// log statistics of the coding agents, as a program of its own beside
+    /// Noa.
+    OpenAgentUsage,
     /// Open the "Theme" picker half of the split theme-settings overlay
     /// (theme-settings-ui R-1, later split into two overlays). Reachable
     /// only from the command palette — deliberately unbound in
@@ -300,6 +304,7 @@ impl AppCommand {
     pub(crate) const OPEN_COMPETITION_MENU_ID: &'static str = "noa.view.open-competition";
     pub(crate) const OPEN_REVIEW_MENU_ID: &'static str = "noa.view.open-review";
     pub(crate) const OPEN_VERIFY_MENU_ID: &'static str = "noa.view.open-verify";
+    pub(crate) const OPEN_AGENT_USAGE_MENU_ID: &'static str = "noa.view.open-agent-usage";
     pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
 
     pub(crate) fn menu_id(self) -> &'static str {
@@ -388,6 +393,7 @@ impl AppCommand {
             AppCommand::OpenCompetition => Self::OPEN_COMPETITION_MENU_ID,
             AppCommand::OpenReview => Self::OPEN_REVIEW_MENU_ID,
             AppCommand::OpenVerify => Self::OPEN_VERIFY_MENU_ID,
+            AppCommand::OpenAgentUsage => Self::OPEN_AGENT_USAGE_MENU_ID,
         }
     }
 
@@ -465,6 +471,7 @@ impl AppCommand {
             Self::OPEN_COMPETITION_MENU_ID => Some(Self::OpenCompetition),
             Self::OPEN_REVIEW_MENU_ID => Some(Self::OpenReview),
             Self::OPEN_VERIFY_MENU_ID => Some(Self::OpenVerify),
+            Self::OPEN_AGENT_USAGE_MENU_ID => Some(Self::OpenAgentUsage),
             Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
         }
@@ -596,6 +603,7 @@ impl AppCommand {
             Self::OpenCompetition => "competition.open",
             Self::OpenReview => "review.open",
             Self::OpenVerify => "verify.open",
+            Self::OpenAgentUsage => "agent-usage.open",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
             Self::ToggleProcessMonitor => "process-monitor.toggle",
@@ -696,6 +704,7 @@ impl AppCommand {
             "competition.open" => Some(Self::OpenCompetition),
             "review.open" => Some(Self::OpenReview),
             "verify.open" => Some(Self::OpenVerify),
+            "agent-usage.open" => Some(Self::OpenAgentUsage),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),
             "process-monitor.toggle" => Some(Self::ToggleProcessMonitor),

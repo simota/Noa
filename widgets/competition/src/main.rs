@@ -64,9 +64,20 @@ fn system_language() -> Option<String> {
     None
 }
 
+/// The window title. Off macOS, winit draws the title bar itself on Wayland
+/// (GNOME) with a single font and no glyph fallback, so a Japanese title shows
+/// as boxes there: it stays English.
+fn window_title() -> &'static str {
+    if cfg!(target_os = "macos") {
+        title(|key| std::env::var(key).ok(), system_language)
+    } else {
+        "Noa · Competition"
+    }
+}
+
 fn options() -> AppOptions {
     AppOptions {
-        title: title(|key| std::env::var(key).ok(), system_language).into(),
+        title: window_title().into(),
         size: (1440.0, 900.0),
         min_size: Some(ui::MIN_WINDOW),
         ..AppOptions::new("Noa Competition")

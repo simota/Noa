@@ -7,8 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-11-25
+
+A verification widget, an Agent Usage window, multi-judge competitions, and
+agent widgets that run their agents as floats on a board tab.
+
 ### Added
 
+- Verify (`widgets/verify`): View → Verify (and the command palette's Open
+  Verify) opens a multi-agent window that checks whether a change does what
+  it claims by running things. A judge drafts acceptance criteria (which the
+  person can edit before verification starts), verifiers with a strategy
+  each (仕様適合 / 反証 / 回帰 / 実機・E2E / 非機能 / custom) work in their own
+  detached worktree or a shared read-only one, and evidence (logs,
+  screenshots, videos) is copied, hashed and, for commands marked
+  `rerun: true`, run again in the verifier's pane. `verified` needs a
+  matched re-run or two independent passes, and the verdict (合格 /
+  条件付き合格 / 不合格 / 判定不能) must follow from the rulings. Round 2 and
+  later cross-check each other's results. The board has a criteria ×
+  verifier matrix, evidence list and gallery, defects, a Markdown report,
+  修正を依頼 and 同じ設定で再検証. `scripts/bundle-macos.sh` ships it as
+  `Noa Verify`.
+- `noa.newTab` takes `board: true`: the tab runs `noa +ctl board --of self`
+  and is its own orchestrator, so floats spawned with `parentPaneId` set to
+  it are stowed on it. `noa.hello` gains a `capabilities` array that lists
+  `boardTab`.
+- ペインをすべて閉じる in the review, discussion, competition and verify
+  widgets closes every agent pane (and the board tab) the session started,
+  once the session has ended. Panes Noa could not confirm closed are listed.
 - Linux: `scripts/package-linux.sh` ships the widget programs (agent
   dashboard, repo browser, discussion, competition, review, agent usage) in
   the tarball's `libexec/noa/`, `install.sh` installs and uninstalls them,
@@ -37,8 +63,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `competition --demo --judges` shows a canned three-judge competition.
   Single-judge competitions look and export exactly as before.
 
+### Changed
+
+- The review, discussion, competition and verify widgets open a board tab
+  per session and run every agent as a float stowed on it, instead of
+  splits in one tab. The board is recovered on resume and reopened when
+  gone. Fix-request and adopt tabs still open as plain tabs.
+
 ### Notes
 
+- The agent widgets need a Noa that advertises `boardTab` (0.9.16 or
+  later); on an older Noa they start nothing and say why.
 - A competition with more than one judge is not readable by an earlier
   version of the widget; downgrading is not supported.
 - A competition trusts its agents: replies are attributed by file name

@@ -1,9 +1,11 @@
 //! Start a noa-gpui widget program (`widgets/<crate>`, with its own event
 //! loop) beside Noa: the agent dashboard (`agent-dashboard.open`), the repo
 //! browser (`repo-browser.open`), the discussion (`discussion.open`), the
-//! competition (`competition.open`) and the review (`review.open`). They
-//! read Noa's panes through the control server, so each runs as a process of
-//! its own. Only the review gets an argument: the focused pane's directory.
+//! competition (`competition.open`), the review (`review.open`) and the agent
+//! usage (`agent-usage.open`). Each runs as a process of its own. All but the
+//! agent usage read Noa's panes through the control server; the agent usage
+//! needs neither the server nor `server-enable`. Only the review gets an
+//! argument: the focused pane's directory.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -52,6 +54,12 @@ pub(crate) const REVIEW: HelperProgram = HelperProgram {
     title: "Review",
     bundled: "Noa Review",
     crate_name: "review",
+};
+
+pub(crate) const AGENT_USAGE: HelperProgram = HelperProgram {
+    title: "Agent Usage",
+    bundled: "Noa Agent Usage",
+    crate_name: "agent-usage",
 };
 
 /// What `helper` is started with, given the working directory of the
@@ -130,11 +138,20 @@ pub(crate) fn open(
     Ok(())
 }
 
-/// `Contents/Helpers` of the app bundle whose `Contents/MacOS` holds Noa.
-/// Helpers outside `Contents/MacOS` do not take Noa.app as their main bundle,
-/// so the program gets no `com.simota.noa` identity of its own.
+/// Where an installed Noa keeps its helpers, given the directory of Noa's
+/// executable. On macOS, `Contents/Helpers` of the app bundle whose
+/// `Contents/MacOS` holds Noa: helpers outside `Contents/MacOS` do not take
+/// Noa.app as their main bundle, so the program gets no `com.simota.noa`
+/// identity of its own. Elsewhere, `<prefix>/libexec/noa` beside the
+/// `<prefix>/bin` that holds Noa (where `scripts/package-linux.sh` and its
+/// `install.sh` put them).
 fn helpers_dir(exe_dir: &Path) -> Option<PathBuf> {
-    Some(exe_dir.parent()?.join("Helpers"))
+    let prefix = exe_dir.parent()?;
+    Some(if cfg!(target_os = "macos") {
+        prefix.join("Helpers")
+    } else {
+        prefix.join("libexec").join("noa")
+    })
 }
 
 /// Reads `stream` to its end, keeping only the last [`STDERR_TAIL`] bytes.
@@ -170,8 +187,7 @@ fn exit_message(title: &str, status: ExitStatus, stderr_tail: &[u8]) -> Option<S
     })
 }
 
-/// `helper` in `helpers` (where `scripts/bundle-macos.sh` puts the agent
-/// dashboard in `Noa.app`), else the first of `dev_dirs` that holds one.
+/// `helper` under its bundled name in `helpers` (see [`helpers_dir`]), else the first of `dev_dirs` that holds one.
 fn locate(helper: HelperProgram, helpers: Option<&Path>, dev_dirs: &[PathBuf]) -> Option<PathBuf> {
     helpers
         .map(|dir| dir.join(helper.bundled))
@@ -259,6 +275,7 @@ mod tests {
             DISCUSSION,
             COMPETITION,
             REVIEW,
+            AGENT_USAGE,
         ] {
             let dirs = dev_build_dirs(helper);
             assert_eq!(dirs.len(), 2);
@@ -367,6 +384,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_usage_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("agent-usage-exe");
+        let dev = scratch_dir("agent-usage-dev");
+        std::fs::write(dev.join(REVIEW.crate_name), "").unwrap();
+        assert_eq!(
+            locate(AGENT_USAGE, Some(&exe_dir), std::slice::from_ref(&dev)),
+            None
+        );
+        std::fs::write(dev.join("agent-usage"), "").unwrap();
+        assert_eq!(
+            locate(AGENT_USAGE, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(dev.join("agent-usage"))
+        );
+        std::fs::write(exe_dir.join("Noa Agent Usage"), "").unwrap();
+        assert_eq!(
+            locate(AGENT_USAGE, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(exe_dir.join("Noa Agent Usage"))
+        );
+        for dir in [exe_dir, dev] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
     fn only_the_review_is_given_the_focused_panes_directory() {
         assert_eq!(
             launch_args(REVIEW, Some("/Users/me/src/noa")),
@@ -374,7 +415,13 @@ mod tests {
         );
         assert!(launch_args(REVIEW, None).is_empty());
         assert!(launch_args(REVIEW, Some("relative/dir")).is_empty());
-        for helper in [AGENT_DASHBOARD, REPO_BROWSER, DISCUSSION, COMPETITION] {
+        for helper in [
+            AGENT_DASHBOARD,
+            REPO_BROWSER,
+            DISCUSSION,
+            COMPETITION,
+            AGENT_USAGE,
+        ] {
             assert!(
                 launch_args(helper, Some("/Users/me/src/noa")).is_empty(),
                 "{}",
@@ -389,10 +436,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn the_helpers_dir_is_beside_the_macos_dir() {
         assert_eq!(
             helpers_dir(Path::new("/Applications/Noa.app/Contents/MacOS")),
             Some(PathBuf::from("/Applications/Noa.app/Contents/Helpers"))
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn the_helpers_dir_is_libexec_noa_beside_bin() {
+        assert_eq!(
+            helpers_dir(Path::new("/home/u/.local/bin")),
+            Some(PathBuf::from("/home/u/.local/libexec/noa"))
         );
     }
 

@@ -255,13 +255,27 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tasks-installed-kill-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("pid");
-        let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
-        let got = run("/bin/sh", &script, Duration::from_millis(400));
-        assert!(matches!(got, Installed::Unknown(_)), "{got:?}");
-        let pid: i32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
+        // `set +m`: a job an rc file starts stays in the shell's group, but
+        // an interactive bash (macOS's /bin/sh) puts one started from `-c`
+        // in a group of its own; without job control it is like the rc's.
+        let script = format!(
+            "set +m; sleep 30 & echo $! > '{}'; wait",
+            pid_file.display()
+        );
+        // On a loaded macOS a shell can sit in dyld for seconds before its
+        // first line; killed before it wrote the pid, a run proves nothing,
+        // so it is tried again.
+        let pid: i32 = (1..)
+            .find_map(|tries| {
+                let got = run("/bin/sh", &script, Duration::from_secs(2));
+                assert!(matches!(got, Installed::Unknown(_)), "{got:?}");
+                let pid = std::fs::read_to_string(&pid_file).ok()?.trim().parse().ok();
+                assert!(
+                    pid.is_some() || tries < 5,
+                    "the shell never started in {tries} tries"
+                );
+                pid
+            })
             .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -285,7 +299,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("pid");
         let script = format!(
-            "sleep 30 & echo $! > '{}'; echo noa-agent:claude; exit 0",
+            "set +m; sleep 30 & echo $! > '{}'; echo noa-agent:claude; exit 0",
             pid_file.display()
         );
         let got = run("/bin/sh", &script, Duration::from_secs(5));

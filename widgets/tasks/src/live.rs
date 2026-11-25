@@ -207,6 +207,7 @@ impl<C: Connect + Send + 'static> LiveFeed<C> {
                     main,
                     backfilled: false,
                     phases: HashMap::new(),
+                    live_since: HashMap::new(),
                     watch: None,
                     related_at: None,
                     link_failure: None,
@@ -479,6 +480,10 @@ struct Worker<C: Connect> {
     /// Each run's phase at the last look: a run's changes are recorded
     /// while it is live and as it ends, never after.
     phases: HashMap<RunId, Phase>,
+    /// The `HEAD` of a run's work tree as it went live again (a
+    /// follow-up): a run with no tree of its own produced only what was
+    /// committed since (other work commits in between).
+    live_since: HashMap<RunId, String>,
     /// The task whose detail is open, and when its 関連成果 was read.
     watch: Option<TaskRef>,
     related_at: Option<Millis>,
@@ -666,13 +671,17 @@ impl<C: Connect> Worker<C> {
         };
         // A run's agent finished or failed (each time, after a follow-up
         // too), or its pane went: what its work tree holds now is what it
-        // produced. Read once as it ends: a pane left open after its agent
-        // finished goes later with no work of the run's in between (in the
-        // repository itself, an `Isolation::Here` run's tree, other tasks
-        // commit meanwhile). Those already ended at the first look did not
-        // end now: their ending was not seen.
+        // produced. Read as it ends, and a run with a tree of its own again
+        // as its pane goes after that; not an `Isolation::Here` run, whose
+        // tree (the repository itself) other tasks commit to meanwhile.
+        // Those already ended at the first look did not end now: their
+        // ending was not seen.
         let first = !self.backfilled;
-        let mut ended: Vec<(String, PathBuf)> = Vec::new();
+        let mut ended: Vec<(String, PathBuf, Option<String>)> = Vec::new();
+        // Gone after its agent finished: read again only for a run with a
+        // tree of its own, which holds no other work (a last commit made
+        // after it finished would be lost with the tree).
+        let mut gone_done: Vec<(String, PathBuf, Option<String>)> = Vec::new();
         for v in self.views(now) {
             let before = self.phases.get(&v.run.run).copied();
             // An ending not seen stays over until the run is live again.
@@ -682,10 +691,28 @@ impl<C: Connect> Worker<C> {
                 phase => phase,
             };
             self.phases.insert(v.run.run.clone(), phase);
+            if phase == Phase::Live && matches!(before, Some(Phase::Done | Phase::Over)) {
+                match linking::head_of(&v.run.workdir) {
+                    Some(head) => self.live_since.insert(v.run.run.clone(), head),
+                    None => self.live_since.remove(&v.run.run),
+                };
+            }
+            let since = self.live_since.get(&v.run.run).cloned();
             let was_live = matches!(before, None | Some(Phase::Live));
             if phase != Phase::Live && was_live && !first {
-                ended.push((v.run.run.as_str().to_owned(), v.run.workdir));
+                ended.push((v.run.run.as_str().to_owned(), v.run.workdir, since));
+            } else if phase == Phase::Over && before == Some(Phase::Done) && !first {
+                gone_done.push((v.run.run.as_str().to_owned(), v.run.workdir, since));
             }
+        }
+        if !gone_done.is_empty()
+            && let Ok(set) = links::replay(&store)
+        {
+            ended.extend(
+                gone_done
+                    .into_iter()
+                    .filter(|(run, _, _)| linking::own_tree(&set, run)),
+            );
         }
         if first {
             self.backfilled = true;
@@ -693,13 +720,13 @@ impl<C: Connect> Worker<C> {
             self.link_failed(failed);
             // Runs that ended while Tasks was closed: those with a work
             // tree of their own, still there, hold only their own work.
-            let own: Vec<(String, PathBuf)> = match links::replay(&store) {
+            let own: Vec<(String, PathBuf, Option<String>)> = match links::replay(&store) {
                 Ok(set) => self
                     .runs
                     .iter()
                     .filter(|r| self.phases.get(&r.run) != Some(&Phase::Live))
                     .filter(|r| linking::own_tree(&set, r.run.as_str()))
-                    .map(|r| (r.run.as_str().to_owned(), r.workdir.clone()))
+                    .map(|r| (r.run.as_str().to_owned(), r.workdir.clone(), None))
                     .collect(),
                 Err(_) => Vec::new(),
             };
@@ -721,13 +748,17 @@ impl<C: Connect> Worker<C> {
             // their own: an ended run's shared tree (the repository itself,
             // for an `Isolation::Here` run) moves on with other work, which
             // is not the run's.
-            let runs: Vec<(String, PathBuf)> = links::replay(&store)
+            let runs: Vec<(String, PathBuf, Option<String>)> = links::replay(&store)
                 .map(|set| {
                     linking::runs_of(&set, &linking::task_key(&task))
                         .into_iter()
                         .filter(|(run, _)| {
                             self.phases.get(&RunId::new(run.clone())) == Some(&Phase::Live)
                                 || linking::own_tree(&set, run)
+                        })
+                        .map(|(run, workdir)| {
+                            let since = self.live_since.get(&RunId::new(run.clone())).cloned();
+                            (run, workdir, since)
                         })
                         .collect()
                 })
@@ -2571,17 +2602,63 @@ mod tests {
             produced_by(rig, &run.run, &v2)
         });
 
-        // Committed after it finished, then its pane goes: the run ended
-        // as it finished, so the pane going reads nothing again; its own
-        // work tree is read when its task's detail is.
+        // Committed after it finished, then its pane goes: its own work
+        // tree holds only its work, so the pane going reads it again (the
+        // tree may be removed next, and the commit with it).
         let v3 = commit("v3");
         rig.feed.act(Intent::ClosePane(run.run.clone()));
+        // The look that saw it gone recorded what it would before showing it.
         rig.until("gone", |v| v.runs[0].liveness == Liveness::Gone);
-        assert!(!produced_by(&rig, &run.run, &v3), "read again as it went");
-        rig.feed.watch(Some(&TaskRef::Local("t-1".into())));
-        ticking(&mut rig, "v3 as its detail is read", |rig, _| {
-            produced_by(rig, &run.run, &v3)
+        assert!(produced_by(&rig, &run.run, &v3), "not read as it went");
+    }
+
+    /// An `Isolation::Here` run given a follow-up after another task
+    /// committed in the shared checkout: as it finishes again only what
+    /// was committed while it was live again is its own.
+    #[test]
+    fn a_here_runs_follow_up_takes_only_the_commits_made_while_it_was_live() {
+        let mut rig = rig("links-here-again", |repo, _, _| {
+            write_task(repo, "t-1", "one")
         });
+        rig.until("the task", |v| v.tasks.len() == 1);
+        rig.feed.act(Intent::Run {
+            task: TaskRef::Local("t-1".into()),
+            agent: AgentKind::Claude,
+            isolation: Isolation::Here,
+        });
+        let run = rig.until("started", |v| v.runs.len() == 1).runs[0]
+            .run
+            .run
+            .clone();
+        let commit = |rig: &Rig, what: &str| {
+            git_in(&rig.repo, &["commit", "-q", "--allow-empty", "-m", what]);
+            git_in(&rig.repo, &["rev-parse", "HEAD"])
+        };
+        let at_work = |_: &Rig, v: &View| {
+            v.runs[0].liveness
+                == Liveness::Alive {
+                    agent: Some(AgentState::Running),
+                }
+        };
+        agent(&rig, "running");
+        ticking(&mut rig, "at work", at_work);
+        let v1 = commit(&rig, "v1");
+        agent(&rig, "finished");
+        ticking(&mut rig, "v1 as it finishes", |rig, _| {
+            produced_by(rig, &run, &v1)
+        });
+
+        // Task B commits in the shared checkout; then A's follow-up.
+        let b = commit(&rig, "b");
+        agent(&rig, "running");
+        ticking(&mut rig, "at work again", at_work);
+        let v2 = commit(&rig, "v2");
+        agent(&rig, "finished");
+        ticking(&mut rig, "v2 as it finishes again", |rig, _| {
+            produced_by(rig, &run, &v2)
+        });
+        assert!(!produced_by(&rig, &run, &b), "B's commit taken as A's");
+        assert!(produced_by(&rig, &run, &v1));
     }
 
     /// An `Isolation::Here` run whose agent finished is read once, as it

@@ -85,7 +85,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 }
 
 /// The commit `dir`'s `HEAD` is at (`None` on an unborn `HEAD`).
-fn head_of(dir: &Path) -> Option<String> {
+pub fn head_of(dir: &Path) -> Option<String> {
     let out = git(dir, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).ok()?;
     let sha = String::from_utf8(out).ok()?.trim().to_owned();
     (!sha.is_empty()).then_some(sha)
@@ -205,8 +205,11 @@ pub fn backfill(store: &Path, runs: &[Run], log: &Path, now: Millis) -> Option<S
 /// What `run` (work tree `workdir`) produced, read now: `Produced(run →
 /// commit)` for each commit since the one it started on (oldest first, at
 /// most [`COMMITS_CAP`]), and `Produced(run → snapshot)` with the
-/// snapshot observed when the tree is dirty. Runs git: off the UI thread.
-pub fn produced(set: &LinkSet, run: &str, workdir: &Path) -> Vec<Edit> {
+/// snapshot observed when the tree is dirty. A run with no tree of its
+/// own (no branch) given `since`, the `HEAD` as it last went live again,
+/// counts only the commits since that: what was committed while it was
+/// not live is other work's. Runs git: off the UI thread.
+pub fn produced(set: &LinkSet, run: &str, workdir: &Path, since: Option<&str>) -> Vec<Edit> {
     let node = Node::Run(run.to_owned());
     let mut edits = Vec::new();
     let link = |change: ChangeId| Edit::Link {
@@ -217,7 +220,12 @@ pub fn produced(set: &LinkSet, run: &str, workdir: &Path) -> Vec<Edit> {
     };
     // A run with no start commit recorded (logged before links existed)
     // has no range: everything before it would count as its own.
-    if let Some(base) = set.info_of(&node).head {
+    let info = set.info_of(&node);
+    let base = match (&info.branch, since) {
+        (None, Some(since)) => Some(since.to_owned()),
+        _ => info.head,
+    };
+    if let Some(base) = base {
         let range = format!("{base}..HEAD");
         let cap = format!("--max-count={COMMITS_CAP}");
         if let Ok(out) = git(workdir, &["rev-list", "--reverse", &cap, &range]) {
@@ -242,17 +250,22 @@ pub fn produced(set: &LinkSet, run: &str, workdir: &Path) -> Vec<Edit> {
     edits
 }
 
-/// [`produced`] for every run of `runs` whose work tree is still there,
-/// appended in one write; the notice when that fails.
-pub fn record_produced(store: &Path, runs: &[(String, PathBuf)], now: Millis) -> Option<String> {
+/// [`produced`] for every run of `runs` (`(run, workdir, since)`) whose
+/// work tree is still there, appended in one write; the notice when that
+/// fails.
+pub fn record_produced(
+    store: &Path,
+    runs: &[(String, PathBuf, Option<String>)],
+    now: Millis,
+) -> Option<String> {
     let set = match links::replay(store) {
         Ok(set) => set,
         Err(e) => return Some(format!("リンクの記録を読めません: {e}")),
     };
     let edits: Vec<Edit> = runs
         .iter()
-        .filter(|(_, workdir)| workdir.is_dir())
-        .flat_map(|(run, workdir)| produced(&set, run, workdir))
+        .filter(|(_, workdir, _)| workdir.is_dir())
+        .flat_map(|(run, workdir, since)| produced(&set, run, workdir, since.as_deref()))
         .collect();
     if edits.is_empty() {
         return None;

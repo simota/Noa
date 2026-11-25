@@ -443,7 +443,12 @@ impl Builder<'_> {
         let buttons = self
             .tree
             .insert(Some(row), Container::wrapping_row(6.0, 6.0));
-        if let Some(nav) = Nav::of(&result.node, &view.data, &view.repo) {
+        // A record not found has nothing to open: the window would exit.
+        let gone = matches!(
+            view.presence.get(&result.node),
+            Some(Presence::Missing { .. })
+        );
+        if !gone && let Some(nav) = Nav::of(&result.node, &view.data, &view.repo) {
             self.button(buttons, "開く", RelatedAction::Nav(nav));
         }
         self.unlink(buttons, result_name(&result.node), result.links.clone());

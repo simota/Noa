@@ -1528,6 +1528,37 @@ fn ac6_a_missing_record_keeps_its_row_and_link_and_names_its_path() {
     );
 }
 
+/// A review or verification whose record is missing offers no 開く (its
+/// window would only exit), but keeps リンクを外す; a found one opens.
+#[test]
+fn a_missing_review_offers_no_open_but_keeps_unlink() {
+    let gone = format!("rev-1 {DATA}/reviews/rev-1/events.jsonl");
+    let related = related_of(&history(), &[(Node::Review("rev-1".into()), gone.as_str())]);
+    let (screen, _, _) = link_screen(related);
+    let opens = |node: &Node| {
+        let nav = Nav::of(
+            node,
+            std::path::Path::new(DATA),
+            std::path::Path::new("/src/noa"),
+        )
+        .expect("a nav");
+        screen
+            .related_actions
+            .iter()
+            .any(|(_, a)| *a == RelatedAction::Nav(nav.clone()))
+    };
+    assert!(
+        !opens(&Node::Review("rev-1".into())),
+        "開く on a missing review"
+    );
+    assert!(opens(&Node::Verify("ver-1".into())), "開く on a found one");
+    assert!(screen.related_actions.iter().any(|(_, a)| *a
+        == RelatedAction::AskUnlink {
+            what: "レビュー rev-1".into(),
+            links: vec![LinkId::new("lnk-4")],
+        }));
+}
+
 /// AC7 (screen): リンクを追加 checks the ID's form, says why it refuses
 /// one, and sends the link; リンクを外す asks first and sends nothing
 /// until 外す.

@@ -1164,14 +1164,17 @@ impl Verify {
         let mut released = false;
         if let Source::Live(channel) = &self.source {
             let current = channel.generation();
-            while let Ok(snapshot) = channel.snapshots.try_recv() {
-                if snapshot.generation >= current {
-                    latest = Some(snapshot);
-                }
-            }
+            // Notices first: a runner's forwarder sends its session snapshot
+            // before any notice after it, so every snapshot sent before a
+            // notice read here is read below too.
             while let Ok((generation, notice)) = channel.notices.try_recv() {
                 if generation >= current {
                     notices.push(notice);
+                }
+            }
+            while let Ok(snapshot) = channel.snapshots.try_recv() {
+                if snapshot.generation >= current {
+                    latest = Some(snapshot);
                 }
             }
             while channel.released.try_recv().is_ok() {
@@ -1200,7 +1203,12 @@ impl Verify {
                 }
             }
         }
-        let refused_start = self.starting && self.session.is_none() && !notices.is_empty();
+        // A notice refuses the start only while no verification has come
+        // up: one after a successful open (the link log could not be
+        // written, L1-4) is an ordinary notice.
+        let opened = latest.as_ref().is_some_and(|s| s.session.is_some());
+        let refused_start =
+            self.starting && self.session.is_none() && !opened && !notices.is_empty();
         for notice in &notices {
             self.toast(notice.clone());
         }

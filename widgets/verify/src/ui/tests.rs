@@ -436,6 +436,49 @@ fn a_refused_start_shows_why_under_the_form() {
     let _ = std::fs::remove_dir_all(repo);
 }
 
+/// A link-log notice after a successful open (L1-4: it never fails the
+/// session) is not a start refusal, whichever channel is read first.
+#[test]
+fn a_link_log_notice_after_an_open_is_no_start_refusal() {
+    const NOTICE: &str = "タスクとの関連を記録できません: links.jsonl.lock: Permission denied";
+    for notice_first in [false, true] {
+        let (channel, link) = Channel::fake();
+        let mut screen = live_ready(channel);
+        let repo = temp(&format!("link-notice-{notice_first}"));
+        let mut text = TextStore::new(Default::default());
+        let form = start::Form {
+            repo: repo.display().to_string(),
+            criteria: "新しいタブは cwd を引き継ぐ\n".into(),
+            ..start::Form::default()
+        };
+        start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+        act(&mut screen, Action::Start);
+        assert!(screen.starting, "notice_first={notice_first}");
+        let session = snapshot(crate::demo::session(), None, 0);
+        if notice_first {
+            link.notices.send((0, NOTICE.into())).unwrap();
+            link.snapshots.send(session).unwrap();
+        } else {
+            link.snapshots.send(session).unwrap();
+            link.notices.send((0, NOTICE.into())).unwrap();
+        }
+        screen.poll_live(&mut text);
+        assert!(!screen.starting, "notice_first={notice_first}");
+        assert!(screen.session.is_some(), "notice_first={notice_first}");
+        assert_eq!(screen.refusal, None, "notice_first={notice_first}");
+        assert!(!screen.tree.is_hidden(screen.board));
+        assert!(screen.tree.is_hidden(screen.start.root));
+        let shown = labels_under(&screen.tree, screen.start.root).join("\n");
+        assert!(!shown.contains("開始できません"), "{shown}");
+        assert!(!shown.contains(NOTICE), "{shown}");
+        assert!(
+            toasts(&screen).iter().any(|t| t == NOTICE),
+            "notice_first={notice_first}"
+        );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+}
+
 #[test]
 fn the_spec_file_can_be_chosen_in_an_open_panel() {
     let mut screen = Verify::demo_start();

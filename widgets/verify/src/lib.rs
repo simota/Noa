@@ -11,7 +11,9 @@ pub mod fsx;
 pub mod media;
 pub mod model;
 pub mod rerun;
+pub mod sibling;
 pub mod store;
+pub mod task_links;
 pub mod worktree;
 
 #[cfg(test)]

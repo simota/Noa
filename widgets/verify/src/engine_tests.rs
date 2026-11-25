@@ -275,7 +275,11 @@ fn ac16_the_round_runs_briefing_verifying_ingesting_ruling_and_the_judge_waits_f
         claude.receipt.replied.is_some(),
         "every item has its outcome"
     );
-    assert!(claude.body.contains("nohup sh '"), "{}", claude.body);
+    assert!(
+        claude.body.contains("run_in_background option set") && claude.body.contains("    sh '"),
+        "{}",
+        claude.body
+    );
     rig.rerun("claude-2", |_, _| Rerun::TimedOut { log: None });
     assert_eq!(rig.phase(), Phase::Ruling);
     let brief = rig.brief("judge", BriefKind::Work);

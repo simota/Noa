@@ -1480,9 +1480,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 base: store::verifier_root(session, part),
                 request: request.clone(),
                 watch: rerun::Watch::new(rerun::Limits {
-                    // Every kind runs `run.sh` detached for now
-                    // (`rerun::detached`); a foreground kind would get the
-                    // smaller of this and its tool's limit (L1-5 step 3).
+                    // The same for every kind: a foreground re-run brief
+                    // tells the agent to keep waiting on the run for as
+                    // long as every command's limit allows
+                    // (`rerun::foreground_limit`, L1-5 step 3).
                     run: RERUN_TIMEOUT,
                     next_start: self.config.start_timeout,
                 }),

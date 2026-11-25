@@ -187,8 +187,23 @@ fn ac21_rerun_briefs_start_the_widgets_script_and_say_reply_nothing() {
         .find(|s| s.starts_with("R1 re-run brief to codex"))
         .unwrap();
     assert!(
-        rerun.contains("nohup sh '/golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun/run.sh' >/dev/null 2>&1 &"),
+        rerun.contains("\n    sh '/golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun/run.sh'\n"),
         "{rerun}"
+    );
+    assert!(
+        rerun.contains("Start exactly this once with your shell tool in the foreground")
+            && !rerun.contains("nohup"),
+        "{rerun}"
+    );
+    assert!(
+        rerun.contains("runs 2 commands, each allowed up to 10 minutes, so the whole run can take up to 25 minutes")
+            && rerun.contains("keep waiting on that same running process")
+            && rerun.contains("Never start it a second time and never stop it."),
+        "{rerun}"
+    );
+    assert!(
+        !rerun.contains("timeout"),
+        "codex and agy have no run-deadline argument to set: {rerun}"
     );
     assert!(rerun.contains("Reply nothing."), "{rerun}");
     assert!(

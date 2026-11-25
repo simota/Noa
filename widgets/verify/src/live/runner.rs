@@ -3887,8 +3887,9 @@ pub(crate) mod tests {
                     fs::write(dir.join("1.cmd"), "exit 1").unwrap();
                     run_rerun_script(&runner, "claude");
                 }
-                _ => fs::write(dir.join(rerun::DONE_FILE), format!("{}\n", "0".repeat(32)))
-                    .unwrap(),
+                _ => {
+                    fs::write(dir.join(rerun::DONE_FILE), format!("{}\n", "0".repeat(32))).unwrap()
+                }
             }
             for _ in 0..3 {
                 fake.advance(1_000);
@@ -3971,10 +3972,15 @@ pub(crate) mod tests {
         assert_eq!(s.round(1).unwrap().phase, Phase::Ruling);
         let judge = fake.pane_of(":judge");
         let brief = fake.pastes(judge).last().cloned().unwrap();
-        assert!(brief.contains("exit 5; re-run differed (exit 3)"), "{brief}");
+        assert!(
+            brief.contains("exit 5; re-run differed (exit 3)"),
+            "{brief}"
+        );
         let report = verify::model::export::report_markdown(s, None);
         assert!(
-            report.contains("`claude/r1/e1` コマンド `exit 3`（.） · 終了コード 5 · 再実行 不一致（3）"),
+            report.contains(
+                "`claude/r1/e1` コマンド `exit 3`（.） · 終了コード 5 · 再実行 不一致（3）"
+            ),
             "{report}"
         );
         let _ = fs::remove_dir_all(root);
@@ -4029,7 +4035,11 @@ pub(crate) mod tests {
         assert!(reply_dir.join(&log.path).is_file());
         let codex = EvidenceKey::reported(&PartId::new("codex"), 1, "e1");
         let stored = runner.engine.session().evidence_item(&codex).unwrap();
-        assert!(reply_dir.join(&stored.stored.as_ref().unwrap().path).is_file());
+        assert!(
+            reply_dir
+                .join(&stored.stored.as_ref().unwrap().path)
+                .is_file()
+        );
         only(files_below(runner.engine.dir()));
         let _ = fs::remove_dir_all(root);
         // To a verdict, its report written.
@@ -4162,7 +4172,10 @@ pub(crate) mod tests {
         assert!(err.contains("再開できません"), "{err}");
         assert!(err.contains("claude"), "{err}");
         assert!(err.contains(&tree.display().to_string()), "{err}");
-        assert!(!tree.join(".git").exists(), "a verifier's worktree was made there");
+        assert!(
+            !tree.join(".git").exists(),
+            "a verifier's worktree was made there"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

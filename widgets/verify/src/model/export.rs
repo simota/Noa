@@ -1381,7 +1381,9 @@ mod tests {
             "{report}"
         );
         assert!(
-            report.contains("- `claude-2/r1/e1` コマンド `cargo test e1`（.） · 終了コード 0 · 再実行 時間切れ"),
+            report.contains(
+                "- `claude-2/r1/e1` コマンド `cargo test e1`（.） · 終了コード 0 · 再実行 時間切れ"
+            ),
             "{report}"
         );
     }

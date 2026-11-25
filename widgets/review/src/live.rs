@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use review::model::types::{AgentChoice, PartId, ReviewerChoice, RoundNo, Session, Target};
+use review::sibling::{self, Launcher};
+use review::task_links::{self, Origin};
 
 use crate::session::fix::{self, FixRequest};
 use crate::session::ipc::IpcConnect;
@@ -29,6 +31,7 @@ pub struct Snapshot {
     pub reply_root: Option<PathBuf>,
     /// The session's store directory (`events.jsonl`, `report.md`).
     pub session_dir: Option<PathBuf>,
+    pub origin: Option<Origin>,
     /// The [`Channel::generation`] it was sent in; one sent before the
     /// screen last left a review is stale.
     pub generation: u64,
@@ -73,6 +76,7 @@ pub enum Command {
     },
     /// Closes the agents' panes of the ended review on screen.
     ClosePanes,
+    OpenOriginalTask(Origin),
     /// Gives the stored review in `dir` `by` more rounds and goes on
     /// with it: a finished one that ran out of rounds continues.
     ExtendStored {
@@ -161,6 +165,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
         session: None,
         reply_root: None,
         session_dir: None,
+        origin: None,
         generation: 0,
     });
     wake();
@@ -230,6 +235,12 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
         {
             handle = None;
         }
+        if let Command::OpenOriginalTask(origin) = cmd {
+            if let Err(why) = open_original_task(&mut sibling::System, &origin) {
+                notify(&why);
+            }
+            continue;
+        }
         // A fix needs no runner: it is one request to Noa, on a link of
         // its own, so a stored review asks for one as a running one does.
         if let Command::RequestFix(req) = cmd {
@@ -258,6 +269,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     session: None,
                     reply_root: None,
                     session_dir: None,
+                    origin: None,
                     generation,
                 });
                 wake();
@@ -323,6 +335,13 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
     }
 }
 
+pub(crate) fn open_original_task(
+    launcher: &mut impl Launcher,
+    origin: &Origin,
+) -> Result<(), String> {
+    launcher.launch(sibling::TASKS, task_links::tasks_args(origin)?)
+}
+
 /// The runner start a command on a stored review asks for.
 fn stored_start(cmd: Command) -> Option<runner::Start> {
     match cmd {
@@ -346,6 +365,7 @@ fn forwarded(cmd: Command) -> Option<Action> {
         Command::Start { .. }
         | Command::Resume { .. }
         | Command::ExtendStored { .. }
+        | Command::OpenOriginalTask(_)
         | Command::RequestFix(_)
         | Command::Leave => return None,
     })
@@ -370,22 +390,26 @@ fn forward_updates(
     let mut session = None;
     let mut reply_root = None;
     let mut session_dir = None;
+    let mut origin = None;
     for update in &handle.updates {
         let sent = match update {
             Update::Session {
                 session: next,
                 reply_root: root,
                 session_dir: dir,
+                origin: next_origin,
             } => {
                 session = Some(next);
                 reply_root = Some(root);
                 session_dir = Some(dir);
+                origin = next_origin;
                 snapshots
                     .send(Snapshot {
                         link: link.clone(),
                         session: session.clone(),
                         reply_root: reply_root.clone(),
                         session_dir: session_dir.clone(),
+                        origin: origin.clone(),
                         generation,
                     })
                     .is_ok()
@@ -402,6 +426,7 @@ fn forward_updates(
                         session: session.clone(),
                         reply_root: reply_root.clone(),
                         session_dir: session_dir.clone(),
+                        origin: origin.clone(),
                         generation,
                     })
                     .is_ok()
@@ -420,6 +445,7 @@ fn forward_updates(
                     session,
                     reply_root,
                     session_dir,
+                    origin,
                     generation,
                 });
                 wake();
@@ -440,11 +466,45 @@ fn forward_updates(
 /// The far ends of a [`Channel::fake`].
 #[cfg(test)]
 pub struct FakeLink {
-    pub snapshots: Sender<Snapshot>,
+    pub snapshots: FakeSnapshots,
     pub notices: Sender<Notice>,
     pub released: Sender<()>,
     pub versions: Sender<(u64, String)>,
     pub commands: Receiver<(u64, Command)>,
+}
+
+// The existing UI tests build snapshots without task data.
+#[cfg(test)]
+pub struct TestSnapshot {
+    pub link: Link,
+    pub session: Option<Arc<Session>>,
+    pub reply_root: Option<PathBuf>,
+    pub session_dir: Option<PathBuf>,
+    pub generation: u64,
+}
+
+#[cfg(test)]
+pub struct FakeSnapshots(Sender<Snapshot>);
+
+#[cfg(test)]
+impl FakeSnapshots {
+    pub fn send(&self, snapshot: TestSnapshot) -> Result<(), mpsc::SendError<Snapshot>> {
+        let TestSnapshot {
+            link,
+            session,
+            reply_root,
+            session_dir,
+            generation,
+        } = snapshot;
+        self.0.send(Snapshot {
+            link,
+            session,
+            reply_root,
+            session_dir,
+            origin: None,
+            generation,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -465,7 +525,7 @@ impl Channel {
             generation: Arc::new(AtomicU64::new(0)),
         };
         let link = FakeLink {
-            snapshots: snapshot_tx,
+            snapshots: FakeSnapshots(snapshot_tx),
             notices: notice_tx,
             released: released_tx,
             versions: version_tx,

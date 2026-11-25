@@ -18,7 +18,161 @@ mod start;
 mod thread;
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use crate::live::TestSnapshot as Snapshot;
+    include!("tests.rs");
+}
+
+#[cfg(test)]
+mod links_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::fs;
+
+    use review::sibling::{self, Helper, Launcher};
+    use review::task_links::LinkEvent;
+
+    #[derive(Default)]
+    struct RecordingLauncher(Vec<(Helper, Vec<OsString>)>);
+
+    impl Launcher for RecordingLauncher {
+        fn launch(&mut self, helper: Helper, args: Vec<OsString>) -> Result<(), String> {
+            self.0.push((helper, args));
+            Ok(())
+        }
+    }
+
+    fn origin_button(screen: &Review) -> Option<WidgetId> {
+        screen
+            .actions
+            .iter()
+            .find_map(|(id, action)| (*action == Action::OpenOriginalTask).then_some(*id))
+    }
+
+    fn has_status_caption(screen: &Review, text: &str) -> bool {
+        screen
+            .tree
+            .children(screen.status_trailing)
+            .iter()
+            .any(|&id| {
+                screen
+                    .tree
+                    .get::<Label>(id)
+                    .is_some_and(|label| label.text() == text)
+            })
+    }
+
+    #[test]
+    fn links_ac5_live_and_stored_return_button_opens_the_origin_issue() {
+        let mut text = TextStore::new(Default::default());
+        let dir = std::env::temp_dir().join(format!("noa-review-links-ui-{}", std::process::id()));
+        let repo = dir.join("task repo");
+        fs::create_dir_all(&repo).unwrap();
+        let tasks_root = dir.join("tasks");
+        let key_dir = tasks_root.join("key");
+        fs::create_dir_all(&key_dir).unwrap();
+        let review_dir = dir.join("reviews").join("rev-1");
+        let batches = crate::demo::log();
+        let mut store = store::Store::create(&review_dir, &batches[0]).unwrap();
+        store.append_all(&batches[1..]).unwrap();
+        drop(store);
+        let session = crate::demo::session();
+        let log = task_links::links_log(&key_dir);
+        let mut origin = Origin {
+            key_dir,
+            tasks_repo: None,
+            task: task_links::TaskKey(serde_json::json!({"github":{"repo":"o/n","number":12}})),
+            run: "run-1".into(),
+        };
+
+        let snapshot = |origin| Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(session.clone())),
+            reply_root: None,
+            session_dir: Some(review_dir.clone()),
+            origin,
+            generation: 0,
+        };
+        assert!(origin_button(&Review::of_snapshot(snapshot(None))).is_none());
+        let screen = Review::of_snapshot(snapshot(Some(origin.clone())));
+        assert!(!screen.tree.is_enabled(origin_button(&screen).unwrap()));
+        assert!(has_status_caption(
+            &screen,
+            "タスクのリポジトリがわかりません"
+        ));
+        origin.tasks_repo = Some(repo.clone());
+        let screen = Review::of_snapshot(snapshot(Some(origin.clone())));
+        assert!(screen.tree.is_enabled(origin_button(&screen).unwrap()));
+
+        task_links::append(
+            &log,
+            &LinkEvent::Repo {
+                path: repo.clone(),
+                at: 1,
+            },
+        )
+        .unwrap();
+        task_links::append(
+            &log,
+            &LinkEvent::SessionLinked {
+                kind: SessionKind::Review,
+                session: session.id.to_string(),
+                task: origin.task.clone(),
+                run: origin.run.clone(),
+                commit: Some("a".repeat(40)),
+                uncommitted: false,
+                by: task_links::MatchedBy::Branch,
+                at: 2,
+            },
+        )
+        .unwrap();
+        let (channel, link) = Channel::fake();
+        let mut screen = Review::live(channel, std::sync::mpsc::channel().1);
+        screen
+            .show_stored_at(&review_dir, &mut text, Some(&tasks_root))
+            .unwrap();
+        assert!(screen.read_only);
+        let id = origin_button(&screen).unwrap();
+        assert_eq!(
+            screen.tree.get::<Button>(id).unwrap().label(),
+            "元のタスクを開く"
+        );
+        assert!(screen.tree.is_enabled(id));
+        screen.handle_action(Action::OpenOriginalTask, &mut text);
+        let command = link.commands.try_iter().last().unwrap().1;
+        assert_eq!(command, Command::OpenOriginalTask(origin.clone()));
+        let Command::OpenOriginalTask(origin) = command else {
+            unreachable!()
+        };
+        let mut launcher = RecordingLauncher::default();
+        crate::live::open_original_task(&mut launcher, &origin).unwrap();
+        assert_eq!(
+            launcher.0,
+            [(
+                sibling::TASKS,
+                vec![
+                    format!("--repo={}", repo.display()).into(),
+                    "--select=#12".into()
+                ]
+            )]
+        );
+
+        fs::remove_dir(&repo).unwrap();
+        screen.rebuild(&mut text);
+        assert!(!screen.tree.is_enabled(origin_button(&screen).unwrap()));
+        assert!(has_status_caption(
+            &screen,
+            &format!("{} はもうありません", repo.display())
+        ));
+        assert!(
+            crate::live::open_original_task(&mut launcher, &origin)
+                .unwrap_err()
+                .contains("はもうありません")
+        );
+        assert_eq!(launcher.0.len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -45,6 +199,7 @@ use review::model::types::{
     Severity,
 };
 use review::store::{self, Listed};
+use review::task_links::{self, Origin, SessionKind};
 
 use crate::installed::Installed;
 use crate::live::{Channel, Command, Link, Snapshot};
@@ -110,6 +265,7 @@ pub enum Action {
     Extend(RoundNo),
     /// Closes the agents' panes of the ended review in Noa.
     ClosePanes,
+    OpenOriginalTask,
     /// Takes up the unfinished stored review on screen (its agents start).
     ResumeShown,
     /// Writes the stored review's report again from its log.
@@ -221,6 +377,7 @@ pub struct Review {
     reply_root: Option<PathBuf>,
     /// The session's store directory.
     session_dir: Option<PathBuf>,
+    origin: Option<Origin>,
     tab: CenterTab,
     filters: Filters,
     selected: Option<String>,
@@ -312,6 +469,8 @@ impl Review {
         let mut screen = Self::build(Source::Snapshot, snapshot.link, snapshot.session);
         screen.reply_root = snapshot.reply_root;
         screen.session_dir = snapshot.session_dir;
+        screen.origin = snapshot.origin;
+        screen.rebuild(&mut TextStore::new(Default::default()));
         screen
     }
 
@@ -442,6 +601,7 @@ impl Review {
             session,
             reply_root: None,
             session_dir: None,
+            origin: None,
             tab: CenterTab::Findings,
             filters: Filters::default(),
             selected: None,
@@ -605,6 +765,7 @@ impl Review {
         self.session = None;
         self.reply_root = None;
         self.session_dir = None;
+        self.origin = None;
         self.read_only = false;
         self.stored_dir = None;
         self.extending = false;
@@ -618,6 +779,15 @@ impl Review {
     }
 
     fn show_stored(&mut self, dir: &Path, text: &mut TextStore) -> Result<(), String> {
+        self.show_stored_at(dir, text, task_links::default_root().as_deref())
+    }
+
+    fn show_stored_at(
+        &mut self,
+        dir: &Path,
+        text: &mut TextStore,
+        tasks_root: Option<&Path>,
+    ) -> Result<(), String> {
         // Taken just before the read, so it goes with the session read: a
         // write that lands after it shows as a change at the next look.
         let stamp = store::log_stamp(dir);
@@ -628,6 +798,9 @@ impl Review {
         if !matches!(self.source, Source::Demo) {
             self.reply_root = Some(store::reply_dir(dir, &session));
             self.session_dir = Some(dir.to_owned());
+            self.origin = tasks_root.and_then(|root| {
+                task_links::find_origin(root, SessionKind::Review, session.id.as_str())
+            });
         }
         self.session = Some(Arc::new(session));
         self.read_only = true;
@@ -1114,6 +1287,17 @@ impl Review {
             );
             self.actions.push((close, Action::ClosePanes));
         }
+        if let Some(origin) = &self.origin {
+            let availability = task_links::tasks_args(origin);
+            let open_task = self
+                .tree
+                .insert(Some(self.status_trailing), small("元のタスクを開く"));
+            self.tree.set_enabled(open_task, availability.is_ok());
+            self.actions.push((open_task, Action::OpenOriginalTask));
+            if let Err(why) = availability {
+                caption(&mut self.tree, self.status_trailing, why);
+            }
+        }
     }
 
     /// Takes the installed-agents report, once it has arrived: the menus
@@ -1202,14 +1386,14 @@ impl Review {
         let mut released = false;
         if let Source::Live(channel) = &self.source {
             let current = channel.generation();
-            while let Ok(snapshot) = channel.snapshots.try_recv() {
-                if snapshot.generation >= current {
-                    latest = Some(snapshot);
-                }
-            }
             while let Ok((generation, notice)) = channel.notices.try_recv() {
                 if generation >= current {
                     notices.push(notice);
+                }
+            }
+            while let Ok(snapshot) = channel.snapshots.try_recv() {
+                if snapshot.generation >= current {
+                    latest = Some(snapshot);
                 }
             }
             while channel.released.try_recv().is_ok() {
@@ -1226,7 +1410,12 @@ impl Review {
                 self.built = None;
             }
         }
-        let refused_start = self.starting && self.session.is_none() && !notices.is_empty();
+        let refused_start = self.starting
+            && self.session.is_none()
+            && latest
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.session.is_none())
+            && !notices.is_empty();
         for notice in &notices {
             self.toast(notice.clone());
         }
@@ -1261,6 +1450,10 @@ impl Review {
                 self.starting = false;
             }
             self.session = snapshot.session;
+            if self.origin != snapshot.origin {
+                self.origin = snapshot.origin;
+                self.built = None;
+            }
             self.drop_hidden_selection();
             if snapshot.reply_root.is_some() {
                 self.reply_root = snapshot.reply_root;
@@ -1569,6 +1762,11 @@ impl Review {
             Action::SetHold(hold) => self.send_cmd(Command::SetHold { hold }),
             Action::Continue => self.send_cmd(Command::Continue),
             Action::ClosePanes => self.send_cmd(Command::ClosePanes),
+            Action::OpenOriginalTask => {
+                if let Some(origin) = self.origin.clone() {
+                    self.send_cmd(Command::OpenOriginalTask(origin));
+                }
+            }
             Action::Extend(by) => match self.stored_dir.clone() {
                 Some(dir) if self.read_only => {
                     if !matches!(self.source, Source::Live(_)) {

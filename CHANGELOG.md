@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directories, once per skill per turn; agy records none. The statistics
   index is rebuilt once on the first start.
 
+### Fixed
+
+- Agent Usage: in the project table, a project only agy worked in showed
+  `0` tokens under 全体 although agy records no tokens; it now shows `—`, as
+  under agy. A project agy worked in beside Claude Code or Codex marks its
+  token and skill counts as partial (`(一部)`). (#257)
+
 ## [0.9.16] - 2026-11-25
 
 A verification widget, an Agent Usage window, multi-judge competitions, and

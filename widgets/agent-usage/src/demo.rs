@@ -557,12 +557,17 @@ pub fn report(period: Period, filter: AgentFilter, now: Unix, tz: &dyn Tz) -> St
         .map(|i| 1.0 / (i as f64 + 1.2))
         .collect();
     let sum: f64 = weights.iter().sum();
-    for (name, w) in PROJECTS.iter().zip(&weights).take(15) {
+    // agy works in every third project.
+    let measured = agents.iter().any(|a| *a != Agent::Agy);
+    let agy = agents.contains(&Agent::Agy);
+    for (i, (name, w)) in PROJECTS.iter().zip(&weights).take(15).enumerate() {
         let mut counts = scale(&report.total, w / sum);
         counts.workers = 0;
         report.per_project.push(KeyRow {
             key: (*name).to_owned(),
             counts,
+            measured,
+            unmeasured: agy && (!measured || i % 3 == 2),
         });
     }
     report.other_projects = (PROJECTS.len() - 15) as u64;

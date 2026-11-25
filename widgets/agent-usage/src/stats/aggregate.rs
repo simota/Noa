@@ -203,9 +203,28 @@ fn availability(index: &Index, agent: Agent) -> Availability {
     if !index.roots_present[agent.index()] && !has_files {
         return Availability::Missing("no logs found".to_owned());
     }
+    if records_tokens(agent) {
+        Availability::Full
+    } else {
+        Availability::NoTokens
+    }
+}
+
+/// Whether `agent`'s logs record tokens and skills (agy's record neither).
+fn records_tokens(agent: Agent) -> bool {
     match agent {
-        Agent::Agy => Availability::NoTokens,
-        Agent::Claude | Agent::Codex => Availability::Full,
+        Agent::Agy => false,
+        Agent::Claude | Agent::Codex => true,
+    }
+}
+
+/// Which kinds of agent were active in a project: (measured, unmeasured).
+fn mark(seen: &mut BTreeMap<u32, (bool, bool)>, project: u32, agent: Agent) {
+    let s = seen.entry(project).or_default();
+    if records_tokens(agent) {
+        s.0 = true;
+    } else {
+        s.1 = true;
     }
 }
 
@@ -235,6 +254,7 @@ pub fn report(
     let mut agents: [Acc; 3] = Default::default();
     let mut models: BTreeMap<(Agent, u32), Acc> = BTreeMap::new();
     let mut projects: BTreeMap<u32, Acc> = BTreeMap::new();
+    let mut seen: BTreeMap<u32, (bool, bool)> = BTreeMap::new();
     let mut tools: BTreeMap<u32, u64> = BTreeMap::new();
     let mut skills: BTreeMap<(u32, Agent), SkillAcc> = BTreeMap::new();
     let parents = codex_parents(index);
@@ -253,6 +273,7 @@ pub fn report(
             .add(&b.c, model);
         if b.project != 0 {
             projects.entry(b.project).or_default().add(&b.c, model);
+            mark(&mut seen, b.project, b.agent);
         }
         if let Some(slot) = slots.slot(b.hour, tz) {
             days[slot][b.agent.index()] += b.c.tokens.total();
@@ -294,6 +315,7 @@ pub fn report(
         agents[agent.index()].sessions += 1;
         if s.project != 0 {
             projects.entry(s.project).or_default().sessions += 1;
+            mark(&mut seen, s.project, *agent);
         }
     }
 
@@ -336,9 +358,14 @@ pub fn report(
 
     let mut per_project: Vec<KeyRow> = projects
         .iter()
-        .map(|(project, acc)| KeyRow {
-            key: index.string(*project).to_owned(),
-            counts: acc.counts(),
+        .map(|(project, acc)| {
+            let (measured, unmeasured) = seen.get(project).copied().unwrap_or_default();
+            KeyRow {
+                key: index.string(*project).to_owned(),
+                counts: acc.counts(),
+                measured,
+                unmeasured,
+            }
         })
         .collect();
     per_project.sort_by(|a, b| {
@@ -526,6 +553,22 @@ mod tests {
             ]
         );
         assert_eq!(r.other_projects, 0);
+        // Which projects hold counted activity: alpha and beta are Claude
+        // and Codex, gamma and delta only agy, whose tokens are unknown.
+        let kinds: Vec<_> = r
+            .per_project
+            .iter()
+            .map(|p| (p.key.as_str(), p.measured, p.unmeasured))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("~/work/alpha", true, false),
+                ("/srv/beta", true, false),
+                ("~/work/gamma", false, true),
+                ("~/work/delta", false, true),
+            ]
+        );
         assert_eq!(r.tools.first(), Some(&("Bash".to_owned(), 2)));
         // Workers spawned in the period, per agent.
         let workers: Vec<_> = r.per_agent.iter().map(|a| (a.0, a.1.workers)).collect();

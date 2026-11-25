@@ -151,6 +151,12 @@ pub struct ModelRow {
 pub struct KeyRow {
     pub key: String,
     pub counts: Counts,
+    /// Activity of an agent that records tokens and skills (Claude Code,
+    /// Codex) is in it.
+    pub measured: bool,
+    /// Activity of an agent that records neither (agy) is in it: its counts
+    /// leave that part out.
+    pub unmeasured: bool,
 }
 
 /// One skill of one agent in the period.

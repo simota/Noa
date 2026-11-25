@@ -805,6 +805,24 @@ impl Session {
         }
     }
 
+    /// Whether the engine adds rounds now: [`Session::extendable`], and an
+    /// ended verification's worktrees all removed first (closing asks for
+    /// their removal, L1-3; one whose removal failed stays `Made`).
+    pub fn extendable_now(&self) -> Result<(), &'static str> {
+        self.extendable()?;
+        if self.closed
+            && self
+                .worktrees
+                .values()
+                .any(|t| t.state == crate::model::types::WorktreeState::Made)
+        {
+            return Err(
+                "ワークツリーの削除が終わっていません（削除が終わってから追加してください）",
+            );
+        }
+        Ok(())
+    }
+
     /// The defect (or dismissal) a raw defect went to, if any.
     pub fn placement(&self, key: &RawKey) -> Option<&str> {
         self.defects

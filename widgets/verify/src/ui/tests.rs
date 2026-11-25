@@ -1161,6 +1161,82 @@ fn ac27_worktree_and_snapshot_buttons_open_finder_through_the_opener() {
 
 // ---- round controls and the composer ----
 
+/// L1-4 item 2, L1-7 item 2: the progress strip counts every item asked
+/// for re-run, those of a verifier whose script could not be written
+/// (`not_run`, no `RerunRequested`) too, as the round's evidence lists them.
+#[test]
+fn the_rerun_count_holds_the_items_whose_script_could_not_be_written() {
+    use verify::model::types::{EvidenceBody, Isolation, Rerun};
+    let mut session = crate::demo::held();
+    assert_eq!(session.isolation, Isolation::Worktree);
+    let asked: Vec<(PartId, EvidenceKey)> = session
+        .evidence
+        .iter()
+        .filter(|e| matches!(e.body, EvidenceBody::Command { rerun: true, .. }))
+        .filter_map(|e| {
+            e.key
+                .split()
+                .filter(|(_, r, _)| *r == 1)
+                .map(|(p, ..)| (p, e.key.clone()))
+        })
+        .collect();
+    let parts: std::collections::BTreeSet<&PartId> = asked.iter().map(|(p, _)| p).collect();
+    assert!(parts.len() >= 2, "{asked:?}");
+    // One verifier's script was never written: its items end `not_run`.
+    let unwritten = (*parts.iter().next().unwrap()).clone();
+    session.rounds[0].reruns.remove(&unwritten);
+    for e in &mut session.evidence {
+        if asked.iter().any(|(p, k)| *p == unwritten && *k == e.key) {
+            e.rerun = Some(Rerun::NotRun {
+                why: "再実行スクリプトを書けません".into(),
+                log: None,
+            });
+        }
+    }
+    let round = session.rounds[0].clone();
+    assert_eq!(
+        progress::reruns(&session, &round),
+        (asked.len(), asked.len())
+    );
+    // Not yet ended: counted as asked, not done.
+    for e in &mut session.evidence {
+        if asked.iter().any(|(p, k)| *p == unwritten && *k == e.key) {
+            e.rerun = None;
+        }
+    }
+    let unwritten_items = asked.iter().filter(|(p, _)| *p == unwritten).count();
+    assert_eq!(
+        progress::reruns(&session, &round),
+        (asked.len() - unwritten_items, asked.len())
+    );
+}
+
+/// L1-4 item 6, L1-7: an ended verification whose worktree is still
+/// there (its removal failed: locked, say) offers no +1 / +3, which the
+/// engine would refuse until it is removed; once removed, it does.
+#[test]
+fn extending_is_not_offered_while_an_ended_verifications_worktree_is_left() {
+    let mut session = crate::demo::session();
+    assert!(session.closed && session.extendable().is_ok());
+    session
+        .worktrees
+        .get_mut(&PartId::new("codex"))
+        .unwrap()
+        .state = verify::model::types::WorktreeState::Made;
+    let (screen, _link) = live_with(session);
+    let a = acts(&screen);
+    assert!(
+        !a.contains(&Action::Extend(1)) && !a.contains(&Action::Extend(3)),
+        "{a:?}"
+    );
+    let (screen, _link) = live_with(crate::demo::session());
+    let a = acts(&screen);
+    assert!(
+        a.contains(&Action::Extend(1)) && a.contains(&Action::Extend(3)),
+        "{a:?}"
+    );
+}
+
 #[test]
 fn round_controls_and_pane_jumps_reach_the_runner() {
     let (mut screen, link) = live_with(crate::demo::held());
@@ -1538,7 +1614,7 @@ fn the_report_is_saved_alone_or_exported_with_its_evidence() {
 // ---- requirement A: ペインをすべて閉じる ----
 
 #[test]
-fn the_agents_panes_close_together_only_once_the_verification_has_finished() {
+fn ac36_the_agents_panes_close_together_only_once_the_verification_has_finished() {
     // Running: not offered.
     let (screen, _link) = live_with(crate::demo::held());
     assert!(!acts(&screen).contains(&Action::ClosePanes));
@@ -1579,7 +1655,7 @@ fn the_agents_panes_close_together_only_once_the_verification_has_finished() {
 }
 
 #[test]
-fn an_interrupted_stored_verification_is_not_offered_to_close_its_panes() {
+fn ac36_an_interrupted_stored_verification_is_not_offered_to_close_its_panes() {
     let root = temp("panes-interrupted");
     let dir = stored_unfinished(&root);
     let (channel, link) = Channel::fake();
@@ -1598,7 +1674,7 @@ fn an_interrupted_stored_verification_is_not_offered_to_close_its_panes() {
 }
 
 #[test]
-fn a_finished_stored_verification_probes_its_panes_and_closes_them_by_folder() {
+fn ac36_a_finished_stored_verification_probes_its_panes_and_closes_them_by_folder() {
     let root = temp("panes-stored");
     let dir = stored_demo(&root);
     let (channel, link) = Channel::fake();
@@ -1659,6 +1735,36 @@ fn row<'a>(screen: &'a Verify, id: &str) -> &'a criteria::Row {
         .iter()
         .find(|r| r.id == id)
         .unwrap_or_else(|| panic!("no row for {id}"))
+}
+
+/// AC-5, AC-6, L1-2: the only criterion left, though its source could be
+/// removed, offers no 削除 (the engine keeps at least one), and says why.
+#[test]
+fn ac06_the_last_criterion_cannot_be_removed_and_its_button_says_why() {
+    use noa_gpui_core::Widget as _;
+    let tooltip = |screen: &Verify, id: &str| {
+        let remove = widget_for(screen, &Action::RemoveCriterion(id.into())).unwrap();
+        let text = screen
+            .tree
+            .get::<noa_gpui_core::widgets::Button>(remove)
+            .and_then(|b| b.tooltip(noa_gpui_scene::Point::default()));
+        (screen.tree.is_enabled(remove), text.unwrap_or_default())
+    };
+    let mut session = crate::demo::criteria_held();
+    session.criteria.retain(|c| c.id == "AC-3");
+    let (screen, _link) = live_with(session);
+    let (enabled, text) = tooltip(&screen, "AC-3");
+    assert!(!enabled, "{text}");
+    assert!(text.contains("1件以上"), "{text}");
+    // With another criterion beside it, it goes.
+    let mut session = crate::demo::criteria_held();
+    session
+        .criteria
+        .retain(|c| c.id == "AC-3" || c.id == "AC-1");
+    let (screen, _link) = live_with(session);
+    let (enabled, text) = tooltip(&screen, "AC-3");
+    assert!(enabled, "{text}");
+    assert_eq!(text, "この基準を外します");
 }
 
 #[test]

@@ -8,7 +8,9 @@ use noa_gpui_core::style::{
 use noa_gpui_core::widgets::{Container, ControlSize, Label, ProgressBar, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
-use verify::model::types::{Brief, BriefKind, Millis, Phase, Receipt, Round, Session};
+use verify::model::types::{
+    Brief, BriefKind, Evidence, EvidenceBody, Isolation, Millis, Phase, Receipt, Round, Session,
+};
 
 use super::{caption, gap, spacer, tag};
 
@@ -99,22 +101,23 @@ fn rounds_done(session: &Session) -> (u32, u32) {
 }
 
 /// The round's re-runs: how many items have an outcome, of how many were
-/// asked for.
+/// asked for (every `rerun: true` command of the round, a verifier's
+/// whose script could not be written among them: it ends `not_run`
+/// without a request). None in 共有 mode, which runs none.
 pub(super) fn reruns(session: &Session, round: &Round) -> (usize, usize) {
-    let keys: Vec<_> = round
-        .reruns
-        .values()
-        .flat_map(|req| req.items.iter().map(|item| &item.key))
-        .collect();
-    let done = keys
+    if session.isolation == Isolation::Shared {
+        return (0, 0);
+    }
+    let asked: Vec<&Evidence> = session
+        .evidence
         .iter()
-        .filter(|key| {
-            session
-                .evidence_item(key)
-                .is_some_and(|e| e.rerun.is_some())
+        .filter(|e| {
+            matches!(e.body, EvidenceBody::Command { rerun: true, .. })
+                && e.key.split().is_some_and(|(_, r, _)| r == round.no)
         })
-        .count();
-    (done, keys.len())
+        .collect();
+    let done = asked.iter().filter(|e| e.rerun.is_some()).count();
+    (done, asked.len())
 }
 
 pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: Millis) {

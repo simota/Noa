@@ -2507,7 +2507,8 @@ fn reserve(
     now: Millis,
 ) -> Result<(SessionId, PathBuf, PathBuf), String> {
     fs::create_dir_all(root).map_err(|e| format!("{} を作れません: {e}", root.display()))?;
-    store::prepare_workdir(workdir).map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
+    // Its ignore line comes after the capture (`new_verification`).
+    store::make_workdir(workdir).map_err(|e| format!("prepare {}: {e}", workdir.display()))?;
     for suffix in 0..ID_TRIES {
         let id = match suffix {
             0 => SessionId::at(now),
@@ -2611,15 +2612,9 @@ fn check_shared_ref(
     if head != want {
         return Err(shared_head_moved(&head, &want));
     }
-    let status = checkout_git(
-        workdir,
-        &[
-            "status",
-            "--porcelain",
-            "--untracked-files=normal",
-            "--ignore-submodules=none",
-        ],
-    )?;
+    // On a copy of the index: the person's is never written (L1-3).
+    let status = verify::capture::worktree_status(workdir)
+        .map_err(|e| format!("git status が失敗しました: {e}"))?;
     if !status.is_empty() {
         return Err(format!(
             "{SHARED_REF_HEAD}。作業ツリーに未コミットの変更があります"
@@ -2633,8 +2628,8 @@ fn check_shared_ref(
 /// own.
 const APPENDED_IGNORE: &[u8] = b"/verify/";
 
-/// A checkout's `.noa/.gitignore` as a start found it, before `reserve`
-/// (`store::prepare_workdir`) may append its ignore line. A start refused
+/// A checkout's `.noa/.gitignore` as a start found it, before
+/// `store::ignore_verify_dir` may append its ignore line. A start refused
 /// after that takes the line away again: a tracked file left changed
 /// would refuse the next 共有 start of a ref as an uncommitted change
 /// (L1-3).
@@ -2737,6 +2732,12 @@ fn new_verification(
     {
         undo();
         return Err(shared_head_moved(&head, &captured.rebuild.head_sha));
+    }
+    // Only now, the target taken: a tracked `.noa/.gitignore` this changes
+    // is the widget's own change, never part of the target (L1-1).
+    if let Err(e) = store::ignore_verify_dir(&workdir) {
+        undo();
+        return Err(format!("prepare {}: {e}", workdir.display()));
     }
     let setup = Setup {
         request: &request,
@@ -3619,7 +3620,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn shared_mode_verifies_a_ref_only_in_a_clean_checkout_at_its_commit() {
+    fn ac38_shared_mode_verifies_a_ref_only_in_a_clean_checkout_at_its_commit() {
         let fake = fake();
         let root = temp_root();
         let repo = repo(&root);
@@ -3658,6 +3659,40 @@ pub(crate) mod tests {
         let (runner, _, _) = open_wired(&fake, start()).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(runner.engine.session().rebuild.head_sha, feat);
         assert_eq!(runner.engine.session().isolation, Isolation::Shared);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// AC-1, L1-3: the 共有 start's check of a clean checkout writes
+    /// nothing to the person's index, though a tracked file's mtime moved
+    /// (git refreshes such an entry's stat information when it can).
+    #[test]
+    fn ac01_the_shared_check_of_a_clean_checkout_leaves_the_index_unwritten() {
+        let root = temp_root();
+        let repo = repo(&root);
+        let file = fs::File::options()
+            .write(true)
+            .open(repo.join("src/lib.rs"))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+            .unwrap();
+        drop(file);
+        let index = fs::read(repo.join(".git/index")).unwrap();
+        let mut target = state_of(&repo);
+        target.head = Head::Ref("HEAD".into());
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            check_shared_ref(&target, Isolation::Shared, &repo).unwrap(),
+            Some(head)
+        );
+        assert!(
+            fs::read(repo.join(".git/index")).unwrap() == index,
+            "the person's index was written"
+        );
+        // The same file changed is still a change.
+        fs::write(repo.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        let err = check_shared_ref(&target, Isolation::Shared, &repo).unwrap_err();
+        assert!(err.contains("未コミットの変更"), "{err}");
+        assert!(fs::read(repo.join(".git/index")).unwrap() == index);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3753,12 +3788,12 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    /// AC-12 end to end: a re-run script nobody starts. Its brief goes out,
+    /// AC-39 (AC-12 end to end): a re-run script nobody starts. Its brief goes out,
     /// is sent again at each start timeout until the retries run out, then
     /// every item ends `not_run` ("re-run did not start") and the round
     /// goes on to the judge.
     #[test]
-    fn ac12_a_script_that_never_writes_a_pid_ends_every_item_not_run_after_its_retries() {
+    fn ac39_a_script_that_never_writes_a_pid_ends_every_item_not_run_after_its_retries() {
         let fake = fake();
         let root = temp_root();
         let (mut runner, _actions, _updates) = rig(&fake, &root, false);
@@ -3820,6 +3855,198 @@ pub(crate) mod tests {
         assert_eq!(rerun_pastes(&fake, claude), 1 + CONFIG.max_retries as usize);
         assert_eq!(s.round(1).unwrap().phase, Phase::Ruling);
         assert_eq!(fake.pasted(judge), 2, "the judge's ruling brief");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// AC-12 through the runner's own conversion (`finish_rerun`): a
+    /// `run.sh` changed before it ran, a `.cmd` changed before it ran, and a
+    /// `done` holding another nonce each end the item `not_run`, naming the
+    /// file, whatever the script did; the round goes on to the judge.
+    #[test]
+    fn ac12_a_changed_script_or_cmd_or_another_nonce_ends_the_item_not_run_through_the_runner() {
+        for changed in [rerun::SCRIPT_FILE, "1.cmd", rerun::DONE_FILE] {
+            let fake = fake();
+            let root = temp_root();
+            let (mut runner, _actions, _updates) = rig(&fake, &root, false);
+            let mut conn = fake.clone();
+            round_one_briefed(&fake, &mut runner, &mut conn);
+            replied(&fake, &mut runner, &mut conn);
+            step(&mut runner, &mut conn);
+            assert_eq!(rerun_pastes(&fake, fake.pane_of(":claude")), 1);
+            let s = runner.engine.session().clone();
+            let part = PartId::new("claude");
+            let dir = store::rerun_dir(&store::verifier_reply_dir(&s, &part), 1, &part);
+            match changed {
+                rerun::SCRIPT_FILE => {
+                    let script = fs::read_to_string(dir.join(rerun::SCRIPT_FILE)).unwrap();
+                    fs::write(dir.join(rerun::SCRIPT_FILE), format!("{script}:\n")).unwrap();
+                    run_rerun_script(&runner, "claude");
+                }
+                // Reported `exit 0`: run as changed, it would be `differed`.
+                "1.cmd" => {
+                    fs::write(dir.join("1.cmd"), "exit 1").unwrap();
+                    run_rerun_script(&runner, "claude");
+                }
+                _ => {
+                    fs::write(dir.join(rerun::DONE_FILE), format!("{}\n", "0".repeat(32))).unwrap()
+                }
+            }
+            for _ in 0..3 {
+                fake.advance(1_000);
+                step(&mut runner, &mut conn);
+            }
+            match &rerun_outcomes(&runner, "claude")[..] {
+                [Some(Rerun::NotRun { why, .. })] => assert!(
+                    why.starts_with(rerun::SCRIPT_CHANGED) && why.contains(changed),
+                    "{changed}: {why}"
+                ),
+                other => panic!("{changed}: {other:?}"),
+            }
+            assert_eq!(
+                runner.engine.session().round(1).unwrap().phase,
+                Phase::Ruling,
+                "{changed}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    /// AC-10 through the runner: a command reported with one exit status
+    /// that exits with another when run again is `differed`, and both
+    /// statuses stay on its item, the reported one on its evidence and the
+    /// re-run's on its outcome, side by side for the judge and the report.
+    #[test]
+    fn ac10_a_rerun_that_exits_otherwise_is_differed_with_both_statuses_on_its_item() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, _actions, _updates) = rig(&fake, &root, false);
+        let mut conn = fake.clone();
+        round_one_briefed(&fake, &mut runner, &mut conn);
+        // e1 reported 5 and exits 3; e2 reported 3 and exits 3.
+        let reply = passing(true)
+            .replace(
+                r#""cmd": "exit 0", "cwd": ".", "exit": 0"#,
+                r#""cmd": "exit 3", "cwd": ".", "exit": 5"#,
+            )
+            .replace(r#""evidence": ["e1"]"#, r#""evidence": ["e1", "e2"]"#)
+            .replace(
+                "}]}",
+                r#"}, {"id": "e2", "kind": "command", "cmd": "exit 3", "cwd": ".", "exit": 3, "log": "logs/1.log", "rerun": true}]}"#,
+            );
+        assert!(reply.contains(r#""exit": 5"#) && reply.contains(r#""id": "e2""#));
+        verifier_reply(&runner, "claude", &reply);
+        verifier_reply(&runner, "codex", &passing(false));
+        settle(&fake, &mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        run_rerun_script(&runner, "claude");
+        for _ in 0..3 {
+            fake.advance(1_000);
+            step(&mut runner, &mut conn);
+        }
+        let s = runner.engine.session();
+        let key = EvidenceKey::reported(&PartId::new("claude"), 1, "e1");
+        let item = s.evidence_item(&key).unwrap();
+        assert!(
+            matches!(item.body, EvidenceBody::Command { exit: 5, .. }),
+            "{:?}",
+            item.body
+        );
+        assert!(
+            matches!(
+                item.rerun,
+                Some(Rerun::Differed {
+                    exit: Some(3),
+                    log: Some(_)
+                })
+            ),
+            "{:?}",
+            item.rerun
+        );
+        let same = EvidenceKey::reported(&PartId::new("claude"), 1, "e2");
+        let same = s.evidence_item(&same).unwrap();
+        assert!(
+            matches!(same.rerun, Some(Rerun::Matched { exit: 3, .. })),
+            "{:?}",
+            same.rerun
+        );
+        assert_eq!(s.round(1).unwrap().phase, Phase::Ruling);
+        let judge = fake.pane_of(":judge");
+        let brief = fake.pastes(judge).last().cloned().unwrap();
+        assert!(
+            brief.contains("exit 5; re-run differed (exit 3)"),
+            "{brief}"
+        );
+        let report = verify::model::export::report_markdown(s, None);
+        assert!(
+            report.contains(
+                "`claude/r1/e1` コマンド `exit 3`（.） · 終了コード 5 · 再実行 不一致（3）"
+            ),
+            "{report}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Every file below `dir`, relative to it.
+    fn files_below(dir: &Path) -> BTreeSet<PathBuf> {
+        let mut out = BTreeSet::new();
+        let mut todo = vec![dir.to_owned()];
+        while let Some(at) = todo.pop() {
+            for entry in fs::read_dir(&at).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    todo.push(path);
+                } else {
+                    out.insert(path.strip_prefix(dir).unwrap().to_owned());
+                }
+            }
+        }
+        out
+    }
+
+    /// AC-9: what ingest copies, the verifiers' logs and the re-run's, goes
+    /// to the judge's reply dir; nothing is under the data dir but
+    /// `events.jsonl` and, once written, `report.md`.
+    #[test]
+    fn ac09_nothing_is_under_the_data_dir_but_its_log_and_its_report() {
+        let only = |files: BTreeSet<PathBuf>| {
+            let allowed = [store::EVENTS_FILE, store::REPORT_FILE].map(PathBuf::from);
+            assert!(files.contains(Path::new(store::EVENTS_FILE)), "{files:?}");
+            assert!(files.iter().all(|f| allowed.contains(f)), "{files:?}");
+            files
+        };
+        // Ingested, with a re-run's log taken in.
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, _actions, _updates) = rig(&fake, &root, false);
+        let mut conn = fake.clone();
+        round_one_briefed(&fake, &mut runner, &mut conn);
+        replied(&fake, &mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        run_rerun_script(&runner, "claude");
+        for _ in 0..3 {
+            fake.advance(1_000);
+            step(&mut runner, &mut conn);
+        }
+        let Some(Rerun::Matched { log: Some(log), .. }) = &rerun_outcomes(&runner, "claude")[0]
+        else {
+            panic!("{:?}", rerun_outcomes(&runner, "claude"));
+        };
+        let reply_dir = runner.engine.reply_dir();
+        assert!(reply_dir.join(&log.path).is_file());
+        let codex = EvidenceKey::reported(&PartId::new("codex"), 1, "e1");
+        let stored = runner.engine.session().evidence_item(&codex).unwrap();
+        assert!(
+            reply_dir
+                .join(&stored.stored.as_ref().unwrap().path)
+                .is_file()
+        );
+        only(files_below(runner.engine.dir()));
+        let _ = fs::remove_dir_all(root);
+        // To a verdict, its report written.
+        let root = temp_root();
+        let dir = finished_with_a_failure(&root);
+        let files = only(files_below(&dir));
+        assert!(files.contains(Path::new(store::REPORT_FILE)), "{files:?}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3926,6 +4153,32 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// AC-19, L1-3: a worktree moved away while stopped, a plain folder
+    /// made at its path: git still lists it there (`prunable`), and the
+    /// resume is refused rather than starting a verifier in that folder.
+    #[test]
+    fn ac19_a_resume_refuses_a_plain_folder_left_where_a_worktree_was_moved_from() {
+        let fake = fake();
+        let root = temp_root();
+        let dir = stopped_after_round_one_briefs(&fake, &root);
+        let s = store::read_session(&dir).unwrap();
+        let tree = s.worktrees[&PartId::new("claude")].path.clone();
+        fs::rename(&tree, root.join("moved-away")).unwrap();
+        fs::create_dir_all(tree.join("src")).unwrap();
+        fs::write(tree.join("src/lib.rs"), "pub fn one() -> u32 { 1 }\n").unwrap();
+        let err = open_wired(&fake, Start::Resume { dir: dir.clone() })
+            .err()
+            .unwrap();
+        assert!(err.contains("再開できません"), "{err}");
+        assert!(err.contains("claude"), "{err}");
+        assert!(err.contains(&tree.display().to_string()), "{err}");
+        assert!(
+            !tree.join(".git").exists(),
+            "a verifier's worktree was made there"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn ac19_a_resume_refuses_a_worktree_that_is_not_detached_at_the_head() {
         let fake = fake();
@@ -4020,7 +4273,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_agents_panes_close_together_once_the_verification_has_ended() {
+    fn ac36_the_agents_panes_close_together_once_the_verification_has_ended() {
         let fake = fake();
         let root = temp_root();
         let (mut runner, actions, updates) = rig(&fake, &root, false);
@@ -4092,7 +4345,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_stored_verification_closes_only_its_own_panes_and_only_once_it_has_ended() {
+    fn ac36_a_stored_verification_closes_only_its_own_panes_and_only_once_it_has_ended() {
         let fake = fake();
         let root = temp_root();
         let (mut runner, actions, _updates) = rig(&fake, &root, false);
@@ -5622,6 +5875,50 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// AC-2, L1-1: the ignore line a start adds to a tracked
+    /// `.noa/.gitignore` is the widget's own change, never part of the
+    /// target: a clean checkout is still an empty diff (refused, the line
+    /// taken away), and a real change is captured without it.
+    #[test]
+    fn ac02_the_ignore_line_a_start_adds_is_never_part_of_the_target() {
+        let fake = fake();
+        let root = temp_root();
+        let repo = repo(&root);
+        fs::create_dir_all(repo.join(".noa")).unwrap();
+        fs::write(repo.join(".noa/.gitignore"), "logs/\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "noa"]);
+        let mut target = state_of(&repo);
+        target.kind = TargetKind::Diff;
+        target.base = Some("HEAD".into());
+        target.head = Head::Worktree;
+        let start = |target: &Target| new_start(&root, target.clone(), Isolation::Worktree, true);
+        let err = open_wired(&fake, start(&target)).err().unwrap();
+        assert!(err.contains("差分がありません"), "{err}");
+        assert_eq!(
+            fs::read_to_string(repo.join(".noa/.gitignore")).unwrap(),
+            "logs/\n"
+        );
+        assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+        nothing_left(&root, &repo);
+
+        fs::write(repo.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        let (runner, _, _) = open_wired(&fake, start(&target)).unwrap_or_else(|e| panic!("{e}"));
+        let s = runner.engine.session();
+        let files: Vec<&str> = s.manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(files, ["src/lib.rs"]);
+        let target_dir = store::target_dir(&runner.engine.reply_dir());
+        let patch = fs::read_to_string(target_dir.join("worktree.patch")).unwrap_or_default()
+            + &fs::read_to_string(target_dir.join("diff.patch")).unwrap_or_default();
+        assert!(!patch.contains(".noa/"), "{patch}");
+        assert_eq!(
+            fs::read_to_string(repo.join(".noa/.gitignore")).unwrap(),
+            "logs/\n/verify/\n",
+            "the start ignores its folder"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_shared_start_refused_after_its_reservation_takes_its_ignore_line_away() {
         let fake = fake();
@@ -5635,11 +5932,18 @@ pub(crate) mod tests {
         git(&repo, &["commit", "-q", "-m", "noa"]);
         let mut target = state_of(&repo);
         target.head = Head::Ref("main".into());
-        target.spec = Some("docs/missing.md".into());
-        let start = |target: &Target| new_start(&root, target.clone(), Isolation::Shared, true);
-        // The capture refuses the spec file the reservation was made for.
-        let err = open_wired(&fake, start(&target)).err().unwrap();
-        assert!(err.contains("docs/missing.md"), "{err}");
+        let start = |max_rounds: RoundNo| {
+            let mut start = new_start(&root, target.clone(), Isolation::Shared, true);
+            let Start::New(new) = &mut start else {
+                unreachable!()
+            };
+            new.max_rounds = max_rounds;
+            start
+        };
+        // The target is captured and the ignore line appended; only then
+        // is the setup refused, for a round limit out of range.
+        let err = open_wired(&fake, start(0)).err().unwrap();
+        assert!(err.contains("ラウンド上限"), "{err}");
         assert_eq!(
             fs::read_to_string(repo.join(".noa/.gitignore")).unwrap(),
             "notes/\n"
@@ -5647,8 +5951,7 @@ pub(crate) mod tests {
         assert_eq!(git(&repo, &["status", "--porcelain"]), "");
         nothing_left(&root, &repo);
         // Corrected, the same start goes.
-        target.spec = None;
-        let (runner, _, _) = open_wired(&fake, start(&target)).unwrap_or_else(|e| panic!("{e}"));
+        let (runner, _, _) = open_wired(&fake, start(2)).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             runner.engine.session().rebuild.head_sha,
             git(&repo, &["rev-parse", "HEAD"])

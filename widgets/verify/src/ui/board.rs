@@ -275,7 +275,9 @@ impl Verify {
                 );
             }
         }
-        if session.extendable().is_ok()
+        // As the engine takes +N: not while an ended verification's
+        // worktree is still there (its removal failed).
+        if session.extendable_now().is_ok()
             && (!self.read_only || (session.closed && stored_free && noa))
         {
             caption(

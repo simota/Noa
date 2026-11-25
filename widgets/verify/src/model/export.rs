@@ -1353,6 +1353,41 @@ mod tests {
         );
     }
 
+    /// AC-20 (L1-8 item 6): a re-run that timed out is listed first in the
+    /// evidence list, ahead of items that come before it in the log; the
+    /// rest keep their order.
+    #[test]
+    fn ac20_a_timed_out_rerun_is_listed_first_in_the_evidence_list() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        for part in VERIFIERS {
+            rig.reply(part, &all_pass());
+        }
+        rig.ingest();
+        rig.rerun("claude", |_, exit| Rerun::Matched { exit, log: None });
+        rig.rerun("codex", |_, exit| Rerun::Matched { exit, log: None });
+        rig.rerun("claude-2", |_, _| Rerun::TimedOut { log: None });
+        let report = report_markdown(rig.engine.session(), None);
+        let listed: Vec<&str> = evidence_section(&report)
+            .lines()
+            .filter_map(|l| l.strip_prefix("- `"))
+            .map(|l| &l[..l.find('`').unwrap()])
+            .collect();
+        assert_eq!(
+            listed,
+            ["claude-2/r1/e1", "claude/r1/e1", "codex/r1/e1"],
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "- `claude-2/r1/e1` コマンド `cargo test e1`（.） · 終了コード 0 · 再実行 時間切れ"
+            ),
+            "{report}"
+        );
+    }
+
     #[test]
     fn a_command_of_several_lines_is_shown_whole_to_the_judge_and_in_the_report() {
         let mut rig = Rig::new(2);

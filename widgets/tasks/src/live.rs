@@ -881,6 +881,23 @@ impl<C: Connect> Worker<C> {
                 self.results.insert(run.run.clone(), (fact, report));
             }
         }
+        self.note_here_live(now);
+    }
+
+    /// Notes the この作業ツリー runs live now, at every look and not only at
+    /// the change poll, so one that ends between two polls still gets its
+    /// last head read once (L1-3).
+    fn note_here_live(&mut self, now: Millis) {
+        let live: Vec<RunId> = self
+            .views(now)
+            .into_iter()
+            .filter(|view| {
+                view.run.branch.is_none()
+                    && matches!(view.liveness, Liveness::Starting | Liveness::Alive { .. })
+            })
+            .map(|view| view.run.run)
+            .collect();
+        self.here_live.extend(live);
     }
 
     /// `noa.listPanels`; a failure keeps the panes last seen, so a lost
@@ -2637,6 +2654,26 @@ mod tests {
         rig.feed.act(Intent::Refresh);
         rig.settle();
         assert_eq!(rig.seen().len(), 2, "not after that");
+    }
+
+    /// AC-3 (Tasks): an この作業ツリー run that commits and ends before any
+    /// change poll saw it live still gets its last head once it is gone.
+    #[test]
+    fn links_ac3_a_here_run_ended_before_a_change_poll_is_recorded_once() {
+        let mut rig = rig("links-ac3-here-short", |repo, _, _| {
+            write_task(repo, "t-1", "one")
+        });
+        let run = run_t1(&mut rig, Isolation::Here);
+        let c1 = commit_in(&rig.repo, "one");
+        rig.feed.act(Intent::ClosePane(run.run.clone()));
+        rig.until("closed", |v| v.runs.iter().all(|r| r.run.closed.is_some()));
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen(), [(run.run.to_string(), c1)]);
+        commit_in(&rig.repo, "two");
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen().len(), 1, "not after that");
     }
 
     /// A run started before the link log (a `RunStarted`, no `ChangeBase`):

@@ -17,8 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use review::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
 use review::model::export;
 use review::model::types::{
-    AgentChoice, AgentKind, AgentSetup, Head, Millis, PartId, Phase, ReviewerChoice, RoundNo,
-    Session, SessionId, Target, TargetKind,
+    AgentChoice, AgentKind, AgentSetup, Millis, PartId, Phase, ReviewerChoice, RoundNo, Session,
+    SessionId, Target, TargetKind,
 };
 use review::store::{self, Store};
 use review::task_links::{self, LinkEvent, Origin, SessionKind};
@@ -1598,30 +1598,7 @@ fn session_origin(
     let Some(matched) = task_links::match_run(root, &target) else {
         return Ok(None);
     };
-    let uncommitted = if session.target.head == Head::Worktree {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&target.toplevel)
-            .args([
-                "status",
-                "--porcelain",
-                "-z",
-                "--untracked-files=normal",
-                "--",
-            ])
-            .args(&session.target.paths)
-            .output()
-            .map_err(|error| format!("git status: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "git status: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        !output.stdout.is_empty()
-    } else {
-        false
-    };
+    let uncommitted = manifest.uncommitted;
     let log = task_links::links_log(&matched.run.key_dir);
     let events = task_links::read(&log).map_err(|error| format!("{}: {error}", log.display()))?;
     let tasks_repo = events.into_iter().rev().find_map(|event| match event {
@@ -1649,7 +1626,7 @@ fn session_origin(
 mod tests {
     use super::super::ipc::BOARD_CAPACITY;
     use super::*;
-    use review::model::types::{BuiltinLens, LensChoice};
+    use review::model::types::{BuiltinLens, Head, LensChoice};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1838,6 +1815,30 @@ mod tests {
                     "{links:?}"
                 );
             }
+        }
+
+        /// A snapshot taken with uncommitted changes stays "+未コミット" when
+        /// the run commits them before the session is linked.
+        #[test]
+        fn links_ac3_dirty_snapshot_stays_uncommitted_when_committed_before_linking() {
+            let fixture = LinkFixture::new();
+            fs::write(fixture.worktree.join("a.txt"), "more\n").unwrap();
+            let fake = fake();
+            let start = fixture.start(&fixture.worktree, Head::Worktree, &[]);
+            let (runner, _, _) = open_wired_at(&fake, start, None).unwrap();
+            let session = runner.engine.session().clone();
+            git(&fixture.worktree, &["commit", "-qam", "commit D"]);
+            let origin = session_origin(&fixture.tasks_root, &session, false, 9)
+                .unwrap()
+                .expect("the run matches");
+            assert_eq!(origin.run, "run-5");
+            let events = fixture.events();
+            assert!(
+                matches!(events.last(), Some(LinkEvent::SessionLinked {
+                    commit: Some(commit), uncommitted: true, ..
+                }) if commit == &fixture.sha),
+                "{events:?}"
+            );
         }
 
         #[test]

@@ -74,10 +74,10 @@ Review and Verify read `runs.jsonl` too, but only its `RunStarted` lines and onl
 - A run's base: on start, Tasks appends `ChangeBase { run, commit }` with `git -C <workdir> rev-parse HEAD` of the run's work tree (the new worktree is made from `HEAD`, `widgets/tasks/src/worktree.rs:83-100`; a この作業ツリー run's work tree is the repository).
 - Change poll, on the live feed's worker, on start, every `CHANGE_POLL_MS = 10_000` and on 再取得:
   - Runs with a branch (新しい worktree): one `git -C <repo> for-each-ref --format=%(refname:lstrip=2)%00%(objectname) refs/heads/task-run-*` (branch names are `task-<run-id>`, `worktree::branch_for`, `widgets/tasks/src/worktree.rs:78`). The branch ref lives in the repository, not in the worktree, so it is still read after the worktree is removed; a deleted branch stops new versions and keeps the recorded ones.
-  - Runs without a branch (この作業ツリー): `git -C <workdir> rev-parse HEAD` while the run is `Starting` or `Alive`, and once more after it turns `Gone`.
+  - Runs without a branch (この作業ツリー): `git -C <workdir> rev-parse HEAD` while the run is `Starting` or `Alive`, and once more after it turns `Gone`. "Live" is noted at every look of the worker (2 s), not only at the change poll, so a run that commits and ends between two polls still gets its last head; a run this worker never saw live (it ended while no Tasks window was open) gets no last read, since its end time is not known.
   - A head that differs from the run's last recorded commit (its `ChangeSeen`, else its `ChangeBase`) is appended as `ChangeSeen { run, commit }`.
-- Version (L2-3 gives the exact fold): the versions of a task are the distinct commits the link log names for the task's runs (`ChangeSeen`, and the `commit` of a `SessionLinked`, so whatever a review or verification targeted is always a version), excluding each run's base, numbered v1, v2, … in the order of their first line in the log. The current version is the last one. Versions span all runs of a task (a retry run's first commit after v2 is v3).
-- A version is a commit, not a snapshot of uncommitted files. A session that checked uncommitted changes on top of commit C is shown as "on vC + 未コミット" and does not count as checking vC (L1-5).
+- Version (L2-3 gives the exact fold): the versions of a task are the distinct commits the link log names for the task's runs (`ChangeSeen`, and the `commit` of a `SessionLinked`, so whatever a review or verification targeted is always a version), excluding each run's base, numbered v1, v2, … in the order of their first line in the log. The current version is the one the head was last seen on: the last `ChangeSeen` of the task's runs, or a version a `SessionLinked` names first; a head seen back on a version keeps its number and makes it current again, and a head back on the run's base leaves no current version. Versions span all runs of a task (a retry run's first commit after v2 is v3).
+- A version is a commit, not a snapshot of uncommitted files. A session that checked uncommitted changes on top of commit C is shown as "on vC + 未コミット" and does not count as checking vC (L1-5). Whether it did is read with its snapshot (Review: `uncommitted` in its manifest, from `git status` before a last look at HEAD; Verify: its captured patch and untracked files), never later, when the run may have committed them.
 
 ### L1-4. Linking Review and Verify sessions
 
@@ -138,7 +138,7 @@ In the Tasks detail pane (`widgets/tasks/src/ui/detail.rs`), after the task's bu
 ```
 
 - Each row starts with a `Tag` naming its kind: 実行 / 変更 / レビュー / 検証 / PR. Order: kinds as above; inside a kind newest first (versions: current first); a 未登録 row last in its kind.
-- Rows: 実行 = run id, agent, the run's liveness word (detail.rs's `liveness`); 変更 = one line per version, `vN` (`（現在）` on the last), short SHA (7), the run's branch or `この作業ツリー`; レビュー / 検証 = session id, version text (L1-5), outcome label; PR = `#N` when the URL has one, and the URL.
+- Rows: 実行 = run id, agent, the run's liveness word (detail.rs's `liveness`); 変更 = one line per version, `vN` (`（現在）` on the current one), short SHA (7), the run's branch or `この作業ツリー`; レビュー / 検証 = session id, version text (L1-5), outcome label; PR = `#N` when the URL has one, and the URL.
 - Empty: 「まだ関連する成果はありません」 and the 関連を追加 button.
 - Keys: `a` opens 関連を追加 for the selected task (a key no layout uses today, `widgets/tasks/src/ui/mod.rs:669-790`). The row buttons are ordinary detail buttons (`detail::insert` returns them with their `Intent`, as today).
 
@@ -308,7 +308,8 @@ pub struct Checked { pub kind: SessionKind, pub session: String, pub run: RunId,
 pub struct PrLink { pub id: String, pub url: String, pub number: Option<u64>, pub at: Millis }
 #[derive(Default)]
 pub struct Related { pub runs: Vec<RunId>, pub versions: Vec<Version>, pub reviews: Vec<Checked>,
-                     pub verifications: Vec<Checked>, pub prs: Vec<PrLink> }
+                     pub verifications: Vec<Checked>, pub prs: Vec<PrLink>,
+                     pub head: Option<u32> }   // the version the head is on (L2-3)
 impl Related {
     pub fn current(&self) -> Option<&Version>;
     pub fn registered(&self, kind: SessionKind) -> bool;   // L1-5
@@ -329,8 +330,8 @@ All are `Debug, Clone, PartialEq, Eq` (`Serialize, Deserialize` on the `task_lin
 2. Runs from `runs.jsonl` grouped by task, newest first.
 3. Walk the link log in file order; a `TaskKey` that does not deserialize into a `TaskRef`, or a run id not in `runs.jsonl`, skips the line:
    - `ChangeBase { run, commit }`: the run's base (first one wins).
-   - `ChangeSeen { run, commit }`: for the run's task, if `commit` is not the run's base and not already a version of the task, push `Version { no: len + 1, commit, run }`.
-   - `SessionLinked` not in Removed, first per `(kind, session)`: if `commit` is set, not the run's base and not yet a version of `task`, push it as a version (as above); then push a `Checked` with `TargetVersion` per L1-5 and `Outcome::Running`.
+   - `ChangeSeen { run, commit }`: for the run's task, if `commit` is not the run's base and not already a version of the task, push `Version { no: len + 1, commit, run }`; the task's `head` becomes that version's number (`None` when `commit` is the base).
+   - `SessionLinked` not in Removed, first per `(kind, session)`: if `commit` is set, not the run's base and not yet a version of `task`, push it as a version (as above) and make it the `head`; then push a `Checked` with `TargetVersion` per L1-5 and `Outcome::Running`.
    - `SessionOutcome` of a linked, not removed session: `decision` set → `Decided(name)`; else `closed` → `EndedWithout`; else `Running` (the last line wins).
    - `PrLinked` not in Removed: push a `PrLink` (`number` parsed from `/pull/<N>`).
 4. `registered(kind)`: some `Checked` of that kind has `TargetVersion::Version { no: current, uncommitted: false }`.

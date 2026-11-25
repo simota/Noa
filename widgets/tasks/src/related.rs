@@ -67,12 +67,16 @@ pub struct Related {
     pub reviews: Vec<Checked>,
     pub verifications: Vec<Checked>,
     pub prs: Vec<PrLink>,
+    /// The number of the version the head is on: the last `ChangeSeen`,
+    /// or a version a session named first (`None` on the base).
+    pub head: Option<u32>,
 }
 
 impl Related {
-    /// The current version: the last one.
+    /// The current version: the one the head was last seen on.
     pub fn current(&self) -> Option<&Version> {
-        self.versions.last()
+        let no = self.head?;
+        self.versions.iter().find(|v| v.no == no)
     }
 
     /// Whether some session of `kind` checked the current version itself
@@ -184,12 +188,12 @@ pub fn fold(runs: &[Run], events: &[LinkEvent]) -> BTreeMap<TaskRef, Related> {
                 let Some(found) = by_id.get(run.as_str()) else {
                     continue;
                 };
-                if bases.get(run.as_str()) == Some(&commit.as_str()) {
-                    continue;
-                }
-                out.entry(found.task.clone())
-                    .or_default()
-                    .version_of(commit, &found.run, *at);
+                let related = out.entry(found.task.clone()).or_default();
+                related.head = if bases.get(run.as_str()) == Some(&commit.as_str()) {
+                    None
+                } else {
+                    Some(related.version_of(commit, &found.run, *at))
+                };
             }
             LinkEvent::SessionLinked {
                 kind,
@@ -219,10 +223,14 @@ pub fn fold(runs: &[Run], events: &[LinkEvent]) -> BTreeMap<TaskRef, Related> {
                     Some(c) if bases.get(run.as_str()) == Some(&c) => {
                         TargetVersion::Base { uncommitted }
                     }
-                    Some(c) => TargetVersion::Version {
-                        no: related.version_of(c, &found.run, *at),
-                        uncommitted,
-                    },
+                    Some(c) => {
+                        let known = related.versions.len();
+                        let no = related.version_of(c, &found.run, *at);
+                        if related.versions.len() > known {
+                            related.head = Some(no);
+                        }
+                        TargetVersion::Version { no, uncommitted }
+                    }
                 };
                 if removed.contains(&(task.clone(), session.as_str())) {
                     continue;
@@ -628,6 +636,61 @@ mod tests {
             outcome_label(SessionKind::Verify, &r.verifications[0].outcome),
             "合格"
         );
+    }
+
+    #[test]
+    fn links_ac4_head_back_on_an_earlier_version_is_current() {
+        let t = local("t-1");
+        let runs = vec![run("run-5", &t, 1, true)];
+        let mut events = vec![
+            base("run-5", &sha('0'), 2),
+            seen("run-5", &sha('1'), 3),
+            seen("run-5", &sha('2'), 4),
+            // `git reset --hard` back to v1, then a verification of it.
+            seen("run-5", &sha('1'), 5),
+            linked(
+                SessionKind::Verify,
+                "ver-1",
+                &t,
+                "run-5",
+                Some(&sha('1')),
+                false,
+                6,
+            ),
+            linked(
+                SessionKind::Review,
+                "rev-1",
+                &t,
+                "run-5",
+                Some(&sha('2')),
+                false,
+                7,
+            ),
+        ];
+        let r = &fold(&runs, &events)[&t];
+        assert_eq!(r.versions.len(), 2, "no version renumbered");
+        assert_eq!(r.current().map(|v| v.no), Some(1));
+        assert!(r.registered(SessionKind::Verify));
+        assert!(
+            !r.registered(SessionKind::Review),
+            "v2 is no longer current"
+        );
+        // Back on the base: no version is current, nothing is 未登録.
+        events.push(seen("run-5", &sha('0'), 8));
+        let r = &fold(&runs, &events)[&t];
+        assert_eq!(r.current(), None);
+        // A session naming a commit no poll saw yet: that is the new head.
+        events.push(linked(
+            SessionKind::Review,
+            "rev-2",
+            &t,
+            "run-5",
+            Some(&sha('3')),
+            false,
+            9,
+        ));
+        let r = &fold(&runs, &events)[&t];
+        assert_eq!(r.current().map(|v| v.no), Some(3));
     }
 
     #[test]

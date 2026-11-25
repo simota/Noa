@@ -46,6 +46,7 @@ pub fn manifest() -> TargetManifest {
         }],
         diff_bytes: 900,
         diff_digest: Some(9),
+        uncommitted: false,
         captured_at: 1,
     }
 }

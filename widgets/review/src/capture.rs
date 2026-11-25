@@ -679,6 +679,12 @@ fn capture_git(
     if target.head == Head::Worktree && diff_view(&repo, target, &range)? != view {
         return Ok(None);
     }
+    // Whether the snapshot holds changes not in `head_sha`, read before a
+    // last look at HEAD: a commit since `head_sha` was read takes it again.
+    let uncommitted = target.head == Head::Worktree && dirty(&repo, &target.paths)?;
+    if target.head == Head::Worktree && commit_of(&repo, "HEAD").as_ref() != Some(&head_sha) {
+        return Ok(None);
+    }
 
     let head_label = match &target.head {
         Head::Worktree => {
@@ -702,8 +708,32 @@ fn capture_git(
         omitted: collector.omitted,
         diff_bytes: view.patch.len() as u64,
         diff_digest: Some(digest_bytes(&view.patch)),
+        uncommitted,
         captured_at: now,
     }))
+}
+
+/// Whether the work tree has changes or untracked files under `paths`
+/// (all of it when empty) that are not in HEAD.
+fn dirty(repo: &Path, paths: &[String]) -> Result<bool, String> {
+    let output = git(repo)
+        .args([
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=normal",
+            "--",
+        ])
+        .args(paths)
+        .output()
+        .map_err(|e| format!("git status: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git status: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 /// Skipped by a walk outside git: hidden entries, build and package dirs.

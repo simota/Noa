@@ -10,8 +10,9 @@
 //! Keys, while no text field has focus: `v` next layout, `h`/`l` column
 //! (the board), `j`/`k` card or row (and the arrows), `[`/`]` month (the
 //! calendar), `Enter` detail, `n` 新規, `x` 実行, `d` 完了にする /
-//! 再開 (local tasks), `r` 再取得, `/` filter, `o` GitHub で開く, Escape
-//! closes the form, leaves the filter or closes the detail. While a menu
+//! 再開 (local tasks), `r` 再取得, `/` filter, `o` GitHub で開く, `a`
+//! 関連を追加, Escape closes the form, leaves the filter or closes the
+//! detail. While a menu
 //! (or another overlay) has focus, every key is the menu's.
 
 pub mod columns;
@@ -21,7 +22,7 @@ pub mod forms;
 pub mod style;
 pub mod views;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use noa_gpui_core::style::{FlexDirection, Rect as LayoutRect, length};
@@ -41,6 +42,8 @@ use tasks::model::types::{
     AgentKind, Column, DONE_DAYS, GitHubView, Isolation, Millis, RunId, RunView, Source, State,
     Task, TaskRef,
 };
+use tasks::related::Related;
+use tasks::task_links::SessionKind;
 
 use columns::Card;
 use forms::{Form, FormOutcome};
@@ -92,6 +95,21 @@ pub enum Intent {
     OpenUrl(String),
     Refresh,
     LoadDetail(u64),
+    /// A linked Review or Verify session, in its own window.
+    OpenSession {
+        kind: SessionKind,
+        session: String,
+    },
+    /// 関連を追加: what the person typed (a PR's URL or number).
+    AddLink {
+        task: TaskRef,
+        input: String,
+    },
+    /// 外す: a PR link's id or a session's.
+    RemoveLink {
+        task: TaskRef,
+        id: String,
+    },
 }
 
 /// Where the screen's data comes from.
@@ -100,6 +118,11 @@ pub trait Feed {
     fn poll(&mut self) -> Option<View>;
     /// Outcomes come back as View.notice.
     fn act(&mut self, intent: Intent);
+    /// Each task's 関連成果, as of the last View `poll` gave (a feed that
+    /// links nothing has none).
+    fn related(&self) -> Option<&BTreeMap<TaskRef, Related>> {
+        None
+    }
 }
 
 /// The filter line's source choices, in order.
@@ -554,12 +577,14 @@ impl Tasks {
                     TaskRef::GitHub { number, .. } => self.view.github.details.get(number),
                     TaskRef::Local(_) | TaskRef::Code { .. } => None,
                 };
+                let related = self.feed.related().and_then(|all| all.get(&r));
                 self.detail_actions = detail::insert(
                     &mut self.tree,
                     self.detail_host,
                     &task,
                     &runs,
                     loaded,
+                    related,
                     self.view.now,
                 );
                 if let Some(&scroll) = self.tree.children(self.detail_host).first() {
@@ -742,6 +767,12 @@ impl Tasks {
             }
             Key::Char('r') => {
                 self.act(Intent::Refresh);
+                true
+            }
+            Key::Char('a') => {
+                if let Some(task) = self.selected.clone() {
+                    self.open_form(Form::add_link(task), text);
+                }
                 true
             }
             Key::Char('/') => {
@@ -947,11 +978,18 @@ fn lists<'a>(view: &'a View, filter: &Filter) -> [Vec<Card<'a>>; 4] {
     lists
 }
 
-/// Whether `id` (`t-…`, `#N`, a marker's `path`) names `r`.
+/// Whether `id` (`t-…`, `#N`, a marker's `path`, or `code:<key>:<path>`:
+/// the key holds no `:`, so the first one after `code:` ends it) names `r`.
 fn names(r: &TaskRef, id: &str) -> bool {
     match r {
         TaskRef::Local(local) => local == id,
-        TaskRef::Code { path, .. } => path == id,
+        TaskRef::Code { path, key } => match id
+            .strip_prefix("code:")
+            .and_then(|rest| rest.split_once(':'))
+        {
+            Some((k, p)) => k == key && p == path,
+            None => path == id,
+        },
         TaskRef::GitHub { number, .. } => id
             .strip_prefix('#')
             .is_some_and(|n| n.parse() == Ok(*number)),
@@ -1129,9 +1167,11 @@ impl Screen for Tasks {
 }
 
 impl Tasks {
-    /// A detail button: 編集 and 実行 open their form, the rest are sent.
+    /// A detail button: 編集, 実行 and 関連を追加 open their form, the rest
+    /// are sent.
     fn detail_action(&mut self, intent: Intent, text: &mut TextStore) {
         match intent {
+            Intent::AddLink { task, .. } => self.open_form(Form::add_link(task), text),
             Intent::Edit { id, .. } => {
                 if let Some(task) = self.task(&TaskRef::Local(id.clone())).cloned() {
                     self.open_form(Form::edit(&id, &task), text);
@@ -1166,4 +1206,125 @@ fn scroll_position(tree: &UiTree, id: WidgetId) -> noa_gpui_scene::Point {
 
 fn set_scroll_position(tree: &mut UiTree, id: WidgetId, at: noa_gpui_scene::Point) {
     tree.update::<ScrollView, _>(id, |s, cx| s.set_scroll_position(cx, at));
+}
+
+#[cfg(test)]
+mod links_tests {
+    //! The task-links parts of the screen (`docs/specs/task-links.md`):
+    //! `--select=code:<key>:<path>` and the `a` key.
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use noa_gpui_scene::Size;
+    use tasks::task_links::{self, TaskKey};
+
+    use super::*;
+    use crate::demo;
+
+    struct Recorder {
+        view: Option<View>,
+        sent: Rc<RefCell<Vec<Intent>>>,
+    }
+
+    impl Feed for Recorder {
+        fn poll(&mut self) -> Option<View> {
+            self.view.take()
+        }
+
+        fn act(&mut self, intent: Intent) {
+            self.sent.borrow_mut().push(intent);
+        }
+    }
+
+    fn window() -> Size {
+        Size::new(1280.0, 860.0)
+    }
+
+    fn screen_on(view: View) -> (Tasks, Rc<RefCell<Vec<Intent>>>, TextStore) {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let mut screen = Tasks::new(Box::new(Recorder {
+            view: Some(view),
+            sent: sent.clone(),
+        }));
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(window(), &mut text);
+        (screen, sent, text)
+    }
+
+    fn key(screen: &mut Tasks, text: &mut TextStore, key: Key) {
+        screen.dispatch(
+            Event::KeyDown {
+                key,
+                modifiers: Modifiers::default(),
+            },
+            text,
+        );
+        if let Key::Char(c) = key {
+            screen.dispatch(Event::Text(c.to_string()), text);
+        }
+        screen.prepare(window(), text);
+    }
+
+    /// `--select=code:<key>:<path>` (what Review and Verify pass for a
+    /// marker task) selects that marker, also when a marker in another file
+    /// has the same key.
+    #[test]
+    fn links_ac5_select_code_key_path_names_one_marker_among_files_sharing_its_key() {
+        let mut view = demo::view();
+        view.tasks.extend(tasks::code::parse(
+            b"src/a.rs\x007\x00    // TODO: same words\nsrc/b:c.rs\x007\x00    // TODO: same words\n",
+            |_| demo::NOW,
+        ));
+        let markers: Vec<TaskRef> = view
+            .tasks
+            .iter()
+            .map(|t| t.r#ref.clone())
+            .filter(|r| matches!(r, TaskRef::Code { path, .. } if path.starts_with("src/")))
+            .collect();
+        let [a, b] = &markers[..] else {
+            panic!("{markers:?}");
+        };
+        let (TaskRef::Code { key: ka, .. }, TaskRef::Code { key: kb, .. }) = (a, b) else {
+            unreachable!()
+        };
+        assert_eq!(ka, kb, "the same marker text in two files shares its key");
+        let (mut screen, _, mut text) = screen_on(view);
+        for marker in [a, b] {
+            let arg =
+                task_links::select_arg(&TaskKey(serde_json::to_value(marker).unwrap())).unwrap();
+            assert!(arg.starts_with("code:"), "{arg}");
+            assert!(screen.select(&arg, &mut text), "{arg}");
+            assert_eq!(screen.detail.as_ref(), Some(marker), "{arg}");
+        }
+        // The path still names a marker; a key with another path does not.
+        assert!(screen.select("src/a.rs", &mut text));
+        assert_eq!(screen.detail.as_ref(), Some(a));
+        assert!(!screen.select(&format!("code:{ka}:src/c.rs"), &mut text));
+        assert!(!screen.select("code:nope:src/a.rs", &mut text));
+    }
+
+    /// `a` opens 関連を追加 for the selected task; an empty field does not
+    /// submit; Return submits `AddLink` with what was typed.
+    #[test]
+    fn links_ac6_the_a_key_opens_add_link_and_submits_what_was_typed() {
+        let (mut screen, log, mut text) = screen_on(demo::view());
+        let t1 = TaskRef::Local("t-1".into());
+        screen.select_ref(&t1);
+        key(&mut screen, &mut text, Key::Char('a'));
+        assert!(screen.form.is_some(), "the form is open");
+        key(&mut screen, &mut text, Key::Enter);
+        assert!(screen.form.is_some(), "empty: not submitted");
+        assert!(log.borrow().is_empty());
+        screen.dispatch(Event::Text("#45".into()), &mut text);
+        key(&mut screen, &mut text, Key::Enter);
+        assert!(screen.form.is_none(), "closed on submit");
+        assert_eq!(
+            *log.borrow(),
+            [Intent::AddLink {
+                task: t1,
+                input: "#45".into(),
+            }]
+        );
+    }
 }

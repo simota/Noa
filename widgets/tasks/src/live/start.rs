@@ -1,8 +1,10 @@
 //! Starting, focusing and closing a run against the [`Noa`] trait.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use tasks::model::types::{AgentKind, Isolation, Millis, Run, RunEvent, RunId, Task};
+use tasks::task_links::{self, LinkEvent};
 use tasks::{fsx, runs, shell, store, worktree};
 
 use super::ipc::{Noa, NoaError, PaneSpec, PaneView, Placement, no_board_tab};
@@ -22,6 +24,59 @@ pub struct RunRequest {
     pub isolation: Isolation,
 }
 
+/// `git -C dir <args>`, without the person's `GIT_*` variables; its stdout,
+/// or why it failed.
+pub fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // As `store::without_git_env` (crate-private to the library): git finds
+    // the repository from `dir` alone.
+    for (name, _) in std::env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            cmd.env_remove(name);
+        }
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("git を起動できません: {e}"))?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+    }
+}
+
+/// The commit `dir`'s work tree is at (`git rev-parse HEAD`).
+pub fn head_of(dir: &Path) -> Result<String, String> {
+    let out = git(dir, &["rev-parse", "--verify", "HEAD"])?;
+    Ok(String::from_utf8_lossy(&out).trim().to_owned())
+}
+
+/// The run log's link log (`links.jsonl` in its key dir).
+pub fn links_of(log: &Path) -> PathBuf {
+    task_links::links_log(log.parent().unwrap_or(Path::new("")))
+}
+
+/// Records the commit `run` starts from: `ChangeBase` with `workdir`'s
+/// `HEAD`, in `log`'s key dir.
+pub fn record_base(log: &Path, run: &RunId, workdir: &Path, now: Millis) -> Result<(), String> {
+    let commit = head_of(workdir)?;
+    task_links::append(
+        &links_of(log),
+        &LinkEvent::ChangeBase {
+            run: run.to_string(),
+            commit,
+            at: now,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Workdir (worktree::add or repo), prepare_workdir, task.md, RunStarted, the board tab if
 /// `board` is None (cwd repo), the float (label, shell::argv, env NOA_RESULT + PROMPT_VAR),
 /// RunPaneAssigned. The float is `attended: true` (keyboard focus), as review's fix request
@@ -33,13 +88,17 @@ pub struct RunRequest {
 /// is tried once more on a new board tab. A run whose float cannot be
 /// opened at all is logged closed, so its card does not wait out
 /// `START_TIMEOUT_MS` in 実行中.
+///
+/// Once `RunStarted` is logged, the commit the run starts from is recorded
+/// (`ChangeBase`, `docs/specs/task-links.md` L1-3); why it could not be is
+/// the second value: the run goes on.
 pub fn start<N: Noa>(
     noa: &mut N,
     board: &mut Option<u64>,
     log: &Path,
     req: &RunRequest,
     now: Millis,
-) -> Result<RunId, String> {
+) -> Result<(RunId, Option<String>), String> {
     if !noa.supports_board_tab() {
         return Err(no_board_tab(&noa.server_version()));
     }
@@ -96,6 +155,7 @@ pub fn start<N: Noa>(
         }
         return Err(why);
     }
+    let base = record_base(log, &run, &workdir, now).err();
     let spec = PaneSpec {
         argv: shell::argv(req.agent),
         cwd: workdir,
@@ -123,7 +183,7 @@ pub fn start<N: Noa>(
         board: on,
         at: now,
     })?;
-    Ok(run)
+    Ok((run, base))
 }
 
 /// Spawns `spec` as a float on `board`, opening the board tab first when
@@ -338,7 +398,8 @@ pub(crate) mod tests {
             &request(&repo, Isolation::Worktree),
             500,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(run, RunId::new("run-500"));
         let workdir = tmp.0.join("app-wt/task-run-500");
         assert!(workdir.is_dir());
@@ -417,7 +478,8 @@ pub(crate) mod tests {
             &request(&repo, Isolation::Here),
             9,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         let second = start(
             &mut noa,
             &mut board,
@@ -425,7 +487,8 @@ pub(crate) mod tests {
             &request(&repo, Isolation::Here),
             9,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!((first.as_str(), second.as_str()), ("run-9", "run-9-2"));
         let spawned = noa.with(|s| s.spawned.clone());
         let boards = spawned

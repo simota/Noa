@@ -5,7 +5,7 @@
 //!
 //! The surface is fixed by the spec (L2-2); the bodies are unit U2's.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -169,6 +169,9 @@ pub fn fold(runs: &[Run], events: &[LinkEvent]) -> BTreeMap<TaskRef, Related> {
     let mut bases: HashMap<&str, &str> = HashMap::new();
     // Each linked session's task, by (kind, session).
     let mut linked: HashMap<(SessionKind, &str), TaskRef> = HashMap::new();
+    // Every (kind, session) whose first `SessionLinked` was taken, removed
+    // or not.
+    let mut sessions: HashSet<(SessionKind, &str)> = HashSet::new();
     // 3. The log in file order.
     for event in events {
         match event {
@@ -204,13 +207,13 @@ pub fn fold(runs: &[Run], events: &[LinkEvent]) -> BTreeMap<TaskRef, Related> {
                 let Some(found) = by_id.get(run.as_str()) else {
                     continue;
                 };
-                if removed.contains(&(task.clone(), session.as_str()))
-                    || linked.contains_key(&(*kind, session.as_str()))
-                {
+                if !sessions.insert((*kind, session.as_str())) {
                     continue;
                 }
                 let related = out.entry(task.clone()).or_default();
                 let uncommitted = *uncommitted;
+                // The commit is a version even when the link is removed:
+                // 外す removes the link, never a version (L1-8, Decision 5).
                 let target = match commit.as_deref() {
                     None => TargetVersion::Unknown,
                     Some(c) if bases.get(run.as_str()) == Some(&c) => {
@@ -221,6 +224,9 @@ pub fn fold(runs: &[Run], events: &[LinkEvent]) -> BTreeMap<TaskRef, Related> {
                         uncommitted,
                     },
                 };
+                if removed.contains(&(task.clone(), session.as_str())) {
+                    continue;
+                }
                 related.checked_mut(*kind).push(Checked {
                     kind: *kind,
                     session: session.clone(),
@@ -797,6 +803,89 @@ mod tests {
         // A removal names the task: on another task the same id is not removed.
         let other = vec![pr("pr-4", &issue(12), url, 4), removed(&t, "pr-4")];
         assert_eq!(fold(&runs, &other)[&issue(12)].prs.len(), 1);
+    }
+
+    /// 外す on a review removes the link, not the version its commit made:
+    /// a verification on a later version keeps its number, in the fold and
+    /// after the log is read back.
+    #[test]
+    fn links_ac6_removing_a_review_keeps_the_versions_it_made() {
+        let t = local("t-1");
+        let runs = vec![run("run-5", &t, 1, true)];
+        let (a, b) = (sha('a'), sha('b'));
+        let mut events = vec![
+            base("run-5", &sha('0'), 1),
+            // A review records A before the change poll has seen it: v1.
+            linked(
+                SessionKind::Review,
+                "rev-1",
+                &t,
+                "run-5",
+                Some(&a),
+                false,
+                2,
+            ),
+            // The poll records B: v2.
+            seen("run-5", &b, 3),
+            linked(
+                SessionKind::Verify,
+                "ver-1",
+                &t,
+                "run-5",
+                Some(&b),
+                false,
+                4,
+            ),
+            outcome(SessionKind::Verify, "ver-1", Some("pass"), true),
+        ];
+        let on_v2 = |r: &Related| {
+            let versions: Vec<(u32, &str)> = r
+                .versions
+                .iter()
+                .map(|v| (v.no, v.commit.as_str()))
+                .collect();
+            assert_eq!(versions, [(1, a.as_str()), (2, b.as_str())]);
+            assert_eq!(r.verifications.len(), 1);
+            let ver = &r.verifications[0];
+            assert_eq!(
+                ver.target,
+                TargetVersion::Version {
+                    no: 2,
+                    uncommitted: false
+                }
+            );
+            assert_eq!(
+                format!(
+                    "{} · {}",
+                    version_text(&ver.target),
+                    outcome_label(SessionKind::Verify, &ver.outcome)
+                ),
+                "v2 · 合格"
+            );
+            assert!(r.registered(SessionKind::Verify));
+        };
+        let before = &fold(&runs, &events)[&t];
+        on_v2(before);
+        assert_eq!(before.reviews.len(), 1);
+
+        events.push(removed(&t, "rev-1"));
+        let after = &fold(&runs, &events)[&t];
+        on_v2(after);
+        assert!(after.reviews.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("noa-tasks-removed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = task_links::links_log(&dir);
+        for event in &events {
+            task_links::append(&log, event).unwrap();
+        }
+        let read = task_links::read(&log).unwrap();
+        assert_eq!(read, events);
+        let reloaded = &fold(&runs, &read)[&t];
+        on_v2(reloaded);
+        assert_eq!(reloaded, after);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

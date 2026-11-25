@@ -544,6 +544,19 @@ fn run_branch_heads(repo: &Path) -> Result<HashMap<String, String>, String> {
         .collect())
 }
 
+/// The commit `branch` of `repo` was created at: the oldest entry of its
+/// reflog ("branch: Created from HEAD"), if git kept one.
+fn branch_origin(repo: &Path, branch: &str) -> Option<String> {
+    let name = format!("refs/heads/{branch}");
+    let out = start::git(repo, &["reflog", "show", "--format=%H", &name, "--"]).ok()?;
+    let oldest = String::from_utf8_lossy(&out)
+        .lines()
+        .last()?
+        .trim()
+        .to_owned();
+    (!oldest.is_empty()).then_some(oldest)
+}
+
 /// Whether `last` is at least `POLL_MS` before `now` (or never).
 fn due(last: Option<Millis>, now: Millis) -> bool {
     last.is_none_or(|last| now >= last.saturating_add(POLL_MS))
@@ -619,15 +632,27 @@ impl<C: Connect> Worker<C> {
             .into_iter()
             .map(|(run, commit)| (run.to_owned(), commit.to_owned()))
             .collect();
-        let mut heads: Vec<(RunId, Result<String, String>)> = Vec::new();
+        let based: HashSet<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                LinkEvent::ChangeBase { run, .. } => Some(run.clone()),
+                _ => None,
+            })
+            .collect();
+        // Each run's head, with its branch when it has one.
+        let mut heads: Vec<(RunId, Option<String>, Result<String, String>)> = Vec::new();
         let mut failure = None;
         if self.runs.iter().any(|r| r.branch.is_some()) {
             match run_branch_heads(&self.repo) {
                 Ok(branches) => {
                     for run in &self.runs {
                         // A deleted branch adds nothing; its versions stay.
-                        if let Some(sha) = run.branch.as_ref().and_then(|b| branches.get(b)) {
-                            heads.push((run.run.clone(), Ok(sha.clone())));
+                        if let Some((branch, sha)) = run
+                            .branch
+                            .as_ref()
+                            .and_then(|b| Some((b, branches.get(b)?)))
+                        {
+                            heads.push((run.run.clone(), Some(branch.clone()), Ok(sha.clone())));
                         }
                     }
                 }
@@ -649,10 +674,10 @@ impl<C: Connect> Worker<C> {
                 }
             };
             if look {
-                heads.push((run.run.clone(), start::head_of(&run.workdir)));
+                heads.push((run.run.clone(), None, start::head_of(&run.workdir)));
             }
         }
-        for (run, head) in heads {
+        for (run, branch, head) in heads {
             let commit = match head {
                 Ok(commit) => commit,
                 Err(why) => {
@@ -660,7 +685,30 @@ impl<C: Connect> Worker<C> {
                     continue;
                 }
             };
-            if commit.is_empty() || recorded.get(run.as_str()) == Some(&commit) {
+            if commit.is_empty() {
+                continue;
+            }
+            let mut last = recorded.get(run.as_str()).cloned();
+            if !based.contains(run.as_str()) {
+                // A run started before the link log (or whose base could
+                // not be written): its base is where its branch was created,
+                // else the head seen now, never a version.
+                let base = branch
+                    .as_deref()
+                    .and_then(|b| branch_origin(&self.repo, b))
+                    .unwrap_or_else(|| commit.clone());
+                let event = LinkEvent::ChangeBase {
+                    run: run.to_string(),
+                    commit: base.clone(),
+                    at: now,
+                };
+                if let Err(why) = self.append_link(&event) {
+                    failure = Some(format!("関連の記録に書けません: {why}"));
+                    continue;
+                }
+                last.get_or_insert(base);
+            }
+            if last.as_ref() == Some(&commit) {
                 continue;
             }
             let seen = LinkEvent::ChangeSeen {
@@ -2589,6 +2637,73 @@ mod tests {
         rig.feed.act(Intent::Refresh);
         rig.settle();
         assert_eq!(rig.seen().len(), 2, "not after that");
+    }
+
+    /// A run started before the link log (a `RunStarted`, no `ChangeBase`):
+    /// the first poll records its base, not a version. Its base is where
+    /// its branch was created, so a branch still there shows no version and
+    /// one that moved before the upgrade shows its head as v1; the next
+    /// commit after that is the next version.
+    #[test]
+    fn links_ac3_a_run_from_before_the_link_log_gets_a_base_not_a_version() {
+        let mut rig = rig("links-ac3-old", |repo, log, _| {
+            let base = start::head_of(repo).unwrap();
+            git_ok(repo, &["branch", "task-run-1", &base]);
+            git_ok(repo, &["branch", "task-run-2", &base]);
+            let moved = commit_on(repo, &base, "before the upgrade");
+            git_ok(repo, &["update-ref", "refs/heads/task-run-2", &moved]);
+            for (run, task, at) in [("run-1", "t-1", START - 100), ("run-2", "t-2", START - 50)] {
+                let workdir = repo.with_file_name(format!("gone-{run}"));
+                let branch = format!("task-{run}");
+                logged_run(log, run, &local_ref(task), Some(&branch), &workdir, at);
+            }
+        });
+        let (t1, t2) = (local_ref("t-1"), local_ref("t-2"));
+        let base = start::head_of(&rig.repo).unwrap();
+        let moved = git_ok(&rig.repo, &["rev-parse", "refs/heads/task-run-2"]);
+        rig.settle();
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        let bases: Vec<(String, String)> = rig
+            .links()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::ChangeBase { run, commit, .. } => Some((run, commit)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            bases,
+            [
+                ("run-1".to_owned(), base.clone()),
+                ("run-2".to_owned(), base.clone())
+            ]
+        );
+        assert_eq!(rig.seen(), [("run-2".to_owned(), moved.clone())]);
+        let r1 = rig.until_related(&t1, "run-1", |r| r.runs.len() == 1);
+        assert!(r1.versions.is_empty(), "{r1:#?}");
+        let r2 = rig.until_related(&t2, "v1", |r| r.versions.len() == 1);
+        assert_eq!(
+            (r2.versions[0].no, r2.versions[0].commit.as_str()),
+            (1, moved.as_str())
+        );
+
+        let c1 = commit_on(&rig.repo, &base, "one");
+        git_ok(&rig.repo, &["update-ref", "refs/heads/task-run-1", &c1]);
+        rig.feed.act(Intent::Refresh);
+        let r1 = rig.until_related(&t1, "v1", |r| r.versions.len() == 1);
+        assert_eq!(
+            (r1.versions[0].no, r1.versions[0].commit.as_str()),
+            (1, c1.as_str())
+        );
+        assert_eq!(
+            rig.links()
+                .iter()
+                .filter(|e| matches!(e, LinkEvent::ChangeBase { .. }))
+                .count(),
+            2,
+            "a base is recorded once"
+        );
     }
 
     /// AC-5 (Tasks): 開く on a review or a verification starts Review or

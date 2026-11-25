@@ -1,0 +1,2 @@
+[{"labels":[{"id":"MDU6TGFiZWwx","name":"bug","description":"Something isn't working","color":"d73a4a"},{"id":"MDU6TGFiZWwy","name":"good first issue","description":"","color":"7057ff"}],"number":42,"state":"OPEN","title":"Crash on resize: \"quoted\" $(title)","updatedAt":"2026-11-24T22:39:25Z","url":"https://github.com/noa-dev/noa/issues/42"},
+{"labels":[],"number":7,"state":"OPEN","title":"Add themes","updatedAt":"2026-01-02T03:04:05Z","url":"https://github.com/noa-dev/noa/issues/7"}]

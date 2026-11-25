@@ -133,6 +133,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::OpenCompetition => "Open Competition",
         AppCommand::OpenReview => "Open Review",
         AppCommand::OpenVerify => "Open Verify",
+        AppCommand::OpenTasks => "Open Tasks",
         AppCommand::OpenAgentUsage => "Open Agent Usage",
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
@@ -284,6 +285,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::OpenVerify => {
             "Verify a change against acceptance criteria with several agents running checks in isolated worktrees, recorded evidence and a verdict, in a window of its own."
         }
+        AppCommand::OpenTasks => {
+            "Show the repository's local tasks and GitHub issues in one task list and run coding agents on them, in a window of its own."
+        }
         AppCommand::OpenAgentUsage => {
             "Show Claude Code, Codex and Antigravity usage limits and statistics in a window of its own."
         }
@@ -390,6 +394,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::OpenCompetition,
         AppCommand::OpenReview,
         AppCommand::OpenVerify,
+        AppCommand::OpenTasks,
         AppCommand::OpenAgentUsage,
         AppCommand::SetTabTitle,
         AppCommand::CloseTab,
@@ -694,6 +699,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::OpenCompetition
         | AppCommand::OpenReview
         | AppCommand::OpenVerify
+        | AppCommand::OpenTasks
         | AppCommand::OpenAgentUsage => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
@@ -1064,6 +1070,7 @@ mod tests {
             AppCommand::OpenCompetition,
             AppCommand::OpenReview,
             AppCommand::OpenVerify,
+            AppCommand::OpenTasks,
             AppCommand::OpenAgentUsage,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));

@@ -332,25 +332,25 @@ Fix it and write the whole file again at:
 ===== R1 re-run brief to claude =====
 ## Re-run
 Round 1: the widget runs the commands you marked rerun: true again, in this pane.
-Run exactly this with your shell tool, detached so your tool's own time limit does not cut it short, and do nothing else until the next brief:
+Run exactly this with your Bash tool, with its run_in_background option set so your tool's own time limit does not cut it short, then do nothing else until the next brief:
 
-    nohup sh '/golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r1/claude/rerun/run.sh' >/dev/null 2>&1 &
+    sh '/golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r1/claude/rerun/run.sh'
 
 Do not edit any file under /golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r1/claude/rerun and do not touch your worktree. Reply nothing.
 ===== R1 re-run brief to codex =====
 ## Re-run
 Round 1: the widget runs the commands you marked rerun: true again, in this pane.
-Run exactly this with your shell tool, detached so your tool's own time limit does not cut it short, and do nothing else until the next brief:
+Run exactly this with your shell tool in the foreground and wait until it ends, with your tool's timeout set to at least 1500 seconds (the script runs 2 commands, each allowed up to 10 minutes, plus a margin). Do not stop it early and do not start it in the background. Do nothing else until the next brief:
 
-    nohup sh '/golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun/run.sh' >/dev/null 2>&1 &
+    sh '/golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun/run.sh'
 
 Do not edit any file under /golden/repo-wt/verify-ver-golden-codex/.noa/verify/ver-golden/r1/codex/rerun and do not touch your worktree. Reply nothing.
 ===== R1 re-run brief to agy =====
 ## Re-run
 Round 1: the widget runs the commands you marked rerun: true again, in this pane.
-Run exactly this with your shell tool, detached so your tool's own time limit does not cut it short, and do nothing else until the next brief:
+Run exactly this with your shell tool in the foreground and wait until it ends, with your tool's timeout set to at least 900 seconds (the script runs 1 command, each allowed up to 10 minutes, plus a margin). Do not stop it early and do not start it in the background. Do nothing else until the next brief:
 
-    nohup sh '/golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r1/agy/rerun/run.sh' >/dev/null 2>&1 &
+    sh '/golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r1/agy/rerun/run.sh'
 
 Do not edit any file under /golden/repo-wt/verify-ver-golden-agy/.noa/verify/ver-golden/r1/agy/rerun and do not touch your worktree. Reply nothing.
 ===== R1 brief to judge =====
@@ -948,9 +948,9 @@ Rules:
 ===== R2 re-run brief to claude =====
 ## Re-run
 Round 2: the widget runs the commands you marked rerun: true again, in this pane.
-Run exactly this with your shell tool, detached so your tool's own time limit does not cut it short, and do nothing else until the next brief:
+Run exactly this with your Bash tool, with its run_in_background option set so your tool's own time limit does not cut it short, then do nothing else until the next brief:
 
-    nohup sh '/golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r2/claude/rerun/run.sh' >/dev/null 2>&1 &
+    sh '/golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r2/claude/rerun/run.sh'
 
 Do not edit any file under /golden/repo-wt/verify-ver-golden-claude/.noa/verify/ver-golden/r2/claude/rerun and do not touch your worktree. Reply nothing.
 ===== R2 brief to judge =====

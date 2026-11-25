@@ -21,8 +21,8 @@ use crate::capture::digest_bytes;
 use crate::evidence;
 use crate::fsx;
 use crate::model::types::{
-    AgentKind, EvidenceKey, MAX_LOG_BYTES, Millis, PartId, RERUN_KILL_GRACE, Rerun, RerunItem,
-    RerunRequest, RoundNo, Stored,
+    AgentKind, EvidenceKey, MAX_LOG_BYTES, Millis, PartId, RERUN_KILL_GRACE, RERUN_TIMEOUT, Rerun,
+    RerunItem, RerunRequest, RoundNo, Stored,
 };
 use crate::store;
 
@@ -54,16 +54,36 @@ pub const SCRIPT_CHANGED: &str = "re-run script was changed";
 /// What a stored re-run log cut at [`MAX_LOG_BYTES`] ends with.
 pub const CUT_MARK: &str = "\n[Noa Verify: output cut at 8 MiB; the rest was not stored]\n";
 
-/// Whether `kind`'s re-run brief starts `run.sh` detached (`nohup sh … &`)
-/// rather than in the foreground. #TODO(agent): AC-35 settles, in a live
-/// Noa, whether each kind's shell tool lets a detached process outlive the
-/// tool call; a kind found to kill it changes to `false` here.
+/// Whether `kind`'s re-run brief starts `run.sh` in the background, where
+/// it outlives the tool call that started it, rather than in the
+/// foreground (L1-5 step 3). Measured on 2026-11-25 (AC-35): a `nohup sh
+/// … &` typed by the agent did not survive in either measured kind, so no
+/// kind gets that form. Claude Code's Bash tool ran a 150 s command to its
+/// end after the call returned when started with its `run_in_background`
+/// option: `true`, and the brief asks for that option. Codex ran a 150 s
+/// command to its end in the foreground with a long enough tool timeout:
+/// `false`, and the brief asks for at least [`foreground_limit`].
+/// #TODO(agent): agy is unverified; it gets the foreground form until a
+/// live Noa shows how its shell tool treats a long or background command.
 pub const fn detached(kind: AgentKind) -> bool {
     match kind {
         AgentKind::Claude => true,
-        AgentKind::Codex => true,
-        AgentKind::Agy => true,
+        AgentKind::Codex => false,
+        AgentKind::Agy => false,
     }
+}
+
+/// What a foreground re-run brief adds to its commands' limits when it
+/// asks for a tool timeout (L1-5 step 3): the kill grace of each command
+/// and the gaps between them.
+pub const FOREGROUND_MARGIN: Millis = 5 * 60_000;
+
+/// The tool timeout a foreground re-run brief asks for, for a script of
+/// `items` commands: each may run [`RERUN_TIMEOUT`], plus
+/// [`FOREGROUND_MARGIN`], so the tool never cuts the run short before the
+/// widget's own limits end it.
+pub const fn foreground_limit(items: usize) -> Millis {
+    items as Millis * RERUN_TIMEOUT + FOREGROUND_MARGIN
 }
 
 /// One command to run again.
@@ -109,9 +129,9 @@ pub struct Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// How long one command may run, counted from its `.pid` being first
-    /// seen: [`RERUN_TIMEOUT`](crate::model::types::RERUN_TIMEOUT), or less
-    /// for a kind whose re-run brief runs `run.sh` in the foreground (L1-5
-    /// step 3).
+    /// seen: [`RERUN_TIMEOUT`] for every kind; a foreground re-run brief
+    /// asks for a tool timeout of at least [`foreground_limit`], so the
+    /// tool does not end the run first (L1-5 step 3).
     pub run: Millis,
     /// How long after one command ended the next one's `.pid` may take;
     /// past it, that command and every later one are `not_run` ("re-run did
@@ -869,8 +889,9 @@ mod tests {
         (worktree, dir)
     }
 
-    /// The fake agent: starts `run.sh` as the re-run brief says, detached
-    /// from nothing but the test, with `sh`.
+    /// The fake agent: starts `run.sh` as the re-run brief says, with `sh`,
+    /// as a child the test waits on, as an agent's foreground run or its
+    /// background tool does.
     fn start(dir: &Path) -> Child {
         start_with(Path::new("sh"), dir)
     }
@@ -1765,7 +1786,11 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_starts_its_script_detached_until_ac35_says_otherwise() {
-        assert!(AgentKind::ALL.into_iter().all(detached));
+    fn ac35_only_claude_starts_its_script_in_the_background() {
+        assert!(detached(AgentKind::Claude));
+        assert!(!detached(AgentKind::Codex));
+        assert!(!detached(AgentKind::Agy));
+        assert_eq!(foreground_limit(1), 15 * 60_000);
+        assert_eq!(foreground_limit(3), 35 * 60_000);
     }
 }

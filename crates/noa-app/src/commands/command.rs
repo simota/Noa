@@ -112,6 +112,10 @@ pub enum AppCommand {
     /// of a diff, files or a document with blind reviews, cross-examination
     /// and a consolidated report, as a program of its own beside Noa.
     OpenReview,
+    /// Start the verify (`widgets/verify`), a multi-agent verification of a
+    /// change against acceptance criteria with isolated worktrees and
+    /// recorded evidence, as a program of its own beside Noa.
+    OpenVerify,
     /// Start the agent usage window (`widgets/agent-usage`), the limits and
     /// log statistics of the coding agents, as a program of its own beside
     /// Noa.
@@ -299,6 +303,7 @@ impl AppCommand {
     pub(crate) const OPEN_DISCUSSION_MENU_ID: &'static str = "noa.view.open-discussion";
     pub(crate) const OPEN_COMPETITION_MENU_ID: &'static str = "noa.view.open-competition";
     pub(crate) const OPEN_REVIEW_MENU_ID: &'static str = "noa.view.open-review";
+    pub(crate) const OPEN_VERIFY_MENU_ID: &'static str = "noa.view.open-verify";
     pub(crate) const OPEN_AGENT_USAGE_MENU_ID: &'static str = "noa.view.open-agent-usage";
     pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
 
@@ -387,6 +392,7 @@ impl AppCommand {
             AppCommand::OpenDiscussion => Self::OPEN_DISCUSSION_MENU_ID,
             AppCommand::OpenCompetition => Self::OPEN_COMPETITION_MENU_ID,
             AppCommand::OpenReview => Self::OPEN_REVIEW_MENU_ID,
+            AppCommand::OpenVerify => Self::OPEN_VERIFY_MENU_ID,
             AppCommand::OpenAgentUsage => Self::OPEN_AGENT_USAGE_MENU_ID,
         }
     }
@@ -464,6 +470,7 @@ impl AppCommand {
             Self::OPEN_DISCUSSION_MENU_ID => Some(Self::OpenDiscussion),
             Self::OPEN_COMPETITION_MENU_ID => Some(Self::OpenCompetition),
             Self::OPEN_REVIEW_MENU_ID => Some(Self::OpenReview),
+            Self::OPEN_VERIFY_MENU_ID => Some(Self::OpenVerify),
             Self::OPEN_AGENT_USAGE_MENU_ID => Some(Self::OpenAgentUsage),
             Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
@@ -595,6 +602,7 @@ impl AppCommand {
             Self::OpenDiscussion => "discussion.open",
             Self::OpenCompetition => "competition.open",
             Self::OpenReview => "review.open",
+            Self::OpenVerify => "verify.open",
             Self::OpenAgentUsage => "agent-usage.open",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
@@ -695,6 +703,7 @@ impl AppCommand {
             "discussion.open" => Some(Self::OpenDiscussion),
             "competition.open" => Some(Self::OpenCompetition),
             "review.open" => Some(Self::OpenReview),
+            "verify.open" => Some(Self::OpenVerify),
             "agent-usage.open" => Some(Self::OpenAgentUsage),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),

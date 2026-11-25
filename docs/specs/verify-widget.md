@@ -1,0 +1,539 @@
+# Verify widget (multi-agent verification): Spec
+
+| | |
+|---|---|
+| slug | verify-widget |
+| status | implemented (2026-11-25); manual ACs unconfirmed; no owner sign-off |
+| owner | simota |
+| as-of | 2026-11-25 (HEAD 4b740605, branch `orch/pdca-act`); the design's statements about existing code were checked against 51ac2170 (`widgets/review` unchanged since 23b98f3f) |
+| crate | `widgets/verify` (binary `verify`, bundled as `Noa Verify`) |
+| request | 「reviewウィジェットやコンペウィジェットを参考に検証ウィジェットを作成したい。まずは設計からお願い。」 |
+
+## L0: Vision
+
+- Problem: the review widget (`widgets/review`) finds defects by reading a snapshot; nobody runs anything, and its brief forbids edits. The competition widget (`widgets/competition`) runs a check on what contestants built, but it scores entries; it does not decide whether one change does what it claims. Whether a change works is still decided by one agent saying "tests pass", with no record anyone else can check.
+- Job to be done: pick a change, agree on what "works" means (acceptance criteria), seat 2–6 verifier agents, each with a strategy (仕様適合, 反証, 回帰, …) and its own isolated copy of the change, let each verify alone by running things, then let them reproduce or refute each other's results, and get, per criterion, a ruling backed by recorded, hashed evidence, a verdict, and a Markdown report.
+- Success definition: from View → Verify, a branch's change is verified by three agents over two rounds against criteria the person confirmed, and ends in a verdict and `report.md` in which every criterion has a ruling, every ruling cites evidence the widget stored and hashed, and every command marked for re-run was run again, by a script the widget wrote, in the verifier's own pane, with its exit status compared.
+- Assumed meaning of 検証 (the request does not define it): **dynamic verification of a change against acceptance criteria** — agents execute tests, the app and ad-hoc probes. Static reading is the review widget's job. See Decisions taken by default, 1.
+
+## Reuse decision
+
+As the review widget decided (`docs/specs/review-widget.md`, Reuse decision): `widgets/verify` is a fourth independent crate outside the workspace, with its own `Cargo.lock`; it depends on no other widget and no shared crate is extracted. The review widget is the newest and closest copy, so most pieces come from it:
+
+| Piece | Source | Adaptation |
+|---|---|---|
+| Types (`string_id!`, `AgentKind`, `AgentSetup`, `Participant`, `Receipt`, `Brief`, `Round`, `Millis`, `RoundNo`), the brief lifecycle events, `create`/`apply`/`replay` | `review/src/model/{types,reduce}.rs` | `Participant.lens` → `strategy`; `Role` is `Judge`/`Verifier`; new events (L2-3) |
+| Engine shape (Briefing → parallel work → one evaluator → Closed, timeouts, retries, correction notes, hold/continue/extend, `check_resumable`, `check_store_paths`) | `review/src/engine.rs` | a criteria phase before round 1; evidence ingest and re-run between a reply and the judge |
+| Git capture (merge base, three-dot diff, worktree mode with untracked files, caps, manifest, digests) | `review/src/capture.rs` | Git and work-tree-state targets only (no Files/Document); the manifest also records the tree to rebuild |
+| `Store`, `fsx` (`open_dir`, `write_new_at`), `installed.rs`, `live.rs`, `live/ipc.rs`, `live/runner.rs` | review | plus worktree creation/removal, the re-run script and its brief |
+| 修正を依頼 (`live/fix.rs`), 同じ設定で再検証, `--repo`, stored views follow their log, search | review L1-9 … L1-12 | over failed criteria and defects instead of findings |
+| Stance/consolidation folding, agreement tally, ranking | folding: `review/src/model/reduce.rs`; tally and ranking: `Session::tally`, `Session::ranked` in `review/src/model/types.rs`; review L2-4 | over criteria results and cross-checks |
+| File manifest with size and FNV-1a digest | `competition/src/check.rs` (`fnv1a64`, `manifest.md`) | the evidence manifest (L1-5) |
+| Start view rows, progress strip, cards, composer | `review/src/ui/*` | strategy column, criteria editor, isolation choice |
+
+New code: the criteria phase and editor, per-verifier worktrees, evidence ingest and hashing, the re-run script and its watcher, the criteria × verifier matrix, the evidence view, and the report.
+
+## Glossary
+
+| Term | Meaning | Identifier |
+|---|---|---|
+| verification (検証) | one session: a target, criteria, a panel, rounds, rulings, a verdict | `Session`, id `ver-<millis>[-n]` |
+| target | the change being verified, captured once | `Target`, `TargetManifest` |
+| criterion (受け入れ基準) | one checkable statement of what "works" means | `Criterion`, id `AC-1`, `AC-2`, … |
+| judge (判定役) | the agent that drafts the criteria, rules on each round and gives the verdict; runs nothing itself | `Role::Judge`, id `judge` |
+| verifier (検証者) | an agent that runs checks in its own worktree and reports results | `Role::Verifier`, ids `claude`, `codex`, `claude-2`, … |
+| strategy (手法) | the way a verifier is asked to verify (the review widget's lens) | `Strategy` |
+| result (結果) | one verifier's outcome on one criterion in one round | `CriterionResult` |
+| evidence (証跡) | a command run, a log, a screenshot or an observation a result rests on | `Evidence`, key `<verifier>/r<N>/<id>` |
+| re-run (再実行) | a verifier's command run again in its own pane by a script the widget wrote, its exit status compared | `Rerun` |
+| re-run brief | the short brief that asks a verifier to start the re-run script | `BriefKind::Rerun` |
+| defect (不具合) | a problem a verifier found that no criterion covers | `Defect`, id `D1`, `D2`, … |
+| cross-check (追試) | a verifier reproducing or refuting another's result in round ≥ 2 | `CrossCheck` |
+| ruling (判定) | the judge's decision on one criterion | `Ruling` |
+| verdict (総合判定) | the judge's decision on the change | `Verdict` |
+
+## L1: Requirements
+
+### L1-1. Target and capture
+
+Two target kinds, both in a git work tree (a non-git directory refuses the start: 「検証は git の作業ツリーでのみ行えます」, since every verifier needs its own copy):
+
+1. **Git 差分** (`TargetKind::Diff`): repository, base ref (empty = remote default branch, then `main`, then `master`), head (作業ツリー or a ref), optional pathspec. Captured exactly as review L1-1 item 1: `target/diff.patch`, post-images, manifest. An empty diff refuses the start. Criteria are about what the change does.
+2. **現在の状態** (`TargetKind::State`): repository and head (作業ツリー or a ref), no base. Verifies the tree as it is (for instance "the feature in spec X is implemented"). The manifest lists no changed files; `target/diff.patch` holds the uncommitted changes against `HEAD` in work-tree mode, and is empty otherwise.
+
+Common rules:
+- Caps, binary handling and the manifest are review's (`MAX_DIFF_BYTES` 4 MiB etc.). Besides the review manifest, the capture records the **rebuild recipe**: the head commit SHA, and in work-tree mode `git diff --binary HEAD` (`target/worktree.patch`, cap 16 MiB; every option that shapes it is given, whatever the person's diff settings or variables: three lines of context, the default hunk joining, submodule lines and path order, blank context lines as a space, no external diff, text conversion or color, so `git apply` takes it) plus every untracked, non-ignored file (`target/untracked/<path>`, same text/size rules; a binary untracked file is copied as is up to 1 MiB, else refuses the start with its name). This recipe is what each verifier's worktree is built from (L1-3).
+- No capture command writes to the person's index or work tree. A ref's files are read as its checkout gives them (line endings, `ident`, `working-tree-encoding`, the attributes read from the head itself), but no filter driver runs in the person's checkout: a file whose `filter` attribute names a driver the person's settings give a `smudge` or `process` command (git-lfs and similar) is left out of the snapshot, 「チェックアウト時にフィルタ（git-lfs など）を通すファイル（中身は取り込みません）」, and a verifier's worktree still gets it from its own checkout. A work tree's files are read as their bytes are: the work-tree diffs (`diff.patch`, `worktree.patch`) run no `clean` or `process` command either, so the manifest, both patches and a rebuilt worktree hold the same content (git-lfs's clean filter among them; `git apply` in a verifier's worktree runs that checkout's own drivers).
+- In work-tree mode (both kinds) a verifier's worktree holds the person's exact bytes in every file `target/worktree.patch` writes; untracked files are copied as they are. A checkout's conversion can rule that out (`text eol=crlf` on a file edited with LF, `text=auto` on one edited with CRLF, `ident`, `working-tree-encoding`): the patch holds git's normalized content, and `git apply` writes it back converted. The recipe carries no copy of a tracked file, so such a file **refuses the start** rather than being reproduced. The capture rebuilds the patch's files in a scratch folder outside the person's checkout as a verifier's worktree is built: the head's `.gitattributes` files and every file the patch changes or deletes are checked out from the head into a private index, then the patch is applied with `git apply` as L1-3 applies it (its deletions first), and no filter driver runs (a verifier's checkout runs its own, above). It compares each written file with the person's and names every file that differs: 「検証者の worktree ではこのファイルが別のバイト列になります（チェックアウト時の改行コードなどの変換のため）。リポジトリの設定どおりの内容にしてから開始してください: a.txt」.
+- Every git command of capture and worktree runs isolated from the person's environment and settings (`capture::git`): no `GIT_*` variable of the widget's environment (`GIT_DIR`, `GIT_INDEX_FILE`, `GIT_DIFF_OPTS`, `GIT_EXTERNAL_DIFF`, `GIT_CONFIG_*`, …), every setting the widget reads output under pinned in the command's own scope, which no system, global or repository file overrides (paths unquoted, no color, no hook, no file-system monitor (`core.fsmonitor`: a hook command, or a daemon git may start), the diff's context, hunk joining, blank lines, prefixes, renames and rename limit, algorithm and submodule lines at git's default, no submodule ignored (`diff.ignoreSubmodules`), git's default `core.bigFileThreshold` of 512 MiB so that no text under the 1 MiB file cap is diffed as binary for its size, no external diff), `--no-ext-diff --no-textconv --ignore-submodules=none --diff-algorithm=myers` on every diff (only an option overrides a `submodule.<name>.ignore` or a `diff.<driver>.algorithm` setting), and every filter driver the settings define given no command in the person's checkout. The diff is read by its hunk headers' line counts, not by its lines' look.
+- A **spec file** may be named (optional, a path inside the repository, text, ≤ 1 MiB): copied to `target/spec.md` and given to the judge as the main source of criteria.
+
+### L1-2. Criteria (受け入れ基準)
+
+The first phase of every verification, before any verifier is briefed.
+
+- Sources, in the judge's brief: the request text (依頼), the person's own criteria (start view text area, one per line, optional), the spec file, and the target (diff and manifest).
+- The judge writes `c/criteria.json` (L1-6): a list of criteria, each with id `AC-<n>`, a one-line statement, how to verify it, its priority (`must` / `should`), and its source (`user`, `spec:<line>`, `request`, `inferred`). Every line the person gave must appear as exactly one criterion with source `user` and the person's wording kept in `statement` (the judge may add `how`).
+- 基準を確認してから検証 (start view checkbox, default **on**): after the judge's criteria are accepted the session holds, and the 基準 tab shows them editable: change statement, how and priority, add, remove (an `inferred` or `request` criterion only; a `user` one can be edited but not removed), and reorder. 検証を開始 starts round 1. Every change is an event (`CriteriaEdited`), so the report can say which criteria the person changed. Off: round 1 starts as soon as the criteria are accepted.
+- Limits: 1–30 criteria (`MAX_CRITERIA`); a statement 1–300 characters.
+- Criteria are frozen once round 1 starts. A criterion that turns out wrong is ruled `not_applicable` by the judge with a reason; the judge cannot add criteria later, but may open defects.
+
+### L1-3. Isolation: one worktree per verifier
+
+Verifiers run things: builds, tests, the app, throwaway probes that write files. Running several in the person's work tree at once would mix their edits and outputs, and could change what the person is working on.
+
+- 隔離 (start view): **個別 worktree** (default) or **共有（読み取りのみ）**.
+- 個別 worktree: when round 1 starts the runner creates, for each verifier, a detached worktree at `<main worktree>-wt/verify-<session id>-<verifier>`, where the main worktree is the repository's (the first entry of `git worktree list --porcelain`, as `main_worktree` in `crates/noa-app/src/ctl/worktree.rs` picks the `<main>-wt/` parent `Noa +ctl spawn --worktree` uses; the session's `main_worktree`), also when the target is a linked worktree (a target in `/src/app-wt/feature` of `/src/app` gets `/src/app-wt/verify-…`): `git worktree add --detach <path> <head sha>` with sparse checkout off, so the worktree holds every file of the head whatever the person's sparse-checkout setting: off for that command and the checkout it runs (none of the person's sparse-checkout patterns is copied), and kept off in the new worktree's own `config.worktree` when the repository keeps settings per worktree (`extensions.worktreeConfig`); no setting of the person's is written. Then in work-tree mode `git apply --binary target/worktree.patch`, in two runs: the sections that delete a file, then the rest (one run checks every section before it writes any, and on a case-insensitive volume, macOS's default, refuses a file added under a name that differs from a deleted one only in case, `git mv readme README`), and the untracked files copied in. It then checks the rebuilt tree against the manifest (each manifest file's digest; a deleted file counts as gone when no entry of exactly its name is left, since a case-insensitive volume also finds `README` by the name `readme`); a mismatch refuses round 1 and names the files. No branch is created. The verifier's brief allows any edit inside its worktree (throwaway tests, debug prints) and forbids edits anywhere else.
+- 共有（読み取りのみ）: every verifier runs in the target's checkout top level (`git rev-parse --show-toplevel` of the target's repository, the session's `workdir`; the linked worktree itself when the target is one); the brief forbids edits (as review's does) and allows only commands that do not write tracked files. For a quick verification, or a tree too large to check out several times. The report says the mode and that isolation was not enforced. Nothing makes that checkout the target: with a ref head the person may have another commit out, or uncommitted changes over it, so the runner refuses the start before it writes anything to that checkout (the reservation's `.noa/`, which a tracked `.noa/.gitignore` would show as a change; nothing is left behind: a start refused after the reservation, a capture that fails on its spec file say, takes away again the ignore line the reservation appended to a `.noa/.gitignore` already there, in either mode, so the start corrected is not refused for the widget's own change), unless `git rev-parse HEAD` in that checkout prints the ref's commit (resolved as the capture resolves it, whose head SHA must then be that commit) and `git status --porcelain --untracked-files=normal --ignore-submodules=none` there prints nothing (an untracked file counts as a change; both commands run with no `GIT_*` variable of the widget's environment and with `core.fsmonitor` off): 「共有（読み取りのみ）で ref を検証するには、作業ツリーの HEAD がそのコミットである必要があります」 (naming the commit it found), and for a dirty tree a reason naming the uncommitted changes. The same check runs again on 再開 and on +N of such a verification (L1-10), before anything is written to the log or the checkout, so the rounds still to run verify the code the earlier rounds did: the checkout's HEAD must be the captured head SHA (not the ref resolved again, which may have moved since) and its work tree clean, refused with the same reasons and nothing changed. There the ignore line the start appended to a tracked `.noa/.gitignore` is the widget's own change and does not count (the status lists only ` M .noa/.gitignore`, and the file is HEAD's with that line appended). The brief half below still holds every round. Every verifier brief in this mode names the checkout and the commit its HEAD must be (the head SHA: the ref's commit, or in work-tree mode the HEAD captured with the changes), tells the verifier to run `git rev-parse HEAD` there before anything else, and, when it prints another commit, to run nothing else and report every criterion `blocked` with a note naming the commit it saw.
+- The judge always runs in the session's reply dir of the target's checkout (`<workdir>/.noa/verify/<id>/`) and runs nothing (L1-4).
+- Removal: when the verification closes (verdict, or 終了), the runner removes each worktree it made with `git worktree remove --force <path>` after checking, through `git worktree list --porcelain`, that the path is still a worktree of this repository at a detached HEAD whose path is the one the log records; anything else is left and named in a notice. The removal at close and ワークツリーを削除 only ever remove the path the store gives the verifier (`worktree::path_for` from the main worktree): a logged path that differs (another worktree of the repository, say) is left and named in the notice, and that verifier's worktree stays recorded as made. An interrupted verification keeps its worktrees for 再開. The board's ワークツリーを削除 removes them on demand for a stored, ended or interrupted verification (an interrupted one then rebuilds them on 再開).
+- Logging: each worktree is logged as made (`WorktreeMade`, or `WorktreeFailed`) or removed (`WorktreeRemoved`) as soon as that one is, before the next is touched, when round 1 starts, on 再試行, on +N, on a resume and on every removal; so a widget that ends halfway leaves the log saying what is on disk, and the next start goes on from what is logged. A worktree the log records as made that `git worktree list --porcelain` no longer lists at its path is taken as removed, and logged so, by a removal (at close, ワークツリーを削除) and by a resume or an extension: its removal went through and was cut short before it was logged. A folder still at that path is left as it is and named in the removal's notice.
+- Build caches: each worktree has its own `target/` (or language equivalent). The brief tells verifiers so; a shared cache is out of scope (concurrent builds would lock each other).
+
+### L1-4. Rounds
+
+Phases: Criteria (基準策定) → [held for confirmation] → per round: Briefing (配信) → Verifying (検証) → Ingest (証跡収集, widget only) → Ruling (判定) → Closed.
+
+1. **Round 1, 独立検証 (`RoundKind::Blind`)**: every verifier gets the request, the target, the frozen criteria, its strategy and checklist, its worktree, the rules and the reply format. For every criterion it reports a result (`pass` / `fail` / `blocked` / `not_tested`) with evidence, and it may report defects. It names no peer and must not read other verifiers' worktrees or replies.
+2. **Ingest and re-run (every round)**: once every verifier has replied or failed, the widget copies each reply's evidence files into the judge's reply dir (`<repo>/.noa/verify/<id>/evidence/`, L1-10), hashes them, and has each verifier run its re-runs in its own pane (L1-5). Results that cite missing files are not rejected here (validation already checked existence); a file that vanished between validation and ingest makes that evidence `missing`.
+3. **Ruling (every round)**: the judge gets every result with its evidence summaries, digests and re-run outcomes, every cross-check, and the defects, and writes `r<N>/judge.json`: a ruling per criterion (`verified` / `failed` / `inconclusive` / `not_applicable`, with rationale and the evidence keys it rests on), defect consolidation (add / merge / update / dismiss, as review's lead ops), and cross-check assignments for the next round.
+4. **Rounds 2…, 追試 (`RoundKind::Cross`)**: every verifier gets the rulings so far, every result and evidence summary with identities, and its assignments: criteria and defects the judge asked it to reproduce or refute (default when the judge assigns none: every `fail` and every `pass` resting on a single verifier, given to a verifier other than the one who reported it, round-robin). For each assignment it writes a cross-check (`reproduced` / `not_reproduced` / `disputed`) with its own evidence from its own worktree. It may also update its own results with new evidence.
+5. **The last round**: the judge must give a verdict; no criterion may stay unruled. Early end: the judge may set `close: true` (with a verdict) from round 2 on, or in round 1 when `max_rounds` is 1, or in round 1 when every criterion is `verified` by two or more verifiers with re-runs that matched.
+6. Round limit default 2, 1–6. ラウンド後に停止, interventions, +1 / +3, 再試行 and a failed verifier not stopping the round as review L1-3 items 7–9; 終了 (ends without a verdict, asks first) as review L1-3 item 5 and L1-5 (Bottom). +1 / +3 on a verification that ended at its limit is refused while any of its worktrees is still recorded as made (closing asked for their removal, L1-3, and a round sent now would go into a worktree being removed): 「ワークツリーの削除が終わっていません」; once every one is removed, the extension rebuilds them before its round starts.
+7. Timeouts: start 90 s, reply **45 min** (builds and test suites are longer than reading), 2 retries.
+8. Panes: one Noa tab per verification with auto approval, judge and verifiers in splits on the 3×3 grid; each verifier's pane starts in its worktree.
+
+### L1-5. Evidence, hashing and re-runs
+
+The point of the widget: a ruling rests on what the widget stored and checked, not on what an agent said.
+
+- Evidence kinds a verifier reports (L1-6):
+  - `command`: the shell command, its working directory (relative to the worktree), the exit status the verifier saw, the path of its saved output (`logs/<n>.log`, combined stdout and stderr, written by the verifier, e.g. `cmd > logs/3.log 2>&1; echo $?`), and `rerun: true|false`.
+  - `file`: a file the verifier produced (screenshot, screen recording, generated output), path under its reply dir. Screenshots and videos follow L1-5a.
+  - `observation`: text only (something seen in the GUI, say). Shown as 未裏付け and never enough alone for `verified` (L1-6 judge rules).
+- Validation (at reply time; the runner inspects each cited path with `evidence::inspect` and passes the facts in with the reply, L2-2 `FileFact`, so the check itself is pure): every `logs/…` and `file` path exists under the verifier's reply dir, is a regular file (no link), and is at most 8 MiB (logs) / 15 MiB (other files; media per L1-5a); at most 40 evidence items and 512 MiB in total per reply.
+- Ingest: each file is copied to `<reply dir>/evidence/r<N>/<verifier>/<path>`, the judge's reply dir in the target's checkout (`<repo>/.noa/verify/<id>/`, beside `target/`; Decision 11), its directories opened one component at a time from the repository and the file created exclusively (`fsx::open_dir`, `write_new_at`, no link followed; a file already at its name, left by an ingest of the same round cut short before `EvidenceIngested` was logged, is kept as the copy only when it is a regular file, reached without a link, with the source's bytes, and is otherwise refused and left as it is), and its FNV-1a 64 digest and size recorded in `EvidenceIngested`. `manifest.md` per round lists every item (as competition's check manifest), the person's attached media of the round among them (the round current when it was attached, L1-5a), and is written again when one is attached. From then on the stored copy is what the judge and the report cite; the worktree may change or go.
+- Re-run (`rerun: true`), **in the verifier's own pane**: a command often depends on the environment the verifier ran it in — the variables Noa gives every pane (`NOA_BIN`, `NOA_SURFACE_ID`, set in `crates/noa-app/src/app.rs`), the agent's own shell and its sandbox. A re-run made by the widget as its own subprocess would lack them and report a difference that is the widget's, not the change's. So the re-run goes where the command first ran:
+  1. When a verifier's reply is accepted (and it has `rerun: true` items; in 共有 mode re-runs are off, as they would run in the person's tree, and the report says so), the widget writes, under that verifier's reply dir, `r<N>/<verifier>/rerun/`: one file per command, `<n>.cmd`, holding the command exactly as reported (never parsed or quoted by the widget), and `run.sh`, a fixed script generated from constants and widget-chosen paths only (each single-quoted), with a fresh random nonce (16 bytes read from `/dev/urandom`, hex; no random-number crate is added). Their digests are logged in `RerunRequested { round, part, nonce, items, script_digest }`. `rerun/` is made exclusively; one already there (a write cut short before `RerunRequested` was logged) is written again, with a new nonce, only when it holds nothing but regular files of the names the widget writes for that request (`<n>.cmd`, `run.sh`), and anything else in it (a run's files, the verifier's, a link, a folder) refuses the request and is left as it is.
+  2. `run.sh` first runs itself again with `/bin/bash` unless bash already runs it, then sets `set -m` and runs the commands one after another. For each, a background subshell `cd`s to the reported `cwd` under the worktree, runs `"${SHELL:-/bin/sh}" <n>.cmd < /dev/null > <n>.log 2>&1`, and writes its exit status to `<n>.exit` itself before it ends (temporary file + `mv`, so a half-written status is never read, and a `<n>.pid` whose process is gone without an `<n>.exit` means the command was stopped, never that its status is still on its way). A `cd` that fails writes `<n>.nocwd` instead (its error in the log) and the command does not run: it is `not_run` ("the reported cwd could not be entered in the worktree; the command did not run"), never `cd`'s exit status. The script writes `<n>.pid` as `<pid of the subshell> <pid of run.sh>` (temporary file + `mv`) and waits for the subshell; the `run.sh` pid is what `rerun::poll` checks the command against when it first reads `<n>.pid` (the pid must then lead a process group of its own in that script's session, or it is never signalled). **A command's turn ends only when nothing of its process group is left.** Processes it started stay in the group after the subshell ends (a child that ignores the timeout's SIGTERM, a background job), so once the subshell is gone the script sends what is left of the group SIGTERM, SIGKILL 5 s (`RERUN_KILL_GRACE`) later, and starts the next command, or writes `done`, only when the group is gone: two commands never run at once. When all are done it writes `done` holding the nonce. It writes nothing outside `rerun/` except what the commands themselves do. The shell options bash takes from an exported `SHELLOPTS` in the pane's environment (errexit, say) are left as they are, so the command's shell sees them as the pane gives them, and no line of the script stops on a failing command (the command's status, a `wait` on a subshell that failed or was killed, and a signal to a group that has just gone are each taken with `||`): a failing command never costs its `.exit` or the commands after it. `set -m` is what makes the timeout kill of step 4 possible: a background command started after `set -m` leads its own process group (pgid = its pid), while without it the command shares the script's group, so there would be no group of its own to signal. Only bash gives that job control without a terminal: dash turns it off (`can't access tty`) and zsh as `sh` refuses `set -m` (`can't change option: -m`) and ends the script, so `run.sh` runs itself again with `/bin/bash` under any other `sh` (the brief still starts it with `sh`, never `$SHELL`).
+  3. The widget sends the verifier a **re-run brief** (`BriefKind::Rerun`, through the usual lifecycle: it waits while the agent is working or sits on a prompt, `refuseShell`, start timeout), only ever to the pane that ran the verifier's work brief: when that pane is gone (closed, or counted as lost because its agent is back at its shell) no pane is started for it, and every item of the re-run still without an outcome is `not_run` ("verifier's pane is gone"). Right before the brief is pasted, the widget reads the script's files again, so a resend queued at the start timeout never goes out once the first `.pid` has appeared: the brief's one command line depends on the verifier's agent kind (`rerun::detached`, one constant per `AgentKind` in `rerun.rs`):
+     - claude (`true`, background): "Run exactly this with your Bash tool, with its run_in_background option set so your tool's own time limit does not cut it short, then do nothing else until the next brief: `sh '<abs path>/run.sh'`."
+     - codex and agy (`false`, foreground): "Start exactly this once with your shell tool in the foreground: `sh '<abs path>/run.sh'`. The script runs <n> commands, each allowed up to 10 minutes, so the whole run can take up to <m> minutes. If your tool returns control before the script has finished, keep waiting on that same running process (poll it or read its output) until it ends. Never start it a second time and never stop it. Do nothing else until the next brief." (for one command: "1 command, allowed up to 10 minutes"), where <m> is `rerun::foreground_limit(n)` in minutes: n × `RERUN_TIMEOUT` plus `FOREGROUND_MARGIN` (5 min). The brief asks for no tool timeout: per a review on 2026-11-25 (not measured), neither tool has a run-deadline argument — Codex's `exec_command` has only `yield_time_ms` (how long until control returns, at most 30 s at first) and agy's `run_command` has `WaitMsBeforeAsync` (at most 10 s before the command moves to the background) — so a long run gives control back while it still runs, and the agent waits on that process. #TODO(agent): agy is unverified; it gets the foreground form until a live Noa shows how its shell tool treats a long or background command.
+
+     Then, for every kind: "Do not edit any file under `rerun/`. Reply nothing." The agent needs no reply file; the widget watches `rerun/`, and collects a foreground run's files exactly as a background one's (the script writes the same `.pid`, `.exit` and `done` either way). Why these forms (measured 2026-11-25 on the development machine, AC-35): `nohup sh run.sh >/dev/null 2>&1 &` typed by the agent does not survive. From Claude Code (sandboxed Bash) the process never wrote its first line; from Codex it started but was killed when the tool call ended (its 150 s sleep never finished). Inside Codex's shell `$NOA_BIN` is unset (its sandbox strips the variable), so the "same environment" a re-run gets is the agent's tool environment, not the bare pane's. What works: Claude Code's Bash tool with its `run_in_background` option ran a 150 s command to its end after the tool call returned; Codex ran a 150 s command in the foreground to its end when asked to allow a timeout of at least 200 seconds. Guards, so a run that a tool still cuts short cannot hang a round:
+     - Every poll, a command whose `.pid` exists but whose process is gone (`kill(pid, 0)` fails with `ESRCH`) and which has no `.exit` is `not_run` ("the re-run was stopped before it finished; the agent's tool may have ended it"), rather than `timed_out` at `RERUN_TIMEOUT` (given, as every outcome, once its turn is over, step 4); the commands after it are `not_run` ("re-run did not finish") when `run.sh` itself is gone too (no new `.pid` within the start timeout).
+     - A foreground kind keeps `RERUN_TIMEOUT` as its per-command limit: its brief tells the agent to keep waiting on the running script for up to `foreground_limit(n)`, covering every command's limit, and never to stop it or start it again, so the widget's own limits end a command first. A tool or agent that cuts the run short anyway leaves a command `not_run` by the rule above.
+  4. The widget watches the `.exit` files (polling as replies are polled, through `rerun::poll`, which times each command from its `.pid` being first seen, does the kills below and gives each item's outcome; the runner keeps its timing state between polls). Each command has a 10 min limit (`RERUN_TIMEOUT`) counted from its `.pid` appearing; past it the widget sends SIGTERM to that pid's process group, SIGKILL 5 s later, and records `timed_out` only for a command still running when the SIGTERM was sent: a group found gone by then gets no signal (the command ended by itself), and a command whose `.exit` appears by the end of the poll that sent it keeps its status (only what it left in its group was killed). **An outcome is given only once the command's turn is over, its log final**: once nothing of its process group is left, which the script shows by writing the next `.pid` or `done` (it writes them only then) or the widget sees itself. For the last command, killed past its limit or not, only `done` shows it, or, when the script is gone without writing it, the start timeout passing after the widget saw the group gone (as a next command would be `not_run` then); so while the script runs, the run is finished only at `done`, and a log is never ingested while what the command left behind still writes to it. A script that has not written its first `.pid` within the start timeout after the brief was sent counts as not started: the brief is retried as any brief, then every item is `not_run` ("re-run did not start"). Once the first `.pid` has appeared (`RerunStarted`), the re-run brief is never sent again, by a retry, a redelivery, a resume (also one whose log holds the start but not the send: the `.pid` may be seen before `Sent` is logged) or anything else: an `Error` from the verifier's pane after that, or a late send failure, leaves the watch running to each item's outcome (the detached script may outlive the pane's error, and a second start would run the same commands into the same `.log` and `.exit` files). A resume reads every watched re-run's files (`.pid`, `.exit`, `done`, the logs) before it handles a lost pane: a script that started while the widget was stopped counts as started, and one that ran to its end gives its outcomes as any finished run does, its verifier's pane gone or not. A resume that finds a re-run's `rerun/` or its `run.sh` gone (its worktree was removed, and the recipe rebuilds none of a reply dir) ends every item still without an outcome `not_run` ("re-run files missing after resume"), started or not, instead of waiting.
+  5. At `done` (with the right nonce), or when every item has an outcome, the widget checks `run.sh` and every `<n>.cmd` against the logged digests (a mismatch makes every item of that verifier `not_run`: "re-run script was changed"), then ingests each `<n>.log` (capped at 8 MiB, the cut marked) as `<reply dir>/evidence/r<N>/<verifier>.rerun/<n>.log` (`store::rerun_log_path`) and records `RerunFinished`. The re-run logs get that sibling directory, never a name inside `evidence/r<N>/<verifier>/`, because that directory holds the verifier's own evidence at the paths it chose: a reported path is relative with no `..`, so it stays inside `<verifier>/`, and a verifier id (an agent kind with an optional `-<n>`) never holds a `.`, so no reported file can be stored where a re-run log is. Outcome: `matched` (same exit status), `differed` (both statuses recorded), `timed_out`, `not_run` (why: 共有 mode, pane gone, did not start, stopped before it finished, cwd could not be entered, script changed). The outcome and its log are recorded apart: an item of any outcome whose `<n>.log` was written keeps that log, ingested as above, and an item whose log could not be stored keeps its outcome without one. A copy already at a log's path (an ingest a crash cut short before `RerunFinished` was logged) is taken when it is a regular file of the same size and bytes, as evidence ingest takes one, and refused, left as it is, otherwise.
+  - At most 8 re-runs per verifier per round; verifiers run theirs in parallel, each in its own pane and worktree.
+- Trust (accepted limit): the re-run passes through the verifier's own agent, which starts the script and could, against its brief, alter what runs or what is written. The widget checks the files it wrote and the nonce, not the agent's process. A re-run therefore shows that the command gives the same status again in the same environment — it catches misreported exit codes, stale logs and flaky results — and is not a proof against a verifier that lies. The report says re-runs ran in the verifiers' panes; independent confirmation comes from the cross-check rounds, where another verifier runs the claim in its own worktree.
+- Re-runs happen after the verifier's reply is accepted and before the judge is briefed; the verifier's reply brief tells it that a re-run brief may follow and not to touch the worktree until the next brief.
+
+### L1-5a. Screenshots and videos (スクショ・動画)
+
+GUI behaviour (a tab opening in the right directory, a dialog, an animation) is often only shown by a picture. Screenshots and screen recordings are first-class evidence, from verifiers and from the person.
+
+- Media kinds, decided by the file's leading bytes (magic), not its extension; a mismatch between the two is a validation problem:
+  - image: PNG, JPEG, GIF, WebP; at most 15 MiB (`MAX_IMAGE_BYTES`).
+  - video: MP4 / QuickTime (`ftyp` box), WebM; at most 200 MiB (`MAX_VIDEO_BYTES`).
+  - Anything else stays a plain `file` (opened, not previewed).
+- A `file` evidence item that is media carries, besides `path`:
+  - `caption` (required for media, 1–300 characters): what the picture shows, in words, so a judge or reader who cannot open the file still knows what it claims.
+  - `marks` (video only, optional, at most 20): `[{"t": "00:12.5", "note": "new tab opens in /tmp"}]`, moments to look at; `t` is `mm:ss[.f]` or `hh:mm:ss[.f]` (the first field one or two digits, each later one two, minutes and seconds 00–59, `f` one to three digits of a second; `media::parse_mark`, whose error names the problem), non-decreasing.
+  - `shows` (optional): the criteria ids it is evidence for, when the item is cited by results of several criteria and the picture shows only some of them. Media only: a plain file with `shows` is refused (L1-6), as it is evidence only for what cites it.
+- Capture: the verifier brief (L2-4, section Evidence) tells verifiers to save screenshots under `shots/` and recordings under `video/` in their reply dir, to use the platform's own capture tools, and to report `blocked` with the reason when capture is not allowed (on macOS, a screen-recording permission the agent's terminal lacks) rather than describing the screen as an `observation`. #TODO(agent): the brief suggests `screencapture -x shots/1.png` and `screencapture -v video/1.mov` (with the `blocked` fallback above), commands that have not been tried from an agent inside a Noa pane on macOS (permission prompt per app); AC-34 checks it by hand.
+- Person-attached media (証跡を追加): on the board, the selected criterion's thread and the evidence tab offer 証跡を追加 (a file chooser and dropping files onto the window), with a required caption and the criteria it shows. The widget validates it as above, with the rules a verifier's reply is held to (caption 1–300 characters; marks only on a video, at most 20, in time order, each with a note; `shows` naming criteria), copies it to `<reply dir>/evidence/user/<n>.<ext>` (the judge's reply dir, as ingest; exclusive create, no link followed), hashes it, and logs `EvidenceAttached { key: "user/<n>", round, body, stored, shows, at }` (`round`: the round current then, kept on the item with the time, so filters and cards show it after a replay). Allowed from round 1's start until the verification closes; the judge sees it in the next ruling brief. The open form keeps to the same window: one left open when the verification closes keeps what was typed, its 追加 off, and says why. Person-attached evidence is cited like any other, and shown with the tag あなた; it counts as one independent source for `verified` (L1-6) only together with a verifier's `pass` on the same criterion.
+- No pictures in the window: every media item shows as a **placeholder card** — kind (画像 / 動画), format (PNG, MOV, …), size in bytes, caption, verifier (or あなた), round, and for a video ▶ with its marks — wherever a preview would go (thread strip, gallery). The widget makes no thumbnails. Why (checked in the noa-gpui 0.2.1 sources `widgets/review` builds with): noa-gpui draws a picture only from RGBA8 pixels uploaded with `Renderer::create_image`, which a live window offers only while its screen is built (`noa_gpui_platform::Setup`; the `Screen` trait has no later hook, and `Headless::create_image` exists only headless), and evidence arrives after the window is built; and no public decoder exists (`noa-gpui-render-wgpu`'s `png::decode` is crate-private and reads only the stored-block PNGs it writes itself). The `png` crate in `widgets/review/Cargo.lock` is there only for `muda` / `tray-icon`; using it would be a new direct dependency, which this widget does not add.
+- For a later version that draws previews (not built now): `qlmanage -t -s 480 -o <dir> <file>` writes `<dir>/<file name>.png` — the whole input name plus `.png` (`shot one.png` → `shot one.png.png`), 480 px on the long side (a 1024×1024 PNG gave 480×480) — and exits 0 in about 0.1 s; for a file whose name has no extension it recognises it writes nothing and never exits (still running when killed after 20 s), so it would need a copy named with the sniffed extension and a kill on timeout; it does not start inside the Claude Code macOS sandbox ("sandbox initialization failed: Operation not permitted"). Checked 2026-11-24 on macOS 26 (Darwin 25.6).
+- Viewing: 開く opens the stored copy in the system viewer or player (`open <stored copy>`, run as a subprocess), images and videos alike, since the widget shows no picture and plays no video itself; each video mark is listed on its card with its time and note. Every media item has Finder で表示.
+- What agents get: briefs list each media item with its kind, size, caption, marks and stored path, wherever it is cited (a result, a cross-check, a raw defect). The judge is told it may open images by path when its CLI can read images, and that it cannot watch videos: a video's claim rests on its caption and marks. A `verified` or `failed` ruling that rests on video evidence alone (no command, image or other file among the stored evidence it cites) must have a rationale, which the brief says must name the caption and marks it relied on; an empty one is refused (L1-6).
+- Digests, re-runs: media are hashed and stored as other files; they are never re-run. A ruling may cite them like any `file` evidence.
+
+### L1-6. Agent output formats and validation
+
+JSON files, one code fence tolerated, `deny_unknown_fields`, one problem per line in the correction note, `rejected_digest` logged, as review L1-4.
+
+**Judge criteria** `c/criteria.json`:
+
+```json
+{
+  "summary": "What the change claims and how the criteria cover it.",
+  "criteria": [
+    {"id": "AC-1", "statement": "Opening a tab inherits the focused pane's cwd.",
+     "how": "Run the app, cd /tmp in a pane, open a tab, check pwd.",
+     "priority": "must", "source": "user"}
+  ]
+}
+```
+
+Rules: 1–30 criteria; ids `AC-<n>` unique, from 1 without gaps; `priority` `must`|`should`; `source` `user`|`request`|`inferred`|`spec:<line>` (a line of `target/spec.md`); every user line appears once with `source: user`, matched by exact text after trimming (missing ones are listed); `how` non-empty.
+
+**Verifier reply** `r<N>/<verifier>/reply.json` (the reply dir is `<worktree>/.noa/verify/<session id>/`, ignored by `.noa/.gitignore = *`, so sandboxed agents can write it; in 共有 mode the target checkout's):
+
+```json
+{
+  "summary": "What I ran and what I found.",
+  "environment": "macOS 26.1, rustc 1.92, debug build",
+  "results": [
+    {"criterion": "AC-1", "result": "fail",
+     "note": "New tab opens in $HOME after `cd /tmp`.",
+     "evidence": ["e1", "e2", "e3"]}
+  ],
+  "evidence": [
+    {"id": "e1", "kind": "command", "cmd": "cargo test -p noa-app cwd_inherit",
+     "cwd": ".", "exit": 101, "log": "logs/1.log", "rerun": true},
+    {"id": "e2", "kind": "file", "path": "shots/tab.png", "caption": "pwd in the new tab"},
+    {"id": "e3", "kind": "file", "path": "video/new-tab.mov", "caption": "cd /tmp, ⌘T, pwd",
+     "marks": [{"t": "00:04", "note": "⌘T pressed"}, {"t": "00:06.5", "note": "new tab shows $HOME"}]}
+  ],
+  "defects": [
+    {"id": "1", "claim": "…", "severity": "high", "category": "falsify", "confidence": "high",
+     "location": {"path": "crates/…", "line": 40}, "repro": "1. … 2. …", "evidence": ["e1"]}
+  ],
+  "cross_checks": [
+    {"subject": "codex/AC-2", "outcome": "not_reproduced", "note": "…", "evidence": ["e3"]}
+  ]
+}
+```
+
+Rules:
+- `results`: round 1: exactly one per criterion (missing ones listed). Round ≥ 2: optional updates of its own results.
+- `result` `pass` needs at least one `command` or `file` evidence; `fail` needs evidence and a note; `blocked` (could not run: missing tool, build broken) and `not_tested` need a note.
+- `evidence` ids unique in the reply; every id cited exists; every evidence item is cited at least once. `cmd` 1–2000 characters, single-line or multi-line; `cwd` relative, no `..`; `exit` an integer; paths relative to the reply dir's `r<N>/<verifier>/`, no `..`, no leading `/`, and not under `rerun/`: the widget keeps that directory for its re-run script and logs (L1-5), so a `file` or `log` path starting with `rerun/` is one problem line. `shows` is for media only (L1-5a): on a `file` whose bytes are not an image or a video it is one problem line.
+- `defects`: at most 20; fields as review's raw findings plus `repro` (required) and `evidence` (at least one id).
+- `cross_checks`: not allowed in round 1. From round 2, exactly one per assignment of this verifier (missing ones listed); `subject` is an assignment (`<verifier>/<AC id>` or a defect id); `outcome` `reproduced`|`not_reproduced`|`disputed`; evidence required except for `disputed` with a note.
+
+**Judge ruling** `r<N>/judge.json`:
+
+```json
+{
+  "summary": "…",
+  "rulings": [
+    {"criterion": "AC-1", "ruling": "failed", "rationale": "…",
+     "evidence": ["claude/r1/e1", "codex/r2/e3"]}
+  ],
+  "defect_ops": [{"op": "add", "id": "D1", "from": ["claude/1"], "...": "as review lead ops"}],
+  "assign": {"codex": ["claude/AC-1"], "claude": ["D1"]},
+  "verdict": {"decision": "fail", "rationale": "…", "blocking": ["AC-1", "D1"]},
+  "close": false
+}
+```
+
+Rules (the widget enforces the evidence standard; the judge cannot rule past it):
+- Every criterion gets one ruling per round (a ruling carried over unchanged is allowed: `"ruling": "same"`). Cited evidence keys exist.
+- The evidence standard reads each criterion's **history**, not each verifier's latest result: every result on the criterion from every verifier and round; every cross-check on one of those results, with the one result it is about; every cross-check on a defect; and what each evidence item is to the criterion (`model::rules::History`, which holds rules 1–6 below). Over that history:
+  1. **What a cross-check is about.** A cross-check of round N on `<verifier>/<criterion>` is about that verifier's latest result on the criterion as of round N − 1: the result its brief named (`- codex/AC-1: pass (R2)`). A result the verifier reports later does not change what the check was about; once it has reported one, the later checks on that subject are about the later result.
+  2. **Evidence that counts.** An item is evidence for a criterion when a result on it cites it, or a cross-check about a result on it, or it is media whose `shows` names it; media with `shows` is evidence only for the criteria it names (L1-5a), whoever cites it. It counts for the criterion when it is evidence for it and its file was stored: a `command` whose log or a `file` whose copy was missing at ingest counts for nothing, and an `observation`, which has no file, counts as text. Evidence cited for `verified` or `failed` must be evidence for that criterion; citing anything else is refused (`AC-3: cited evidence codex/r1/e1 is not evidence for AC-3 …`).
+  3. **When a pass counts.** A verifier's `pass` of any round counts for a ruling that cites a `command` or `file` of it that counts (rule 2), unless it is contested: a `"same"` ruling resting on round 1's passes still holds after a verifier reports another `pass` in round 2. A `pass` is **contested** once a `not_reproduced` cross-check about that very result (rule 1; its checker is another verifier, as a verifier is never assigned its own result) cites evidence that counts for the criterion (rule 2), until a later `pass` on the criterion, of a round after that check and from any verifier (its own included), that has a `command` or `file` that counts for the criterion (rule 2; media whose `shows` leaves the criterion out has none) and is not itself contested. A contested pass counts for no ruling: it is neither one of the two independent passes nor the pass whose matched re-run is cited, and the refusal names it with the checks that contest it (`AC-1: verified needs a matched re-run or two independent passes; claude's R1 pass is contested by codex's R2 not_reproduced and counts for nothing until a later pass that is not contested`). A `disputed` check contests nothing, nor does a `not_reproduced` whose evidence does not count (rule 2) or one about another result of that verifier. A verifier is one source however many of its passes count. Media the person attached whose `shows` names the criterion is one more source when cited (L1-5a). A cross-check is no pass, whatever its outcome; only a `not_reproduced` that contests a pass takes one away.
+  4. **When a fail is open.** Every `fail` of any round is open until a `not_reproduced` cross-check about that very result (rule 1) cites evidence that counts for the criterion (rule 2). Nothing else answers it: not a later result of the same verifier (`blocked`, `not_tested`, even `pass`), not a `disputed` or `reproduced` check, not a `not_reproduced` about another result of that verifier. A fail its verifier replaced before anyone checked it therefore stays open. The refusal names the fail's round and why each `not_reproduced` on its subject did not answer it (`AC-1: verified despite codex's R1 fail, which no not_reproduced cross-check has answered; claude-2's R3 not_reproduced is about codex's R2 pass`; `…; claude-2/r2/e1 was not stored (gone before ingest) and counts for nothing`; `…; claude-2/r2/f1 is not evidence for AC-1 (its shows leaves AC-1 out)`).
+  5. **When a fail is confirmed.** A `fail` that a `reproduced` cross-check about it reproduced is confirmed, whatever comes later (`AC-1: verified despite codex's R1 fail, which claude-2 reproduced in R2`).
+  6. **When evidence backs a failure.** An item backs the criterion failing when it counts for the criterion (rule 2) and a `fail` result on it cites it, or a `reproduced` cross-check about a `fail` result on it, or a `reproduced` cross-check on a defect (whatever became of the defect since, a merge included). Nothing else does: a cross-check about a `pass` backs no failure, whatever its outcome.
+- `verified` needs a cited `command` or `file` (an `observation` alone never satisfies it); no open fail (rule 4) and no confirmed fail (rule 5) on the criterion; and a cited `command` of a counting pass whose re-run `matched` (the matched re-run of a fail's command is not one, nor is a contested pass's), or two sources (rule 3) (`AC-2: verified needs a matched re-run or two independent passes`).
+- `failed` needs a cited item that backs the criterion failing (rule 6) (`AC-1: failed needs a cited fail result or reproduced evidence`).
+- `inconclusive` and `not_applicable` need a rationale. So does a `verified` or `failed` ruling whose stored command and file evidence is all video (L1-5a): `AC-1: failed rests on video evidence alone (codex/r1/v1); its rationale must name the caption and marks it relied on`.
+- Defect ops: every raw defect of this round placed once (add / merge / dismiss), as review's unassigned-raw rule.
+- `assign`: keys are verifier ids; values are `<verifier>/<AC id>` of another verifier or a defect id; a verifier is never assigned its own result.
+- `verdict` (last round or `close`): `pass` (合格: every `must` criterion `verified`, no live `critical`/`high` defect), `pass_with_issues` (条件付き合格: every `must` `verified`; some `should` not, or live defects; `blocking` lists them, every one), `fail` (不合格: some `must` `failed`; `blocking` non-empty), `inconclusive` (判定不能: some `must` `inconclusive`, none `failed`). A `must` criterion ruled `not_applicable` was not verified: `pass` is refused, and `pass_with_issues` is allowed only when that criterion is listed in `blocking`; a `should` one ruled `not_applicable` holds nothing back. The widget checks the decision against the rulings and refuses a mismatch with the reason.
+
+### L1-7. UI (Japanese labels)
+
+Window title 「Noa · 多角検証」 / "Noa · Multi-Agent Verification", app name `Noa Verify`; minimum window as review's.
+
+1. **開始ビュー**: 対象 (「Git 差分 | 現在の状態」, repository, base, head, path filter), 仕様ファイル (optional path, 選択…), 依頼 (text), 受け入れ基準 (optional, one per line, placeholder 「空欄なら判定役が依頼と仕様から作成」), 判定役 row, 検証者 2–6 rows (agent / model / effort / 手法 / custom text), 隔離 (個別 worktree | 共有（読み取りのみ）), 基準を確認してから検証 (on), ラウンド上限 (1–6, default 2), 開始 with the refusal note, 過去の検証 (as review's past list: target, verdict tag, criteria tally 検証済 4 · 不合格 1 · 判定不能 1, age, state). Installed agents as review's.
+2. **Board**:
+   - Header: target label, status, verdict tag; コピー, レポート保存, 新しい検証.
+   - Progress strip: 「ラウンド n / max · 独立検証｜追試」, steps 基準策定 → 配信 → 検証 → 証跡収集 → 判定, per-agent badges, re-run progress (再実行 3 / 5), 停止中 / 基準確認待ち.
+   - Left cards: target card (base…head, files, +/−, isolation mode, スナップショットを開く); one card per verifier (agent · model · effort, strategy tag, badge, results this round ✓ n ✗ n ⊘ n, ペインを開く, ワークツリーを開く); the judge's card.
+   - Center tabs:
+     - **基準**: before round 1 (held), the editable criteria list (L1-2). After: the **criteria × verifier matrix**: one row per criterion (id, priority, statement, ruling tag), one column per verifier, each cell the latest result (✓ pass, ✗ fail, ⊘ blocked, – not tested) with a re-run mark (↻ matched, ≠ differed) and a cross-check mark (⇄: a cross-check about the result the cell shows, L1-6 rule 1; one about an earlier result of that verifier marks nothing); a click selects the criterion.
+     - **証跡**: every evidence item, filterable by verifier (and あなた), round, kind (コマンド / 画像 / 動画 / ファイル / 観察), criterion and re-run outcome, shown as 一覧 (kind, command or path, exit status verifier's / re-run's, digest, size) or ギャラリー (media only: a grid of placeholder cards, L1-5a, grouped by criterion, each with kind, format, caption, verifier, round, size, and ▶ with its marks for a video); 開く opens the stored copy (a log in a read-only text view with search; an image or a video in the system viewer or player, L1-5a). 証跡を追加 attaches the person's own media.
+     - **不具合**: consolidated defects as review's findings board (severity, status, tally, location, claim), with repro steps.
+     - **レポート**: L1-8, 暫定 until a verdict.
+   - Right, the selected criterion's thread: statement, how, source, priority; per verifier per round: result, note, evidence (with re-run outcome; media as a strip of placeholder cards, a click opens it; media whose `shows` leaves the criterion out is not shown there, as the gallery leaves it out, L1-5a); the person's attached media; 証跡を追加; cross-checks; the judge's ruling history with rationale and cited evidence. A selected defect shows its sources, repro, cross-checks and history. Nothing selected: the judge's latest summary and the verdict.
+   - Bottom: composer (全員 / each verifier / 判定役), ラウンド後に停止, 次のラウンドへ, 検証を開始 (while held for criteria), +1, +3, 再試行, 終了. 再試行 is offered exactly when the engine's retry has something to take up: the judge's criteria brief that gave up (criteria not accepted), worktrees that could not be made between rounds (round 1 included), a verifier's work brief that gave up without a reply while the round is briefed or verified, or the judge's ruling brief that gave up while the round is ruled.
+   - Status bar: **ペインをすべて閉じる** (the label the review, discussion and competition widgets use for the same button), once the verification has finished (a verdict, or ended with 終了). It closes, with `noa.closePane`, every pane this verification started in Noa: the judge's and the verifiers'. Never a 修正を依頼 tab's pane, nor any pane the verification did not start. Not offered while the verification runs or after it was interrupted (its panes are needed to resume). Also offered for a finished stored verification opened in the live window when any of its panes is still open, found by its label through `noa.listPanels`; not in a read-only window started with `--session`. That window's read-only views offer nothing that acts on Noa (no ペインをすべて閉じる, 再開, +N or 修正を依頼, and Noa is not asked which panes are open); ワークツリーを削除 and レポートを再生成 stay. It asks first (an alert whose default is キャンセル, so Return and Escape both cancel); nothing closes panes on its own. It does not touch the worktrees (L1-3 removes them at close). Afterwards a notice 「n 個のペインを閉じました」 names every pane that could not be closed (a close whose outcome Noa could not tell keeps the pane until Noa reports it gone, and then goes without a notice, as review's).
+3. 修正を依頼 (review L1-9; its tab opens in the target's checkout, `workdir`) offers scopes 不合格の基準 n 件, 不具合 n 件 and the selection; the task lists each failed criterion with its failing evidence (stored log excerpts, last 80 lines) and repro steps, and says where the verifiers ran: in copies of the tree (個別 worktree), or in that checkout itself (共有). 同じ設定で再検証 (review L1-10) refills the start view including the frozen criteria (as user criteria, so they are kept verbatim) and adds the previous verdict and blocking list to the request.
+
+### L1-8. Report
+
+`export::report_markdown(&Session, base: Option<&Path>)` (the reply dir for absolute media links, `None` for relative ones), Japanese:
+
+1. `# 検証結果`（暫定）: target (repository, base…head SHAs, merge base, files, +/−), isolation mode, panel (verifier → strategy; judge), rounds, status.
+2. `## 総合判定`: decision, rationale, blocking list.
+3. `## 受け入れ基準`: a table (id, priority, statement, ruling, verifiers' results ✓✗⊘–, re-run ↻/≠), then per criterion the rationale and cited evidence (command, exit, re-run outcome, digest, stored path).
+4. `## 不具合`: live defects ranked, with repro and evidence: the raw defects' evidence, then each cross-check on the defect with its round, verifier, outcome and the evidence it cites.
+5. `## 追試`: every cross-check (subject, verifier, outcome, note, the evidence it cites).
+6. `## 証跡一覧`: every evidence item with digest and size; re-runs that differed or timed out listed first. When any item was marked for re-run, one line at the top says where the re-runs ran: in each verifier's own pane, started by its agent (L1-5, Trust), so a match is not an independent confirmation; in 共有 mode, that none ran. In 個別 worktree mode the line names the panes only once a re-run has run (matched, differed or timed out); before that it says none has run yet, and once none can (the verification ended, or every one ended `not_run`), that none ran.
+7. `## 基準の変更`: criteria the person added, edited or removed before round 1; criteria ruled `not_applicable` and why.
+8. `## 検証の欠落`: criteria with no `pass`/`fail` result in any round (the criterion's history, as L1-6 reads it; a later `blocked` or `not_tested` takes none away, while the table of item 3 shows only the latest), verifiers that failed a round, `blocked` results with their reasons (every round's, also one a later result of the same verifier replaced), re-runs not run (also those the verification ended before), 共有 mode (isolation not enforced, no re-runs), `observation`-only results.
+9. `## ラウンド記録`: per round, kind and the judge's summary.
+
+Media in the report: under each criterion, the media its results, the cross-checks on its results and its rulings cite (unless their `shows` leaves it out) and the person attached for it; under each live defect, the media its raw defects and the cross-checks on it or on a defect merged into it cite (a merge moves the raw defects, and the checks on them count with them, as in the tally); images are embedded and videos are linked with their caption and marks; person-attached ones are marked （あなたが添付）. Evidence paths are relative to the judge's reply dir (`evidence/r1/codex/shots/tab.png`), where the stored copies live. `report.md` stays in the data dir, so it links each one by its absolute path, the reply dir joined with that relative path (`![caption](/…/repo/.noa/verify/ver-1/evidence/r1/codex/shots/tab.png)`), percent-encoded per component, and its first line names the reply dir the links point into. `export::report_markdown` takes that base as an argument: the golden test passes a fixed one, and 証跡ごと書き出す passes none, which gives the relative paths. Text (stored paths in the evidence list) shows the relative path.
+
+Written to `<session dir>/report.md` after every accepted judge output (the criteria included, also while they wait for confirmation) and at close, as review's. レポート保存 offers two forms: レポートのみ (`<id>.md`, media as the absolute links above, which resolve only on this machine while `<repo>/.noa/verify/<id>/` exists, said in a line at its top) and 証跡ごと書き出す (a chosen folder receives `report.md` with links relative to the folder and a copy of every cited evidence file at its path relative to the reply dir (`evidence/r<N>/…`, `evidence/user/…`), so the folder can be zipped and shared; no link is followed and no existing file is overwritten).
+
+### L1-9. Strategies (手法)
+
+| id | Label | Checklist (brief text, summarized) |
+|---|---|---|
+| `conformance` | 仕様適合 | exercise each criterion's `how` as written; record the command and its output; stop at the first deviation and record it |
+| `falsify` | 反証 | try to make each criterion fail: boundaries, invalid input, empty/huge data, concurrency, interrupted runs; write throwaway tests in your worktree; a criterion you could not break is a pass only with the attempts as evidence |
+| `regression` | 回帰 | run the repository's own checks (AGENTS.md / CLAUDE.md commands, CI scripts) and the tests of code the diff touches; compare with the base when a failure may be pre-existing (`git stash` is not allowed; check out the base in a second detached worktree of your own under your worktree's `.noa/`) |
+| `e2e` | 実機・E2E | build and run the product as a user would (GUI, CLI, server); capture screenshots or transcripts as `file` evidence |
+| `nonfunctional` | 非機能 | measure what the criteria or the change imply: time, memory, CPU, output size, security-relevant behaviour; give numbers with the command that produced them |
+
+カスタム: free text 1–500 characters (`custom`, `custom-2`, …). Default panel: claude/仕様適合, codex/反証, claude/回帰 (`claude-2`). A verifier's strategy shapes its brief; every verifier still reports a result for every criterion in round 1.
+
+### L1-10. Storage, locking, resume, flags, Noa integration
+
+- Root `<data dir>/noa/verifications`, id `ver-<millis>`:
+
+  ```text
+  <data dir>/noa/verifications/<id>/
+    events.jsonl  report.md
+  <repo>/.noa/verify/<id>/         judge's reply dir (c/criteria.json, r<N>/judge.json, fix-<n>.md)
+    target/                        manifest.json, diff.patch, files/<path> (post-images), worktree.patch, untracked/, spec.md
+    evidence/r<N>/<verifier>/      ingested logs and files (evidence/r<N>/manifest.md beside them)
+    evidence/r<N>/<verifier>.rerun/  re-run logs, <n>.log (L1-5 step 5)
+    evidence/user/                 person-attached media
+  <main>-wt/verify-<id>-<verifier>/.noa/verify/<id>/r<N>/<verifier>/   verifier reply dirs
+  ```
+
+  `<repo>` is the target's checkout top level (the session's `workdir`), `<main>` the repository's main worktree (`main_worktree`); they differ only when the target is a linked worktree.
+
+  The snapshot sits in the judge's reply dir, not the data dir, as review's does whenever a session has a workdir (`store::target_dir(reply_dir)`, review L1-7), so a judge sandboxed to the repository can read it; a verification always has one (git only). The ingested evidence sits beside it for the same reason (Decision 11); the verifier worktrees removed at close hold none of it. Each `.noa/` (the repository's and each worktree's) gets its `.gitignore` holding `*` from `store::prepare_workdir`, as review's.
+
+- Locking, delivery (`refuseShell`, 128 KiB brief spill to a file), resume refusals, read-only stored view, stored views follow their log: as review L1-7. Resume additionally refuses when `target/spec.md` no longer hashes as the logged spec file (`capture::verify` checks it with the manifest and the recipe), and when a recorded worktree exists but is not a detached worktree of the repository at the head SHA (named), and rebuilds a missing one from the recipe. For a 共有 verification of a ref, a resume and an extension (+N) both refuse, before anything is written, when the checkout's HEAD is not the head SHA or its work tree is not clean (L1-3's check, with its reasons). Each worktree rebuilt is logged before the next is made, so a resume refused halfway (a full disk) keeps the ones it made; one whose rebuild fails is logged `WorktreeFailed` with its reason before the resume is refused (the stored view shows it failed, not removed), and the next resume makes it again while its round is open (再試行 makes worktrees only between rounds). A verifier pane started before its worktree was last made runs in the folder that was removed; the log's order tells (a `WorktreeMade` after the verifier's last `PaneAssigned`), so this holds for a rebuild on resume, one a refused resume logged, an extension's after the close removed the worktrees, and +N in the window that holds the verification alike: such a pane is never taken up, it is closed and the agent started again in the new worktree, in a new pane, as for a lost pane. It is closed only once the pane with that id on the current connection carries its label (`ver:<id>:<part>`): an id kept while the link was down may name another pane after Noa restarted, and that one is left alone. A pane counts as lost only when Noa reports its agent gone: the pane closed, its child exited (`Panel.exit`), back at its shell (`refuseShell` refuses every write), or its card emptied after an agent showed in it (`agentLeft`, as `noa +ctl wait` reads it). Noa answers a pane at its shell and a paste into a pane that has not enabled bracketed paste with the same -32010; an empty send that refuses a shell (it writes nothing) tells them apart. Once the agent has been reported gone for the start timeout since the first refused write, the pane is closed and the agent started again in a new pane (one brief starts at most two panes, `MAX_SPAWNS`, as for a pane that exits). A pane Noa reports exited (`Panel.exit`) or emptied (`agentLeft`) is lost whatever its paste readiness or last state says, so a brief waiting for it never times out on it and 再試行 starts the agent again: an exited one at once (its child never comes back), an emptied one once that has lasted the start timeout. A paste refused for any other reason (an agent waiting for input that has not enabled bracketed paste) never closes the pane: the brief stays queued for it and goes once it takes pastes, and a notice says so once the start timeout has passed.
+- Flags: `verify [--demo | --demo-start | --demo-held | --demo-criteria | --session=DIR | --repo=DIR] [--tab=criteria|evidence|gallery|defects|report] [--criterion=ID] [--snapshot=FILE.png [--size=WxH]]`; `--tab=gallery` is the 証跡 tab in its ギャラリー view, so `--snapshot` reaches every view (AC-25).
+- Panes of a finished verification: ペインをすべて閉じる (L1-7 item 2, status bar) goes through the runner that holds the verification; for a finished stored verification no runner holds, the window asks Noa (`noa.listPanels`, a connection of its own) which of its panes, by label (`ver:<id>:<part>`), are still open, and closes those. A log not closed (interrupted) is refused.
+- Noa integration: exactly the files review L1-8 lists, with `AppCommand::OpenVerify`, `OPEN_VERIFY_MENU_ID = "noa.view.open-verify"`, action `verify.open`, palette title "Open Verify", View → "Verify" after "Review", `helper_program::VERIFY` (`Noa Verify`, crate `verify`) receiving `--repo` as review does, `scripts/verify.sh` and `scripts/bundle-macos.sh` entries, `AGENTS.md`, `docs/FEATURES.md`. Two places review L1-8's table does not list also change: `crates/noa-app/src/commands/tests.rs` (a test like `the_review_widget_is_addressable_by_action_and_menu_id` for `verify.open` / `noa.view.open-verify`), and `helper_program::launch_args`, which today passes `--repo=<cwd>` only when `helper.crate_name == REVIEW.crate_name`, so it must match `VERIFY` too (its test `only_the_review_is_given_the_focused_panes_directory` and the module doc change with it).
+
+## L2: Detail
+
+### L2-1. Crate layout
+
+```text
+widgets/verify/
+  Cargo.toml  Cargo.lock  .gitignore
+  src/lib.rs            library: capture, worktree, evidence, media, rerun, engine, fsx, store, model; #[cfg(test)] testkit
+  src/main.rs           binary: demo, installed, live, `session` (= src/live/ via #[path = "live"]), ui — as review's main.rs
+  src/demo.rs  src/installed.rs  src/fsx.rs  src/testkit.rs
+  src/capture.rs        git capture + rebuild recipe (from review)
+  src/worktree.rs       add / rebuild / check / remove (I/O); naming and porcelain parsing pure
+  src/evidence.rs       inspect cited files for validation, ingest, attach, digest, manifest.md, 証跡ごと書き出す copy (I/O)
+  src/media.rs          magic-byte sniffing, caps, marks parsing (pure)
+  src/rerun.rs          run.sh generation and digests (pure); watching .pid/.exit/done, liveness, timeout kill, log ingest (I/O)
+  src/engine.rs  src/engine_tests.rs   pure state machine (criteria phase, rounds, ingest step)
+  src/store.rs
+  src/model/{mod,types,reduce,brief,validate,validate_tests,export,strategy,rules}.rs   rules.rs = L1-6 judge evidence standard
+  src/live.rs  src/live/{ipc,runner,fix}.rs
+  src/ui/{mod,start,criteria,progress,cards,board,matrix,evidence,defects,thread,report,composer,fix,tests}.rs
+  tests/cli.rs  tests/resume.rs  tests/golden.rs  tests/golden/{scenario.rs,briefs.txt,report.md}
+```
+
+`Cargo.lock` starts as a copy of `widgets/review/Cargo.lock` with the package renamed (`name = "review"` → `"verify"` in the root `[[package]]`), then one `cargo metadata --offline --format-version 1 >/dev/null` in `widgets/verify`, which only moves that entry to its sorted place (checked 2026-11-24 on a copy: `--locked` accepts the renamed copy either way, and a run without `--locked` re-sorts it and changes nothing else); `Cargo.toml` has exactly review's `[dependencies]` and `[target.'cfg(target_os = "macos")'.dependencies]`. No new third-party crate: process timeouts with `std::process::Child::try_wait` polling, signals and `kill(pid, 0)` through `libc` (already a dependency), the nonce from `/dev/urandom`, opening files with `open` as a subprocess.
+
+### L2-2. Types (new or changed vs. review)
+
+```rust
+pub enum TargetKind { Diff, State }
+pub struct Rebuild { pub head_sha: String, pub worktree_patch: Option<u64 /*digest*/>, pub untracked: Vec<(String, u64)> }
+pub enum Isolation { Worktree, Shared }
+pub enum Priority { Must, Should }
+pub enum CriterionSource { User, Request, Inferred, Spec { line: u32 } }
+pub struct Criterion { pub id: String, pub statement: String, pub how: String,
+                       pub priority: Priority, pub source: CriterionSource, pub edited: bool }
+pub enum Outcome { Pass, Fail, Blocked, NotTested }
+pub struct CriterionResult { pub round: RoundNo, pub part: PartId, pub criterion: String,
+                             pub outcome: Outcome, pub note: String, pub evidence: Vec<EvidenceKey> }
+pub enum EvidenceBody {
+    Command { cmd: String, cwd: String, exit: i32, log: String, rerun: bool },
+    File { path: String, caption: Option<String>, media: Option<Media>,
+           marks: Vec<Mark>, shows: Vec<String> },
+    Observation { text: String },
+}
+pub enum Media { Png, Jpeg, Gif, Webp, Mp4, QuickTime, Webm }   // from magic bytes
+pub struct Mark { pub t_ms: u64, pub note: String }
+pub struct Stored { pub path: PathBuf, pub bytes: u64, pub digest: u64 }
+// What the runner found at a cited path when a reply was read (evidence::inspect),
+// passed in with the reply so validation (L1-6) stays pure:
+pub enum FileState { Regular { bytes: u64 }, Missing, Link, NotRegular }
+pub struct FileFact { pub path: String, pub state: FileState,
+                      pub sniffed: Option<Media> /* magic bytes */, pub by_ext: Option<Media> }
+// `log` on every variant: the stored `<n>.log`, `None` when none was written or it could not be stored.
+pub enum Rerun { Matched { exit: i32, log: Option<Stored> }, Differed { exit: Option<i32>, log: Option<Stored> },
+                 TimedOut { log: Option<Stored> }, NotRun { why: String, log: Option<Stored> } }
+pub struct Attachment { pub round: RoundNo, pub at: Millis }   // person-attached: the round current then
+pub struct Evidence { pub key: EvidenceKey, pub body: EvidenceBody,
+                      pub stored: Option<Stored>, pub rerun: Option<Rerun>,
+                      pub attached: Option<Attachment> }
+pub enum CrossOutcome { Reproduced, NotReproduced, Disputed }
+pub struct CrossCheck { pub round: RoundNo, pub by: PartId, pub subject: Subject,
+                        pub outcome: CrossOutcome, pub note: String, pub evidence: Vec<EvidenceKey> }
+pub enum RulingKind { Verified, Failed, Inconclusive, NotApplicable }
+pub struct Ruling { pub round: RoundNo, pub kind: RulingKind, pub rationale: String, pub evidence: Vec<EvidenceKey> }
+pub enum Decision { Pass, PassWithIssues, Fail, Inconclusive }
+pub struct Verdict { pub decision: Decision, pub rationale: String, pub blocking: Vec<String> }
+pub enum Phase { Criteria, Confirming, Briefing, Verifying, Ingesting, Ruling, Closed }
+// Defect / Finding fold copied from review with `repro: String` added.
+```
+
+### L2-3. Events
+
+`Created { id, request, target, manifest, rebuild, isolation, spec, user_criteria, workdir, main_worktree, max_rounds, judge, verifiers, confirm, at }`, `CriteriaAccepted { criteria }`, `CriteriaEdited { op: Add|Edit|Remove|Move, … , at }`, `CriteriaFrozen { at }`, `WorktreeMade { part, path }`, `WorktreeRemoved { part }`, `RoundStarted`, brief lifecycle events, `ReplyRecorded { round, part, summary, environment, results, evidence, defects, cross_checks }`, `EvidenceIngested { round, part, items: Vec<(EvidenceKey, Stored)>, tails }` (`tails`: the last 40 lines of each stored log of a command reported with a non-zero exit status, read by the runner at ingest), `RerunRequested { round, part, nonce, items, script_digest }`, `RerunFinished { key, rerun }`, `EvidenceAttached { key, round, body, stored, shows, at }` (person-attached media), `JudgeAccepted { round, output }`, `PhaseChanged`, `HoldSet`, `RoundsExtended`, `SessionClosed`, `MessagePosted`, `PaneAssigned`.
+
+The engine stays pure: ingest and re-runs are I/O the runner performs on `Effect::Ingest { round }` / `Effect::Rerun { part }` (write the script, issue the re-run brief) and reports back as events; the engine moves Ingesting → Ruling when every re-run of the round has an outcome.
+
+### L2-4. Briefs
+
+English, constant section headings (as review's):
+
+- Judge, criteria: `## 1. Verification request` · `## 2. Target` · `## 3. Spec` · `## 4. Criteria the person gave` · `## 5. How to write criteria` (checkable, one behaviour each, `how` concrete enough to run) · `## 6. Your output`.
+- Verifier, round 1: `## 1. Request and round` · `## 2. Target and your worktree` (path, built from which SHA and patch, edits allowed only here, own build cache) · `## 3. Criteria` · `## 4. Your strategy` · `## 5. Evidence` (save every command's output under `logs/`, mark `rerun: true` for commands that should give the same exit status when run again without your session state; do not touch the worktree after writing the reply) · `## 6. Rules` (blind, no other panes or worktrees, no push/publish, mark unverified) · `## 7. User interventions` · `## 8. How to reply`.
+- Verifier, round ≥ 2: 1–4, then `## 5. Rulings and results so far` · `## 6. Your assignments` · `## 7. Evidence` · `## 8. User interventions` · `## 9. How to reply`.
+- Judge, ruling: `## 1. Request and round` · `## 2. Criteria` · `## 3. Panel and receipts` · `## 4. Results this round` (per criterion, per verifier, evidence with stored digest and re-run outcome; log tails of failing commands, last 40 lines (`JUDGE_TAIL_LINES`), the ones `EvidenceIngested` logged) · `## 5. Cross-checks` · `## 6. Defects` (each raw defect with every evidence item it cites, as above) · `## 7. Evidence standard` (L1-6 rules verbatim) · `## 8. This round` · `## 9. Your output`.
+- Re-run brief (verifier, between its reply and the judge): `## Re-run` only — the one command line of L1-5 step 3 (per agent kind: claude's Bash tool with `run_in_background`, codex and agy started once in the foreground and waited on, however often the tool returns control, never started again or stopped, with the bound on the whole run it states), the reminder not to edit `rerun/` or the worktree, and "reply nothing". Short on purpose, so it fits a paste and does not restart the verifier's work.
+
+## L3: Acceptance Criteria
+
+Unit and golden tests as review's; GUI behaviour against a live Noa is verified by hand (AC-26…28, AC-34, AC-35, AC-37).
+
+Unconfirmed (2026-11-25): none of the manual ACs has been checked by hand yet — AC-26, AC-27, AC-28, AC-34, AC-35, AC-37. For AC-35 only the agents' tool behaviour was measured, outside the widget (L1-5 step 3).
+
+1. AC-1 Capture on a temp repository writes the review-compatible snapshot plus `worktree.patch` and `untracked/` in work-tree mode; the person's `git status` and index are unchanged (test).
+2. AC-2 A non-git directory, an empty diff (Diff kind), an untracked binary over 1 MiB and each cap refuse the start with the reason (test).
+3. AC-3 `worktree::add` builds a detached worktree whose tracked and untracked files match the manifest digests, from a ref and from work-tree mode; a tampered patch refuses round 1 naming the files; no branch is created (test).
+4. AC-4 `worktree::remove` removes only a detached worktree of the repository at the recorded path, and leaves (and names) one that was re-pointed to a branch or moved (test).
+5. AC-5 Criteria validation: every person-given line appears once with `source: user`; ids without gaps; 0 and 31 criteria refused; each rule its own problem line (table test).
+6. AC-6 With 基準を確認してから検証 on, the session holds after criteria; edits are events; a `user` criterion cannot be removed; 検証を開始 freezes them; with it off round 1 starts at once (engine test).
+7. AC-7 Round-1 verifier briefs name no peer, no peer worktree and no peer reply path (golden).
+8. AC-8 Verifier validation: missing results per criterion, `pass` without evidence, an uncited or dangling evidence id, a log path with `..` or a link, a file over the cap, cross-checks in round 1, a missing assignment answer — each its own problem line (table test).
+9. AC-9 Ingest copies each file into the judge's reply dir's `evidence/r<N>/<verifier>/` (nothing under the data dir but `events.jsonl` and `report.md`), records size and digest, writes `manifest.md`, and never follows a link swapped in after validation (test with a link race fixture).
+10. AC-10 Re-run: with `run.sh` started by a fake agent in a temp worktree, a command that exits 0 twice is `matched`; one that exits differently is `differed` with both statuses; a sleeping command is `timed_out` at the limit (shortened in the test) and its process group killed; output beyond 8 MiB is cut and marked (test).
+11. AC-11 Re-runs never run in the person's tree: in 共有 mode every `rerun: true` item is `not_run` with the reason, and no script or re-run brief is made (test).
+12. AC-12 A command holding quotes, `$()` and newlines reaches the shell only as its `<n>.cmd` file and runs as written; `run.sh` holds no reported text; a changed `run.sh` or `.cmd`, a `done` with the wrong nonce, and a script that never writes a `.pid` each end as `not_run` with the reason (test).
+13. AC-13 Judge rules: `verified` without a matched re-run or two independent passes is refused; with an unanswered `fail` refused; `observation`-only refused; `failed` without a fail result refused (table test).
+14. AC-14 Verdict consistency: `pass` with a `must` not verified, or a live high defect, is refused; `fail` without a failed `must` is refused; each with the reason (table test).
+15. AC-15 Default assignments: every `fail` and every single-verifier `pass` is assigned to another verifier, round-robin, never to its reporter (test).
+16. AC-16 Engine: Briefing → Verifying → Ingesting → Ruling; the judge is briefed only after every re-run of the round has an outcome; a verifier that fails the round does not block it (engine test).
+17. AC-17 Early close in round 1 is accepted only when every criterion is verified by two verifiers with matched re-runs (engine test).
+18. AC-18 Defect ops: every raw defect placed once; merge moves sources (copied review tests adapted).
+19. AC-19 Resume rebuilds a missing worktree from the recipe, takes up labelled panes, and refuses a worktree that is not detached at the head SHA (test).
+20. AC-20 The report matches `tests/golden/report.md` for the golden scenario: every section of L1-8, re-runs that differed listed first, criteria changes listed (golden).
+21. AC-21 Briefs match `tests/golden/briefs.txt` (golden).
+22. AC-22 The criteria × verifier matrix shows the latest result per cell with re-run and cross-check marks; a click selects the criterion (UI test).
+23. AC-23 Evidence tab filters by verifier, round, kind and re-run outcome; 開く opens the stored copy, not the worktree file (UI test).
+24. AC-24 修正を依頼 writes a task listing each failed criterion with its stored log tail and repro steps, and opens a tab with auto approval off (test, as review's fix tests).
+25. AC-25 `--snapshot` renders every view (including the gallery) (`--demo`, `--demo-start`, `--demo-held`, `--demo-criteria`, each `--tab`, `--criterion`) headlessly.
+26. AC-26 (manual) From View → Verify in a live Noa, a branch of this repository is verified by three agents over two rounds, each in its own worktree; the report is written and the worktrees are removed at close.
+27. AC-27 (manual) ペインを開く / ワークツリーを開く bring the pane forward / open Finder.
+28. AC-28 (manual) An interrupted verification resumes from 過去の検証 with its worktrees.
+29. AC-29 `scripts/verify.sh --full` builds and tests `widgets/verify`; `scripts/bundle-macos.sh` bundles and signs `Noa Verify`; `cargo test -p noa-app` passes with the new command (CI).
+30. AC-30 Media validation: a PNG named `.mp4`, a video over 200 MiB, an image over 15 MiB, media without a caption, marks out of order or in a bad format, and `shows` naming an unknown criterion — each its own problem line; a JPEG, GIF, WebP, MP4, MOV and WebM fixture are each sniffed right (table test).
+31. AC-31 Person-attached media: copied to `<reply dir>/evidence/user/<n>.<ext>` without following a link, hashed, logged as `EvidenceAttached`, listed in the next judge brief; refused before round 1 and after close; alone it does not satisfy `verified`, with a verifier's `pass` it does (test).
+32. AC-32 A media item shows as a placeholder card (kind, format, size, caption, and for a video ▶ and its marks) in the thread strip and the gallery, no picture is drawn and no thumbnail file is written; 開く asks for the stored copy to be opened with `open`, not the worktree file (UI test with a fake opener).
+33. AC-33 The report embeds images and links videos with captions and marks, by absolute path into the reply dir (golden with a fixed base); 証跡ごと書き出す writes a report with relative links, copies every cited file to its path relative to the reply dir, and refuses to overwrite (golden + test).
+34. AC-34 (manual) In a live Noa, a verifier's screenshot shows as a placeholder card in the thread and the gallery, 開く opens it in the system image viewer, and a video opens in the system player.
+35. AC-35 (manual) In a live Noa, a claude and a codex verifier each start `run.sh` from the re-run brief; a command using `$NOA_BIN` matches (for codex, in the environment of its sandboxed tool, where `$NOA_BIN` is unset for the verifier's own run and the re-run alike, L1-5 step 3); a command longer than the agent tool's own time limit still finishes. Measured 2026-11-25 outside the widget, by hand: `nohup … &` from either agent's tool does not survive; claude's `run_in_background` and codex's foreground run with a long enough timeout each ran a 150 s command to its end (L1-5 step 3). Still open: the widget's own re-run brief end to end in a live Noa, and agy.
+36. AC-36 ペインをすべて閉じる: offered only once the verification has finished (verdict or 終了), never while it runs or after an interruption, and not in a read-only `--session` window; it asks first and Return or Escape cancels; confirming closes every judge and verifier pane the verification started and no 修正を依頼 pane or other pane; the notice names each pane that could not be closed; a finished stored verification opened in the live window offers it only while a pane of it is open (by label) and closes those (UI test + runner test with the fake Noa).
+37. AC-37 (manual) In a live Noa, after a verification ends, ペインをすべて閉じる closes its tab's agent panes and leaves a 修正を依頼 tab open; the worktrees are untouched by it.
+38. AC-38 共有（読み取りのみ） with a ref head: the start is refused, with the reason and nothing left behind, when the checkout's `git rev-parse HEAD` is another commit or `git status --porcelain` is not empty; it starts when the checkout is clean at that commit. 再開 and +N of such a verification run the same check against the captured head SHA: after a tracked file is edited, HEAD unchanged, each is refused with that reason and nothing written to the log, the report or the checkout, and each goes once the edit is undone, the start's own ignore line in a tracked `.noa/.gitignore` not counting (runner tests on a temp repository).
+39. AC-39 AC-12's "a script that never writes a `.pid`" end to end through the runner: with a fake Noa and clock, a verifier's `rerun: true` commands get a re-run brief that no agent acts on; it is sent again after each start timeout up to the retries, then every item ends `not_run` ("re-run did not start") and the round goes on to the judge (runner test).
+
+## Scope
+
+In scope: L1-1 … L1-10.
+
+Out of scope:
+- Static review of the change (the review widget does it; 同じ設定で再検証 does not start a review).
+- Files and document targets; non-git directories.
+- A shared build cache across worktrees; running verifiers on other machines.
+- Mutation testing run by the widget (the 反証 strategy may do it inside its worktree).
+- The widget deciding results itself beyond re-runs (it does not parse test output).
+- Posting results to GitHub or CI.
+- The judge adding criteria after round 1 starts.
+- Playing video inside the widget (the system player opens it), editing or annotating media, and audio-only evidence.
+- Drawing image previews or making thumbnails (L1-5a: noa-gpui 0.2.1 cannot upload a picture after the window is built and has no public decoder).
+
+## Decisions taken by default
+
+Each can be changed before implementation:
+
+1. 検証 means running things against criteria (dynamic), not reading (L0). This is the main assumption of the design.
+2. Criteria come first, from the judge, and the person confirms them by default, because a ruling is only as good as what it is measured against.
+3. One detached worktree per verifier by default; 共有 mode exists for trees too large to check out several times.
+4. Re-runs run in the verifier's own pane (the person's decision, 2026-11-24), started by the verifier's agent from a widget-written script, so they see the pane's environment, the agent's shell and its sandbox; the cost is that the agent mediates (L1-5, Trust), and independence comes from cross-checks.
+5. `verified` needs a matched re-run or two independent passes; the widget enforces it, the judge cannot rule past it.
+6. Evidence is copied into the judge's reply dir (Decision 11) and hashed at ingest, so the report stays checkable after the worktrees are removed.
+7. Round limit default 2 (independent + one cross-check round), reply timeout 45 min.
+8. The judge runs nothing; verifiers run everything.
+9. Worktrees are removed with `--force` at close (they hold only the verifier's throwaway edits), after checking each is the one the log recorded; interrupted sessions keep them.
+10. Media show as placeholder cards and open in the system viewer; the window draws no picture (L1-5a). Real previews would need a decoder crate (a new dependency) and a way to upload pictures after the window is built.
+11. Ingested evidence is kept in the judge's reply dir, `<repo>/.noa/verify/<id>/evidence/`, beside `target/`, not in the data dir; `events.jsonl` and `report.md` stay in the data dir (the orchestrator's decision, 2026-11-24). Reason: the judge is told it may open images by path (L1-5a), and a judge whose sandbox reaches only the repository cannot read the data dir; this is the same reason review keeps its snapshot in the workdir. Whether codex's sandbox in particular can read the data dir was not checked. The cost: `report.md` links media by absolute path into the repository (L1-8), and deleting `<repo>/.noa/` loses the evidence while the log remains.
+
+## Needs the maintainer's agreement before implementation
+
+- `AGENTS.md` (Safety): implementing adds `widgets/verify/Cargo.lock` and changes `scripts/verify.sh` and `AGENTS.md`, as the review widget did.
+- Decision 9 (`git worktree remove --force` on widget-made worktrees).
+
+## Implementation plan
+
+Five units, each built by one agent in its own worktree. No two units edit the same file. Unit 1 lands first; units 2–4 start from it, unit 5 can start at once.
+
+```text
+U1 skeleton ──┬── U2 core ──┐
+              ├── U3 io ────┼── U4 app (tests go green after U2 + U3 merge)
+              │             │
+U5 integration (noa-app part any time; widget checks after U1; AC-29 after U1–U4)
+```
+
+### Rules for every unit
+
+- Copy from `widgets/review` (and `widgets/competition/src/check.rs` for the manifest), then adapt as this spec says. Do not depend on another widget's crate.
+- After U1 merges, these files are **frozen**: `Cargo.toml`, `Cargo.lock`, `.gitignore`, `src/lib.rs`, `src/model/mod.rs`, `src/model/types.rs`, `src/fsx.rs`. No unit edits them. Behaviour on a shared type goes in an `impl` block in the unit's own file (Rust allows inherent impls in any module of the crate).
+- Every `pub` item U1 writes (name, signature, fields, variants) is a contract. Units fill in bodies and may add private items, `pub` items in their own files, and their own tests. They do not change a U1 signature. A unit that needs a change to a frozen file or to a U1 signature stops that part, writes `#TODO(agent): <change and why>` in its report, and works around it inside its own files where it can. The change then lands as one follow-up commit after the units merge.
+- No new dependency, no `cargo update`. Every command runs with `--locked --offline` inside `widgets/verify`.
+- Tests that need another unit's code (still `todo!()` before that unit merges) go into that later unit, not into this one.
+- Done means: the done commands below pass, the unit's ACs have passing tests named `acNN_…` (as review's tests are named), and the branch is rebased on the branch U1 merged into.
+
+### U1 `skeleton` (start: now; others wait for its merge)
+
+- Creates: `widgets/verify/{Cargo.toml, Cargo.lock, .gitignore}` (L2-1: review's dependencies, lock renamed and re-sorted; `.gitignore` = `/target`, `*.png`); `src/lib.rs` (the library modules of L2-1, `#[cfg(test)] pub(crate) mod testkit;`); `src/main.rs` (just `fn main() {}`; U4 owns it after this); `src/model/mod.rs`; `src/model/types.rs`; `src/fsx.rs` (review's, verbatim, with its tests); and one stub file for every other library module of L2-1 (`capture`, `worktree`, `evidence`, `media`, `rerun`, `engine`, `store`, `model/{reduce,brief,validate,export,strategy,rules}`, `testkit`).
+- `types.rs` holds **every** shared type, written in full with serde derives: review's types that are kept (`string_id!`, `SessionId`, `PartId`, `MessageId`, `AgentKind`, `AgentSetup`, `AgentChoice`, `Participant` with `strategy`, `Role { Judge, Verifier }`, `Head`, `TargetManifest` and its file types, `Severity`, `Location`, the defect/finding fold types with `repro`, `Receipt`, `Brief` with `BriefKind { Work, Rerun }`, `Round`, `RoundKind`, `Message`, `Session`), every type of L2-2 including `FileFact`/`FileState`, `Strategy` (L1-9 built-ins plus custom), the constants (`MAX_CRITERIA` 30, `DEFAULT_MAX_ROUNDS` 2, `MAX_MAX_ROUNDS` 6, `MIN_PANEL` 2, `MAX_PANEL` 6, `JUDGE_ID` `"judge"`, the media caps, `MAX_RERUNS` 8, `RERUN_TIMEOUT`), and the **`Event` enum of L2-3** (here, not in `reduce.rs` as review has it, so it is frozen with the other types; `reduce.rs` re-exports it as `pub use crate::model::types::Event;`).
+- Each stub module holds its full `pub` surface with doc comments and `todo!()` bodies. Shared constants (`capture::DIFF_FILE`, `FILES_DIR`, `MANIFEST_FILE`, `WORKTREE_PATCH`, `UNTRACKED_DIR`, `SPEC_FILE`, `store::EVENTS_FILE`, `REPORT_FILE`, `TARGET_DIR`, `EVIDENCE_DIR` = `"evidence"` (under the reply dir, beside `TARGET_DIR`), `USER_EVIDENCE_DIR` = `"user"`, …) get their values. A body of a few lines that several units call is written in full: `capture::digest_bytes` (FNV-1a 64, review's), `store::digest`, path helpers such as `store::session_dir`, `reply_dir`, `target_dir`, `evidence_dir(reply_dir)` (`<reply dir>/evidence`), `rerun_log_path` (`<reply dir>/evidence/r<N>/<verifier>.rerun/<n>.log`), `worktree::path_for`; and `media::parse_mark`, which U2's reply validation calls (AC-30), with its unit tests. The surfaces to write:
+  - `engine`: `Config` (start 90 s, reply 45 min, 2 retries), `AgentState`, `Input` (review's plus `ReplyFileWritten { …, files: Vec<FileFact> }`, `CriteriaEdit`, `UserStartVerify`, `WorktreeMade`/`WorktreeFailed`, `Ingested` (with the failing logs' tails), `RerunReported`, `AttachEvidence`), `Effect` (review's plus `MakeWorktrees`, `Ingest { round }`, `Rerun { part }`, `RemoveWorktrees`), `Output`, `EngineError`, `Setup`, `Engine` with review's methods, `participants`, `check_panel`, `check_resumable`, `check_store_paths`.
+  - `capture`: `capture`, `repo_root`, `default_base`, `verify` (review's, plus the rebuild recipe and the spec file). `worktree`: `main_worktree`, `add`, `check`, `remove`, `list` (porcelain parse). `evidence`: `inspect`, `ingest`, `attach`, `write_manifest`, `export_bundle`. `media`: `sniff`, `by_extension`, `parse_mark` (in full), caps. `rerun`: `script`, `write_request`, `poll` (outcome per item, timed by a `Watch` the runner keeps per script, killing past the limit), `kill_group`, `ingest_logs`, the per-`AgentKind` detached/foreground constant.
+  - `store`: review's surface (`Store`, `list_sessions`, `page_sessions`, `Summary`, `Listed`, `prepare_workdir`, reply/report paths, `write_fix_task`). `model::reduce`: `create`, `apply`, `replay`. `model::validate`: `parse_criteria`, `parse_reply`, `parse_judge`, `may_close` (given the round's draft rulings). `model::rules`: the evidence standard and verdict check. `model::brief`: one function per brief of L2-4 plus `correction_note`. `model::export`: `report_markdown`, `fix_task`, `failures`. `model::strategy`: labels and checklists.
+- Spec: L2-1, L2-2, L2-3 (types only). ACs: none.
+- Done: `cargo build --locked --offline --all-targets` and `cargo test --locked --offline` (fsx's tests plus a serde round trip of `Event` and `Session`) pass in `widgets/verify`; `git diff --stat` shows only `widgets/verify/`.
+
+### U2 `core` (waits for U1)
+
+- Edits (fills): `src/model/{reduce,validate,rules,strategy,brief,export}.rs`, `src/engine.rs`, `src/store.rs`, `src/testkit.rs`. Creates: `src/model/validate_tests.rs`, `src/engine_tests.rs`, `tests/golden.rs`, `tests/golden/{scenario.rs,briefs.txt,report.md}` (blessed with `VERIFY_BLESS=1`, as review's `REVIEW_BLESS`).
+- Spec: L1-2; L1-4 (phases, rounds, default assignments, early close, timeouts); L1-5 validation rules and the engine side of ingest and re-runs (what moves Ingesting → Ruling, `not_run` in 共有 mode); L1-5a media validation over `FileFact`s (marks through `media::parse_mark`, U1's), what the briefs say about media, the `EvidenceAttached` rule; L1-6; L1-8 report text; L1-9; L1-7 item 3 task text (`export::fix_task`); L1-10 store, locking and the engine's resume checks; L2-3; L2-4. The screenshot TODO of L1-5a stays open: write the brief with its fallback (report `blocked` with the reason).
+- ACs: 5, 6, 7, 8, 11, 13, 14, 15, 16, 17, 18, 20, 21; and the model halves of 24 (task text), 30 (one problem line per media rule, given `FileFact`s), 31 (event, next judge brief, counts only with a verifier's `pass`), 33 (report embeds images, links videos with captions and marks: golden).
+- May assume: U1's types and signatures. Must not call `capture`, `worktree`, `evidence`, `media` or `rerun` bodies in its tests (stubs until U3 merges), except the bodies U1 wrote in full (such as `media::parse_mark`): tests feed `FileFact`s, `Stored`s and re-run outcomes as inputs. `engine::check_resumable` calls `capture::verify` and `worktree::check`; its tests are U4's (AC-19).
+- Done: `cargo build --locked --offline --all-targets`, `cargo test --locked --offline` and `cargo test --locked --offline --test golden` pass.
+
+### U3 `io` (waits for U1)
+
+- Edits (fills): `src/capture.rs`, `src/worktree.rs`, `src/evidence.rs`, `src/media.rs`, `src/rerun.rs`, each with its own `#[cfg(test)]` tests (temp git repositories, real `git` and `sh`).
+- Spec: L1-1; L1-3 (main worktree lookup, worktree add / rebuild / check / remove, naming at `<main>-wt/verify-<id>-<verifier>`); L1-5 ingest, `run.sh` and `.cmd` writing, nonce, digests, watching `.pid` / `.exit` / `done`, liveness, timeout kill of the process group, log caps; L1-5a sniffing, caps, attach copy (marks parsing is U1's `media::parse_mark`, written in full; U3 leaves it as it is); L1-8 証跡ごと書き出す copy.
+- ACs: 1, 2, 3, 4, 9, 10, 12; and the I/O halves of 19 (`worktree::check` refuses a worktree that is not detached at the head SHA; rebuild from the recipe), 30 (each fixture sniffed right; a PNG named `.mp4` reported as a mismatch), 31 (copy to `<reply dir>/evidence/user/<n>.<ext>` without following a link, hashed), 33 (export copies every cited file at its path relative to the reply dir and refuses to overwrite).
+- May assume: U1's types, constants and `fsx`. Calls nothing of U2 (no engine, no reducer).
+- Done: `cargo build --locked --offline --all-targets` and `cargo test --locked --offline` pass. If a test needs something the sandbox blocks (it should not: temp dirs, `git`, `sh`, signals to its own children), say which in the report.
+
+### U4 `app` (waits for U1; its tests go green only after U2 and U3 merge)
+
+- Edits: `src/main.rs`. Creates: `src/demo.rs`, `src/installed.rs`, `src/live.rs`, `src/live/{ipc,runner,fix}.rs`, `src/ui/{mod,start,criteria,progress,cards,board,matrix,evidence,defects,thread,report,composer,fix,tests}.rs`, `tests/cli.rs`, `tests/resume.rs` (resume through the library API: `engine::check_resumable` with real captures and worktrees).
+- Spec: L1-3 runner side (when worktrees are made and removed, ワークツリーを削除); L1-4 items 6–8 (interventions, hold, extend, panes); L1-5 runner side (issuing the re-run brief, polling through `rerun::poll`, kills, ingest calls); L1-5a viewing (placeholder cards, `open`, Finder で表示) and 証跡を追加 (file chooser and dropped files, both in noa-gpui 0.2.1: `FileDialogRequest`, `DroppedFile`); L1-7 UI; L1-10 flags, resume, read-only view, stored views follow their log, `--repo`.
+- ACs: 19 (resume flow end to end), 22, 23, 24 (the request: task file written through `fsx`, tab opened with auto approval off; test with review's fake connection), 25, 32, 36, 38, 39. Manual, closed by hand in a live Noa and not by tests: **26, 27, 28, 34, 35, 37** (AC-35: the per-kind background/foreground constant in `rerun.rs` was set from the 2026-11-25 measurements, L1-5 step 3; agy's stays unverified).
+- May assume: U1's surfaces. Until U2 and U3 merge it builds against stubs, so only the build is checked; then it rebases onto them and runs the tests.
+- Done: before U2 + U3 merge, `cargo build --locked --offline --all-targets`; after, `cargo test --locked --offline` (UI tests expect macOS system fonts, as review's) and `cargo run --locked --offline -- --demo --snapshot=$TMPDIR/v.png` for each `--demo*` and `--tab` value without a panic.
+
+### U5 `integration` (noa-app part: start now; widget checks: after U1; AC-29: after U1–U4)
+
+- Edits: `crates/noa-app/src/commands/command.rs`, `crates/noa-app/src/commands/tests.rs`, `crates/noa-app/src/command_palette.rs`, `crates/noa-app/src/app/commands.rs`, `crates/noa-app/src/app/helpers/dispatch.rs`, `crates/noa-app/src/split_tree/tree/commands.rs`, `crates/noa-app/src/macos_menu.rs`, `crates/noa-app/src/helper_program.rs` (including `launch_args` passing `--repo` to `VERIFY`), `scripts/verify.sh` (`verify=widgets/verify/Cargo.toml`, `run verify widget_check` in `--full`, `widgets/verify/*` and `widget_uses` in the changed-path mode), `scripts/bundle-macos.sh` (build loop, `VERIFY_BIN`, `-x` check, copy to `Contents/Helpers/Noa Verify`, `codesign`), `AGENTS.md` (Verification list), `docs/FEATURES.md` (a **Verify** entry after Review). Nothing under `widgets/verify/`.
+- Spec: L1-10 Noa integration (and review L1-8's table, which it follows).
+- ACs: 29.
+- Done: `cargo test -p noa-app --offline` and `cargo clippy --workspace --offline` pass (outside the sandbox if `noa-ipc`/`noa-pty` tests hit `PermissionDenied`, as CLAUDE.md says); after U1 merges, `scripts/verify.sh` passes with the widget; AC-29 closes when `scripts/verify.sh --full` and `scripts/bundle-macos.sh` pass with U1–U4 merged.

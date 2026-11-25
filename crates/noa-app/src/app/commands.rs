@@ -247,6 +247,7 @@ impl App {
                 self.open_helper_program(crate::helper_program::COMPETITION)
             }
             AppCommand::OpenReview => self.open_helper_program(crate::helper_program::REVIEW),
+            AppCommand::OpenVerify => self.open_helper_program(crate::helper_program::VERIFY),
             AppCommand::OpenAgentUsage => {
                 self.open_helper_program(crate::helper_program::AGENT_USAGE)
             }

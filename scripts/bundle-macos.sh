@@ -64,12 +64,13 @@ case "$MODE" in
 esac
 
 # The agent dashboard, the repo browser, the discussion, the competition, the
-# review and the agent usage (widgets/agent-dashboard, widgets/repo-browser,
-# widgets/discussion, widgets/competition, widgets/review and
-# widgets/agent-usage, crates outside the workspace) ship in Noa.app's Contents/Helpers; Noa starts them from View
+# review, the verify and the agent usage (widgets/agent-dashboard,
+# widgets/repo-browser, widgets/discussion, widgets/competition, widgets/review,
+# widgets/verify and widgets/agent-usage, crates outside the workspace) ship in
+# Noa.app's Contents/Helpers; Noa starts them from View
 # > Agent Dashboard, View > Repo Browser, View > Discussion, View > Competition
-# View > Review and View > Agent Usage (or the command palette).
-for widget in agent-dashboard repo-browser discussion competition review agent-usage; do
+# View > Review, View > Verify and View > Agent Usage (or the command palette).
+for widget in agent-dashboard repo-browser discussion competition review verify agent-usage; do
   if [ "$PROFILE" = release ]; then
     cargo build --manifest-path "$ROOT/widgets/$widget/Cargo.toml" --locked --release
   else
@@ -87,6 +88,7 @@ BROWSER_BIN="$TARGET_DIR/repo-browser"
 DISCUSSION_BIN="$TARGET_DIR/discussion"
 COMPETITION_BIN="$TARGET_DIR/competition"
 REVIEW_BIN="$TARGET_DIR/review"
+VERIFY_BIN="$TARGET_DIR/verify"
 USAGE_BIN="$TARGET_DIR/agent-usage"
 
 [ -x "$BIN" ] || { echo "error: binary not found at $BIN" >&2; exit 1; }
@@ -95,6 +97,7 @@ USAGE_BIN="$TARGET_DIR/agent-usage"
 [ -x "$DISCUSSION_BIN" ] || { echo "error: binary not found at $DISCUSSION_BIN" >&2; exit 1; }
 [ -x "$COMPETITION_BIN" ] || { echo "error: binary not found at $COMPETITION_BIN" >&2; exit 1; }
 [ -x "$REVIEW_BIN" ] || { echo "error: binary not found at $REVIEW_BIN" >&2; exit 1; }
+[ -x "$VERIFY_BIN" ] || { echo "error: binary not found at $VERIFY_BIN" >&2; exit 1; }
 [ -x "$USAGE_BIN" ] || { echo "error: binary not found at $USAGE_BIN" >&2; exit 1; }
 
 # Generate the icon on first run (best effort — the app still bundles without it).
@@ -114,6 +117,7 @@ cp "$BROWSER_BIN" "$CONTENTS/Helpers/Noa Repo Browser"
 cp "$DISCUSSION_BIN" "$CONTENTS/Helpers/Noa Discussion"
 cp "$COMPETITION_BIN" "$CONTENTS/Helpers/Noa Competition"
 cp "$REVIEW_BIN" "$CONTENTS/Helpers/Noa Review"
+cp "$VERIFY_BIN" "$CONTENTS/Helpers/Noa Verify"
 cp "$USAGE_BIN" "$CONTENTS/Helpers/Noa Agent Usage"
 cp -RX "$ROOT/assets/wallpapers" "$CONTENTS/Resources/wallpapers"
 
@@ -191,6 +195,9 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Review"
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/assets/macos.entitlements.plist" \
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Verify"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Agent Usage"

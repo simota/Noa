@@ -437,8 +437,24 @@ pub(crate) mod tests {
     /// Writes an executable shell script into `dir`.
     pub(crate) fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n[ -n \"$AGENT_USAGE_TEST_WARM\" ] && exit 0\n{body}\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // macOS checks a newly written executable the first time it runs,
+        // which has taken about 0.4 s here: longer than the short timeouts
+        // these tests give the script. Run it once, exiting at once, so that
+        // check happens before any timed run.
+        let warm = Command::new(&path)
+            .env("AGENT_USAGE_TEST_WARM", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(warm.success(), "warm-up run of {}", path.display());
         path
     }
 

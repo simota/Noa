@@ -46,6 +46,7 @@ enum Kind {
     /// リンクを追加 under `task`'s 関連成果.
     Link {
         task: TaskRef,
+        title: String,
     },
 }
 
@@ -128,7 +129,10 @@ impl Form {
     /// `Intent::Link` once the ID has its kind's form, else says why.
     pub fn link(task: &TaskRef, title: &str) -> Form {
         Form::new(
-            Kind::Link { task: task.clone() },
+            Kind::Link {
+                task: task.clone(),
+                title: title.to_owned(),
+            },
             format!("リンクを追加: {title}"),
             String::new(),
             String::new(),
@@ -289,7 +293,7 @@ impl Form {
         if !(clicked && message.source == ids.submit) && !submitted {
             return FormOutcome::Pending;
         }
-        if let (Kind::Link { task }, Some((kind, id, why))) = (&self.kind, ids.link) {
+        if let (Kind::Link { task, title }, Some((kind, id, why))) = (&self.kind, ids.link) {
             let kind = chosen(tree, kind)
                 .and_then(|i| LinkKind::ALL.get(i).copied())
                 .unwrap_or(LinkKind::Review);
@@ -300,6 +304,7 @@ impl Form {
             return match check_link_id(kind, &typed) {
                 Ok(id) => FormOutcome::Submit(Intent::Link {
                     task: task.clone(),
+                    title: title.clone(),
                     kind,
                     id,
                 }),

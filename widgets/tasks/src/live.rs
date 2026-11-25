@@ -73,6 +73,7 @@ enum Job {
     RefreshRelated,
     Link {
         task: TaskRef,
+        title: String,
         kind: LinkKind,
         id: String,
     },
@@ -421,7 +422,17 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
                 self.send(Job::RefreshRelated);
             }
             Intent::LoadDetail(number) => self.issues.load_detail(number),
-            Intent::Link { task, kind, id } => self.send(Job::Link { task, kind, id }),
+            Intent::Link {
+                task,
+                title,
+                kind,
+                id,
+            } => self.send(Job::Link {
+                task,
+                title,
+                kind,
+                id,
+            }),
             Intent::Unlink { links, .. } => self.send(Job::Unlink(links)),
             // Starting a program is quick; it is reaped on its own thread.
             Intent::Navigate(nav) => match (self.launcher)(&nav) {
@@ -655,8 +666,11 @@ impl<C: Connect> Worker<C> {
         };
         // A run's agent finished or failed (each time, after a follow-up
         // too), or its pane went: what its work tree holds now is what it
-        // produced. Those already ended at the first look did not end now:
-        // their ending was not seen, so nothing is recorded for them.
+        // produced. Read once as it ends: a pane left open after its agent
+        // finished goes later with no work of the run's in between (in the
+        // repository itself, an `Isolation::Here` run's tree, other tasks
+        // commit meanwhile). Those already ended at the first look did not
+        // end now: their ending was not seen.
         let first = !self.backfilled;
         let mut ended: Vec<(String, PathBuf)> = Vec::new();
         for v in self.views(now) {
@@ -668,7 +682,8 @@ impl<C: Connect> Worker<C> {
                 phase => phase,
             };
             self.phases.insert(v.run.run.clone(), phase);
-            if phase != Phase::Live && before != Some(phase) && !first {
+            let was_live = matches!(before, None | Some(Phase::Live));
+            if phase != Phase::Live && was_live && !first {
                 ended.push((v.run.run.as_str().to_owned(), v.run.workdir));
             }
         }
@@ -676,6 +691,22 @@ impl<C: Connect> Worker<C> {
             self.backfilled = true;
             let failed = linking::backfill(&store, &self.runs, &self.log, now);
             self.link_failed(failed);
+            // Runs that ended while Tasks was closed: those with a work
+            // tree of their own, still there, hold only their own work.
+            let own: Vec<(String, PathBuf)> = match links::replay(&store) {
+                Ok(set) => self
+                    .runs
+                    .iter()
+                    .filter(|r| self.phases.get(&r.run) != Some(&Phase::Live))
+                    .filter(|r| linking::own_tree(&set, r.run.as_str()))
+                    .map(|r| (r.run.as_str().to_owned(), r.workdir.clone()))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            if !own.is_empty() {
+                let failed = linking::record_produced(&store, &own, now);
+                self.link_failed(failed);
+            }
         } else if !ended.is_empty() {
             let failed = linking::record_produced(&store, &ended, now);
             self.link_failed(failed);
@@ -686,15 +717,21 @@ impl<C: Connect> Worker<C> {
                 .is_none_or(|at| now.saturating_sub(at) >= RELATED_EVERY)
         {
             self.related_at = Some(now);
-            // Only the task's live runs: an ended run's work tree (the
-            // repository itself, for an `Isolation::Here` run) moves on
-            // with other work, which is not the run's.
+            // The task's live runs, and its ended runs with a work tree of
+            // their own: an ended run's shared tree (the repository itself,
+            // for an `Isolation::Here` run) moves on with other work, which
+            // is not the run's.
             let runs: Vec<(String, PathBuf)> = links::replay(&store)
-                .map(|set| linking::runs_of(&set, &linking::task_key(&task)))
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|(run, _)| self.phases.get(&RunId::new(run.clone())) == Some(&Phase::Live))
-                .collect();
+                .map(|set| {
+                    linking::runs_of(&set, &linking::task_key(&task))
+                        .into_iter()
+                        .filter(|(run, _)| {
+                            self.phases.get(&RunId::new(run.clone())) == Some(&Phase::Live)
+                                || linking::own_tree(&set, run)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             let failed = linking::record_produced(&store, &runs, now);
             self.link_failed(failed);
             self.send_related(&task, now);
@@ -725,12 +762,21 @@ impl<C: Connect> Worker<C> {
         }
     }
 
-    /// リンクを追加: checked (its form, found), then appended `Manual`.
-    fn link(&mut self, task: &TaskRef, kind: LinkKind, id: &str) -> Result<String, String> {
+    /// リンクを追加: checked (its form, found), then appended `Manual`,
+    /// with the task observed (its title and file) for the back-links.
+    fn link(
+        &mut self,
+        task: &TaskRef,
+        title: &str,
+        kind: LinkKind,
+        id: &str,
+    ) -> Result<String, String> {
         let store = self.store.clone()?;
         let set = links::replay(&store).map_err(|e| format!("リンクの記録を読めません: {e}"))?;
-        let edits = linking::manual(&self.places(), &set, &self.runs, &self.log, task, kind, id)
-            .map_err(|why| format!("リンクできません: {why}"))?;
+        let mut edits =
+            linking::manual(&self.places(), &set, &self.runs, &self.log, task, kind, id)
+                .map_err(|why| format!("リンクできません: {why}"))?;
+        edits.push(linking::observe_task(&self.repo, task, title));
         let now = (self.clock)();
         let outcomes =
             links::append(&store, &edits, now).map_err(|e| format!("リンクを書けません: {e}"))?;
@@ -898,7 +944,12 @@ impl<C: Connect> Worker<C> {
                 self.related_at = None;
                 return;
             }
-            Job::Link { task, kind, id } => self.link(&task, kind, &id),
+            Job::Link {
+                task,
+                title,
+                kind,
+                id,
+            } => self.link(&task, &title, kind, &id),
             Job::Unlink(ids) => self.unlink(&ids),
             Job::Create(file) => self.create(file),
             Job::Edit {
@@ -2231,6 +2282,7 @@ mod tests {
 
         rig.feed.act(Intent::Link {
             task: t1.clone(),
+            title: "one".into(),
             kind: LinkKind::Review,
             id: "rev-1".into(),
         });
@@ -2250,6 +2302,7 @@ mod tests {
         ] {
             rig.feed.act(Intent::Link {
                 task: t1.clone(),
+                title: "one".into(),
                 kind,
                 id: id.into(),
             });
@@ -2259,6 +2312,7 @@ mod tests {
         let head = git_in(&rig.repo, &["rev-parse", "HEAD"]);
         rig.feed.act(Intent::Link {
             task: t1.clone(),
+            title: "one".into(),
             kind: LinkKind::Commit,
             id: head[..9].to_owned(),
         });
@@ -2517,11 +2571,117 @@ mod tests {
             produced_by(rig, &run.run, &v2)
         });
 
+        // Committed after it finished, then its pane goes: the run ended
+        // as it finished, so the pane going reads nothing again; its own
+        // work tree is read when its task's detail is.
         let v3 = commit("v3");
         rig.feed.act(Intent::ClosePane(run.run.clone()));
-        ticking(&mut rig, "v3 as its pane goes", |rig, _| {
+        rig.until("gone", |v| v.runs[0].liveness == Liveness::Gone);
+        assert!(!produced_by(&rig, &run.run, &v3), "read again as it went");
+        rig.feed.watch(Some(&TaskRef::Local("t-1".into())));
+        ticking(&mut rig, "v3 as its detail is read", |rig, _| {
             produced_by(rig, &run.run, &v3)
         });
+    }
+
+    /// An `Isolation::Here` run whose agent finished is read once, as it
+    /// finishes: what another task commits in the repository while its
+    /// pane stays open is not taken when the pane goes.
+    #[test]
+    fn a_here_run_is_read_as_it_finishes_not_again_when_its_pane_goes() {
+        let mut rig = rig("links-here-once", |repo, _, _| {
+            write_task(repo, "t-1", "one")
+        });
+        rig.until("the task", |v| v.tasks.len() == 1);
+        rig.feed.act(Intent::Run {
+            task: TaskRef::Local("t-1".into()),
+            agent: AgentKind::Claude,
+            isolation: Isolation::Here,
+        });
+        let run = rig.until("started", |v| v.runs.len() == 1).runs[0]
+            .run
+            .run
+            .clone();
+        agent(&rig, "running");
+        ticking(&mut rig, "at work", |_, v| {
+            v.runs[0].liveness
+                == Liveness::Alive {
+                    agent: Some(AgentState::Running),
+                }
+        });
+        git_in(&rig.repo, &["commit", "-q", "--allow-empty", "-m", "v1"]);
+        let v1 = git_in(&rig.repo, &["rev-parse", "HEAD"]);
+        agent(&rig, "finished");
+        ticking(&mut rig, "v1 as it finishes", |rig, _| {
+            produced_by(rig, &run, &v1)
+        });
+
+        // Task B commits in the shared checkout; then A's pane goes.
+        git_in(&rig.repo, &["commit", "-q", "--allow-empty", "-m", "b"]);
+        let b = git_in(&rig.repo, &["rev-parse", "HEAD"]);
+        rig.feed.act(Intent::ClosePane(run.clone()));
+        // The look that saw it gone recorded what it would before showing it.
+        rig.until("gone", |v| v.runs[0].liveness == Liveness::Gone);
+        assert!(!produced_by(&rig, &run, &b), "B's commit taken as A's");
+        assert!(produced_by(&rig, &run, &v1));
+    }
+
+    /// A worktree run that ended while Tasks was closed is read on the
+    /// first look: its own work tree is still there and holds only its
+    /// work, which would be lost from the history once it is removed.
+    #[test]
+    fn a_worktree_run_that_ended_while_tasks_was_closed_is_read_on_the_first_look() {
+        let mut rig = rig("links-unseen-end", |repo, _, _| {
+            write_task(repo, "t-1", "one")
+        });
+        rig.until("the task", |v| v.tasks.len() == 1);
+        rig.feed.act(Intent::Run {
+            task: TaskRef::Local("t-1".into()),
+            agent: AgentKind::Claude,
+            isolation: Isolation::Worktree,
+        });
+        let run = rig.until("started", |v| v.runs.len() == 1).runs[0]
+            .run
+            .clone();
+        git_in(&run.workdir, &["commit", "-q", "--allow-empty", "-m", "v1"]);
+        let v1 = git_in(&run.workdir, &["rev-parse", "HEAD"]);
+        // Its pane goes unseen: the clock stands still, so this window
+        // lists no panes again (as if it were closed).
+        rig.noa.with(|s| s.panes.clear());
+        let mut later = second_window(&rig);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !produced_by(&rig, &run.run, &v1) {
+            later.poll();
+            assert!(Instant::now() < deadline, "v1 never recorded");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A review linked by hand to a task with no run observes the task
+    /// (title, file), so the review's back-link names it.
+    #[test]
+    fn a_link_added_by_hand_observes_the_task() {
+        let mut rig = rig("links-observe", |repo, _, _| write_task(repo, "t-1", "one"));
+        rig.until("the task", |v| v.tasks.len() == 1);
+        let data = data_of(&rig);
+        fs::create_dir_all(data.join("reviews/rev-1")).unwrap();
+        fs::write(data.join("reviews/rev-1/events.jsonl"), "").unwrap();
+        rig.feed.act(Intent::Link {
+            task: TaskRef::Local("t-1".into()),
+            title: "one".into(),
+            kind: LinkKind::Review,
+            id: "rev-1".into(),
+        });
+        said(&mut rig.feed, "rev-1 をリンクしました");
+        let store = links::path(&data.join("links"), &rig.repo).unwrap();
+        let info = links::replay(&store)
+            .unwrap()
+            .info_of(&links::Node::Task(links::TaskKey::Local("t-1".into())));
+        assert_eq!(info.label.as_deref(), Some("one"));
+        assert_eq!(
+            info.record,
+            Some(local::tasks_dir(&rig.repo).join("t-1.md"))
+        );
     }
 
     /// 開く on a run whose pane and work tree are both gone passes no

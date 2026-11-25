@@ -38,13 +38,15 @@ pub struct RelatedView {
 }
 
 impl RelatedView {
-    /// Whether `other` shows what this one does: all but when it was read.
+    /// Whether `other` shows what this one does: all but when it was read
+    /// and the presence of nodes no row of this task shows (a review
+    /// recorded for another task changes nothing here).
     pub fn shows_the_same(&self, other: &RelatedView) -> bool {
         let RelatedView {
             task,
             related,
             current,
-            presence,
+            presence: _,
             data,
             repo,
             at: _,
@@ -52,9 +54,38 @@ impl RelatedView {
         self.task == *task
             && self.related == *related
             && self.current == *current
-            && self.presence == *presence
             && self.data == *data
             && self.repo == *repo
+            && self
+                .shown()
+                .iter()
+                .all(|node| self.presence.get(node) == other.presence.get(node))
+    }
+
+    /// The nodes the section's rows show: the runs, their changes and the
+    /// results under them, the task's own changes and its loose results.
+    fn shown(&self) -> Vec<Node> {
+        let Ok(related) = &self.related else {
+            return Vec::new();
+        };
+        let changes: Vec<&ChangeEntry> = related
+            .runs
+            .iter()
+            .flat_map(|run| &run.changes)
+            .chain(&related.changes)
+            .collect();
+        let results = changes
+            .iter()
+            .flat_map(|c| &c.results)
+            .chain(&related.loose)
+            .map(|r| r.node.clone());
+        related
+            .runs
+            .iter()
+            .map(|run| Node::Run(run.run.clone()))
+            .chain(changes.iter().map(|c| Node::Change(c.change.clone())))
+            .chain(results)
+            .collect()
     }
 }
 

@@ -46,6 +46,20 @@ fn task_record(repo: &Path, task: &TaskRef) -> Option<PathBuf> {
     }
 }
 
+/// `task` observed: its title and the file that makes it found (`repo`:
+/// the work tree it was read in), so a back-link names it. An empty
+/// `title` (the screen did not find the task) keeps the one recorded.
+pub fn observe_task(repo: &Path, task: &TaskRef, title: &str) -> Edit {
+    Edit::Observe {
+        node: Node::Task(task_key(task)),
+        info: Info {
+            label: (!title.is_empty()).then(|| title.to_owned()),
+            record: task_record(repo, task),
+            ..Info::default()
+        },
+    }
+}
+
 /// `git -C dir args…` without the person's `GIT_*` variables; its stdout.
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new("git");
@@ -134,7 +148,7 @@ pub fn record_start(
     let key = task_key(&task.r#ref);
     let edits = [
         Edit::Link {
-            from: Node::Task(key.clone()),
+            from: Node::Task(key),
             to: Node::Run(run.as_str().to_owned()),
             rel: Rel::Ran,
             origin: Origin::Auto,
@@ -143,14 +157,7 @@ pub fn record_start(
             node: Node::Run(run.as_str().to_owned()),
             info: run_info(agent, run, log, workdir, branch, head_of(workdir)),
         },
-        Edit::Observe {
-            node: Node::Task(key),
-            info: Info {
-                label: Some(task.title.clone()),
-                record: task_record(repo, &task.r#ref),
-                ..Info::default()
-            },
-        },
+        observe_task(repo, &task.r#ref, &task.title),
     ];
     match links::append(&store, &edits, now) {
         Ok(outcomes) => refused(&what, &outcomes),
@@ -254,6 +261,15 @@ pub fn record_produced(store: &Path, runs: &[(String, PathBuf)], now: Millis) ->
         Ok(outcomes) => refused("実行の成果", &outcomes),
         Err(e) => Some(format!("実行の成果のリンクを記録できません: {e}")),
     }
+}
+
+/// Whether `run` has a work tree of its own (a branch) and a recorded
+/// start commit: what that tree holds since is the run's alone, so it is
+/// read after the run ended too. An `Isolation::Here` run (no branch)
+/// shares the repository with other work and is not.
+pub fn own_tree(set: &LinkSet, run: &str) -> bool {
+    let info = set.info_of(&Node::Run(run.to_owned()));
+    info.branch.is_some() && info.head.is_some()
 }
 
 /// The task's runs that have a work tree recorded: `(run, workdir)`.

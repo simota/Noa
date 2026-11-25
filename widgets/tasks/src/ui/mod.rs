@@ -96,9 +96,11 @@ pub enum Intent {
     OpenUrl(String),
     Refresh,
     LoadDetail(u64),
-    /// リンクを追加: `kind` `id` (checked by the feed: found, not linked).
+    /// リンクを追加: `kind` `id` (checked by the feed: found, not linked)
+    /// on `task`, titled `title` (observed with the link).
     Link {
         task: TaskRef,
+        title: String,
         kind: LinkKind,
         id: String,
     },

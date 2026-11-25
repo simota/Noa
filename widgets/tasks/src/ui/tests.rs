@@ -1412,6 +1412,59 @@ fn a_refresh_with_the_same_related_keeps_the_detail_and_its_focus() {
     assert_ne!(screen.related_actions, before);
 }
 
+/// A refresh whose store gained nodes of another task only (a review
+/// recorded for it) leaves this task's detail and its focus as they are;
+/// a presence change on a row this task shows rebuilds it.
+#[test]
+fn a_refresh_with_only_another_tasks_nodes_new_keeps_the_focus() {
+    let first = related_of(&history(), &[]);
+    let next = Rc::new(RefCell::new(Some(first.clone())));
+    let mut screen = Tasks::new(Box::new(RefreshFeed {
+        view: Some(demo::view()),
+        next: next.clone(),
+    }));
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(window(), &mut text);
+    assert!(screen.select("t-3", &mut text));
+    screen.prepare(window(), &mut text);
+    let open = screen
+        .related_actions
+        .iter()
+        .find(|(_, a)| matches!(a, RelatedAction::Nav(Nav::Run(_))))
+        .map(|(id, _)| *id)
+        .expect("開く on the run");
+    screen.tree.set_focus(Some(open));
+    let before = screen.related_actions.clone();
+
+    // rev-9 judged another task's change: in the store, not in this view.
+    let mut presence = first.presence.clone();
+    presence.insert(Node::Review("rev-9".into()), Presence::Found);
+    presence.insert(
+        Node::Task(TaskKey::Local("t-9".into())),
+        Presence::Missing { what: "t-9".into() },
+    );
+    *next.borrow_mut() = Some(RelatedView {
+        presence,
+        at: first.at + 10_000,
+        ..first.clone()
+    });
+    screen.woken(&mut text);
+    assert_eq!(screen.tree.focused(), Some(open));
+    assert_eq!(screen.related_actions, before);
+
+    // rev-1's record is gone: its row says so at once.
+    *next.borrow_mut() = Some(RelatedView {
+        at: first.at + 20_000,
+        ..related_of(&history(), &[(Node::Review("rev-1".into()), "rev-1")])
+    });
+    screen.woken(&mut text);
+    assert!(
+        section(&screen)
+            .iter()
+            .any(|t| t == "記録が見つからない（rev-1）")
+    );
+}
+
 /// AC5: v1's review is shown as a result for an older version while v2 is
 /// current; a current version nothing judged yet says so.
 #[test]
@@ -1532,6 +1585,7 @@ fn ac7_add_link_form_and_unlink_after_confirmation() {
         sent(&log),
         [Intent::Link {
             task: local("t-3"),
+            title: "noa-tasks スキルの例を最新の形式にする".into(),
             kind: LinkKind::Verify,
             id: "ver-42".into(),
         }]

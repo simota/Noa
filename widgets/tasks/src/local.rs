@@ -918,7 +918,10 @@ mod tests {
         {
             let repo = repo.clone();
             std::thread::spawn(move || {
-                for _ in 0..3000 {
+                // One `now`, so the k-th create tries about k names: the
+                // work grows with the square of the count, and on macOS,
+                // with the folder renamed all the while, 3000 took minutes.
+                for _ in 0..150 {
                     let _ = create(&repo, &file("x"), 77);
                 }
                 let _ = tx.send(());

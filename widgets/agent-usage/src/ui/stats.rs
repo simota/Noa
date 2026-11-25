@@ -726,20 +726,25 @@ fn model_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scroll
 /// The project table's rows: name, sessions, turns, skill uses, tokens and
 /// the cost, which says what it leaves out (L1-3.5).
 pub fn project_rows(report: &StatsReport) -> Vec<Vec<String>> {
-    let k = tokens_known(report);
-    let sk = skills_known(report);
     report
         .per_project
         .iter()
         .take(PROJECTS_SHOWN)
         .map(|r| {
+            // Per row: an agy-only project has no measured zero to show,
+            // and a project agy also worked in has only a part counted.
+            let measured = |text: String| match (r.measured, r.unmeasured) {
+                (false, _) => DASH.to_owned(),
+                (true, true) => format!("{text} (一部)"),
+                (true, false) => text,
+            };
             vec![
                 r.key.clone(),
                 count(r.counts.sessions),
                 count(r.counts.c.turns),
-                or_dash(sk, count(r.counts.c.skills)),
-                or_dash(k, tokens(r.counts.c.tokens.total())),
-                cost_text(&r.counts, k),
+                measured(count(r.counts.c.skills)),
+                measured(tokens(r.counts.c.tokens.total())),
+                cost_text(&r.counts, r.measured),
             ]
         })
         .collect()

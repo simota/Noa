@@ -1206,3 +1206,50 @@ fn an_empty_skill_table_still_says_agy_records_none() {
         "{labels:?}"
     );
 }
+
+#[test]
+fn project_tokens_are_unknown_for_agy_only_and_partial_when_mixed() {
+    use agent_usage::stats::types::{Counts, KeyRow};
+    let now = demo::now();
+    let mut report = demo::report(Period::Days7, AgentFilter::All, now, &demo::tz());
+    let row = |key: &str, tokens: u64, measured: bool, unmeasured: bool| {
+        let mut counts = Counts::empty();
+        counts.sessions = 2;
+        counts.c.turns = 5;
+        counts.c.tokens.output = tokens;
+        counts.c.skills = 3 * u64::from(tokens > 0);
+        KeyRow {
+            key: key.into(),
+            counts,
+            measured,
+            unmeasured,
+        }
+    };
+    report.per_project = vec![
+        row("~/mixed", 1_000, true, true),
+        row("~/measured-zero", 0, true, false),
+        row("~/agy-only", 0, false, true),
+    ];
+    let rows = stats::project_rows(&report);
+    // Project, sessions, turns, skills, tokens, cost.
+    assert_eq!(rows[0][3], "3 (一部)");
+    assert!(rows[0][4].ends_with(" (一部)"), "{:?}", rows[0]);
+    assert_eq!(rows[1][3], "0");
+    assert_eq!(rows[1][4], "0");
+    assert_eq!(rows[2][3], stats::DASH);
+    assert_eq!(rows[2][4], stats::DASH);
+    assert_eq!(rows[2][5], stats::DASH);
+    // The same as the agy filter shows it.
+    let agy = demo::report(
+        Period::Days7,
+        AgentFilter::One(Agent::Agy),
+        now,
+        &demo::tz(),
+    );
+    let agy_rows = stats::project_rows(&agy);
+    assert!(
+        agy_rows
+            .iter()
+            .all(|r| r[3] == stats::DASH && r[4] == stats::DASH)
+    );
+}

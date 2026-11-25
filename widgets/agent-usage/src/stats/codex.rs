@@ -11,10 +11,21 @@
 //! assistant is one message; function, custom tool, local shell and web
 //! search calls are tool calls. `input_tokens` includes the cached input:
 //! fresh input = `input_tokens` − `cached_input_tokens`.
+//!
+//! Codex has no skill event: it uses a skill by reading its `SKILL.md`. A
+//! skill use is an `event_msg`/`item_completed` `CommandExecution` whose
+//! `parsed_cmd[]` holds `{type: "read", path}` with `path`
+//! `<root>/skills/[.system/]<name>/SKILL.md`, absolute or `~/`, under a
+//! `.codex` or `.agents` directory (the user's, a plugin's, a repo's skills);
+//! once per skill per turn (`turn_id`), as a skill is often read again. The
+//! skills list in the instructions names the same paths, so the text is never
+//! searched. Only `turn_id` and `parsed_cmd[].{type, path}` are decoded.
+
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::index::{Sink, fnv};
+use super::index::{Sink, fnv, skill_name_ok};
 use super::types::Tokens;
 use crate::time::parse_rfc3339;
 
@@ -35,6 +46,12 @@ pub(crate) struct Tail {
     pub sub_thread: bool,
     /// `info.total_token_usage` of the last `token_count`.
     pub last_total: Option<[u64; 6]>,
+    /// `fnv(turn_id)` of the turn `turn_skills` belongs to.
+    #[serde(default)]
+    pub skill_turn: u64,
+    /// `fnv(name)` of each skill already counted in that turn.
+    #[serde(default)]
+    pub turn_skills: BTreeSet<u64>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +164,89 @@ struct Item {
     name: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ItemCompleted {
+    #[serde(default)]
+    turn_id: Option<String>,
+    #[serde(default)]
+    item: Option<ExecItem>,
+}
+
+#[derive(Deserialize)]
+struct ExecItem {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    parsed_cmd: Option<Vec<ParsedCmd>>,
+}
+
+#[derive(Deserialize)]
+struct ParsedCmd {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// The skill whose `SKILL.md` is at `path`, when that is one of Codex's
+/// skill directories (see the module comment).
+fn skill_of(path: &str) -> Option<&str> {
+    if !(path.starts_with('/') || path.starts_with("~/")) {
+        return None;
+    }
+    let mut parts = path.rsplit('/');
+    if parts.next()? != "SKILL.md" {
+        return None;
+    }
+    let name = parts.next()?;
+    let mut dir = parts.next()?;
+    if dir == ".system" {
+        dir = parts.next()?;
+    }
+    let under_home = dir == "skills" && parts.any(|p| p == ".codex" || p == ".agents");
+    (under_home && skill_name_ok(name)).then_some(name)
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// An `item_completed` line: the skills a command read. It is no event of
+/// its own (active time comes from the records around it).
+fn skill_reads(bytes: &[u8], ts: Option<&str>, tail: &mut Tail, sink: &mut Sink<'_>) -> bool {
+    if !contains(bytes, b"SKILL.md") {
+        return true;
+    }
+    let Some(ts) = ts.and_then(parse_rfc3339) else {
+        return false;
+    };
+    let Some(done) = payload::<ItemCompleted>(bytes) else {
+        return false;
+    };
+    let Some(item) = done
+        .item
+        .filter(|i| i.kind.as_deref() == Some("CommandExecution"))
+    else {
+        return true;
+    };
+    let turn = done.turn_id.as_deref().map_or(0, |t| fnv(t.as_bytes()));
+    if turn != tail.skill_turn {
+        tail.skill_turn = turn;
+        tail.turn_skills.clear();
+    }
+    for cmd in item.parsed_cmd.unwrap_or_default() {
+        if cmd.kind.as_deref() != Some("read") {
+            continue;
+        }
+        if let Some(name) = cmd.path.as_deref().and_then(skill_of)
+            && tail.turn_skills.insert(fnv(name.as_bytes()))
+        {
+            sink.skill(ts, name, tail.session, tail.model, tail.project);
+        }
+    }
+    true
+}
+
 const TOOL_CALLS: [&str; 4] = [
     "function_call",
     "custom_tool_call",
@@ -167,6 +267,9 @@ pub(crate) fn line(bytes: &[u8], tail: &mut Tail, sink: &mut Sink<'_>) -> bool {
     };
     let sub = head.payload.as_ref().and_then(|p| p.kind.as_deref());
     let kind = head.kind.as_deref().unwrap_or("");
+    if (kind, sub) == ("event_msg", Some("item_completed")) {
+        return skill_reads(bytes, head.timestamp.as_deref(), tail, sink);
+    }
     let relevant = matches!(
         (kind, sub),
         ("session_meta" | "turn_context" | "token_usage_record", _)
@@ -241,6 +344,9 @@ pub(crate) fn line(bytes: &[u8], tail: &mut Tail, sink: &mut Sink<'_>) -> bool {
         }
         ("event_msg", Some("task_started")) => {
             sink.counters(ts, tail.model, tail.project).turns += 1;
+            // A turn without `turn_id`s ends its predecessor's skills.
+            tail.skill_turn = 0;
+            tail.turn_skills.clear();
         }
         ("response_item", Some(item_kind)) => {
             let is_message = item_kind == "message";
@@ -444,5 +550,95 @@ mod tests {
         );
         // One session's events: 0:00, 0:30, 2:00, 2:30, … 6:00, 6:30.
         assert_eq!(sum(ix.index()).active_secs, 3 * (30 + 90) + 30);
+    }
+
+    fn item(second: u32, turn: Option<&str>, cmds: &[(&str, &str)]) -> String {
+        let turn = turn.map_or(String::new(), |t| format!(r#""turn_id":"{t}","#));
+        let cmds: Vec<String> = cmds
+            .iter()
+            .map(|(kind, path)| format!(r#"{{"type":"{kind}","cmd":"synthetic","path":"{path}"}}"#))
+            .collect();
+        format!(
+            r#"{{"timestamp":"2026-11-21T00:01:{second:02}Z","type":"event_msg","payload":{{"type":"item_completed",{turn}"thread_id":"x","item":{{"type":"CommandExecution","id":"i{second}","command":"synthetic","aggregated_output":"synthetic output","parsed_cmd":[{}]}}}}}}"#,
+            cmds.join(",")
+        )
+    }
+
+    fn task_started(second: u32, turn: &str) -> String {
+        format!(
+            r#"{{"timestamp":"2026-11-21T00:01:{second:02}Z","type":"event_msg","payload":{{"type":"task_started","turn_id":"{turn}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn skill_reads_count_once_per_turn_from_codex_skill_dirs_only() {
+        const ID: &str = "00000000-0000-4000-8000-0000000005c1";
+        let t = Tree::new();
+        let log = t.codex_file(&format!("rollout-2026-11-21T09-00-00-{ID}.jsonl"));
+        let review = "/home/synthetic/.codex/skills/coding-review/SKILL.md";
+        let mut lines = vec![
+            meta(ID, None, 0),
+            // The instructions list skills by path: not a use.
+            r#"{"timestamp":"2026-11-21T00:00:30Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"skills/listed/SKILL.md ~/.codex/skills/listed/SKILL.md"}]}}"#.to_owned(),
+            task_started(1, "t1"),
+            item(2, Some("t1"), &[("read", review)]),
+            // Read again in the same turn: once.
+            item(3, Some("t1"), &[("read", review), ("read", "~/.codex/skills/.system/imagegen/SKILL.md")]),
+            // Not a skill directory of Codex, not a read, relative, not SKILL.md.
+            item(4, Some("t1"), &[
+                ("read", "/home/synthetic/work/repo/skills/foo/SKILL.md"),
+                ("search", "/home/synthetic/.codex/skills/bar/SKILL.md"),
+                ("read", "skills/baz/SKILL.md"),
+                ("read", "/home/synthetic/.codex/skills/qux/README.md"),
+            ]),
+            // A repo's `.agents` skills and a plugin's count.
+            item(5, Some("t1"), &[
+                ("read", "/home/synthetic/work/repo/.agents/skills/repo-skill/SKILL.md"),
+                ("read", "~/.codex/plugins/cache/vendor/sites/1.0.0/skills/sites/SKILL.md"),
+            ]),
+            // A new turn counts it again.
+            task_started(6, "t2"),
+            item(7, Some("t2"), &[("read", review)]),
+            // Other items, and one naming SKILL.md that is no command.
+            r#"{"timestamp":"2026-11-21T00:01:08Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t2","item":{"type":"AgentMessage","text":"see SKILL.md"}}}"#.to_owned(),
+        ];
+        lines.push(r#"{"timestamp":"2026-11-21T00:01:09Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","parsed_cmd":"SKILL.md"}}}"#.to_owned());
+        let mut bytes = jsonl(&lines);
+        // Cut mid-line: read next pass.
+        let last = item(10, None, &[("read", review)]);
+        bytes.extend_from_slice(&last.as_bytes()[..40]);
+        write(&log, &bytes);
+        let mut ix = t.indexer();
+        ix.pass(&mut |_| {});
+        let codex = |n: &str, c| (crate::model::Agent::Codex, n.to_owned(), c);
+        assert_eq!(
+            skills(ix.index()),
+            vec![
+                codex("coding-review", 2),
+                codex("imagegen", 1),
+                codex("repo-skill", 1),
+                codex("sites", 1),
+            ]
+        );
+        // `parsed_cmd` not a list: a bad line.
+        assert_eq!(ix.index().coverage().lines_bad, 1);
+        let e = &ix.index().files[&log];
+        let at = |s: &str| crate::time::parse_rfc3339(s).unwrap();
+        // Item lines are no events: active time comes from the records.
+        let events: Vec<_> = e
+            .data
+            .activity
+            .iter()
+            .flat_map(|a| &a.events)
+            .map(|e| e.0)
+            .collect();
+        assert!(!events.contains(&at("2026-11-21T00:01:02Z")), "{events:?}");
+        // The rest of the cut line, without a turn id: after `t2`, a new turn.
+        let mut rest = last.as_bytes()[40..].to_vec();
+        rest.push(b'\n');
+        append(&log, &rest);
+        ix.pass(&mut |_| {});
+        assert_eq!(skills(ix.index())[0], codex("coding-review", 3));
+        assert_eq!(sum(ix.index()).skills, 6);
     }
 }

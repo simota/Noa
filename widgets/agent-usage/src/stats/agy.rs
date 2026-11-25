@@ -71,6 +71,10 @@ mod tests {
         // 7 lines: 2 slash commands, one malformed.
         assert_eq!(c.turns, 4);
         assert_eq!(c.tokens.total(), 0);
+        // A slash command's name is only in the prompt text (`display`),
+        // which is never read: no skill uses.
+        assert_eq!(c.skills, 0);
+        assert!(skills(ix.index()).is_empty());
         let hist = &ix.index().files[&t.root.join("home/.gemini/antigravity-cli/history.jsonl")];
         assert_eq!(hist.data.lines_bad, 1);
     }

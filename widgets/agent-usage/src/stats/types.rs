@@ -93,6 +93,9 @@ pub struct Counters {
     pub turns: u64,
     pub messages: u64,
     pub tool_calls: u64,
+    /// Skill uses (`stats::claude`, `stats::codex`; agy records none).
+    #[serde(default)]
+    pub skills: u64,
     pub active_secs: u64,
     pub tokens: Tokens,
 }
@@ -150,6 +153,22 @@ pub struct KeyRow {
     pub counts: Counts,
 }
 
+/// One skill of one agent in the period.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkillRow {
+    pub skill: String,
+    pub agent: Agent,
+    pub uses: u64,
+    /// Sessions that used it (a Codex sub-thread counts toward its root).
+    pub sessions: u64,
+    /// Projects it was used in.
+    pub projects: u64,
+    /// The time of the last use.
+    pub last: Unix,
+    /// `last` as local "MM/DD HH:MM".
+    pub last_label: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Coverage {
     pub files_total: u64,
@@ -169,6 +188,8 @@ pub struct StatsReport {
     /// Projects beyond the listed top 15.
     pub other_projects: u64,
     pub tools: Vec<(String, u64)>,
+    /// Most used first.
+    pub skills: Vec<SkillRow>,
     /// (label, tokens per `Agent::index`).
     pub days: Vec<(String, [u64; 3])>,
     pub cumulative: Vec<(String, [u64; 3])>,
@@ -199,6 +220,7 @@ impl StatsReport {
             per_project: Vec::new(),
             other_projects: 0,
             tools: Vec::new(),
+            skills: Vec::new(),
             days: Vec::new(),
             cumulative: Vec::new(),
             heatmap: [[0; 24]; 7],

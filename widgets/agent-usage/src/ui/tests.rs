@@ -602,7 +602,7 @@ fn every_part_of_both_tabs_is_reachable_at_minimum_width() {
     };
     let (mut screen, _, mut text) = screen_at(demo::sources(demo::now()), stats_prefs, MIN_WINDOW);
     let scrolls: Vec<WidgetId> = screen.stats_scrolls.iter().map(|(_, id)| *id).collect();
-    assert_eq!(scrolls.len(), 5, "every table scrolls sideways");
+    assert_eq!(scrolls.len(), 6, "every table scrolls sideways");
     // Nothing outside a table is cut off: the KPIs and the share legend wrap.
     let cut = cut_off(&screen.tree, screen.stats_host, &scrolls);
     assert!(cut.is_empty(), "{cut:#?}");
@@ -760,14 +760,14 @@ fn project_cost_says_what_it_leaves_out() {
     assert!(!rows.is_empty());
     for row in &rows {
         assert!(
-            row[4].starts_with('$') && row[4].contains("一部未計上"),
+            row[5].starts_with('$') && row[5].contains("一部未計上"),
             "{row:?}"
         );
     }
     // Claude alone is priced in full.
     let claude = demo::report(Period::Days7, AgentFilter::One(Agent::Claude), now, &tz);
     for row in stats::project_rows(&claude) {
-        assert!(!row[4].contains("未計上"), "{row:?}");
+        assert!(!row[5].contains("未計上"), "{row:?}");
     }
 }
 
@@ -912,9 +912,10 @@ fn long_names_are_cut_in_their_column_and_whole_on_hover() {
     use noa_gpui_scene::{DrawCommand, Point};
     let now = demo::now();
     let tz = demo::tz();
-    // The demo's long project path, a model and an MCP tool: each longer
-    // than its column.
+    // The demo's long project path and plugin skill, a model and an MCP
+    // tool: each longer than its column.
     let path = demo::PROJECTS[1];
+    let skill = "example-plugin:spreadsheet-builder";
     let model = "claude-sonnet-5-5-20261001-extended-context-preview";
     let tool = "mcp__github__create_pull_request_review_comment";
     let mut report = demo::report(Period::Days7, AgentFilter::All, now, &tz);
@@ -963,7 +964,7 @@ fn long_names_are_cut_in_their_column_and_whole_on_hover() {
     // The long names are cut (the model in its table and in the share
     // legend), and nothing else is.
     cut.sort();
-    let mut expected = vec![model, model, path, tool];
+    let mut expected = vec![model, model, path, skill, tool];
     expected.sort();
     assert_eq!(cut, expected);
     let shown = |name: &str| {
@@ -1110,7 +1111,7 @@ fn a_wholly_unpriced_row_says_how_many_tokens_it_leaves_out() {
         stats::agent_rows(&codex)[0]
     );
     for row in stats::project_rows(&codex) {
-        assert!(unpriced(&row[4]), "{row:?}");
+        assert!(unpriced(&row[5]), "{row:?}");
     }
     let (screen, _, _) = screen_with(
         demo::sources(now),
@@ -1151,4 +1152,57 @@ fn a_first_failure_shows_its_reason_once() {
             "{claude:?}"
         );
     }
+}
+
+#[test]
+fn skill_table_lists_uses_by_agent_and_agy_has_none() {
+    let now = demo::now();
+    let tz = demo::tz();
+    let all = demo::report(Period::Days7, AgentFilter::All, now, &tz);
+    let rows = stats::skill_rows(&all);
+    assert!(!rows.is_empty());
+    // Skill, agent, uses, sessions, projects, last use.
+    assert_eq!(rows[0].len(), 6);
+    assert!(rows.iter().any(|r| r[1] == "Codex") && rows.iter().any(|r| r[1] == "Claude Code"));
+    assert!(rows.iter().all(|r| r[5].starts_with("11/24 ")), "{rows:?}");
+    assert!(
+        stats::project_rows(&all)
+            .iter()
+            .all(|r| r[3] != stats::DASH)
+    );
+    let agy = demo::report(Period::Days7, AgentFilter::One(Agent::Agy), now, &tz);
+    assert!(stats::skill_rows(&agy).is_empty());
+    assert!(!stats::skills_known(&agy));
+    assert_eq!(
+        stats::unavailable_reason(&agy, "スキル使用"),
+        "agy はスキル使用を記録しません"
+    );
+}
+
+#[test]
+fn an_empty_skill_table_still_says_agy_records_none() {
+    let now = demo::now();
+    // Claude and Codex logs were read but hold no skill use in the period;
+    // agy is selected too.
+    let mut report = demo::report(Period::Days7, AgentFilter::All, now, &demo::tz());
+    report.skills.clear();
+    assert!(stats::skills_known(&report));
+    let (mut screen, _, mut text) = feed_screen(
+        demo::sources(now),
+        Some(report),
+        Prefs {
+            tab: Tab::Stats,
+            ..Prefs::default()
+        },
+        None,
+    );
+    screen.prepare(window(), &mut text);
+    let labels = labels_under(&screen.tree, screen.stats_host);
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.contains("スキル使用の記録がありません")
+                && l.contains("agy はスキル使用を記録しません")),
+        "{labels:?}"
+    );
 }

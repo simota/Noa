@@ -9,12 +9,13 @@
 //! (hours, active time), never event times: its cost follows the number of
 //! hours with data, not of events.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::index::{FileEntry, Index, Kind};
+use super::index::{FileEntry, Index, Kind, codex_parents, session_root};
 use super::prices;
 use super::types::{
-    AgentFilter, Availability, Bucket, Counters, Counts, KeyRow, ModelRow, Period, StatsReport,
+    AgentFilter, Availability, Bucket, Counters, Counts, KeyRow, ModelRow, Period, SkillRow,
+    StatsReport,
 };
 use crate::model::{Agent, Unix};
 use crate::time::{LocalDate, Tz, add_days, day_start, local};
@@ -30,8 +31,24 @@ fn add_counters(a: &mut Counters, b: &Counters) {
     a.turns += b.turns;
     a.messages += b.messages;
     a.tool_calls += b.tool_calls;
+    a.skills += b.skills;
     a.active_secs += b.active_secs;
     a.tokens.add(&b.tokens);
+}
+
+#[derive(Default)]
+struct SkillAcc {
+    uses: u64,
+    sessions: BTreeSet<u64>,
+    projects: BTreeSet<u32>,
+    last: Unix,
+}
+
+/// "MM/DD HH:MM" in `tz`.
+fn minute_label(at: Unix, tz: &dyn Tz) -> String {
+    let t = local(at, tz);
+    let minute = (at + i64::from(tz.offset_secs(at))).rem_euclid(3600) / 60;
+    format!("{} {:02}:{minute:02}", label(t.date), t.hour)
 }
 
 #[derive(Default)]
@@ -219,6 +236,8 @@ pub fn report(
     let mut models: BTreeMap<(Agent, u32), Acc> = BTreeMap::new();
     let mut projects: BTreeMap<u32, Acc> = BTreeMap::new();
     let mut tools: BTreeMap<u32, u64> = BTreeMap::new();
+    let mut skills: BTreeMap<(u32, Agent), SkillAcc> = BTreeMap::new();
+    let parents = codex_parents(index);
     let mut days = vec![[0u64; 3]; slots.len()];
     let mut heatmap = [[0u64; 24]; 7];
 
@@ -246,6 +265,20 @@ pub fn report(
         if agent.is_some_and(|a| filter.matches(a)) {
             for t in e.data.tools.iter().filter(|t| in_range(t.hour)) {
                 *tools.entry(t.name).or_default() += t.count;
+            }
+        }
+        if let Some(agent) = agent.filter(|a| filter.matches(*a)) {
+            for k in e.data.skills.iter().filter(|k| in_range(k.hour)) {
+                let acc = skills.entry((k.name, agent)).or_default();
+                acc.uses += k.count;
+                if k.session != 0 {
+                    acc.sessions
+                        .insert(session_root(&parents, agent, k.session));
+                }
+                if k.project != 0 {
+                    acc.projects.insert(k.project);
+                }
+                acc.last = acc.last.max(k.last);
             }
         }
         for w in &e.data.workers {
@@ -321,6 +354,26 @@ pub fn report(
         .collect();
     tools.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
+    let mut skills: Vec<SkillRow> = skills
+        .into_iter()
+        .map(|((name, agent), acc)| SkillRow {
+            skill: index.string(name).to_owned(),
+            agent,
+            uses: acc.uses,
+            sessions: acc.sessions.len() as u64,
+            projects: acc.projects.len() as u64,
+            last: acc.last,
+            last_label: minute_label(acc.last, tz),
+        })
+        .collect();
+    skills.sort_by(|a, b| {
+        b.uses
+            .cmp(&a.uses)
+            .then(b.last.cmp(&a.last))
+            .then(a.skill.cmp(&b.skill))
+            .then(a.agent.cmp(&b.agent))
+    });
+
     let labels = slots.labels();
     let mut running = [0u64; 3];
     let cumulative = labels
@@ -343,6 +396,7 @@ pub fn report(
         per_project,
         other_projects,
         tools,
+        skills,
         days,
         cumulative,
         heatmap,
@@ -868,5 +922,84 @@ mod tests {
         assert_eq!(all.total.c.active_secs, SESSIONS * 2 * (EVENTS as u64 - 1));
         assert_eq!(all.total.sessions, SESSIONS);
         assert!(took < Duration::from_millis(50), "all/all took {took:?}");
+    }
+
+    #[test]
+    fn skills_follow_period_filter_sessions_and_projects() {
+        let t = Tree::new();
+        let call = |ts: &str, session: &str, cwd: &str, id: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","sessionId":"{session}","cwd":"/home/synthetic/work/{cwd}","message":{{"id":"msg_{id}","model":"claude-opus-5-5","content":[{{"type":"tool_use","id":"{id}","name":"Skill","input":{{"skill":"coding-review"}}}}],"usage":{{"output_tokens":1}}}}}}"#
+            )
+        };
+        write(
+            &t.claude_file("-a", "a.jsonl"),
+            &jsonl(&[call("2026-11-20T01:00:00Z", "sess-a", "alpha", "tu_a")]),
+        );
+        // Today 10:30 JST.
+        write(
+            &t.claude_file("-b", "b.jsonl"),
+            &jsonl(&[call("2026-11-24T01:30:00Z", "sess-b", "beta", "tu_b")]),
+        );
+        const ROOT: &str = "00000000-0000-4000-8000-0000000005a1";
+        const SUB: &str = "00000000-0000-4000-8000-0000000005a2";
+        for (id, parent, minute) in [(ROOT, None, 0), (SUB, Some(ROOT), 5)] {
+            let parent = parent.map_or(String::new(), |p| format!(r#","parent_thread_id":"{p}""#));
+            let lines = [
+                format!(
+                    r#"{{"timestamp":"2026-11-21T00:{minute:02}:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/home/synthetic/work/alpha"{parent}}}}}"#
+                ),
+                format!(
+                    r#"{{"timestamp":"2026-11-21T00:{minute:02}:10Z","type":"event_msg","payload":{{"type":"item_completed","turn_id":"{id}","item":{{"type":"CommandExecution","parsed_cmd":[{{"type":"read","path":"~/.codex/skills/coding-review/SKILL.md"}}]}}}}}}"#
+                ),
+            ];
+            write(
+                &t.codex_file(&format!("rollout-2026-11-21T09-{minute:02}-00-{id}.jsonl")),
+                &jsonl(&lines),
+            );
+        }
+        let mut ix = t.indexer();
+        ix.pass(&mut |_| {});
+        let ix = ix.index().clone();
+
+        let week = report(&ix, Period::Days7, AgentFilter::All, now(), &JST);
+        let rows: Vec<_> = week
+            .skills
+            .iter()
+            .map(|r| (r.agent, r.skill.as_str(), r.uses, r.sessions, r.projects))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                // Two sessions in two projects; the Codex sub-thread counts
+                // toward its root's session.
+                (Agent::Claude, "coding-review", 2, 2, 2),
+                (Agent::Codex, "coding-review", 2, 1, 1),
+            ]
+        );
+        assert_eq!(week.skills[0].last, at("2026-11-24T01:30:00Z"));
+        assert_eq!(week.skills[0].last_label, "11/24 10:30");
+        assert_eq!(week.total.c.skills, 4);
+        let alpha = week
+            .per_project
+            .iter()
+            .find(|p| p.key == "~/work/alpha")
+            .unwrap();
+        assert_eq!(alpha.counts.c.skills, 3);
+
+        let today = report(&ix, Period::Today, AgentFilter::All, now(), &JST);
+        let rows: Vec<_> = today.skills.iter().map(|r| (r.agent, r.uses)).collect();
+        assert_eq!(rows, vec![(Agent::Claude, 1)]);
+        let codex = report(
+            &ix,
+            Period::Days7,
+            AgentFilter::One(Agent::Codex),
+            now(),
+            &JST,
+        );
+        assert!(codex.skills.iter().all(|r| r.agent == Agent::Codex));
+        assert_eq!(codex.skills.len(), 1);
+        let agy = report(&ix, Period::All, AgentFilter::One(Agent::Agy), now(), &JST);
+        assert!(agy.skills.is_empty());
     }
 }

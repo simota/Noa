@@ -247,6 +247,7 @@ fn add(a: &mut Counters, b: &Counters) {
     a.turns += b.turns;
     a.messages += b.messages;
     a.tool_calls += b.tool_calls;
+    a.skills += b.skills;
     a.active_secs += b.active_secs;
     a.tokens.add(&b.tokens);
 }
@@ -306,6 +307,20 @@ pub fn tools(ix: &Index) -> Vec<(String, u64)> {
     let mut v: Vec<_> = by.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     v
+}
+
+/// Skill uses by (agent, skill name), by name.
+pub fn skills(ix: &Index) -> Vec<(Agent, String, u64)> {
+    let mut by: BTreeMap<(Agent, String), u64> = BTreeMap::new();
+    for e in ix.files.values() {
+        let Some(agent) = file_agent(e.kind) else {
+            continue;
+        };
+        for k in &e.data.skills {
+            *by.entry((agent, ix.string(k.name).to_owned())).or_default() += k.count;
+        }
+    }
+    by.into_iter().map(|((a, n), c)| (a, n, c)).collect()
 }
 
 /// Total tokens per non-empty model name, by name.

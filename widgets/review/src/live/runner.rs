@@ -17,10 +17,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use review::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
 use review::model::export;
 use review::model::types::{
-    AgentChoice, AgentKind, AgentSetup, Millis, PartId, Phase, ReviewerChoice, RoundNo, Session,
-    SessionId, Target, TargetKind,
+    AgentChoice, AgentKind, AgentSetup, Head, Millis, PartId, Phase, ReviewerChoice, RoundNo,
+    Session, SessionId, Target, TargetKind,
 };
 use review::store::{self, Store};
+use review::task_links::{self, LinkEvent, Origin, SessionKind};
 
 use super::ipc::{
     Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement, no_board_tab,
@@ -106,6 +107,7 @@ pub enum Update {
         session: Arc<Session>,
         reply_root: PathBuf,
         session_dir: PathBuf,
+        origin: Option<Origin>,
     },
     Link(Link),
     Notice(String),
@@ -137,7 +139,10 @@ pub fn spawn_session(start: Start, wake: impl Fn() + Send + 'static) -> SessionH
                 start,
                 IpcConnect,
                 SystemClock,
-                Config::default(),
+                RunnerConfig {
+                    engine: Config::default(),
+                    tasks_root: task_links::default_root(),
+                },
                 action_rx,
                 update_tx,
                 wake,
@@ -147,11 +152,16 @@ pub fn spawn_session(start: Start, wake: impl Fn() + Send + 'static) -> SessionH
     SessionHandle { updates, actions }
 }
 
+pub struct RunnerConfig {
+    pub engine: Config,
+    pub tasks_root: Option<PathBuf>,
+}
+
 pub fn run_session<C: Connect, K: Clock>(
     start: Start,
     connector: C,
     clock: K,
-    config: Config,
+    config: RunnerConfig,
     actions: Receiver<Action>,
     updates: Sender<Update>,
     wake: impl Fn() + 'static,
@@ -349,6 +359,9 @@ struct WatchedReply {
 struct Runner<C: Connect, K: Clock> {
     engine: Engine,
     store: Store,
+    origin: Option<Origin>,
+    last_outcome: Option<(Option<&'static str>, bool)>,
+    link_notice_shown: bool,
     connector: C,
     clock: K,
     actions: Receiver<Action>,
@@ -378,7 +391,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         start: Start,
         connector: C,
         clock: K,
-        config: Config,
+        config: RunnerConfig,
         actions: Receiver<Action>,
         updates: Sender<Update>,
         wake: Rc<dyn Fn()>,
@@ -386,13 +399,23 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let now = clock.now();
         let resumed = matches!(start, Start::Resume { .. } | Start::Extend { .. });
         let (engine, store) = match start {
-            Start::New(new) => new_review(*new, config, now)?,
-            Start::Resume { dir } => open_log(dir, None, config, now)?,
-            Start::Extend { dir, by } => open_log(dir, Some(by), config, now)?,
+            Start::New(new) => new_review(*new, config.engine, now)?,
+            Start::Resume { dir } => open_log(dir, None, config.engine, now)?,
+            Start::Extend { dir, by } => open_log(dir, Some(by), config.engine, now)?,
         };
-        let runner = Self {
+        let (origin, link_error) = match config.tasks_root {
+            Some(root) => match session_origin(&root, engine.session(), resumed, now) {
+                Ok(origin) => (origin, None),
+                Err(error) => (None, Some(error)),
+            },
+            None => (None, None),
+        };
+        let mut runner = Self {
             engine,
             store,
+            origin,
+            last_outcome: None,
+            link_notice_shown: false,
             connector,
             clock,
             actions,
@@ -410,6 +433,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             link_state: Link::Connecting,
         };
         runner.emit_session();
+        if let Some(error) = link_error {
+            runner.link_error(error);
+        }
+        runner.record_outcome();
         runner.emit_link(Link::Connecting);
         Ok(runner)
     }
@@ -424,6 +451,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             session: Arc::new(self.engine.session().clone()),
             reply_root: self.engine.reply_dir(),
             session_dir: self.engine.dir().to_owned(),
+            origin: self.origin.clone(),
         });
     }
 
@@ -440,6 +468,36 @@ impl<C: Connect, K: Clock> Runner<C, K> {
 
     fn notice(&self, text: impl Into<String>) {
         self.emit(Update::Notice(text.into()));
+    }
+
+    fn link_error(&mut self, error: String) {
+        let message = format!("タスクとの関連を記録できません: {error}");
+        eprintln!("{message}");
+        if !self.link_notice_shown {
+            self.link_notice_shown = true;
+            self.notice(message);
+        }
+    }
+
+    fn record_outcome(&mut self) {
+        let Some(origin) = &self.origin else { return };
+        let session = self.engine.session();
+        let decision = session.verdict().map(|v| v.decision.name());
+        let outcome = (decision, session.closed);
+        if self.last_outcome == Some(outcome) {
+            return;
+        }
+        match task_links::record_outcome(
+            origin,
+            SessionKind::Review,
+            session.id.as_str(),
+            decision,
+            session.closed,
+            self.clock.now(),
+        ) {
+            Ok(()) => self.last_outcome = Some(outcome),
+            Err(error) => self.link_error(error.to_string()),
+        }
     }
 
     fn run(&mut self) -> Result<(), String> {
@@ -859,6 +917,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             self.store
                 .append_all(&output.batches)
                 .map_err(|e| format!("write log: {e}"))?;
+            self.record_outcome();
             self.emit_session();
         }
         let now = self.clock.now();
@@ -1509,14 +1568,407 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
     })?;
     Ok((engine, store))
 }
+fn session_origin(
+    root: &Path,
+    session: &Session,
+    resumed: bool,
+    now: Millis,
+) -> Result<Option<Origin>, String> {
+    if session.target.kind != TargetKind::Git {
+        return Ok(None);
+    }
+    match fs::read_dir(root) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", root.display())),
+    }
+    let id = session.id.as_str();
+    if resumed {
+        return Ok(task_links::find_origin(root, SessionKind::Review, id));
+    }
+    let manifest = &session.manifest;
+    let Some(toplevel) = manifest.repo.clone() else {
+        return Ok(None);
+    };
+    let target = task_links::Target {
+        toplevel,
+        head_ref: manifest.head_ref.clone(),
+        head_sha: manifest.head_sha.clone(),
+    };
+    let Some(matched) = task_links::match_run(root, &target) else {
+        return Ok(None);
+    };
+    let uncommitted = if session.target.head == Head::Worktree {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&target.toplevel)
+            .args([
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=normal",
+                "--",
+            ])
+            .args(&session.target.paths)
+            .output()
+            .map_err(|error| format!("git status: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git status: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        !output.stdout.is_empty()
+    } else {
+        false
+    };
+    let log = task_links::links_log(&matched.run.key_dir);
+    let events = task_links::read(&log).map_err(|error| format!("{}: {error}", log.display()))?;
+    let tasks_repo = events.into_iter().rev().find_map(|event| match event {
+        LinkEvent::Repo { path, .. } => Some(path),
+        _ => None,
+    });
+    task_links::link_session(
+        &matched,
+        SessionKind::Review,
+        id,
+        target.head_sha.as_deref(),
+        uncommitted,
+        now,
+    )
+    .map_err(|error| format!("{}: {error}", log.display()))?;
+    Ok(Some(Origin {
+        key_dir: matched.run.key_dir,
+        tasks_repo,
+        task: matched.run.task,
+        run: matched.run.run,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::ipc::BOARD_CAPACITY;
     use super::*;
-    use review::model::types::{BuiltinLens, Head, LensChoice};
+    use review::model::types::{BuiltinLens, LensChoice};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    mod links {
+        use super::*;
+        use review::task_links::{MatchedBy, RUNS_FILE};
+
+        struct LinkFixture {
+            root: PathBuf,
+            repo: PathBuf,
+            worktree: PathBuf,
+            tasks_root: PathBuf,
+            log: PathBuf,
+            sha: String,
+        }
+
+        fn git(dir: &Path, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "user.name=Review Test",
+                    "-c",
+                    "user.email=review@example.test",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+
+        impl LinkFixture {
+            fn new() -> Self {
+                let root = temp_root();
+                let repo = root.join("repo");
+                let worktree = root.join("worktree");
+                fs::create_dir_all(&repo).unwrap();
+                git(&repo, &["init", "-q", "-b", "main"]);
+                fs::write(repo.join("a.txt"), "original\n").unwrap();
+                git(&repo, &["add", "a.txt"]);
+                git(&repo, &["commit", "-qm", "base"]);
+                git(
+                    &repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "-qb",
+                        "task-run-5",
+                        worktree.to_str().unwrap(),
+                    ],
+                );
+                fs::write(worktree.join("a.txt"), "changed\n").unwrap();
+                git(&worktree, &["commit", "-qam", "change"]);
+                let sha = git(&worktree, &["rev-parse", "HEAD"]);
+                let tasks_root = root.join("tasks");
+                let key_dir = tasks_root.join("key");
+                fs::create_dir_all(&key_dir).unwrap();
+                fs::write(
+                    key_dir.join(RUNS_FILE),
+                    format!(
+                        "{}\n",
+                        serde_json::json!({
+                            "event": "RunStarted", "run": "run-5", "task": {"local": "t-1"},
+                            "workdir": worktree, "branch": "task-run-5", "at": 5,
+                        })
+                    ),
+                )
+                .unwrap();
+                let log = task_links::links_log(&key_dir);
+                task_links::append(
+                    &log,
+                    &LinkEvent::Repo {
+                        path: repo.clone(),
+                        at: 1,
+                    },
+                )
+                .unwrap();
+                task_links::append(
+                    &log,
+                    &LinkEvent::ChangeSeen {
+                        run: "run-5".into(),
+                        commit: sha.clone(),
+                        at: 6,
+                    },
+                )
+                .unwrap();
+                Self {
+                    root,
+                    repo,
+                    worktree,
+                    tasks_root,
+                    log,
+                    sha,
+                }
+            }
+
+            fn start(&self, repo: &Path, head: Head, paths: &[&str]) -> Start {
+                new_start_on(
+                    &self.root.join("reviews"),
+                    Target {
+                        kind: TargetKind::Git,
+                        path: Some(repo.to_owned()),
+                        base: Some("main".into()),
+                        head,
+                        paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+                        text: None,
+                        workdir: None,
+                    },
+                    vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                    1,
+                )
+            }
+
+            fn open(&self, fake: &Fake, start: Start) -> Wired {
+                open_wired_at(fake, start, Some(self.tasks_root.clone())).unwrap()
+            }
+
+            fn events(&self) -> Vec<LinkEvent> {
+                task_links::read(&self.log).unwrap()
+            }
+        }
+
+        impl Drop for LinkFixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+
+        #[test]
+        fn links_ac3_matches_worktree_branch_and_commit_and_scopes_dirty_status() {
+            let fixture = LinkFixture::new();
+            fs::write(fixture.worktree.join("dirty.txt"), "untracked\n").unwrap();
+            let fake = fake();
+            for (repo, head, paths, expected, dirty) in [
+                (
+                    &fixture.worktree,
+                    Head::Worktree,
+                    &[][..],
+                    MatchedBy::Worktree,
+                    true,
+                ),
+                (
+                    &fixture.worktree,
+                    Head::Worktree,
+                    &["a.txt"][..],
+                    MatchedBy::Worktree,
+                    false,
+                ),
+                (
+                    &fixture.repo,
+                    Head::Ref("task-run-5".into()),
+                    &[][..],
+                    MatchedBy::Branch,
+                    false,
+                ),
+                (
+                    &fixture.repo,
+                    Head::Ref(fixture.sha.clone()),
+                    &[][..],
+                    MatchedBy::Commit,
+                    false,
+                ),
+            ] {
+                let (runner, _, _) = fixture.open(&fake, fixture.start(repo, head, paths));
+                let id = &runner.engine.session().id;
+                let origin = runner.origin.as_ref().unwrap();
+                assert_eq!(origin.tasks_repo.as_deref(), Some(fixture.repo.as_path()));
+                assert_eq!(origin.run, "run-5");
+                let events = fixture.events();
+                let links = events.iter().filter(|event| {
+                    matches!(event, LinkEvent::SessionLinked { session, .. } if session == id.as_str())
+                }).collect::<Vec<_>>();
+                assert!(
+                    matches!(links.as_slice(), [LinkEvent::SessionLinked {
+                    kind: SessionKind::Review, task, run, commit: Some(commit), by, uncommitted, ..
+                }] if task == &origin.task && run == "run-5" && commit == &fixture.sha && *by == expected && *uncommitted == dirty),
+                    "{links:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn links_ac3_unrelated_and_document_targets_write_nothing() {
+            let fixture = LinkFixture::new();
+            let unrelated = fixture.root.join("unrelated");
+            fs::create_dir(&unrelated).unwrap();
+            git(&unrelated, &["init", "-q", "-b", "main"]);
+            git(
+                &unrelated,
+                &["commit", "--allow-empty", "-qm", "independent"],
+            );
+            fs::write(unrelated.join("other.txt"), "untracked\n").unwrap();
+            let before = fixture.events();
+            let fake = fake();
+            let doc = new_start(
+                &fixture.root.join("reviews"),
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+            );
+            for start in [fixture.start(&unrelated, Head::Worktree, &[]), doc] {
+                let (runner, _, _) = fixture.open(&fake, start);
+                assert!(runner.origin.is_none());
+                assert_eq!(fixture.events(), before);
+            }
+        }
+
+        #[test]
+        fn links_ac3_write_failure_leaves_review_created_and_posts_one_notice() {
+            let fixture = LinkFixture::new();
+            let lock = fixture.log.with_extension("jsonl.lock");
+            fs::remove_file(&lock).unwrap();
+            fs::create_dir(&lock).unwrap();
+            let fake = fake();
+            let (mut runner, _, updates) =
+                fixture.open(&fake, fixture.start(&fixture.worktree, Head::Worktree, &[]));
+            assert!(runner.origin.is_none());
+            assert!(store::read_session(runner.engine.dir()).is_ok());
+            assert!(runner.begin(&mut fake.clone()).is_ok());
+            let notices = notices(&updates);
+            assert!(
+                matches!(notices.as_slice(), [notice] if notice.starts_with("タスクとの関連を記録できません: ") && notice.contains("links.jsonl")),
+                "{notices:?}"
+            );
+        }
+
+        #[test]
+        fn links_ac3_outcomes_follow_verdict_close_resume_and_extension() {
+            let fixture = LinkFixture::new();
+            let fake = fake();
+            let (runner, _, _) =
+                fixture.open(&fake, fixture.start(&fixture.worktree, Head::Worktree, &[]));
+            let dir = runner.engine.dir().to_owned();
+            let id = runner.engine.session().id.to_string();
+            let origin = runner.origin.clone();
+            let outcomes = || {
+                fixture
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        LinkEvent::SessionOutcome {
+                            kind: SessionKind::Review,
+                            session,
+                            decision,
+                            closed,
+                            ..
+                        } if session == id => Some((decision, closed)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(outcomes(), [(None, false)]);
+            drop(runner);
+            let (mut runner, _, _) = fixture.open(&fake, Start::Resume { dir: dir.clone() });
+            assert_eq!(runner.origin, origin);
+            let mut conn = fake.clone();
+            assert!(runner.begin(&mut conn).is_ok());
+            step(&mut runner, &mut conn);
+            for part in [":claude", ":codex"] {
+                fake.report(fake.pane_of(part), "input", None);
+            }
+            step(&mut runner, &mut conn);
+            step(&mut runner, &mut conn);
+            for part in ["claude", "codex"] {
+                reply(
+                    &fake,
+                    &mut runner,
+                    &mut conn,
+                    &PartId::new(part),
+                    r#"{"summary":"fine"}"#,
+                );
+            }
+            step(&mut runner, &mut conn);
+            fake.report(fake.pane_of(":lead"), "input", None);
+            step(&mut runner, &mut conn);
+            step(&mut runner, &mut conn);
+            reply(
+                &fake,
+                &mut runner,
+                &mut conn,
+                &PartId::new("lead"),
+                r#"{"summary":"Fine", "verdict":{"decision":"approve","rationale":"Sound."}}"#,
+            );
+            step(&mut runner, &mut conn);
+            assert_eq!(
+                outcomes(),
+                [(None, false), (None, false), (Some("approve".into()), true)]
+            );
+            drop(runner);
+            let (mut runner, _, _) = fixture.open(&fake, Start::Extend { dir, by: 1 });
+            assert_eq!(runner.origin, origin);
+            runner.feed_user(Input::UserClose).unwrap();
+            assert_eq!(
+                outcomes(),
+                [
+                    (None, false),
+                    (None, false),
+                    (Some("approve".into()), true),
+                    (None, false),
+                    (None, true)
+                ]
+            );
+            assert_eq!(
+                fixture
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event, LinkEvent::SessionLinked { .. }))
+                    .count(),
+                1
+            );
+        }
+    }
 
     struct FakePane {
         label: Option<String>,
@@ -1819,13 +2271,24 @@ mod tests {
     type Wired = (Runner<Fake, Fake>, Sender<Action>, Receiver<Update>);
 
     fn open_wired(fake: &Fake, start: Start) -> Result<Wired, String> {
+        open_wired_at(fake, start, None)
+    }
+
+    fn open_wired_at(
+        fake: &Fake,
+        start: Start,
+        tasks_root: Option<PathBuf>,
+    ) -> Result<Wired, String> {
         let (actions_tx, actions) = mpsc::channel();
         let (updates, updates_rx) = mpsc::channel();
         let runner = Runner::open(
             start,
             fake.clone(),
             fake.clone(),
-            CONFIG,
+            RunnerConfig {
+                engine: CONFIG,
+                tasks_root,
+            },
             actions,
             updates,
             Rc::new(|| {}),

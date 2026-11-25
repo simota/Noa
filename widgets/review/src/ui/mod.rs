@@ -1217,7 +1217,8 @@ impl Review {
         self.poll_installed(text);
         if matches!(self.source, Source::Live(_)) {
             self.recheck_stored();
-            // At most every `backlinks::REREAD`, live or stored.
+            // At most every `backlinks::REREAD`, live or stored, and only
+            // when the store file changed.
             if self.back.as_mut().is_some_and(backlinks::Back::reread) {
                 self.built = None;
             }

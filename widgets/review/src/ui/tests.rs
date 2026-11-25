@@ -2893,12 +2893,7 @@ mod back {
             std::fs::write(repo.join(".noa/tasks/t-1.md"), "# Fix the UI\n").unwrap();
         }
         let dir = base.join("noa/reviews/rev-demo");
-        let mut log = crate::demo::log();
-        if let Some(review::model::reduce::Event::Created { workdir, .. }) = log[0].first_mut() {
-            *workdir = Some(repo.clone());
-        }
-        let mut store = Store::create(&dir, &log[0]).unwrap();
-        store.append_all(&log[1..]).unwrap();
+        store_demo(&dir, Some(repo.clone()));
         let links_log = links::path(&base.join("noa/links"), &repo).unwrap();
         Fixture {
             base,
@@ -2907,6 +2902,17 @@ mod back {
             log: links_log,
             sha,
         }
+    }
+
+    /// Stores the finished demo review in `dir` (anew), as run in `workdir`.
+    fn store_demo(dir: &Path, workdir: Option<PathBuf>) {
+        let _ = std::fs::remove_dir_all(dir);
+        let mut log = crate::demo::log();
+        if let Some(review::model::reduce::Event::Created { workdir: w, .. }) = log[0].first_mut() {
+            *w = workdir;
+        }
+        let mut store = Store::create(dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
     }
 
     fn link(from: Node, to: Node, rel: Rel) -> Edit {
@@ -3095,5 +3101,167 @@ mod back {
             backlinks::rows(&BackLinks::default(), &found, Some(repo)),
             backlinks::Rows::default()
         );
+    }
+
+    /// The task `t-1` titled "Fix the UI" (its file named when `file`), and
+    /// the review `About` it: what Tasks adds by hand.
+    fn about_task(f: &Fixture, file: bool) {
+        let task = Node::Task(TaskKey::Local("t-1".into()));
+        links::append(
+            &f.log,
+            &[
+                link(Node::Review("rev-demo".into()), task.clone(), Rel::About),
+                link(
+                    task.clone(),
+                    Node::Change(ChangeId::Commit(f.sha.clone())),
+                    Rel::Produced,
+                ),
+                Edit::Observe {
+                    node: task,
+                    info: Info {
+                        label: Some("Fix the UI".into()),
+                        record: file.then(|| f.repo.join(".noa/tasks/t-1.md")),
+                        ..Info::default()
+                    },
+                },
+            ],
+            2,
+        )
+        .unwrap();
+    }
+
+    fn opens(screen: &Review) -> Vec<Action> {
+        acts(screen)
+            .into_iter()
+            .filter(|a| matches!(a, Action::OpenLink(_)))
+            .collect()
+    }
+
+    #[test]
+    fn ac4_the_card_finds_its_links_after_the_reviews_worktree_is_removed() {
+        let f = fixture("removed", true);
+        let wt = f.base.join("wt");
+        git(
+            &f.repo,
+            &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()],
+        );
+        store_demo(&f.dir, Some(wt.clone()));
+        // The hand-off of a review of the linked worktree's commit.
+        use crate::session::runner::handoff;
+        let (log, told) = handoff::record(handoff::NewLinks {
+            reviews_root: &f.base.join("noa/reviews"),
+            record: Node::Review("rev-demo".into()),
+            dir: &f.dir,
+            label: "demo".into(),
+            workdir: &wt,
+            change: Some(ChangeId::Commit(f.sha.clone())),
+            capture: &f.dir,
+            git: true,
+        });
+        assert!(told.is_empty(), "{told:?}");
+        assert_eq!(log.as_deref(), Some(f.log.as_path()));
+        about_task(&f, false);
+        git(
+            &f.repo,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+        assert!(!wt.exists());
+        assert!(links::main_worktree(&wt).is_err());
+
+        let screen = Review::stored(&f.dir).unwrap();
+        let labels = card_labels(&screen);
+        let short = f.sha[..7].to_owned();
+        for want in ["Fix the UI", short.as_str()] {
+            assert!(labels.iter().any(|l| l == want), "{want}: {labels:?}");
+        }
+        assert!(!labels.iter().any(|l| l == backlinks::NO_TASK));
+        assert_eq!(
+            opens(&screen),
+            [
+                Action::OpenLink(task_nav(&f)),
+                Action::OpenLink(task_nav(&f))
+            ]
+        );
+    }
+
+    #[test]
+    fn ac4_a_document_review_with_no_workdir_follows_a_link_added_in_tasks() {
+        let f = fixture("document", true);
+        store_demo(&f.dir, None);
+        let (channel, _link) = Channel::fake();
+        let mut screen = stored_ready(channel, &f.dir);
+        assert!(card_labels(&screen).iter().any(|l| l == backlinks::NO_TASK));
+        about_task(&f, true);
+        screen.back.as_mut().unwrap().expire();
+        screen.poll_live(&mut TextStore::new(Default::default()));
+        let labels = card_labels(&screen);
+        assert!(labels.iter().any(|l| l == "Fix the UI"), "{labels:?}");
+        // Its repository is the one the task file is in (no version: the
+        // review judged none).
+        assert_eq!(opens(&screen), [Action::OpenLink(task_nav(&f))]);
+    }
+
+    #[test]
+    fn an_unchanged_store_is_not_read_again() {
+        use std::io::Write as _;
+        let f = fixture("unchanged", true);
+        hand_off(&f);
+        let (channel, _link) = Channel::fake();
+        let mut screen = stored_ready(channel, &f.dir);
+        let mut text = TextStore::new(Default::default());
+        assert!(card_labels(&screen).iter().any(|l| l == "Fix the UI"));
+        // The same length and time: taken as not changed, so not read.
+        let modified = std::fs::metadata(&f.log).unwrap().modified().unwrap();
+        let bytes = std::fs::read_to_string(&f.log).unwrap();
+        std::fs::write(&f.log, bytes.replace("Fix the UI", "Fix the UX")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&f.log)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        screen.back.as_mut().unwrap().expire();
+        screen.poll_live(&mut text);
+        let labels = card_labels(&screen);
+        assert!(labels.iter().any(|l| l == "Fix the UI"), "{labels:?}");
+        // Grown: read again.
+        let mut file = std::fs::File::options().append(true).open(&f.log).unwrap();
+        file.write_all(b"\n").unwrap();
+        screen.back.as_mut().unwrap().expire();
+        screen.poll_live(&mut text);
+        let labels = card_labels(&screen);
+        assert!(labels.iter().any(|l| l == "Fix the UX"), "{labels:?}");
+    }
+
+    #[test]
+    fn a_version_opens_its_first_task_still_there() {
+        let repo = Path::new("/main");
+        let gone = TaskKey::Local("t-gone".into());
+        let presence = |node: &Node| match node {
+            Node::Task(TaskKey::Local(id)) if id == "t-gone" => Presence::Missing {
+                what: "t-gone".into(),
+            },
+            _ => Presence::Found,
+        };
+        let back = back_of(vec![gone.clone(), TaskKey::Local("t-1".into())]);
+        let change = backlinks::rows(&back, &presence, Some(repo))
+            .change
+            .unwrap();
+        assert_eq!(
+            change.open,
+            Some((
+                "版を開く",
+                Nav::Task {
+                    repo: repo.to_owned(),
+                    select: "t-1".into()
+                }
+            ))
+        );
+        // Only missing tasks: the id is copied.
+        let back = back_of(vec![gone]);
+        let change = backlinks::rows(&back, &presence, Some(repo))
+            .change
+            .unwrap();
+        assert_eq!(change.open, Some(("版を開く", Nav::Copy("c".repeat(40)))));
     }
 }

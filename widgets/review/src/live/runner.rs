@@ -27,7 +27,7 @@ use super::ipc::{
     Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement, no_board_tab,
 };
 
-mod handoff;
+pub(crate) mod handoff;
 
 const POLL: Duration = Duration::from_millis(200);
 const TICK_EVERY: Millis = 1_000;
@@ -377,7 +377,8 @@ struct Runner<C: Connect, K: Clock> {
     /// The link store this review's verdict is recorded in, when its work
     /// tree is in a repository (artifact-links L1-2).
     links_log: Option<PathBuf>,
-    /// The verdict label last recorded there.
+    /// The outcome recorded there last (a verdict's label, or
+    /// [`handoff::NO_VERDICT`]).
     outcome: Option<String>,
 }
 
@@ -398,7 +399,11 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             Start::Resume { dir } => opened(open_log(dir, None, config, now)?),
             Start::Extend { dir, by } => opened(open_log(dir, Some(by), config, now)?),
         };
-        let runner = Self {
+        // A review taken up again goes on from the outcome its store holds.
+        let outcome = links_log.as_deref().filter(|_| resumed).and_then(|log| {
+            handoff::recorded_outcome(log, &Node::Review(engine.session().id.to_string()))
+        });
+        let mut runner = Self {
             engine,
             store,
             connector,
@@ -417,12 +422,17 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             resumed,
             link_state: Link::Connecting,
             links_log,
-            outcome: None,
+            outcome,
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
         for notice in link_notices {
             runner.notice(notice);
+        }
+        if resumed {
+            // `open_log` has written the report again (an extension took
+            // its verdict away): the store follows it.
+            runner.observe_outcome();
         }
         Ok(runner)
     }
@@ -848,7 +858,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     }
 
     /// Records the verdict in the link store once the report holding it is
-    /// written, when it differs from the one recorded last.
+    /// written, when it differs from the one recorded last: a verdict gone
+    /// (a round added after it) is recorded as [`handoff::NO_VERDICT`].
     fn observe_outcome(&mut self) {
         let Some(log) = &self.links_log else {
             return;
@@ -3382,7 +3393,11 @@ mod tests {
         // The snapshot names the capture it was judged from.
         let info = set.info_of(&Node::Change(snapshot));
         assert!(info.record.unwrap().ends_with(store::TARGET_DIR));
-        assert_eq!(info.workdir.as_deref(), Some(repo.as_path()));
+        // Recorded canonical (TMPDIR may be a link, as /var on macOS).
+        assert_eq!(
+            info.workdir.map(|dir| dir.canonicalize().unwrap()),
+            Some(repo.canonicalize().unwrap())
+        );
         assert!(told.is_empty(), "{told:?}");
         let _ = fs::remove_dir_all(base);
     }
@@ -3490,22 +3505,40 @@ mod tests {
     fn a_verdict_is_recorded_once_when_its_report_is_written() {
         let base = temp_root();
         let (repo, _c0, _c1, root) = feature_repo(&base);
+        let fake = fake();
+        let (mut runner, _actions, _updates) = approved(&fake, &root, &repo);
+        let record = Node::Review(runner.engine.session().id.to_string());
+        let log = runner.links_log.clone().expect("the repository's store");
+        let verdict = runner
+            .engine
+            .session()
+            .verdict()
+            .expect("a verdict")
+            .decision
+            .label();
+        assert_eq!(outcomes(&log, &record), (Some(verdict.to_owned()), 1));
+        // The same verdict written again is not recorded again.
+        runner.write_report();
+        assert_eq!(outcomes(&log, &record), (Some(verdict.to_owned()), 1));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A one-round review of a document in `repo` (its store is that
+    /// repository's), taken to an approving verdict.
+    fn approved(fake: &Fake, root: &Path, repo: &Path) -> Wired {
         let target = Target {
-            workdir: Some(repo.clone()),
+            workdir: Some(repo.to_owned()),
             ..document("# Plan\n")
         };
-        let fake = fake();
-        let (mut runner, _actions, _updates) = rig_on(
-            &fake,
+        let (mut runner, actions, updates) = rig_on(
+            fake,
             new_start_on(
-                &root,
+                root,
                 target,
                 vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
                 1,
             ),
         );
-        let record = Node::Review(runner.engine.session().id.to_string());
-        let log = runner.links_log.clone().expect("the repository's store");
         let mut conn = fake.clone();
         step(&mut runner, &mut conn);
         for part in [":claude", ":codex"] {
@@ -3515,7 +3548,7 @@ mod tests {
         step(&mut runner, &mut conn);
         for part in ["claude", "codex"] {
             reply(
-                &fake,
+                fake,
                 &mut runner,
                 &mut conn,
                 &PartId::new(part),
@@ -3527,32 +3560,117 @@ mod tests {
         step(&mut runner, &mut conn);
         step(&mut runner, &mut conn);
         reply(
-            &fake,
+            fake,
             &mut runner,
             &mut conn,
             &PartId::new("lead"),
             r#"{"summary": "Nothing.", "verdict": {"decision": "approve", "rationale": "Clean.", "must_fix": []}}"#,
         );
-        let verdict = runner
-            .engine
-            .session()
-            .verdict()
-            .expect("a verdict")
-            .decision
-            .label();
-        let set = review::links::replay(&log).unwrap();
-        assert_eq!(set.info_of(&record).outcome.as_deref(), Some(verdict));
-        let observed = || {
-            review::links::read_events(&log)
-                .unwrap()
-                .iter()
-                .filter(|e| matches!(e, review::links::LinkEvent::Observed { info, .. } if info.outcome.is_some()))
-                .count()
-        };
-        assert_eq!(observed(), 1);
-        // The same verdict written again is not recorded again.
-        runner.write_report();
-        assert_eq!(observed(), 1);
+        (runner, actions, updates)
+    }
+
+    /// The outcome the store `log` holds for `record`, and how many
+    /// outcomes were observed in all.
+    fn outcomes(log: &Path, record: &Node) -> (Option<String>, usize) {
+        let set = review::links::replay(log).unwrap();
+        let observed = review::links::read_events(log)
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, review::links::LinkEvent::Observed { info, .. } if info.outcome.is_some()))
+            .count();
+        (set.info_of(record).outcome, observed)
+    }
+
+    #[test]
+    fn a_verdict_taken_away_by_an_added_round_is_recorded_as_none() {
+        let base = temp_root();
+        let (repo, _c0, _c1, root) = feature_repo(&base);
+        let fake = fake();
+        let (mut runner, actions, _updates) = approved(&fake, &root, &repo);
+        let record = Node::Review(runner.engine.session().id.to_string());
+        let log = runner.links_log.clone().unwrap();
+        let approve = runner.engine.session().verdict().unwrap().decision.label();
+        assert_eq!(outcomes(&log, &record), (Some(approve.to_owned()), 1));
+
+        let mut conn = fake.clone();
+        actions.send(Action::Extend { by: 1 }).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(runner.engine.session().verdict().is_none());
+        assert_eq!(
+            outcomes(&log, &record),
+            (Some(handoff::NO_VERDICT.to_owned()), 2)
+        );
+        // Ended with no new verdict: the store still says none, once.
+        actions.send(Action::Close).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        let report = fs::read_to_string(store::report_path(runner.engine.dir())).unwrap();
+        assert!(report.contains("判定なし（ユーザーが終了）"), "{report}");
+        assert_eq!(
+            outcomes(&log, &record),
+            (Some(handoff::NO_VERDICT.to_owned()), 2)
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_review_extended_after_its_verdict_records_none_when_taken_up() {
+        let base = temp_root();
+        let (repo, _c0, _c1, root) = feature_repo(&base);
+        let fake = fake();
+        let (runner, actions, _updates) = approved(&fake, &root, &repo);
+        let record = Node::Review(runner.engine.session().id.to_string());
+        let log = runner.links_log.clone().unwrap();
+        let dir = runner.engine.dir().to_owned();
+        drop((runner, actions));
+        wait_unlocked(&dir);
+
+        let (mut runner, actions, _updates) = rig_on(
+            &fake,
+            Start::Extend {
+                dir: dir.clone(),
+                by: 1,
+            },
+        );
+        assert_eq!(
+            outcomes(&log, &record),
+            (Some(handoff::NO_VERDICT.to_owned()), 2)
+        );
+        let mut conn = fake.clone();
+        actions.send(Action::Close).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(
+            outcomes(&log, &record),
+            (Some(handoff::NO_VERDICT.to_owned()), 2)
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_review_records_where_its_links_are_in_its_own_folder() {
+        let base = temp_root();
+        let (repo, _c0, _c1, root) = feature_repo(&base);
+        let wt = base.join("wt");
+        let wt_arg = wt.to_str().unwrap();
+        git(&repo, &["worktree", "add", "-q", "-b", "side", wt_arg]);
+        let fake = fake();
+        let (runner, _actions, _updates) = open_wired(
+            &fake,
+            new_start_on(
+                &root,
+                git_target(&wt, Head::Worktree),
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                1,
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let place = handoff::recorded(runner.engine.dir()).expect("its links' place");
+        // The main worktree's store, named without the linked one.
+        assert_eq!(
+            place.repo.canonicalize().unwrap(),
+            repo.canonicalize().unwrap()
+        );
+        assert_eq!(runner.links_log.as_deref(), Some(place.log.as_path()));
+        assert_eq!(place.log, handoff::store_of(&root, &repo).unwrap());
         let _ = fs::remove_dir_all(base);
     }
 }

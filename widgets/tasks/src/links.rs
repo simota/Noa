@@ -1013,7 +1013,8 @@ fn read_head(top: &Path) -> Result<String, String> {
 /// folder when dropped. A snapshot's git calls read and write only it
 /// ([`IndexCopy::git`]): `git diff` writes the stat info it refreshes back
 /// to the index it read, `--no-optional-locks` or not, and the tree's own
-/// index belongs to the agent at work there.
+/// index belongs to the agent at work there. The copy has the index's
+/// mtime, so git's racy-timestamp check reads it as it would the index.
 struct IndexCopy {
     dir: PathBuf,
     index: PathBuf,
@@ -1042,12 +1043,28 @@ impl IndexCopy {
             index: dir.join("index"),
             dir,
         };
-        match fs::copy(&own, &copy.index) {
+        // Bytes and mtime come from one open file: git replaces the index
+        // by rename, never in place, so both are of one version of it.
+        let mut source = match fs::File::open(&own) {
+            Ok(source) => source,
             // No index yet: git reads none as an empty one, here as there.
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                Err(format!("{} を読めません: {e}", own.display()))
-            }
-            _ => Ok(copy),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(copy),
+            Err(e) => return Err(format!("{} を読めません: {e}", own.display())),
+        };
+        // The copy keeps the index's mtime: git reads an entry by content
+        // when its file is not older than the index (racy git), and a copy
+        // newer than the file would report a same-size rewrite clean. The
+        // copy is created here, not with the index's permissions, so a
+        // read-only index still gives a copy that can be written.
+        let copied = source.metadata().and_then(|meta| {
+            let modified = meta.modified()?;
+            let mut file = fs::File::create_new(&copy.index)?;
+            io::copy(&mut source, &mut file)?;
+            file.set_modified(modified)
+        });
+        match copied {
+            Ok(()) => Ok(copy),
+            Err(e) => Err(format!("{} を写せません: {e}", own.display())),
         }
     }
 
@@ -3253,6 +3270,58 @@ mod tests {
         sh(&repo, &["status", "--porcelain"]);
         assert_ne!(fs::read(&index).unwrap(), before);
         assert_eq!(current_change(&repo).unwrap(), id);
+    }
+
+    #[test]
+    fn a_file_rewritten_in_the_second_its_index_was_written_is_dirty() {
+        let tmp = Tmp::new("snap-racy");
+        let repo = tmp.path().join("app");
+        repo_at(&repo);
+        // A rewrite's ctime would tell it apart without the racy check.
+        sh(&repo, &["config", "core.trustctime", "false"]);
+        let file = repo.join("a.txt");
+        let index = repo.join(".git/index");
+        let at = |path: &Path, secs: u64| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
+        };
+        let second = 1_000_000_000;
+        fs::write(&file, "aaaa\n").unwrap();
+        at(&file, second);
+        let head = commit(&repo, "a");
+        // Same length, other bytes, the recorded mtime: only the content
+        // tells it apart, and git reads it only when the entry is racy.
+        fs::write(&file, "bbbb\n").unwrap();
+        at(&file, second);
+        // The index was written in the file's second: racy.
+        at(&index, second);
+        let id = current_change(&repo).unwrap();
+        assert!(
+            matches!(&id, ChangeId::Snapshot(s) if s.starts_with(&format!("snap-{head}-"))),
+            "{id:?}"
+        );
+        // An index newer than the file (as a copy with its own mtime would
+        // be) is not racy: the same tree reads clean.
+        at(&index, second + 1);
+        assert_eq!(current_change(&repo).unwrap(), ChangeId::Commit(head));
+    }
+
+    #[test]
+    fn a_read_only_index_is_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = Tmp::new("snap-ro-index");
+        let repo = tmp.path().join("app");
+        let head = repo_at(&repo);
+        let index = repo.join(".git/index");
+        fs::set_permissions(&index, fs::Permissions::from_mode(0o444)).unwrap();
+        assert_eq!(current_change(&repo).unwrap(), ChangeId::Commit(head));
+        fs::write(repo.join("a.txt"), "two\n").unwrap();
+        let id = current_change(&repo).unwrap();
+        assert!(matches!(id, ChangeId::Snapshot(_)), "{id:?}");
     }
 
     #[test]

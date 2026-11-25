@@ -6,6 +6,7 @@ use tasks::model::types::{AgentKind, Isolation, Millis, Run, RunEvent, RunId, Ta
 use tasks::{fsx, runs, shell, store, worktree};
 
 use super::ipc::{Noa, NoaError, PaneSpec, PaneView, Placement, no_board_tab};
+use super::linking;
 
 /// The variable the run's agent finds its result file in.
 pub const RESULT_VAR: &str = "NOA_RESULT";
@@ -22,7 +23,17 @@ pub struct RunRequest {
     pub isolation: Isolation,
 }
 
-/// Workdir (worktree::add or repo), prepare_workdir, task.md, RunStarted, the board tab if
+/// A run [`start`] began, and the notice for links it could not record
+/// (the run goes ahead without them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Started {
+    pub run: RunId,
+    pub notice: Option<String>,
+}
+
+/// Workdir (worktree::add or repo), prepare_workdir, task.md, RunStarted, the links of the
+/// run (`Ran`, the run and task observed, in the store under `links`, the stores' root;
+/// none when `None`), the board tab if
 /// `board` is None (cwd repo), the float (label, shell::argv, env NOA_RESULT + PROMPT_VAR),
 /// RunPaneAssigned. The float is `attended: true` (keyboard focus), as review's fix request
 /// (Decision 7). Auto approval is the tab's and a float takes its board tab's, so the board
@@ -37,9 +48,10 @@ pub fn start<N: Noa>(
     noa: &mut N,
     board: &mut Option<u64>,
     log: &Path,
+    links: Option<&Path>,
     req: &RunRequest,
     now: Millis,
-) -> Result<RunId, String> {
+) -> Result<Started, String> {
     if !noa.supports_board_tab() {
         return Err(no_board_tab(&noa.server_version()));
     }
@@ -96,6 +108,20 @@ pub fn start<N: Noa>(
         }
         return Err(why);
     }
+    // Beside RunStarted; a link not recorded is said, never a refused run.
+    let notice = links.and_then(|root| {
+        linking::record_start(
+            root,
+            &req.repo,
+            &req.task,
+            req.agent,
+            &run,
+            &workdir,
+            branch.as_deref(),
+            log,
+            now,
+        )
+    });
     let spec = PaneSpec {
         argv: shell::argv(req.agent),
         cwd: workdir,
@@ -123,7 +149,7 @@ pub fn start<N: Noa>(
         board: on,
         at: now,
     })?;
-    Ok(run)
+    Ok(Started { run, notice })
 }
 
 /// Spawns `spec` as a float on `board`, opening the board tab first when
@@ -312,6 +338,7 @@ pub(crate) mod tests {
             &mut noa,
             &mut None,
             &log,
+            None,
             &request(&repo, Isolation::Worktree),
             500,
         )
@@ -335,10 +362,12 @@ pub(crate) mod tests {
             &mut noa,
             &mut board,
             &log,
+            None,
             &request(&repo, Isolation::Worktree),
             500,
         )
-        .unwrap();
+        .unwrap()
+        .run;
         assert_eq!(run, RunId::new("run-500"));
         let workdir = tmp.0.join("app-wt/task-run-500");
         assert!(workdir.is_dir());
@@ -402,6 +431,96 @@ pub(crate) mod tests {
         );
     }
 
+    /// AC2: a run's start records `Ran(task → run)` and the run observed
+    /// (its runs log, work tree, branch and start commit) beside
+    /// `RunStarted`, before the agent's float is spawned; the task is
+    /// observed with its title and file.
+    #[test]
+    fn ac2_a_run_start_links_the_task_to_the_run_beside_run_started() {
+        use tasks::links::{self, Node, Rel, TaskKey};
+        let tmp = Temp::new("start-links");
+        let repo = tmp.0.join("app");
+        repo_at(&repo);
+        let log = tmp.0.join("data/runs.jsonl");
+        let root = tmp.0.join("links");
+        let mut noa = FakeNoa::new(Some(log.clone()));
+        let started = start(
+            &mut noa,
+            &mut None,
+            &log,
+            Some(&root),
+            &request(&repo, Isolation::Worktree),
+            500,
+        )
+        .unwrap();
+        assert_eq!(started.notice, None);
+        let store = links::path(&root, &repo).unwrap();
+        let set = links::replay(&store).unwrap();
+        let task = Node::Task(TaskKey::Local("t-1".into()));
+        let run = Node::Run("run-500".into());
+        let ran = set.live(&task, &run, Rel::Ran).expect("Ran task → run");
+        assert_eq!(ran.at, 500);
+        let info = set.info_of(&run);
+        let workdir = tmp.0.join("app-wt/task-run-500");
+        assert_eq!(info.record.as_deref(), Some(log.as_path()));
+        assert_eq!(info.workdir.as_deref(), Some(workdir.as_path()));
+        assert_eq!(info.branch.as_deref(), Some("task-run-500"));
+        let head = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+        assert_eq!(info.head.as_deref(), Some(head.as_str()));
+        assert_eq!(info.label.as_deref(), Some("codex · task:run-500"));
+        let task_info = set.info_of(&task);
+        assert_eq!(task_info.label.as_deref(), Some("フォントを直す"));
+        assert_eq!(
+            task_info.record,
+            Some(repo.join(".noa/tasks/t-1.md")),
+            "the task's file"
+        );
+        // RunStarted is logged before the links, and the float after both.
+        let spawned = noa.with(|s| s.spawned.clone());
+        assert!(spawned.iter().all(|(_, _, at)| at.contains("RunStarted")));
+        assert_eq!(
+            links::presence(&set, &run, tmp.0.as_path(), &repo),
+            links::Presence::Found
+        );
+    }
+
+    /// A link that cannot be recorded (the store's folder is a file) never
+    /// refuses the run: it starts, is logged, and the notice says why.
+    #[test]
+    fn a_link_write_that_fails_is_a_notice_not_a_refused_run() {
+        let tmp = Temp::new("start-links-fail");
+        let repo = tmp.0.join("app");
+        repo_at(&repo);
+        let log = tmp.0.join("runs.jsonl");
+        let root = tmp.0.join("links");
+        fs::write(&root, "not a folder").unwrap();
+        let mut noa = FakeNoa::new(Some(log.clone()));
+        let started = start(
+            &mut noa,
+            &mut None,
+            &log,
+            Some(&root),
+            &request(&repo, Isolation::Here),
+            7,
+        )
+        .unwrap();
+        assert_eq!(started.run, RunId::new("run-7"));
+        let notice = started.notice.expect("a notice");
+        assert!(
+            notice.contains("run-7") && notice.contains("リンク"),
+            "{notice}"
+        );
+        let runs = runs::replay(&log).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].pane.is_some(), "spawned and assigned");
+    }
+
     #[test]
     fn ac15_here_uses_the_repo_and_two_runs_share_one_board_tab() {
         let tmp = Temp::new("start-here");
@@ -414,18 +533,22 @@ pub(crate) mod tests {
             &mut noa,
             &mut board,
             &log,
+            None,
             &request(&repo, Isolation::Here),
             9,
         )
-        .unwrap();
+        .unwrap()
+        .run;
         let second = start(
             &mut noa,
             &mut board,
             &log,
+            None,
             &request(&repo, Isolation::Here),
             9,
         )
-        .unwrap();
+        .unwrap()
+        .run;
         assert_eq!((first.as_str(), second.as_str()), ("run-9", "run-9-2"));
         let spawned = noa.with(|s| s.spawned.clone());
         let boards = spawned
@@ -457,6 +580,7 @@ pub(crate) mod tests {
             &mut noa,
             &mut board,
             &log,
+            None,
             &request(&repo, Isolation::Worktree),
             1,
         )
@@ -482,6 +606,7 @@ pub(crate) mod tests {
             &mut noa,
             &mut board,
             &log,
+            None,
             &request(&repo, Isolation::Here),
             1,
         )
@@ -502,6 +627,7 @@ pub(crate) mod tests {
             &mut noa,
             &mut stale,
             &log,
+            None,
             &request(&repo, Isolation::Here),
             2,
         )

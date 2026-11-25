@@ -18,6 +18,7 @@ pub mod columns;
 pub mod dates;
 pub mod detail;
 pub mod forms;
+pub mod related;
 pub mod style;
 pub mod views;
 
@@ -36,6 +37,7 @@ use noa_gpui_platform::Screen;
 use noa_gpui_scene::Color;
 use noa_gpui_text::TextStore;
 
+use tasks::links::{LinkId, Nav};
 use tasks::model::column::{Filter, column, matches};
 use tasks::model::types::{
     AgentKind, Column, DONE_DAYS, GitHubView, Isolation, Millis, RunId, RunView, Source, State,
@@ -44,6 +46,8 @@ use tasks::model::types::{
 
 use columns::Card;
 use forms::{Form, FormOutcome};
+pub use related::{LinkKind, RelatedView, check_link_id};
+use related::{RelatedAction, Unlinking};
 use style::{DETAIL_WIDTH, GUTTER, gap};
 pub use views::Layout;
 
@@ -92,6 +96,21 @@ pub enum Intent {
     OpenUrl(String),
     Refresh,
     LoadDetail(u64),
+    /// リンクを追加: `kind` `id` (checked by the feed: found, not linked)
+    /// on `task`, titled `title` (observed with the link).
+    Link {
+        task: TaskRef,
+        title: String,
+        kind: LinkKind,
+        id: String,
+    },
+    /// リンクを外す, answered: these links of `task`'s 関連成果.
+    Unlink {
+        task: TaskRef,
+        links: Vec<LinkId>,
+    },
+    /// A 関連成果 row's 開く that another widget shows.
+    Navigate(Nav),
 }
 
 /// Where the screen's data comes from.
@@ -100,6 +119,13 @@ pub trait Feed {
     fn poll(&mut self) -> Option<View>;
     /// Outcomes come back as View.notice.
     fn act(&mut self, intent: Intent);
+    /// The task whose detail is open (`None`: none): its 関連成果 is read
+    /// now, every 10 s while it stays open, and on 再取得.
+    fn watch(&mut self, _task: Option<&TaskRef>) {}
+    /// A new 関連成果 when one was read since the last call; never blocks.
+    fn related(&mut self) -> Option<RelatedView> {
+        None
+    }
 }
 
 /// The filter line's source choices, in order.
@@ -158,6 +184,12 @@ pub struct Tasks {
     detail_scroll: Option<(TaskRef, WidgetId)>,
     cards: Vec<(WidgetId, TaskRef)>,
     detail_actions: Vec<(WidgetId, Intent)>,
+    /// The 関連成果 last read, the task the feed was told is open, the
+    /// section's buttons, and a リンクを外す waiting for its answer.
+    related: Option<RelatedView>,
+    watching: Option<TaskRef>,
+    related_actions: Vec<(WidgetId, RelatedAction)>,
+    unlinking: Option<Unlinking>,
     layout: Layout,
     layout_control: WidgetId,
     /// The calendar's month, from this one.
@@ -316,6 +348,10 @@ impl Tasks {
             detail_scroll: None,
             cards: Vec::new(),
             detail_actions: Vec::new(),
+            related: None,
+            watching: None,
+            related_actions: Vec::new(),
+            unlinking: None,
             layout: Layout::Board,
             layout_control,
             month: 0,
@@ -542,8 +578,10 @@ impl Tasks {
             .map(|(_, id)| scroll_position(&self.tree, id));
         clear(&mut self.tree, self.detail_host, text);
         self.detail_actions.clear();
+        self.related_actions.clear();
         let shown =
             self.form.is_none() && self.detail.as_ref().is_some_and(|r| self.task(r).is_some());
+        self.watch(shown.then(|| self.detail.clone()).flatten());
         if shown && let Some(r) = self.detail.clone() {
             let task = self.task(&r).cloned();
             if let Some(task) = task {
@@ -563,6 +601,9 @@ impl Tasks {
                     self.view.now,
                 );
                 if let Some(&scroll) = self.tree.children(self.detail_host).first() {
+                    let view = self.related.as_ref().filter(|v| v.task == r);
+                    self.related_actions =
+                        related::insert(&mut self.tree, scroll, view, self.unlinking.as_ref());
                     if let Some(at) = kept {
                         set_scroll_position(&mut self.tree, scroll, at);
                     }
@@ -574,6 +615,20 @@ impl Tasks {
         self.tree.set_hidden(self.form_host, self.form.is_none());
         self.tree
             .set_hidden(self.side, !shown && self.form.is_none());
+    }
+
+    /// Tells the feed whose detail is open when that changed, and takes a
+    /// 関連成果 it already has (the demo's is at hand at once).
+    fn watch(&mut self, task: Option<TaskRef>) {
+        if task == self.watching {
+            return;
+        }
+        self.unlinking = None;
+        self.feed.watch(task.as_ref());
+        self.watching = task;
+        if let Some(view) = self.feed.related() {
+            self.related = Some(view);
+        }
     }
 
     /// Keeps the selection on a card that is shown: the same task when it
@@ -853,6 +908,8 @@ impl Tasks {
     fn escape(&mut self, text: &mut TextStore) -> bool {
         if self.form.is_some() {
             self.close_form(text);
+        } else if self.unlinking.take().is_some() {
+            self.rebuild_detail(text);
         } else if self.tree.focused() == Some(self.text) {
             self.tree.set_focus(None);
         } else if self.detail.take().is_some() {
@@ -995,12 +1052,30 @@ impl Screen for Tasks {
     }
 
     fn woken(&mut self, text: &mut TextStore) {
-        if let Some(view) = self.feed.poll() {
+        let view = self.feed.poll();
+        if view.is_none()
+            && let Some(related) = self.feed.related()
+        {
+            // The 10 s refresh rebuilds only when what is shown changed:
+            // a rebuild drops the focus on 開く / 外す.
+            let changed = self
+                .related
+                .as_ref()
+                .is_none_or(|shown| !shown.shows_the_same(&related));
+            self.related = Some(related);
+            if changed {
+                self.rebuild_detail(text);
+            }
+        }
+        if let Some(view) = view {
             // A new notice from the feed is newer than the screen's own.
             if view.notice.is_some() && view.notice != self.view.notice {
                 self.own_notice = None;
             }
             self.view = view;
+            if let Some(related) = self.feed.related() {
+                self.related = Some(related);
+            }
             self.rebuild(text);
             if let Some(id) = self.select_later.take()
                 && !self.select(&id, text)
@@ -1060,7 +1135,7 @@ impl Screen for Tasks {
 
     fn handle(&mut self, message: Message, text: &mut TextStore) {
         if let Some(form) = &mut self.form {
-            match form.handle(&message, &self.tree) {
+            match form.handle(&message, &mut self.tree) {
                 FormOutcome::Pending => {}
                 FormOutcome::Cancel => {
                     self.close_form(text);
@@ -1123,6 +1198,13 @@ impl Screen for Tasks {
                 .cloned()
             {
                 self.detail_action(intent, text);
+            } else if let Some((_, action)) = self
+                .related_actions
+                .iter()
+                .find(|(id, _)| *id == source)
+                .cloned()
+            {
+                self.related_action(action, text);
             }
         }
     }
@@ -1143,6 +1225,93 @@ impl Tasks {
                 }
             }
             other => self.act(other),
+        }
+    }
+
+    /// A 関連成果 button.
+    fn related_action(&mut self, action: RelatedAction, text: &mut TextStore) {
+        let Some(task) = self.detail.clone() else {
+            return;
+        };
+        match action {
+            RelatedAction::Nav(nav) => self.navigate(nav, text),
+            RelatedAction::AskUnlink { what, links } => {
+                self.unlinking = Some(Unlinking { what, links });
+                self.rebuild_detail(text);
+            }
+            RelatedAction::ConfirmUnlink => {
+                if let Some(ask) = self.unlinking.take() {
+                    self.act(Intent::Unlink {
+                        task,
+                        links: ask.links,
+                    });
+                }
+                self.rebuild_detail(text);
+            }
+            RelatedAction::CancelUnlink => {
+                self.unlinking = None;
+                self.rebuild_detail(text);
+            }
+            RelatedAction::AddLink => {
+                self.unlinking = None;
+                let title = self
+                    .task(&task)
+                    .map(|t| t.title.clone())
+                    .unwrap_or_default();
+                self.open_form(Form::link(&task, &title), text);
+            }
+        }
+    }
+
+    /// A row's 開く: a run's pane (else its work tree) here, an id to the
+    /// clipboard, a review, a verification or a task in its own window.
+    fn navigate(&mut self, nav: Nav, text: &mut TextStore) {
+        match nav {
+            Nav::Copy(id) => {
+                self.tree.clipboard().write_text(&id);
+                self.own_notice = Some(format!("{id} をコピーしました"));
+                self.show_notice();
+            }
+            Nav::Run(run) => {
+                let id = RunId::new(run.clone());
+                let logged = self.view.runs.iter().find(|v| v.run.run == id);
+                let intent = match logged {
+                    Some(v)
+                        if matches!(v.liveness, tasks::model::types::Liveness::Alive { .. }) =>
+                    {
+                        Ok(Intent::OpenPane(id))
+                    }
+                    // The worker checks the work tree is still there.
+                    Some(_) => Ok(Intent::OpenWorktree(id)),
+                    // A run another window's log holds: its work tree, as
+                    // the store last saw it, while it is still there.
+                    None => self
+                        .related
+                        .as_ref()
+                        .and_then(|v| v.related.as_ref().ok())
+                        .and_then(|r| r.runs.iter().find(|e| e.run == run))
+                        .and_then(|e| e.info.workdir.as_ref())
+                        .map(|dir| {
+                            if dir.is_dir() {
+                                Ok(Intent::OpenUrl(dir.display().to_string()))
+                            } else {
+                                Err(format!(
+                                    "{run} の作業ツリー {} はもうありません",
+                                    dir.display()
+                                ))
+                            }
+                        })
+                        .unwrap_or_else(|| Err(format!("{run} の作業場所がわかりません"))),
+                };
+                match intent {
+                    Ok(intent) => self.act(intent),
+                    Err(notice) => {
+                        self.own_notice = Some(notice);
+                        self.rebuild(text);
+                    }
+                }
+            }
+            other => self.act(Intent::Navigate(other)),
         }
     }
 }

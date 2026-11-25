@@ -2,12 +2,12 @@
 //! trait over Noa's control server ([`IpcConnect`] / [`IpcNoa`], `noa-ipc`).
 //! The runner sees only the trait, so its tests run against a fake Noa.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use noa_ipc::{
     Client, ClientError, EventKind, Notification, Panel, Scope, ScopeSet, SendTextOptions,
-    SpawnConfig, SpawnParams, SplitPlacement, TextSource,
+    SpawnConfig, SpawnParams, SplitPlacement, TextSource, WireId,
 };
 
 /// JSON-RPC codes the runner tells apart (as `noa +ctl` does,
@@ -17,6 +17,8 @@ const RPC_PANE_CLOSED: i64 = -32004;
 /// A paste refused with `requirePasteMode`: the pane has not enabled
 /// bracketed paste yet, and nothing was written.
 const RPC_NOT_READY: i64 = -32010;
+/// How many floats a board holds (`MAX_STOWED_PER_BOARD`).
+const BOARD_CAPACITY: u32 = 20;
 const SCREEN_MAX_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +49,8 @@ impl std::fmt::Display for NoaError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneView {
     pub pane_id: u64,
+    /// The pane it is stowed on (`Panel.parentPaneId`): a worker's board.
+    pub parent_pane_id: Option<u64>,
     /// The label it was spawned with.
     pub label: Option<String>,
     /// `running` / `permission` / `input` / `finished` / `error`: the agent's
@@ -84,12 +88,10 @@ pub struct PaneSpec {
 /// Where a new pane goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
-    /// A tab of its own (in the window Noa picks).
+    /// A plain tab of its own (in the window Noa picks).
     NewTab,
-    /// Split off to the right of this pane.
-    Right(u64),
-    /// Split off below this pane.
-    Below(u64),
+    /// A floating pane stowed on this board pane (`Noa::open_board`).
+    Float(u64),
 }
 
 /// The Noa a session runner talks to over one connection.
@@ -97,6 +99,13 @@ pub trait Noa {
     fn panes(&mut self) -> Result<Vec<PaneView>, NoaError>;
     /// The next state change, waiting up to `wait`; `None` when none came.
     fn changes(&mut self, wait: Duration) -> Result<Option<Changes>, NoaError>;
+    /// Whether this Noa opens board tabs (`noa.newTab` `board: true`); an
+    /// older one would open a plain shell tab instead.
+    fn supports_board(&self) -> bool;
+    /// Opens a new tab that is a board, in `cwd`, and returns the board's
+    /// pane id. Keyboard focus stays where it was. Agents go on it with
+    /// [`Placement::Float`].
+    fn open_board(&mut self, cwd: &Path) -> Result<u64, NoaError>;
     /// Starts a pane and returns its id. Keyboard focus stays where it was.
     fn spawn(&mut self, placement: Placement, spec: &PaneSpec) -> Result<u64, NoaError>;
     /// Whether `pane` takes a paste as one (it has enabled bracketed paste).
@@ -190,6 +199,7 @@ fn control_url(bind: &str, port: u16) -> String {
 fn view(panel: &Panel) -> PaneView {
     PaneView {
         pane_id: panel.pane_id.0,
+        parent_pane_id: panel.parent_pane_id.map(|id| id.0),
         label: panel.label.clone(),
         agent_state: panel.agent.as_ref().and_then(|a| a.state.clone()),
         agent_seq: panel.agent.as_ref().map_or(0, |a| a.seq),
@@ -240,6 +250,24 @@ impl Noa for IpcNoa {
         }
     }
 
+    fn supports_board(&self) -> bool {
+        self.client.supports_board_tab()
+    }
+
+    fn open_board(&mut self, cwd: &Path) -> Result<u64, NoaError> {
+        let params = SpawnParams {
+            config: Some(SpawnConfig {
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                ..SpawnConfig::default()
+            }),
+            focus: Some(false),
+            ..SpawnParams::default()
+        };
+        self.client
+            .spawn_board_tab(None, &params)
+            .map_err(noa_error)
+    }
+
     fn spawn(&mut self, placement: Placement, spec: &PaneSpec) -> Result<u64, NoaError> {
         let params = SpawnParams {
             config: Some(SpawnConfig {
@@ -253,13 +281,14 @@ impl Noa for IpcNoa {
         };
         let pane = match placement {
             Placement::NewTab => self.client.spawn_tab(None, &params),
-            Placement::Right(pane) => {
+            Placement::Float(board) => {
+                let params = SpawnParams {
+                    parent_pane_id: Some(WireId(board)),
+                    max_children: Some(BOARD_CAPACITY),
+                    ..params
+                };
                 self.client
-                    .spawn_split(pane, SplitPlacement::Horizontal, &params)
-            }
-            Placement::Below(pane) => {
-                self.client
-                    .spawn_split(pane, SplitPlacement::Vertical, &params)
+                    .spawn_split(board, SplitPlacement::Float, &params)
             }
         };
         pane.map_err(noa_error)

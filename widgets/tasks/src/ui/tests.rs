@@ -1294,14 +1294,122 @@ fn ac3_related_rows_are_in_order_and_each_button_gives_its_nav() {
     assert!(sent(&log).is_empty());
     assert_eq!(screen.tree.clipboard().read_text().as_deref(), Some(SHA1));
     // A run this window logged: its pane when alive, else its worktree.
-    // (The demo's runs are not run-1: its work tree, as the store saw it.)
+    // (The demo's runs are not run-1: its work tree, as the store saw it;
+    // `/src/noa-wt/task-run-1` is not there, so nothing is opened.)
     press_related(&mut screen, &mut text, |a| {
         matches!(a, RelatedAction::Nav(Nav::Run(_)))
     });
+    assert!(sent(&log).is_empty());
+}
+
+/// `history` with run-1's work tree observed at `workdir`.
+fn history_at(workdir: &std::path::Path) -> Vec<LinkEvent> {
+    let mut events = history();
+    for event in &mut events {
+        if let LinkEvent::Observed { info, .. } = event {
+            info.workdir = Some(workdir.to_owned());
+        }
+    }
+    events
+}
+
+/// 開く on a run with no pane whose work tree was removed passes no path
+/// to the OS: it says the work tree is gone, and the row keeps its
+/// 記録が見つからない. A work tree still there is opened.
+#[test]
+fn opening_a_run_whose_work_tree_is_gone_says_so_and_opens_nothing() {
+    let gone = std::env::temp_dir().join("noa-tasks-no-such-worktree-7f3a");
+    assert!(!gone.exists());
+    let missing = "run-1 /data/noa/tasks/runs.jsonl";
+    let related = related_of(&history_at(&gone), &[(Node::Run("run-1".into()), missing)]);
+    let (mut screen, log, mut text) = link_screen(related);
+    press_related(&mut screen, &mut text, |a| {
+        matches!(a, RelatedAction::Nav(Nav::Run(_)))
+    });
+    assert!(sent(&log).is_empty());
+    let notice = screen.own_notice.clone().unwrap_or_default();
     assert_eq!(
-        sent(&log),
-        [Intent::OpenUrl("/src/noa-wt/task-run-1".into())]
+        notice,
+        format!("run-1 の作業ツリー {} はもうありません", gone.display())
     );
+    pos(
+        &section(&screen),
+        &format!("記録が見つからない（{missing}）"),
+    );
+
+    let there = std::env::temp_dir();
+    let (mut screen, log, mut text) = link_screen(related_of(&history_at(&there), &[]));
+    press_related(&mut screen, &mut text, |a| {
+        matches!(a, RelatedAction::Nav(Nav::Run(_)))
+    });
+    assert_eq!(sent(&log), [Intent::OpenUrl(there.display().to_string())]);
+}
+
+/// Hands out `view` once and each 関連成果 put in `next` once, whatever
+/// task is open: as the live feed's 10 s refresh does.
+struct RefreshFeed {
+    view: Option<View>,
+    next: Rc<RefCell<Option<RelatedView>>>,
+}
+
+impl Feed for RefreshFeed {
+    fn poll(&mut self) -> Option<View> {
+        self.view.take()
+    }
+
+    fn act(&mut self, _: Intent) {}
+
+    fn related(&mut self) -> Option<RelatedView> {
+        self.next.borrow_mut().take()
+    }
+}
+
+/// A refresh that reads the same 関連成果 again (only its time differs)
+/// leaves the detail as it is, and the focus on 開く with it; one that
+/// reads something new rebuilds it.
+#[test]
+fn a_refresh_with_the_same_related_keeps_the_detail_and_its_focus() {
+    let first = related_of(&history(), &[]);
+    let next = Rc::new(RefCell::new(Some(first.clone())));
+    let mut screen = Tasks::new(Box::new(RefreshFeed {
+        view: Some(demo::view()),
+        next: next.clone(),
+    }));
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(window(), &mut text);
+    assert!(screen.select("t-3", &mut text));
+    screen.prepare(window(), &mut text);
+    let open = screen
+        .related_actions
+        .iter()
+        .find(|(_, a)| matches!(a, RelatedAction::Nav(Nav::Run(_))))
+        .map(|(id, _)| *id)
+        .expect("開く on the run");
+    screen.tree.set_focus(Some(open));
+    let before = screen.related_actions.clone();
+
+    *next.borrow_mut() = Some(RelatedView {
+        at: first.at + 10_000,
+        ..first.clone()
+    });
+    screen.woken(&mut text);
+    assert_eq!(screen.tree.focused(), Some(open));
+    assert_eq!(screen.related_actions, before);
+    assert_eq!(
+        screen.related.as_ref().map(|v| v.at),
+        Some(first.at + 10_000)
+    );
+
+    // ver-1 is gone from what is read: shown at once.
+    let mut events = history();
+    events.truncate(6);
+    *next.borrow_mut() = Some(RelatedView {
+        at: first.at + 20_000,
+        ..related_of(&events, &[])
+    });
+    screen.woken(&mut text);
+    assert!(!section(&screen).iter().any(|t| t == "検証 ver-1"));
+    assert_ne!(screen.related_actions, before);
 }
 
 /// AC5: v1's review is shown as a result for an older version while v2 is

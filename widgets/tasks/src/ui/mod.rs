@@ -1054,8 +1054,16 @@ impl Screen for Tasks {
         if view.is_none()
             && let Some(related) = self.feed.related()
         {
+            // The 10 s refresh rebuilds only when what is shown changed:
+            // a rebuild drops the focus on 開く / 外す.
+            let changed = self
+                .related
+                .as_ref()
+                .is_none_or(|shown| !shown.shows_the_same(&related));
             self.related = Some(related);
-            self.rebuild_detail(text);
+            if changed {
+                self.rebuild_detail(text);
+            }
         }
         if let Some(view) = view {
             // A new notice from the feed is newer than the screen's own.
@@ -1269,23 +1277,34 @@ impl Tasks {
                     Some(v)
                         if matches!(v.liveness, tasks::model::types::Liveness::Alive { .. }) =>
                     {
-                        Some(Intent::OpenPane(id))
+                        Ok(Intent::OpenPane(id))
                     }
-                    Some(_) => Some(Intent::OpenWorktree(id)),
+                    // The worker checks the work tree is still there.
+                    Some(_) => Ok(Intent::OpenWorktree(id)),
                     // A run another window's log holds: its work tree, as
-                    // the store last saw it.
+                    // the store last saw it, while it is still there.
                     None => self
                         .related
                         .as_ref()
                         .and_then(|v| v.related.as_ref().ok())
                         .and_then(|r| r.runs.iter().find(|e| e.run == run))
                         .and_then(|e| e.info.workdir.as_ref())
-                        .map(|dir| Intent::OpenUrl(dir.display().to_string())),
+                        .map(|dir| {
+                            if dir.is_dir() {
+                                Ok(Intent::OpenUrl(dir.display().to_string()))
+                            } else {
+                                Err(format!(
+                                    "{run} の作業ツリー {} はもうありません",
+                                    dir.display()
+                                ))
+                            }
+                        })
+                        .unwrap_or_else(|| Err(format!("{run} の作業場所がわかりません"))),
                 };
                 match intent {
-                    Some(intent) => self.act(intent),
-                    None => {
-                        self.own_notice = Some(format!("{run} の作業場所がわかりません"));
+                    Ok(intent) => self.act(intent),
+                    Err(notice) => {
+                        self.own_notice = Some(notice);
                         self.rebuild(text);
                     }
                 }

@@ -37,6 +37,27 @@ pub struct RelatedView {
     pub at: Millis,
 }
 
+impl RelatedView {
+    /// Whether `other` shows what this one does: all but when it was read.
+    pub fn shows_the_same(&self, other: &RelatedView) -> bool {
+        let RelatedView {
+            task,
+            related,
+            current,
+            presence,
+            data,
+            repo,
+            at: _,
+        } = other;
+        self.task == *task
+            && self.related == *related
+            && self.current == *current
+            && self.presence == *presence
+            && self.data == *data
+            && self.repo == *repo
+    }
+}
+
 /// The kinds リンクを追加 offers, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkKind {

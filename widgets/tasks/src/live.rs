@@ -15,7 +15,7 @@ pub mod ipc;
 pub mod linking;
 pub mod start;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -205,7 +205,7 @@ impl<C: Connect + Send + 'static> LiveFeed<C> {
                     data,
                     main,
                     backfilled: false,
-                    ended: HashSet::new(),
+                    phases: HashMap::new(),
                     watch: None,
                     related_at: None,
                     link_failure: None,
@@ -465,8 +465,9 @@ struct Worker<C: Connect> {
     /// Whether the first look was made: the runs logged before the store
     /// knew them linked, the runs ended by then seen.
     backfilled: bool,
-    /// The runs whose ending was seen (their changes recorded then).
-    ended: HashSet<RunId>,
+    /// Each run's phase at the last look: a run's changes are recorded
+    /// while it is live and as it ends, never after.
+    phases: HashMap<RunId, Phase>,
     /// The task whose detail is open, and when its 関連成果 was read.
     watch: Option<TaskRef>,
     related_at: Option<Millis>,
@@ -504,6 +505,30 @@ struct Worker<C: Connect> {
     wake: Arc<dyn Fn() + Send + Sync>,
     up: Sender<Up>,
     sent: Option<(Vec<Task>, Vec<RunView>)>,
+}
+
+/// Where a run is, for recording what it produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Starting, or its agent at work (or not reported).
+    Live,
+    /// Its agent finished or failed; the pane is still there.
+    Done,
+    /// Its pane is gone; or it had ended before the first look, when its
+    /// ending was not seen.
+    Over,
+}
+
+impl Phase {
+    fn of(liveness: &Liveness) -> Phase {
+        match liveness {
+            Liveness::Gone => Phase::Over,
+            Liveness::Alive {
+                agent: Some(AgentState::Finished | AgentState::Error),
+            } => Phase::Done,
+            Liveness::Starting | Liveness::Alive { .. } => Phase::Live,
+        }
+    }
 }
 
 /// Whether `last` is at least `POLL_MS` before `now` (or never).
@@ -628,25 +653,25 @@ impl<C: Connect> Worker<C> {
             }
             return;
         };
-        // A run's agent finished, failed or its pane is gone: what its
-        // work tree holds now is what it produced. Those already ended at
-        // the first look did not end now: their detail records them.
+        // A run's agent finished or failed (each time, after a follow-up
+        // too), or its pane went: what its work tree holds now is what it
+        // produced. Those already ended at the first look did not end now:
+        // their ending was not seen, so nothing is recorded for them.
         let first = !self.backfilled;
-        let ended: Vec<(String, PathBuf)> = self
-            .views(now)
-            .into_iter()
-            .filter(|v| {
-                matches!(
-                    v.liveness,
-                    Liveness::Gone
-                        | Liveness::Alive {
-                            agent: Some(AgentState::Finished | AgentState::Error)
-                        }
-                )
-            })
-            .filter(|v| self.ended.insert(v.run.run.clone()))
-            .map(|v| (v.run.run.as_str().to_owned(), v.run.workdir))
-            .collect();
+        let mut ended: Vec<(String, PathBuf)> = Vec::new();
+        for v in self.views(now) {
+            let before = self.phases.get(&v.run.run).copied();
+            // An ending not seen stays over until the run is live again.
+            let phase = match Phase::of(&v.liveness) {
+                Phase::Live => Phase::Live,
+                _ if first || before == Some(Phase::Over) => Phase::Over,
+                phase => phase,
+            };
+            self.phases.insert(v.run.run.clone(), phase);
+            if phase != Phase::Live && before != Some(phase) && !first {
+                ended.push((v.run.run.as_str().to_owned(), v.run.workdir));
+            }
+        }
         if first {
             self.backfilled = true;
             let failed = linking::backfill(&store, &self.runs, &self.log, now);
@@ -661,9 +686,15 @@ impl<C: Connect> Worker<C> {
                 .is_none_or(|at| now.saturating_sub(at) >= RELATED_EVERY)
         {
             self.related_at = Some(now);
-            let runs = links::replay(&store)
+            // Only the task's live runs: an ended run's work tree (the
+            // repository itself, for an `Isolation::Here` run) moves on
+            // with other work, which is not the run's.
+            let runs: Vec<(String, PathBuf)> = links::replay(&store)
                 .map(|set| linking::runs_of(&set, &linking::task_key(&task)))
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(run, _)| self.phases.get(&RunId::new(run.clone())) == Some(&Phase::Live))
+                .collect();
             let failed = linking::record_produced(&store, &runs, now);
             self.link_failed(failed);
             self.send_related(&task, now);
@@ -886,6 +917,11 @@ impl<C: Connect> Worker<C> {
             Job::OpenPane(run) => self.open_pane(&run),
             Job::ClosePane(run) => self.close_pane(&run),
             Job::OpenWorktree(run) => match self.runs.iter().find(|r| r.run == run) {
+                Some(found) if !found.workdir.is_dir() => Err(format!(
+                    "{} の作業ツリー {} はもうありません",
+                    run,
+                    found.workdir.display()
+                )),
                 Some(found) => {
                     let dir = found.workdir.display().to_string();
                     (self.opener)(&dir);
@@ -2354,5 +2390,166 @@ mod tests {
         assert_eq!(entry.info.record.as_deref(), Some(rig.log.as_path()));
         assert_eq!(entry.changes.len(), 1, "no start commit: no commit range");
         assert_eq!(seen.current.as_ref().map(|c| c.run.as_str()), Some("run-1"));
+    }
+
+    /// Whether the store of `rig`'s repository has `Produced(run → sha)`.
+    fn produced_by(rig: &Rig, run: &RunId, sha: &str) -> bool {
+        let store = links::path(&data_of(rig).join("links"), &rig.repo).unwrap();
+        links::replay(&store)
+            .unwrap()
+            .live(
+                &links::Node::Run(run.as_str().to_owned()),
+                &links::Node::Change(links::ChangeId::Commit(sha.to_owned())),
+                links::Rel::Produced,
+            )
+            .is_some()
+    }
+
+    /// Moves the clock on and polls until `done` holds (10 s at most).
+    fn ticking(rig: &mut Rig, what: &str, done: impl Fn(&Rig, &View) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last: Option<View> = None;
+        loop {
+            rig.tick();
+            if let Some(view) = rig.feed.poll() {
+                last = Some(view);
+            }
+            if last.as_ref().is_some_and(|v| done(rig, v)) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{what}: {last:#?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Sets the agent state every pane reports.
+    fn agent(rig: &Rig, state: &str) {
+        rig.noa.with(|s| {
+            for pane in &mut s.panes {
+                pane.agent_state = Some(state.into());
+            }
+        });
+    }
+
+    /// An `Isolation::Here` run shares the repository: what another task
+    /// commits there after the run ended is not the run's, and reading
+    /// its task's detail (here, or in a window opened later) records none
+    /// of it.
+    #[test]
+    fn an_ended_runs_detail_does_not_take_commits_made_after_it_ended() {
+        let mut rig = rig("links-ended", |repo, _, _| write_task(repo, "t-1", "one"));
+        rig.until("the task", |v| v.tasks.len() == 1);
+        let t1 = TaskRef::Local("t-1".into());
+        rig.feed.act(Intent::Run {
+            task: t1.clone(),
+            agent: AgentKind::Claude,
+            isolation: Isolation::Here,
+        });
+        let run = rig.until("started", |v| v.runs.len() == 1).runs[0]
+            .run
+            .run
+            .clone();
+        git_in(&rig.repo, &["commit", "-q", "--allow-empty", "-m", "v1"]);
+        let v1 = git_in(&rig.repo, &["rev-parse", "HEAD"]);
+        rig.feed.act(Intent::ClosePane(run.clone()));
+        ticking(&mut rig, "v1 recorded as it ends", |rig, _| {
+            produced_by(rig, &run, &v1)
+        });
+
+        git_in(&rig.repo, &["commit", "-q", "--allow-empty", "-m", "other"]);
+        let other = git_in(&rig.repo, &["rev-parse", "HEAD"]);
+        rig.feed.watch(Some(&t1));
+        let read = related_until(&mut rig.feed, "the detail", |r| {
+            related_of(r).runs.len() == 1
+        });
+        // And read again on the 10 s refresh.
+        rig.clock.fetch_add(RELATED_EVERY, Ordering::SeqCst);
+        related_until(&mut rig.feed, "read again", |r| r.at > read.at);
+        assert!(!produced_by(&rig, &run, &other), "a later commit taken");
+
+        let mut later = second_window(&rig);
+        later.watch(Some(&t1));
+        related_until(&mut later, "a later window's detail", |r| {
+            related_of(r).runs.len() == 1
+        });
+        assert!(!produced_by(&rig, &run, &other), "a later commit taken");
+        assert!(produced_by(&rig, &run, &v1));
+    }
+
+    /// A pane given a follow-up after its agent finished: what it commits
+    /// then is recorded when it finishes again, and what is there when
+    /// its pane goes, at that.
+    #[test]
+    fn a_follow_up_in_the_same_pane_is_recorded_when_it_finishes_again_and_at_gone() {
+        let mut rig = rig("links-again", |repo, _, _| write_task(repo, "t-1", "one"));
+        rig.until("the task", |v| v.tasks.len() == 1);
+        rig.feed.act(Intent::Run {
+            task: TaskRef::Local("t-1".into()),
+            agent: AgentKind::Claude,
+            isolation: Isolation::Worktree,
+        });
+        let run = rig.until("started", |v| v.runs.len() == 1).runs[0]
+            .run
+            .clone();
+        let commit = |what: &str| {
+            git_in(&run.workdir, &["commit", "-q", "--allow-empty", "-m", what]);
+            git_in(&run.workdir, &["rev-parse", "HEAD"])
+        };
+        let at_work = |_: &Rig, v: &View| {
+            v.runs[0].liveness
+                == Liveness::Alive {
+                    agent: Some(AgentState::Running),
+                }
+        };
+        agent(&rig, "running");
+        ticking(&mut rig, "at work", at_work);
+        let v1 = commit("v1");
+        agent(&rig, "finished");
+        ticking(&mut rig, "v1 as it finishes", |rig, _| {
+            produced_by(rig, &run.run, &v1)
+        });
+
+        agent(&rig, "running");
+        ticking(&mut rig, "at work again", at_work);
+        let v2 = commit("v2");
+        agent(&rig, "finished");
+        ticking(&mut rig, "v2 as it finishes again", |rig, _| {
+            produced_by(rig, &run.run, &v2)
+        });
+
+        let v3 = commit("v3");
+        rig.feed.act(Intent::ClosePane(run.run.clone()));
+        ticking(&mut rig, "v3 as its pane goes", |rig, _| {
+            produced_by(rig, &run.run, &v3)
+        });
+    }
+
+    /// 開く on a run whose pane and work tree are both gone passes no
+    /// path to the OS and says the work tree is gone.
+    #[test]
+    fn opening_a_removed_work_tree_says_so_and_opens_nothing() {
+        let mut rig = rig("open-gone", |repo, _, _| write_task(repo, "t-1", "one"));
+        rig.until("the task", |v| v.tasks.len() == 1);
+        rig.feed.act(Intent::Run {
+            task: TaskRef::Local("t-1".into()),
+            agent: AgentKind::Claude,
+            isolation: Isolation::Worktree,
+        });
+        let run = rig.until("started", |v| v.runs.len() == 1).runs[0]
+            .run
+            .clone();
+        rig.feed.act(Intent::ClosePane(run.run.clone()));
+        rig.until("ended", |v| v.runs[0].liveness == Liveness::Gone);
+        fs::remove_dir_all(&run.workdir).unwrap();
+        rig.feed.act(Intent::OpenWorktree(run.run.clone()));
+        said(
+            &mut rig.feed,
+            &format!(
+                "{} の作業ツリー {} はもうありません",
+                run.run,
+                run.workdir.display()
+            ),
+        );
+        assert!(rig.opened.lock().unwrap().is_empty());
     }
 }

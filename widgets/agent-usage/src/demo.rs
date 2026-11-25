@@ -10,8 +10,8 @@ use agent_usage::model::{
     Agent, Origin, SourceState, Unix, UsageBucket, UsageSource, UsageSpend, UsageWindow,
 };
 use agent_usage::stats::types::{
-    AgentFilter, Availability, Counters, Counts, Coverage, KeyRow, ModelRow, Period, StatsReport,
-    Tokens,
+    AgentFilter, Availability, Counters, Counts, Coverage, KeyRow, ModelRow, Period, SkillRow,
+    StatsReport, Tokens,
 };
 use agent_usage::time::{FixedTz, LocalDate, Tz, add_days, day_start, local, parse_rfc3339};
 
@@ -219,6 +219,7 @@ struct Day {
     turns: u64,
     messages: u64,
     tool_calls: u64,
+    skills: u64,
     active_secs: u64,
     workers: u64,
 }
@@ -226,10 +227,10 @@ struct Day {
 fn day_of(agent: Agent, d: i64, weekday: u8, today_fraction: f64) -> Day {
     let weekend = if weekday >= 5 { 0.35 } else { 1.0 };
     let partial = if d == 0 { today_fraction } else { 1.0 };
-    let (salt, tokens, sessions, turns, messages, tools, active, workers) = match agent {
-        Agent::Claude => (1, 18.0e6, 7.0, 46.0, 320.0, 210.0, 3.2 * 3600.0, 5.0),
-        Agent::Codex => (2, 9.0e6, 3.0, 20.0, 95.0, 150.0, 1.6 * 3600.0, 3.0),
-        Agent::Agy => (3, 0.0, 1.4, 6.0, 0.0, 0.0, 1200.0, 0.6),
+    let (salt, tokens, sessions, turns, messages, tools, skills, active, workers) = match agent {
+        Agent::Claude => (1, 18.0e6, 7.0, 46.0, 320.0, 210.0, 6.0, 3.2 * 3600.0, 5.0),
+        Agent::Codex => (2, 9.0e6, 3.0, 20.0, 95.0, 150.0, 2.5, 1.6 * 3600.0, 3.0),
+        Agent::Agy => (3, 0.0, 1.4, 6.0, 0.0, 0.0, 0.0, 1200.0, 0.6),
     };
     let f = (0.55 + 0.9 * wobble(d, salt)) * weekend * partial;
     let r = |v: f64| (v * f).round() as u64;
@@ -239,6 +240,7 @@ fn day_of(agent: Agent, d: i64, weekday: u8, today_fraction: f64) -> Day {
         turns: r(turns),
         messages: r(messages),
         tool_calls: r(tools),
+        skills: r(skills),
         active_secs: r(active),
         workers: r(workers),
     }
@@ -311,6 +313,7 @@ fn scale(c: &Counts, share: f64) -> Counts {
             turns: s(c.c.turns),
             messages: s(c.c.messages),
             tool_calls: s(c.c.tool_calls),
+            skills: s(c.c.skills),
             active_secs: s(c.c.active_secs),
             tokens: Tokens {
                 input: s(t.input),
@@ -332,6 +335,7 @@ fn add_counts(into: &mut Counts, c: &Counts) {
     into.c.turns += c.c.turns;
     into.c.messages += c.c.messages;
     into.c.tool_calls += c.c.tool_calls;
+    into.c.skills += c.c.skills;
     into.c.active_secs += c.c.active_secs;
     into.c.tokens.add(&c.c.tokens);
     into.cost_usd = match (into.cost_usd, c.cost_usd) {
@@ -379,6 +383,23 @@ const CODEX_TOOLS: [(&str, f64); 4] = [
     ("apply_patch", 0.28),
     ("web_search", 0.08),
     ("update_plan", 0.04),
+];
+
+/// (skill, share of the agent's skill uses). The plugin one is longer than
+/// its column: the table cuts it.
+const CLAUDE_SKILLS: [(&str, f64); 7] = [
+    ("coding-implement", 0.30),
+    ("coding-review", 0.22),
+    ("coding-debug", 0.14),
+    ("noa-orchestration", 0.12),
+    ("example-plugin:spreadsheet-builder", 0.08),
+    ("clarify", 0.07),
+    ("coding-ship", 0.07),
+];
+const CODEX_SKILLS: [(&str, f64); 3] = [
+    ("coding-review", 0.45),
+    ("imagegen", 0.30),
+    ("coding-implement", 0.25),
 ];
 
 /// Relative activity by local hour.
@@ -431,6 +452,7 @@ pub fn report(period: Period, filter: AgentFilter, now: Unix, tz: &dyn Tz) -> St
             t.c.turns += day.turns;
             t.c.messages += day.messages;
             t.c.tool_calls += day.tool_calls;
+            t.c.skills += day.skills;
             t.c.active_secs += day.active_secs;
             t.workers += day.workers;
             t.c.tokens.add(&split(*agent, day.tokens));
@@ -561,6 +583,45 @@ pub fn report(period: Period, filter: AgentFilter, now: Unix, tz: &dyn Tz) -> St
     tools.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     report.tools = tools;
 
+    // Skills: shares of each agent's uses, last used a little earlier the
+    // lower they rank (still today, so every period lists them).
+    let mut skills: Vec<SkillRow> = Vec::new();
+    for (k, agent) in agents.iter().enumerate() {
+        let list: &[(&str, f64)] = match agent {
+            Agent::Claude => &CLAUDE_SKILLS,
+            Agent::Codex => &CODEX_SKILLS,
+            Agent::Agy => &[],
+        };
+        for (rank, (name, share)) in list.iter().enumerate() {
+            let uses = (totals[k].c.skills as f64 * share).round() as u64;
+            if uses == 0 {
+                continue;
+            }
+            let last = now - 60 * (17 + 83 * rank as i64 + 29 * agent.index() as i64);
+            let t = local(last, tz);
+            let minute = (last + i64::from(tz.offset_secs(last))).rem_euclid(3600) / 60;
+            skills.push(SkillRow {
+                skill: (*name).to_owned(),
+                agent: *agent,
+                uses,
+                sessions: ((uses as f64 * 0.6).ceil() as u64).min(totals[k].sessions),
+                projects: (uses / 4).clamp(1, 6),
+                last,
+                last_label: format!(
+                    "{:02}/{:02} {:02}:{minute:02}",
+                    t.date.month, t.date.day, t.hour
+                ),
+            });
+        }
+    }
+    skills.sort_by(|a, b| {
+        b.uses
+            .cmp(&a.uses)
+            .then(b.last.cmp(&a.last))
+            .then_with(|| a.skill.cmp(&b.skill))
+    });
+    report.skills = skills;
+
     report.coverage = Coverage {
         files_total: 54,
         files_done: 54,
@@ -607,6 +668,11 @@ mod tests {
         let agy = report(Period::Days7, AgentFilter::One(Agent::Agy), now, &tz);
         assert_eq!(agy.total.c.tokens.total(), 0);
         assert_eq!(agy.per_agent[0].2, Availability::NoTokens);
+        assert!(agy.skills.is_empty());
+        assert!(week.skills.iter().any(|r| r.agent == Agent::Codex));
+        let skill_uses: u64 = week.skills.iter().map(|r| r.uses).sum();
+        assert!(skill_uses > 0 && skill_uses.abs_diff(week.total.c.skills) <= 10);
+        assert!(today.skills.iter().all(|r| r.last >= today.range.0));
         let last = week.cumulative.last().unwrap().1;
         let summed: u64 = week.days.iter().map(|(_, v)| v[0]).sum();
         assert_eq!(last[0], summed);

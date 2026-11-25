@@ -2,8 +2,8 @@
 //!
 //! Per file the index keeps its length, mtime, a hash of its head (first
 //! 4 KiB), the offset of the first byte not yet consumed and the parser's tail
-//! state, plus everything parsed from it (hour buckets, tool counts, session
-//! spans, per-session event times, workers). A grown file with the same head
+//! state, plus everything parsed from it (hour buckets, tool and skill
+//! counts, session spans, per-session event times, workers). A grown file with the same head
 //! resumes at `offset`; a shrunk file or a changed head is parsed again from
 //! 0, which drops its earlier contribution because that lives in the file's
 //! own entry. Only complete lines advance `offset`.
@@ -39,8 +39,10 @@ use crate::paths::{self, Roots};
 /// 2: per-session event times replace the per-file last event time, Codex
 /// fresh input no longer subtracts cache writes. 3: a file's active time of
 /// events naming no session is kept with it; files under a Claude project
-/// other than transcripts and subagent logs are no longer indexed.
-pub(crate) const VERSION: u32 = 3;
+/// other than transcripts and subagent logs are no longer indexed. 4: skill
+/// uses (`FileData::skills`, `Counters::skills`) and the parser state that
+/// pairs a Claude slash command with its skill record.
+pub(crate) const VERSION: u32 = 4;
 /// Lines longer than this (without the `\n`) are skipped and counted.
 pub(crate) const MAX_LINE: usize = 8 << 20;
 const HEAD_LEN: u64 = 4096;
@@ -55,6 +57,16 @@ pub(crate) fn fnv(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
     })
+}
+
+/// Whether `name` can be a skill's name (a directory name, `plugin:skill`
+/// for a plugin's): 1–128 ASCII letters, digits and `-_.:`, not `.`-led.
+pub(crate) fn skill_name_ok(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
 }
 
 pub(crate) fn hour_of(ts: Unix) -> Unix {
@@ -105,6 +117,21 @@ pub(crate) struct ToolCount {
     pub count: u64,
 }
 
+/// Uses of one skill in one (UTC hour, session, project).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SkillCount {
+    pub hour: Unix,
+    /// Interned skill name.
+    pub name: u32,
+    /// Session key as the parser has it (for Codex the direct parent thread;
+    /// `session_root` maps it to the session); 0 when none is named.
+    pub session: u64,
+    pub project: u32,
+    pub count: u64,
+    /// The latest use in the hour.
+    pub last: Unix,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Worker {
     pub ts: Unix,
@@ -120,6 +147,8 @@ pub(crate) struct FileData {
     pub fallback: Vec<Bucket>,
     pub has_records: bool,
     pub tools: Vec<ToolCount>,
+    #[serde(default)]
+    pub skills: Vec<SkillCount>,
     pub sessions: Vec<SessionSpan>,
     pub workers: Vec<Worker>,
     /// Event times per session key, for active time.
@@ -315,6 +344,7 @@ pub(crate) struct Sink<'a> {
     buckets: HashMap<(Unix, u32, u32), usize>,
     fallback: HashMap<(Unix, u32, u32), usize>,
     tools: HashMap<(Unix, u32), usize>,
+    skills: HashMap<(Unix, u32, u64, u32), usize>,
     sessions: HashMap<u64, usize>,
     activity: HashMap<u64, usize>,
     events: Vec<Event>,
@@ -347,6 +377,7 @@ impl<'a> Sink<'a> {
         let b = &data.buckets;
         let f = &data.fallback;
         let t = &data.tools;
+        let k = &data.skills;
         let s = &data.sessions;
         let a = &data.activity;
         Sink {
@@ -355,6 +386,7 @@ impl<'a> Sink<'a> {
             buckets: positions(b, |i| (b[i].hour, b[i].model, b[i].project)),
             fallback: positions(f, |i| (f[i].hour, f[i].model, f[i].project)),
             tools: positions(t, |i| (t[i].hour, t[i].name)),
+            skills: positions(k, |i| (k[i].hour, k[i].name, k[i].session, k[i].project)),
             sessions: positions(s, |i| s[i].key),
             activity: positions(a, |i| a[i].key),
             strings,
@@ -440,6 +472,29 @@ impl<'a> Sink<'a> {
             data.tools.len() - 1
         });
         data.tools[i].count += 1;
+    }
+
+    /// One use of the skill `name` at `ts`: its row and the bucket's
+    /// `skills` counter.
+    pub fn skill(&mut self, ts: Unix, name: &str, session: u64, model: u32, project: u32) {
+        self.counters(ts, model, project).skills += 1;
+        let name = self.intern(name);
+        let key = (hour_of(ts), name, session, project);
+        let data = &mut *self.data;
+        let i = *self.skills.entry(key).or_insert_with(|| {
+            data.skills.push(SkillCount {
+                hour: key.0,
+                name,
+                session,
+                project,
+                count: 0,
+                last: ts,
+            });
+            data.skills.len() - 1
+        });
+        let k = &mut data.skills[i];
+        k.count += 1;
+        k.last = k.last.max(ts);
     }
 
     pub fn worker(&mut self, ts: Unix, agent: Agent) {
@@ -1018,7 +1073,7 @@ fn rollout_id(path: &Path) -> Option<&str> {
 }
 
 /// Codex sub-thread → its parent thread, from every rollout's `session_meta`.
-fn codex_parents(index: &Index) -> HashMap<u64, u64> {
+pub(crate) fn codex_parents(index: &Index) -> HashMap<u64, u64> {
     index
         .files
         .values()
@@ -1032,7 +1087,7 @@ fn codex_parents(index: &Index) -> HashMap<u64, u64> {
 /// The session a key counts toward: for Codex the root of its thread's
 /// parent chain (a sub-thread of a sub-thread counts toward the root), else
 /// the key itself.
-fn session_root(parents: &HashMap<u64, u64>, agent: Agent, key: u64) -> u64 {
+pub(crate) fn session_root(parents: &HashMap<u64, u64>, agent: Agent, key: u64) -> u64 {
     let mut k = key;
     if agent == Agent::Codex {
         // Bounded, so that a cycle in damaged logs ends.

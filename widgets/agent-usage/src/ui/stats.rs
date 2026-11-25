@@ -1,6 +1,7 @@
 //! The 統計 tab: KPIs for the selection, daily and cumulative tokens, the
 //! per-model share, the hour × weekday heatmap, and tables per agent, model,
-//! project, tool and Noa worker. A value an agent cannot provide is "—".
+//! project, tool, skill and Noa worker. A value an agent cannot provide is
+//! "—".
 
 use noa_gpui_core::style::{FlexDirection, FlexWrap, Size as LayoutSize, auto, length};
 use noa_gpui_core::widgets::{
@@ -62,14 +63,23 @@ const MODEL_COLUMNS: [(&str, f32); 10] = [
     ("メッセージ", 84.0),
     ("推定コスト", 220.0),
 ];
-const PROJECT_COLUMNS: [(&str, f32); 5] = [
+const PROJECT_COLUMNS: [(&str, f32); 6] = [
     ("プロジェクト", 220.0),
     ("セッション", 72.0),
     ("ターン", 66.0),
+    ("スキル", 56.0),
     ("トークン", 86.0),
     ("推定コスト", 220.0),
 ];
 const TOOL_COLUMNS: [(&str, f32); 2] = [("ツール", 150.0), ("回数", 70.0)];
+const SKILL_COLUMNS: [(&str, f32); 6] = [
+    ("スキル", 170.0),
+    ("エージェント", 96.0),
+    ("回数", 56.0),
+    ("セッション", 72.0),
+    ("プロジェクト", 80.0),
+    ("最終使用", 92.0),
+];
 const WORKER_COLUMNS: [(&str, f32); 2] = [("エージェント", 130.0), ("起動数", 70.0)];
 
 /// The tables' horizontal scroll views, by a name that survives a rebuild.
@@ -94,6 +104,12 @@ pub fn logs_known(report: &StatsReport) -> bool {
             .per_agent
             .iter()
             .any(|(_, _, a)| !matches!(a, Availability::Missing(_)))
+}
+
+/// Whether the selection has an agent whose logs record skill uses: the
+/// agents with token counts (agy records neither).
+pub fn skills_known(report: &StatsReport) -> bool {
+    tokens_known(report)
 }
 
 fn has_tokens(a: &Availability) -> bool {
@@ -268,6 +284,7 @@ pub fn build(
     let last = tree.insert(Some(parent), Container::new(wrap_row(style::GUTTER)));
     project_table(tree, last, report, &mut scrolls);
     tools_table(tree, last, report, &mut scrolls);
+    skills_table(tree, last, report, &mut scrolls);
     workers_table(tree, last, report, &mut scrolls);
     scrolls
 }
@@ -706,10 +723,11 @@ fn model_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scroll
     ));
 }
 
-/// The project table's rows: name, sessions, turns, tokens and the cost,
-/// which says what it leaves out (L1-3.5).
+/// The project table's rows: name, sessions, turns, skill uses, tokens and
+/// the cost, which says what it leaves out (L1-3.5).
 pub fn project_rows(report: &StatsReport) -> Vec<Vec<String>> {
     let k = tokens_known(report);
+    let sk = skills_known(report);
     report
         .per_project
         .iter()
@@ -719,6 +737,7 @@ pub fn project_rows(report: &StatsReport) -> Vec<Vec<String>> {
                 r.key.clone(),
                 count(r.counts.sessions),
                 count(r.counts.c.turns),
+                or_dash(sk, count(r.counts.c.skills)),
                 or_dash(k, tokens(r.counts.c.tokens.total())),
                 cost_text(&r.counts, k),
             ]
@@ -782,6 +801,68 @@ fn tools_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scroll
         "tools",
         table(tree, c, &TOOL_COLUMNS, 1, Truncation::Middle, &rows),
     ));
+}
+
+/// The skill table's rows: skill, agent, uses, sessions, projects and the
+/// last use, most used first.
+pub fn skill_rows(report: &StatsReport) -> Vec<Vec<String>> {
+    report
+        .skills
+        .iter()
+        .take(PROJECTS_SHOWN)
+        .map(|r| {
+            vec![
+                r.skill.clone(),
+                r.agent.display().to_owned(),
+                count(r.uses),
+                count(r.sessions),
+                count(r.projects),
+                r.last_label.clone(),
+            ]
+        })
+        .collect()
+}
+
+fn skills_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scrolls: &mut Scrolls) {
+    let c = card(tree, parent, table_item(&SKILL_COLUMNS, 1.6));
+    heading(tree, c, "スキル");
+    // agy records no skill use: say so beside what the others have.
+    let reason = unavailable_reason(report, "スキル使用");
+    if report.skills.is_empty() {
+        let text = if skills_known(report) {
+            "スキル使用の記録がありません".to_owned()
+        } else {
+            reason
+        };
+        tree.insert(
+            Some(c),
+            Label::new(text)
+                .font_size(11.0)
+                .color(Role::Muted)
+                .wrap(true),
+        );
+        return;
+    }
+    // Cut in the middle, a plugin's skill ("<plugin>:<skill>") keeps the
+    // start of its plugin and the end of its name.
+    scrolls.push((
+        "skills",
+        table(
+            tree,
+            c,
+            &SKILL_COLUMNS,
+            2,
+            Truncation::Middle,
+            &skill_rows(report),
+        ),
+    ));
+    let rest = report.skills.len().saturating_sub(PROJECTS_SHOWN) as u64;
+    if rest > 0 {
+        caption(tree, c, format!("その他 {}件", count(rest)));
+    }
+    if !reason.is_empty() {
+        caption(tree, c, reason);
+    }
 }
 
 fn workers_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scrolls: &mut Scrolls) {

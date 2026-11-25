@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Agent Usage: the 統計 tab lists skill uses (skill, agent, uses, sessions,
+  projects, last use) for the chosen period and agent, and the project table
+  counts each project's skill uses. Claude Code's come from `Skill` tool
+  calls and from slash commands that ran a skill (built-ins such as `/clear`
+  are not counted); Codex's from reads of a skill's `SKILL.md` in its skill
+  directories, once per skill per turn; agy records none. The statistics
+  index is rebuilt once on the first start.
+
 ## [0.9.16] - 2026-11-25
 
 A verification widget, an Agent Usage window, multi-judge competitions, and

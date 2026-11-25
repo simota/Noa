@@ -14,7 +14,7 @@ Acceptance criteria, as the request numbers them:
 
 - AC1: standalone crate `widgets/agent-usage` (own `[workspace]`, noa-gpui), opened from View → Agent Usage and the palette ("Open Agent Usage"), launched like the other widgets (dev: `widgets/agent-usage/target`; bundle: `Contents/Helpers`), toast when it cannot be found or started.
 - AC2: limits view for claude, codex, agy: each window with % used, reset time, pace tick, "over pace by N%", plan name when known, stale values marked with their age, independent failure, read-only, periodic and on-demand refresh.
-- AC3: statistics per agent and combined from local logs, read-only: sessions, turns/messages, tokens by kind, per model, per project, per day, active time, tool calls, estimated cost where priced; period today / 7d / 30d / all.
+- AC3: statistics per agent and combined from local logs, read-only: sessions, turns/messages, tokens by kind, per model, per project, per day, active time, tool calls, skill uses, estimated cost where priced; period today / 7d / 30d / all.
 - AC4: graphs: daily tokens stacked by agent, per-model share, hour × weekday heatmap, cumulative trend, limit-usage history (samples recorded under `<data dir>/noa/agent-usage/`).
 - AC5: `agent-usage --demo [--tab=limits|stats] --snapshot=FILE.png` renders canned data headlessly.
 - AC6: parsers and aggregation unit-tested on fixture logs (malformed and partial lines included); `scripts/verify.sh` covers the crate (default and `--full`); `scripts/verify.sh --full` passes.
@@ -78,6 +78,16 @@ Tool resolution (claude, codex, agy, curl fallback): the inherited `PATH`, then 
 | agy | `~/.gemini/antigravity-cli/history.jsonl`; `~/.gemini/antigravity-cli/conversations/<uuid>.db` (file count and mtimes only) | history line `{timestamp (ms epoch), workspace, conversationId?, type?}`: a line without `type == "slash_command"` is one turn; sessions = distinct `conversationId`s plus `.db` files never named in history (first/last activity from the file's mtime). The `display` field (the prompt text) is never read into any structure. Tokens, models and tool calls are not available: `conversations/*.db` are SQLite files whose rows are protobuf blobs (`steps.step_payload`, `gen_metadata.data`), there is no SQLite or protobuf reader in the locks and no `sqlite3` binary on this Linux machine; `log/cli-*.log` hold no token counts |
 | Noa | `<data dir>/noa/ctl/*.jsonl` (`noa_config::ctl_journal_path` layout; 4 files here) | `{"ev":"spawn","ts" (unix s),"argv":[…],"tier","worktree","label","pane"}`: one worker of the agent `basename(argv[0])` when it is `claude`, `codex` or `agy` (others, e.g. `./scripts/verify.sh`, are not agents) |
 
+Skill uses (only the field names and values below are read; no prompt, message or tool output text is kept, and a skill name is kept only once the record proves it is a skill):
+
+| Agent | What counts as one use | Not counted |
+|---|---|---|
+| claude | (a) an `assistant` `message.content[]` block `{type: "tool_use", name: "Skill", input: {skill}}`, once per `tool_use.id`, named by `input.skill` (a leading `/` dropped; `plugin:skill` kept). (b) a slash command that ran a skill: a `user` record whose string content starts with `<command-message>` or `<command-name>` and holds `<command-name>/NAME</command-name>`, counted only when the next `user` record has `isMeta: true`, no `sourceToolUseID`, `parentUuid` equal to the command's `uuid`, and a `text` block starting with `Base directory for this skill:`. Claude Code writes that record for a skill and never for a built-in (sampled here: 212 of 212 skill commands followed by it, 0 of 179 other commands: `clear`, `reload-skills`, `goal`, `model`, `reload-plugins`, `effort`, `compact`, `login`) | built-in commands; the skill record of a `Skill` call (`sourceToolUseID` set), which is the same use as (a); text that only mentions a command (content not starting with the command tags) |
+| codex | an `event_msg`/`item_completed` with `item.type == "CommandExecution"` and an `item.parsed_cmd[]` entry `{type: "read", path}` whose `path` is absolute or `~/`-led, ends in `skills/<name>/SKILL.md` or `skills/.system/<name>/SKILL.md`, and has a `.codex` or `.agents` directory above `skills` (`~/.codex/skills`, a plugin under `~/.codex/plugins/cache`, a repo's `.agents/skills`); once per skill per turn (`payload.turn_id`; `task_started` also starts a new set), since a skill's file is often read twice. Codex has no skill event: it uses a skill by reading its `SKILL.md` (182 such reads here, all `read`, all of a skill directory) | the skills list in the instructions (`developer` message, `session_meta`, `world_state`), which names every skill's path and is never searched; `search`/`list_files` entries; relative paths; `SKILL.md` outside a `.codex`/`.agents` tree. `item_completed` lines are not activity events (active time is unchanged) |
+| agy | unavailable | `history.jsonl` marks a slash command only with `type: "slash_command"`; its name is in `display`, the prompt text, which is never read. `skills/` lists the installed skills, not uses; the conversation stores are unreadable (above) |
+
+Each use is kept per (UTC hour, skill, session key, project) with its count and latest time, and adds to the hour bucket's `skills` counter, so per-agent, per-model and per-project totals include it. A Codex sub-thread's use counts toward its root session.
+
 `<data dir>` is `dirs::data_dir()`: `~/.local/share` on Linux, `~/Library/Application Support` on macOS.
 
 ## Glossary
@@ -90,6 +100,7 @@ Tool resolution (claude, codex, agy, curl fallback): the inherited `PATH`, then 
 | over pace | used % ahead of elapsed %; shown as "+N% over pace" | `UsageWindow::pace_delta` |
 | stale | a value older than `stale_after`, or one whose window reset after it was read | `SourceState::Stale { since }` |
 | index | the per-hour aggregate of every parsed log file, kept on disk | `stats::Index`, `index-v1.json` |
+| skill use | one invocation of an agent skill, by the rules under Statistics | `Counters::skills`, `SkillRow` |
 | hour bucket | counters for one (UTC hour, agent, model, project) | `stats::types::Bucket` |
 | active time | sum of gaps ≤ 5 min between consecutive events of one session | `Counts::active_secs` |
 | limit sample | one window's used % at one time, appended to the history file | `LimitSample` |
@@ -118,7 +129,7 @@ Tool resolution (claude, codex, agy, curl fallback): the inherited `PATH`, then 
 
 1. Controls: period (今日 / 7日 / 30日 / 全期間, `P` cycles) and agent (全体 / Claude / Codex / agy, `A` cycles). Periods are local calendar days: today = since local midnight; 7d / 30d = today and the 6 / 29 days before; all = everything indexed.
 2. KPI row for the selection: sessions, turns, messages, tool calls, active time, total tokens (and by kind: input, output, cache read, cache write, reasoning), estimated cost (USD, "API換算" caption). A value an agent cannot provide is "—", never 0 (agy tokens, messages, tool calls, cost; Codex cost).
-3. Tables: per agent (all counts), per model (agent, model, tokens by kind, messages, cost), per project/cwd (top 15 by tokens, then "その他 N件"; agy by `workspace`), top tools (name, count; Claude `tool_use.name`, Codex call `name`), Noa workers spawned per agent (from the ctl journals) in the period.
+3. Tables: per agent (all counts), per model (agent, model, tokens by kind, messages, cost), per project/cwd (top 15 by tokens, then "その他 N件"; agy by `workspace`; with the project's skill uses, "—" when only agy is selected), top tools (name, count; Claude `tool_use.name`, Codex call `name`), skills (スキル: skill, agent, uses, distinct sessions, distinct projects, last use as local "MM/DD HH:MM"; most used first, top 15 then "その他 N件"; "agy はスキル使用を記録しません" under it when agy is selected), Noa workers spawned per agent (from the ctl journals) in the period.
 4. Parsing never blocks the UI: an indexing pass runs on a background thread; until the first pass ends the view shows what the on-disk index already has with "集計中 n / m ファイル", and a pass is re-run every 60 s (stat only; changed files parsed) and on 更新.
 5. Cost: tokens × the built-in price table (L2-6); models not in the table count as unpriced, and the cost cell says "一部未計上 (N tokens)" when any are. Claude cache writes are priced by TTL (5m / 1h).
 
@@ -332,7 +343,7 @@ Unit C calls only these. On each `wake`, C drains limits, offers each fresh sour
 - Claude dedupe: per file a set of `hash(message.id)` and of `hash(tool_use.id)` in the index; usage counts once per message id, tool calls once per tool-use id. Subagent files count toward their `sessionId`'s session.
 - Typed lean decoding (`#[derive(Deserialize)]` structs with only the fields used, `#[serde(default)]`), so ignored large fields (`api-request-blob`, tool results) are skipped without building values. No prompt or result text is copied into any structure.
 - Active time: per session, events sorted by time; a gap ≤ 300 s adds to the hour bucket of the later event; the last event time per file is kept for resumes.
-- Index file `<own_dir>/index-v1.json` (`{"version":1, …}`), written via temp file + rename at most every 30 s and at the end of a pass; another version or a damaged file is ignored and rebuilt. Interned model and project strings are stored once.
+- Index file `<own_dir>/index-v1.json` (`{"version":4, …}`; 4 added skill uses), written via temp file + rename at most every 30 s and at the end of a pass; another version or a damaged file is ignored and rebuilt. Interned model and project strings are stored once.
 - Projects: Claude `cwd`, Codex `session_meta.cwd` (or the latest `turn_context.cwd`), agy `workspace`; shown with `~` for the home directory.
 - Prices (`prices.rs`), USD per million tokens, Anthropic first-party list prices as published (cached 2026-11-03), matched on the exact model id or the id followed by `-<date>`:
 

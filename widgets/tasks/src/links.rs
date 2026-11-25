@@ -44,6 +44,19 @@ pub const TOO_LARGE: &str = "大きすぎて識別できません";
 /// Why a manual link that already exists is refused.
 pub const ALREADY_LINKED: &str = "既にリンクされています";
 
+/// Why a `Judged` link is refused while its review or verification is
+/// judged on another change: a result is about one exact change.
+pub const JUDGED_ELSEWHERE: &str = "この結果は既に別の版にリンクされています";
+
+/// Why a work tree whose submodule has changes of its own, or that holds
+/// an untracked repository, has no snapshot id: the diff names only a
+/// commit for them, not what is inside.
+const NESTED: &str = "サブモジュールか入れ子のリポジトリに変更があるため識別できません";
+
+/// Why a work tree whose `HEAD` moved while its state was read has no
+/// snapshot id.
+const HEAD_MOVED: &str = "読み取り中に HEAD が動いたため識別できません";
+
 // ------------------------------------------------------------------ ids
 
 /// A task, with the same serde shape as the tasks widget's `TaskRef`
@@ -86,8 +99,18 @@ impl ChangeId {
         }
     }
 
+    /// Whether it has its kind's form: a commit is a full SHA-1 or SHA-256
+    /// in lowercase hex, a snapshot `snap-<such a SHA>-<16 lowercase hex>`.
+    /// The store skips a line that names one without it.
+    pub fn is_valid(&self) -> bool {
+        match self {
+            ChangeId::Commit(sha) => is_sha(sha),
+            ChangeId::Snapshot(id) => snapshot_parts(id).is_some(),
+        }
+    }
+
     /// The commit it is or sits on; `None` for a snapshot id not of the
-    /// `snap-<head>-<hex>` form.
+    /// `snap-<head>-<16 hex>` form.
     pub fn head(&self) -> Option<&str> {
         match self {
             ChangeId::Commit(sha) => Some(sha),
@@ -100,30 +123,37 @@ impl ChangeId {
         match self {
             ChangeId::Commit(sha) => short_sha(sha).to_owned(),
             ChangeId::Snapshot(id) => match snapshot_parts(id) {
-                Some((head, hex)) => format!(
-                    "{} + 未コミット (snap {})",
-                    short_sha(head),
-                    &hex[..hex.len().min(8)]
-                ),
+                Some((head, hex)) => {
+                    format!("{} + 未コミット (snap {})", short_sha(head), &hex[..8])
+                }
                 None => id.clone(),
             },
         }
     }
 }
 
+/// Its first seven characters (cut on a character, not a byte: an id
+/// made by hand may not be ASCII).
 fn short_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(7)]
+    sha.char_indices()
+        .nth(7)
+        .map_or(sha, |(end, _)| &sha[..end])
 }
 
-/// `snap-<head>-<hex>` → `(head, hex)`.
+/// `snap-<head>-<16 hex>` → `(head, hex)`.
 fn snapshot_parts(id: &str) -> Option<(&str, &str)> {
     let (head, hex) = id.strip_prefix("snap-")?.rsplit_once('-')?;
-    (is_sha(head) && !hex.is_empty()).then_some((head, hex))
+    (is_sha(head) && hex.len() == 16 && is_hex(hex)).then_some((head, hex))
 }
 
 /// A full SHA-1 or SHA-256 object id in lowercase hex.
 fn is_sha(s: &str) -> bool {
-    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    (s.len() == 40 || s.len() == 64) && is_hex(s)
+}
+
+/// Lowercase hex digits only.
+fn is_hex(s: &str) -> bool {
+    s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// A record a link points at, by the id the record already has.
@@ -138,6 +168,17 @@ pub enum Node {
     Review(String),
     /// `ver-<millis>[-n]`.
     Verify(String),
+}
+
+impl Node {
+    /// Whether the change it names, if any, has its kind's form
+    /// ([`ChangeId::is_valid`]).
+    fn is_valid(&self) -> bool {
+        match self {
+            Node::Change(change) => change.is_valid(),
+            _ => true,
+        }
+    }
 }
 
 /// What a link says; each fixes the kinds it may join ([`Rel::allows`]).
@@ -290,6 +331,10 @@ pub type Triple = (Node, Node, Rel);
 pub struct LinkSet {
     pub links: Vec<Link>,
     pub info: BTreeMap<Node, Info>,
+    /// Every capture dir ever observed for a snapshot (each `Observed`
+    /// `record` of a `Change(Snapshot)`), not only the latest: a review
+    /// and a verification of one snapshot each keep their own.
+    pub captures: BTreeMap<Node, BTreeSet<PathBuf>>,
     /// Every triple an `Unlinked` removed (it may have been linked again
     /// by hand since).
     pub unlinked: BTreeSet<Triple>,
@@ -298,9 +343,12 @@ pub struct LinkSet {
 }
 
 impl LinkSet {
-    /// Folds one event in. A `Linked` with a pair its `rel` does not allow,
-    /// or with an id already taken, is skipped; an `Unlinked` of no live
-    /// link does nothing.
+    /// Folds one event in. Skipped: a `Linked` with a pair its `rel` does
+    /// not allow, with an id already taken, naming a change id without
+    /// its kind's form ([`ChangeId::is_valid`]), or a `Judged` from a
+    /// review or verification while it is judged on another change; an
+    /// `Observed` of such a change id. An `Unlinked` of no live link does
+    /// nothing.
     pub fn apply(&mut self, event: &LinkEvent) {
         match event {
             LinkEvent::Linked {
@@ -311,7 +359,12 @@ impl LinkSet {
                 origin,
                 at,
             } => {
-                if !rel.allows(from, to) || self.ids.contains(id) {
+                if !rel.allows(from, to)
+                    || !from.is_valid()
+                    || !to.is_valid()
+                    || self.ids.contains(id)
+                    || (*rel == Rel::Judged && self.judged_elsewhere(from, to))
+                {
                     return;
                 }
                 self.ids.insert(id.clone());
@@ -331,9 +384,31 @@ impl LinkSet {
                 }
             }
             LinkEvent::Observed { node, info, .. } => {
+                if !node.is_valid() {
+                    return;
+                }
+                if let (Node::Change(ChangeId::Snapshot(_)), Some(dir)) = (node, &info.record) {
+                    self.captures
+                        .entry(node.clone())
+                        .or_default()
+                        .insert(dir.clone());
+                }
                 self.info.entry(node.clone()).or_default().merge(info);
             }
         }
+    }
+
+    /// The change `record` (a review or verification) is judged on: its
+    /// live `Judged` link's (a record has at most one).
+    pub fn judged(&self, record: &Node) -> Option<&ChangeId> {
+        self.links_from(record, Rel::Judged)
+            .find_map(|l| change_of(&l.to))
+    }
+
+    /// Whether `record` is judged on a change other than `change`.
+    fn judged_elsewhere(&self, record: &Node, change: &Node) -> bool {
+        self.judged(record)
+            .is_some_and(|judged| change_of(change) != Some(judged))
     }
 
     /// The live link `from → to` of `rel`.
@@ -488,25 +563,45 @@ pub enum Outcome {
     /// an unlink of no live link, an observation the node already has.
     Skipped,
     /// Refused, with the reason: a pair the relation does not allow, a
-    /// manual link that is already live ([`ALREADY_LINKED`]).
+    /// change id without its kind's form, a manual link that is already
+    /// live ([`ALREADY_LINKED`]), a `Judged` from a record judged on
+    /// another change ([`JUDGED_ELSEWHERE`]).
     Refused(String),
 }
 
 /// Under the store's lock: replays it, decides each edit against it (and
 /// the edits before it), and appends what is left in one write.
 ///
-/// - `Link` with a pair its `rel` does not allow: refused.
+/// - `Link` with a pair its `rel` does not allow, or naming a change id
+///   without its kind's form: refused.
 /// - `Link` `Auto`: skipped when its triple was **ever** linked, so a
 ///   person's unlink is not undone by the next automatic recording.
 /// - `Link` `Manual`: refused as [`ALREADY_LINKED`] while one is live.
+/// - `Link` `Judged` from a review or verification with a live `Judged`
+///   to another change: refused as [`JUDGED_ELSEWHERE`] (a result is about
+///   one exact change).
 /// - `Unlink` of no live link: skipped.
-/// - `Observe` that changes no field of the node's folded info: skipped.
+/// - `Observe` of a change id without its kind's form: refused; one that
+///   changes no field of the node's folded info: skipped.
 pub fn append(log: &Path, edits: &[Edit], now: Millis) -> io::Result<Vec<Outcome>> {
+    append_with(log, now, |_| Ok(edits.to_vec()))
+}
+
+/// [`append`], with the edits made under the lock from the store as it is
+/// then: a choice that depends on what is recorded (a hand-off's source)
+/// is made where no other writer can change it before it is written. An
+/// `Err` from `edits` writes nothing.
+fn append_with(
+    log: &Path,
+    now: Millis,
+    edits: impl FnOnce(&LinkSet) -> io::Result<Vec<Edit>>,
+) -> io::Result<Vec<Outcome>> {
     let _lock = lock(log)?;
     let mut set = replay(log)?;
+    let edits = edits(&set)?;
     let mut events = Vec::new();
     let mut outcomes = Vec::with_capacity(edits.len());
-    for edit in edits {
+    for edit in &edits {
         let (outcome, event) = decide(&set, edit, now);
         if let Some(event) = event {
             set.apply(&event);
@@ -538,12 +633,18 @@ fn decide(set: &LinkSet, edit: &Edit, now: Millis) -> (Outcome, Option<LinkEvent
                     None,
                 );
             }
+            if let Some(why) = invalid_change(&[from, to]) {
+                return (Outcome::Refused(why), None);
+            }
             match origin {
                 Origin::Auto if set.ever(from, to, *rel) => return (Outcome::Skipped, None),
                 Origin::Manual if set.live(from, to, *rel).is_some() => {
                     return (Outcome::Refused(ALREADY_LINKED.to_owned()), None);
                 }
                 _ => {}
+            }
+            if *rel == Rel::Judged && set.judged_elsewhere(from, to) {
+                return (Outcome::Refused(JUDGED_ELSEWHERE.to_owned()), None);
             }
             let id = new_id(now, &set.ids);
             (
@@ -569,6 +670,9 @@ fn decide(set: &LinkSet, edit: &Edit, now: Millis) -> (Outcome, Option<LinkEvent
             None => (Outcome::Skipped, None),
         },
         Edit::Observe { node, info } => {
+            if let Some(why) = invalid_change(&[node]) {
+                return (Outcome::Refused(why), None);
+            }
             let mut folded = set.info_of(node);
             if folded.merge(info) {
                 (
@@ -584,6 +688,16 @@ fn decide(set: &LinkSet, edit: &Edit, now: Millis) -> (Outcome, Option<LinkEvent
             }
         }
     }
+}
+
+/// The change id among `nodes` without its kind's form, and why an edit
+/// naming it is refused.
+fn invalid_change(nodes: &[&Node]) -> Option<String> {
+    nodes
+        .iter()
+        .filter_map(|n| change_of(n))
+        .find(|c| !c.is_valid())
+        .map(|c| format!("{:?} は版の ID の形ではありません", c.as_str()))
 }
 
 fn kind(node: &Node) -> &'static str {
@@ -656,15 +770,51 @@ pub fn now_millis() -> Millis {
 // ------------------------------------------------------------------ git
 
 /// Settings that shape what git prints, pinned as verify's capture pins
-/// them, so a person's config cannot change a snapshot id.
-const PINNED: [(&str, &str); 7] = [
+/// them, so a person's config cannot change a snapshot id. The settings
+/// an option overrides are pinned by the option in [`SNAPSHOT_DIFF`]
+/// (`diff.orderFile`, `diff.submodule`, `diff.algorithm`,
+/// `diff.indentHeuristic`, `diff.interHunkContext`, `diff.context`,
+/// `diff.renames`, `diff.external`, the prefixes); these have none.
+const PINNED: [(&str, &str); 9] = [
     ("core.quotePath", "false"),
+    ("core.bigFileThreshold", "512m"),
     ("diff.noprefix", "false"),
     ("diff.mnemonicPrefix", "false"),
     ("diff.relative", "false"),
     ("diff.ignoreSubmodules", "none"),
+    ("diff.suppressBlankEmpty", "false"),
     ("core.fsmonitor", "false"),
     ("color.ui", "false"),
+];
+
+/// `git diff` of a snapshot (work tree against `HEAD`, `.noa/` left out):
+/// a binary patch with full object ids, no external diff or text
+/// conversion, no color, no renames, and every option that shapes it at
+/// git's default whatever the settings say: three lines of context, hunks
+/// joined only where they touch, git's own file order (no order file),
+/// the Myers algorithm with the indent heuristic, the short submodule
+/// lines, no submodule ignored, `a/` and `b/` prefixes, the whole tree's
+/// paths.
+const SNAPSHOT_DIFF: [&str; 19] = [
+    "diff",
+    "--binary",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--ignore-submodules=none",
+    "--submodule=short",
+    "--no-renames",
+    "-U3",
+    "--inter-hunk-context=0",
+    "-O/dev/null",
+    "--diff-algorithm=myers",
+    "--indent-heuristic",
+    "--no-relative",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    "HEAD",
+    "--",
+    NOT_NOA,
 ];
 
 /// Clears every `GIT_*` variable `cmd` would inherit, so git finds the
@@ -803,15 +953,28 @@ const NOT_NOA: &str = ":(exclude).noa";
 ///
 /// - `Err` on an unborn `HEAD`, or when git fails;
 /// - `Commit(HEAD)` when nothing outside `.noa/` differs from `HEAD`;
+/// - `Err` when a submodule has changes in its own work tree, or the tree
+///   holds an untracked repository: the diff names only a commit for
+///   those, not what is inside, so two different states would get one id;
 /// - else `Snapshot(snap-<HEAD>-<16 hex>)`, the FNV-1a 64 of
 ///   `noa-snap-v1\0`, `HEAD`, `\0`, the binary diff of the work tree
-///   against `HEAD`, then each untracked file, sorted by path: its path,
-///   `\0`, its length (u64 LE) and its bytes (a link: its target, not
-///   followed). Over [`SNAPSHOT_MAX_BYTES`] of diff and untracked bytes:
-///   `Err(TOO_LARGE)`.
+///   against `HEAD` ([`SNAPSHOT_DIFF`]), then each untracked entry, sorted
+///   by path: its path, `\0`, its kind (`f` a file, `x` a file with its
+///   owner's execute bit, `l` a link), its length (u64 LE) and its bytes
+///   (a link: its target, not followed). Over [`SNAPSHOT_MAX_BYTES`] of
+///   diff and untracked bytes: `Err(TOO_LARGE)`.
+///
+/// `HEAD` is read again once the state is read: when it moved meanwhile,
+/// `Err` (the id would name one commit over a state on another).
 ///
 /// Equal states get equal ids, whichever widget names them.
 pub fn snapshot_id(workdir: &Path) -> Result<ChangeId, String> {
+    snapshot_id_with(workdir, || {})
+}
+
+/// [`snapshot_id`], running `between` once `HEAD` is first read (a test
+/// moves `HEAD` there).
+fn snapshot_id_with(workdir: &Path, between: impl FnOnce()) -> Result<ChangeId, String> {
     let top = git(workdir, &["rev-parse", "--show-toplevel"])
         .map(printed_path)
         .map_err(|why| {
@@ -820,14 +983,29 @@ pub fn snapshot_id(workdir: &Path) -> Result<ChangeId, String> {
                 workdir.display()
             )
         })?;
-    let head = git(&top, &["rev-parse", "--verify", "-q", "HEAD^{commit}"])
+    let head = read_head(&top)?;
+    between();
+    let id = state_id(&top, &head)?;
+    if read_head(&top)? != head {
+        return Err(HEAD_MOVED.to_owned());
+    }
+    Ok(id)
+}
+
+/// The commit `HEAD` of the work tree `top` is at.
+fn read_head(top: &Path) -> Result<String, String> {
+    git(top, &["rev-parse", "--verify", "-q", "HEAD^{commit}"])
         .map(printed_text)
-        .map_err(|_| format!("{} にはまだコミットがありません", top.display()))?;
+        .map_err(|_| format!("{} にはまだコミットがありません", top.display()))
+}
+
+/// The id of the state of the work tree `top` on `head` ([`snapshot_id`]).
+fn state_id(top: &Path, head: &str) -> Result<ChangeId, String> {
     let status = git(
-        &top,
+        top,
         &[
             "status",
-            "--porcelain=v1",
+            "--porcelain=v2",
             "-z",
             "--untracked-files=all",
             "--ignore-submodules=none",
@@ -836,36 +1014,21 @@ pub fn snapshot_id(workdir: &Path) -> Result<ChangeId, String> {
         ],
     )?;
     if status.is_empty() {
-        return Ok(ChangeId::Commit(head));
+        return Ok(ChangeId::Commit(head.to_owned()));
+    }
+    if nested_change(&status) {
+        return Err(NESTED.to_owned());
     }
     let mut hash = Fnv::new();
     hash.update(b"noa-snap-v1\0");
     hash.update(head.as_bytes());
     hash.update(b"\0");
-    let diff = git_capped(
-        &top,
-        &[
-            "diff",
-            "--binary",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            "--no-renames",
-            "-U3",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            "HEAD",
-            "--",
-            NOT_NOA,
-        ],
-        SNAPSHOT_MAX_BYTES,
-    )?
-    .ok_or_else(|| TOO_LARGE.to_owned())?;
+    let diff =
+        git_capped(top, &SNAPSHOT_DIFF, SNAPSHOT_MAX_BYTES)?.ok_or_else(|| TOO_LARGE.to_owned())?;
     hash.update(&diff);
     let mut budget = SNAPSHOT_MAX_BYTES - diff.len() as u64;
     let listing = git(
-        &top,
+        top,
         &[
             "ls-files",
             "--others",
@@ -882,40 +1045,71 @@ pub fn snapshot_id(workdir: &Path) -> Result<ChangeId, String> {
     untracked.sort_unstable();
     for name in untracked {
         let path = top.join(OsStr::from_bytes(name));
-        let bytes = untracked_bytes(&path, budget)?;
+        let (kind, bytes) = untracked_entry(&path, budget)?;
         budget -= bytes.len() as u64;
         hash.update(name);
         hash.update(b"\0");
+        hash.update(&[kind]);
         hash.update(&(bytes.len() as u64).to_le_bytes());
         hash.update(&bytes);
     }
     Ok(ChangeId::Snapshot(format!("snap-{head}-{:016x}", hash.0)))
 }
 
-/// What an untracked file adds to a snapshot: a file's bytes, a link's
-/// target, nothing for anything else (a nested repository); `Err(TOO_LARGE)`
+/// Whether `git status --porcelain=v2 -z` names a submodule with changes
+/// in its own work tree (its `<sub>` field `S?M?` or `S??U`), or an
+/// untracked repository (`? dir/`: with every untracked file listed, a
+/// directory is listed only when it holds a repository of its own).
+fn nested_change(status: &[u8]) -> bool {
+    let mut fields = status.split(|b| *b == 0);
+    while let Some(entry) = fields.next() {
+        let mut words = entry.splitn(4, |b| *b == b' ');
+        let (kind, _xy, sub) = (words.next(), words.next(), words.next());
+        match kind {
+            Some(b"?") if entry.ends_with(b"/") => return true,
+            Some(b"1" | b"2" | b"u") => {
+                if kind == Some(b"2") {
+                    // A rename's original path is a field of its own.
+                    fields.next();
+                }
+                if let Some(&[b'S', _, m, u]) = sub
+                    && (m == b'M' || u == b'U')
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// What an untracked entry adds to a snapshot: its kind (`f` a file, `x`
+/// a file with its owner's execute bit, as git tells 100755 from 100644;
+/// `l` a link) and its bytes (a file's, a link's target, not followed).
+/// `Err(NESTED)` for a directory (a repository of its own), `Err(TOO_LARGE)`
 /// past `budget`.
-fn untracked_bytes(path: &Path, budget: u64) -> Result<Vec<u8>, String> {
+fn untracked_entry(path: &Path, budget: u64) -> Result<(u8, Vec<u8>), String> {
+    use std::os::unix::fs::PermissionsExt as _;
     let unreadable = |e: io::Error| format!("{} を読めません: {e}", path.display());
     let meta = fs::symlink_metadata(path).map_err(unreadable)?;
-    let bytes = if meta.file_type().is_symlink() {
-        fs::read_link(path)
-            .map_err(unreadable)?
-            .into_os_string()
-            .into_vec()
+    let (kind, bytes) = if meta.file_type().is_symlink() {
+        let target = fs::read_link(path).map_err(unreadable)?;
+        (b'l', target.into_os_string().into_vec())
     } else if meta.is_file() {
         let mut bytes = Vec::new();
         fs::File::open(path)
             .and_then(|f| f.take(budget + 1).read_to_end(&mut bytes))
             .map_err(unreadable)?;
-        bytes
+        let executable = meta.permissions().mode() & 0o100 != 0;
+        (if executable { b'x' } else { b'f' }, bytes)
     } else {
-        Vec::new()
+        return Err(NESTED.to_owned());
     };
     if bytes.len() as u64 > budget {
         return Err(TOO_LARGE.to_owned());
     }
-    Ok(bytes)
+    Ok((kind, bytes))
 }
 
 /// The change the work tree holding `workdir` is at now: [`snapshot_id`]
@@ -924,38 +1118,56 @@ pub fn current_change(workdir: &Path) -> Result<ChangeId, String> {
     snapshot_id(workdir)
 }
 
+/// A task's current change, and the run it was taken from ([`task_current`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Current {
+    /// The run whose work tree is at it, or whose newest `Produced` it is.
+    pub run: String,
+    pub change: ChangeId,
+}
+
 /// The current change of `task`: [`current_change`] of the work tree of
 /// its newest run (by start) whose work tree still exists; when none does,
-/// the newest change recorded as `Produced` by its newest run. `None` with
-/// no run, or when git cannot say. Runs git: call it off the UI thread.
-pub fn task_current(set: &LinkSet, task: &TaskKey) -> Option<ChangeId> {
+/// the newest change recorded as `Produced` by its newest run. With the
+/// run it came from, under which [`related`] lists it. `None` with no run,
+/// or when git cannot say. Runs git: call it off the UI thread.
+pub fn task_current(set: &LinkSet, task: &TaskKey) -> Option<Current> {
     let me = Node::Task(task.clone());
     let ran = runs_by_start(set, &me);
     let newest = ran.last()?;
-    for link in ran.iter().rev() {
+    for (run, link) in ran.iter().rev() {
         if let Some(workdir) = set.info.get(&link.to).and_then(|i| i.workdir.as_deref())
             && workdir.is_dir()
         {
-            return current_change(workdir).ok();
+            return current_change(workdir).ok().map(|change| Current {
+                run: (*run).to_owned(),
+                change,
+            });
         }
     }
-    set.links_from(&newest.to, Rel::Produced)
+    let (run, link) = newest;
+    let change = set
+        .links_from(&link.to, Rel::Produced)
         .filter_map(|l| change_of(&l.to))
-        .last()
-        .cloned()
+        .last()?;
+    Some(Current {
+        run: (*run).to_owned(),
+        change: change.clone(),
+    })
 }
 
-/// The live `Ran` links from `task`, oldest run first: by the start its
-/// id names (`run-<millis>`), else by when it was linked.
-fn runs_by_start<'a>(set: &'a LinkSet, task: &'a Node) -> Vec<&'a Link> {
-    let mut ran: Vec<&Link> = set
+/// The live `Ran` links from `task`, each with its run id, oldest run
+/// first: by the start its id names (`run-<millis>`), else by when it was
+/// linked.
+fn runs_by_start<'a>(set: &'a LinkSet, task: &'a Node) -> Vec<(&'a str, &'a Link)> {
+    let mut ran: Vec<(&str, &Link)> = set
         .links_from(task, Rel::Ran)
-        .filter(|l| matches!(l.to, Node::Run(_)))
+        .filter_map(|l| match &l.to {
+            Node::Run(run) => Some((run.as_str(), l)),
+            _ => None,
+        })
         .collect();
-    ran.sort_by_key(|l| match &l.to {
-        Node::Run(run) => run_start(run).unwrap_or(l.at),
-        _ => l.at,
-    });
+    ran.sort_by_key(|(run, l)| run_start(run).unwrap_or(l.at));
     ran
 }
 
@@ -1040,20 +1252,20 @@ fn check(
     nodes
         .into_iter()
         .map(|node| {
-            let info = set.info.get(node);
-            let found = presence_of(node, info, data, repo, commits.as_ref());
+            let found = presence_of(set, node, data, repo, commits.as_ref());
             (node.clone(), found)
         })
         .collect()
 }
 
 fn presence_of(
+    set: &LinkSet,
     node: &Node,
-    info: Option<&Info>,
     data: &Path,
     repo: &Path,
     commits: Option<&BTreeSet<String>>,
 ) -> Presence {
+    let info = set.info.get(node);
     let record = info.and_then(|i| i.record.clone());
     let missing = |id: &str, path: Option<&Path>| Presence::Missing {
         what: match path {
@@ -1090,9 +1302,16 @@ fn presence_of(
             Some(_) => missing(sha, None),
             None => Presence::Unknown,
         },
-        Node::Change(ChangeId::Snapshot(id)) => match record {
-            Some(dir) if dir.is_dir() => Presence::Found,
-            Some(dir) => missing(id, Some(&dir)),
+        // Found while any of its capture dirs is: a review's and a
+        // verification's capture of one snapshot are each a record of it.
+        Node::Change(ChangeId::Snapshot(id)) => match set.captures.get(node) {
+            Some(dirs) if dirs.iter().any(|dir| dir.is_dir()) => Presence::Found,
+            Some(dirs) => Presence::Missing {
+                what: std::iter::once(id.clone())
+                    .chain(dirs.iter().map(|dir| dir.display().to_string()))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            },
             None => Presence::Unknown,
         },
         Node::Review(id) => match review_dir(data, id) {
@@ -1206,8 +1425,13 @@ pub struct ChangeEntry {
 pub struct ResultEntry {
     /// `Review(id)` or `Verify(id)`.
     pub node: Node,
-    /// Under a change: the `Judged` link; in `loose`: the `About` link.
-    pub link: LinkId,
+    /// The links of this task's own that put the row here: the result's
+    /// `About` links to the task or one of its runs, in link order
+    /// (リンクを外す removes these). Empty for a result listed only for
+    /// its `Judged` link to a change of the task: that link is the
+    /// result's own and other tasks list it too, so the row cannot be
+    /// removed from one task's view.
+    pub links: Vec<LinkId>,
     pub judged: Option<ChangeId>,
     /// It judged a change that is not the current one (旧版の結果).
     pub stale: bool,
@@ -1216,35 +1440,52 @@ pub struct ResultEntry {
 
 /// The 関連成果 of `task`, given its current change ([`task_current`]):
 /// its runs, each with the changes it produced and under each the results
-/// that judged exactly that change; results that judged none of them go to
-/// `loose`. The current change is marked, and added under the newest run
-/// (or to `changes` with no run) when it was never recorded. Pure.
-pub fn related(set: &LinkSet, task: &TaskKey, current: Option<&ChangeId>) -> Related {
+/// that judged exactly that change; results `About` the task or one of
+/// its runs that judged none of them go to `loose`. The current change is
+/// marked, and added under the run it was taken from (or to `changes`
+/// when that is none of the task's runs) when it was never recorded.
+/// Pure.
+pub fn related(set: &LinkSet, task: &TaskKey, current: Option<&Current>) -> Related {
     let me = Node::Task(task.clone());
+    let now = current.map(|c| &c.change);
+    let ran = runs_by_start(set, &me);
+    let mine: BTreeSet<&Node> = ran.iter().map(|(_, l)| &l.to).chain([&me]).collect();
+    // Each result's About links to this task or its runs, and the results
+    // in the order first linked.
+    let mut about: BTreeMap<&Node, Vec<LinkId>> = BTreeMap::new();
+    let mut about_order: Vec<&Node> = Vec::new();
+    for link in set
+        .links
+        .iter()
+        .filter(|l| l.rel == Rel::About && mine.contains(&l.to))
+    {
+        let ids = about.entry(&link.from).or_default();
+        if ids.is_empty() {
+            about_order.push(&link.from);
+        }
+        ids.push(link.id.clone());
+    }
+
     let mut shown: BTreeSet<&Node> = BTreeSet::new();
     let mut entry = |link: &Link| -> Option<ChangeEntry> {
         let change = change_of(&link.to)?;
-        let results = results_for(set, change, current);
-        for link in set.links_to(&link.to, Rel::Judged) {
-            shown.insert(&link.from);
-        }
+        let results = results_for(set, change, now, &about);
+        shown.extend(set.links_to(&link.to, Rel::Judged).map(|l| &l.from));
         Some(ChangeEntry {
             change: change.clone(),
             link: Some(link.id.clone()),
-            current: current == Some(change),
+            current: now == Some(change),
             results,
         })
     };
-    let ran = runs_by_start(set, &me);
     let mut runs = Vec::new();
-    for link in &ran {
-        let Node::Run(run) = &link.to else { continue };
+    for (run, link) in &ran {
         let changes = set
             .links_from(&link.to, Rel::Produced)
             .filter_map(&mut entry)
             .collect();
         runs.push(RunEntry {
-            run: run.clone(),
+            run: (*run).to_owned(),
             link: link.id.clone(),
             info: set.info_of(&link.to),
             changes,
@@ -1255,27 +1496,20 @@ pub fn related(set: &LinkSet, task: &TaskKey, current: Option<&ChangeId>) -> Rel
         .filter_map(&mut entry)
         .collect();
 
-    let mine: BTreeSet<&Node> = ran.iter().map(|l| &l.to).chain([&me]).collect();
-    let mut loose: Vec<ResultEntry> = Vec::new();
-    for link in set.links.iter().filter(|l| l.rel == Rel::About) {
-        if !mine.contains(&link.to)
-            || shown.contains(&link.from)
-            || loose.iter().any(|r| r.node == link.from)
-        {
-            continue;
-        }
-        let judged = set
-            .links_from(&link.from, Rel::Judged)
-            .find_map(|l| change_of(&l.to))
-            .cloned();
-        loose.push(ResultEntry {
-            node: link.from.clone(),
-            link: link.id.clone(),
-            stale: stale(judged.as_ref(), current),
-            judged,
-            info: set.info_of(&link.from),
-        });
-    }
+    let loose: Vec<ResultEntry> = about_order
+        .into_iter()
+        .filter(|node| !shown.contains(node))
+        .map(|node| {
+            let judged = set.judged(node).cloned();
+            ResultEntry {
+                node: node.clone(),
+                links: about[node].clone(),
+                stale: stale(judged.as_ref(), now),
+                judged,
+                info: set.info_of(node),
+            }
+        })
+        .collect();
 
     if let Some(current) = current {
         let recorded = runs
@@ -1285,12 +1519,12 @@ pub fn related(set: &LinkSet, task: &TaskKey, current: Option<&ChangeId>) -> Rel
             .any(|c| c.current);
         if !recorded {
             let entry = ChangeEntry {
-                change: current.clone(),
+                change: current.change.clone(),
                 link: None,
                 current: true,
                 results: Vec::new(),
             };
-            match runs.last_mut() {
+            match runs.iter_mut().find(|r| r.run == current.run) {
                 Some(run) => run.changes.push(entry),
                 None => changes.push(entry),
             }
@@ -1303,8 +1537,14 @@ pub fn related(set: &LinkSet, task: &TaskKey, current: Option<&ChangeId>) -> Rel
     }
 }
 
-/// The results that judged exactly `change`, by time.
-fn results_for(set: &LinkSet, change: &ChangeId, current: Option<&ChangeId>) -> Vec<ResultEntry> {
+/// The results that judged exactly `change`, by time, each with its
+/// `About` links of the task (`about`).
+fn results_for(
+    set: &LinkSet,
+    change: &ChangeId,
+    current: Option<&ChangeId>,
+    about: &BTreeMap<&Node, Vec<LinkId>>,
+) -> Vec<ResultEntry> {
     let node = Node::Change(change.clone());
     let mut judged: Vec<&Link> = set.links_to(&node, Rel::Judged).collect();
     judged.sort_by_key(|l| l.at);
@@ -1312,7 +1552,7 @@ fn results_for(set: &LinkSet, change: &ChangeId, current: Option<&ChangeId>) -> 
         .into_iter()
         .map(|l| ResultEntry {
             node: l.from.clone(),
-            link: l.id.clone(),
+            links: about.get(&l.from).cloned().unwrap_or_default(),
             judged: Some(change.clone()),
             stale: stale(Some(change), current),
             info: set.info_of(&l.from),
@@ -1334,7 +1574,7 @@ pub struct BackLinks {
     pub tasks: Vec<BackTask>,
     /// `About` links to runs, in link order.
     pub runs: Vec<BackRun>,
-    /// `Judged` links: the change it judged (one, normally).
+    /// Its `Judged` link: the change it judged (at most one).
     pub changes: Vec<BackChange>,
 }
 
@@ -1438,16 +1678,26 @@ pub struct Source {
 }
 
 /// The source of a review or verification of `change` in work tree
-/// `workdir`, exactly by these rules (no time window, no branch names):
+/// `workdir`, which is at `here` now ([`current_change`]; `None` when git
+/// cannot say), exactly by these rules (no time window, no branch names):
 ///
 /// 1. Some run has a `Produced` link to the change: those runs, and the
 ///    task of each `Ran` link to them.
 /// 2. Else, exactly one run's observed info has this `workdir` and a
-///    branch (a run in a worktree of its own): that run and its tasks, and
-///    `produced_by` it when there is a change.
+///    branch (a run in a worktree of its own), and the change is that work
+///    tree's own: `here`, or the commit `here` sits on, and not the commit
+///    the run started on (its observed `head`: a run that has not moved
+///    off it did not make it). Then that run and its tasks, and
+///    `produced_by` it. With no change (a Files review), the work tree
+///    alone: that run and its tasks.
 /// 3. Else none (the main checkout shared by runs made there, a commit no
-///    run is known to have produced).
-pub fn source_of(set: &LinkSet, change: Option<&ChangeId>, workdir: &Path) -> Source {
+///    run is known to have produced, a commit the work tree is not at).
+pub fn source_of(
+    set: &LinkSet,
+    change: Option<&ChangeId>,
+    workdir: &Path,
+    here: Option<&ChangeId>,
+) -> Source {
     if let Some(change) = change {
         let node = Node::Change(change.clone());
         let mut runs = Vec::new();
@@ -1481,7 +1731,7 @@ pub fn source_of(set: &LinkSet, change: Option<&ChangeId>, workdir: &Path) -> So
         })
         .collect();
     match owners.as_slice() {
-        [run] => {
+        [run] if change.is_none_or(|c| made_here(set, run, c, here)) => {
             let runs = vec![(*run).clone()];
             Source {
                 tasks: tasks_of_runs(set, &runs),
@@ -1491,6 +1741,24 @@ pub fn source_of(set: &LinkSet, change: Option<&ChangeId>, workdir: &Path) -> So
         }
         _ => Source::default(),
     }
+}
+
+/// Rule 2's test of `change` for `run`, whose work tree is at `here`: it
+/// is `here` or the commit `here` sits on, and not the commit `run`
+/// started on.
+fn made_here(set: &LinkSet, run: &str, change: &ChangeId, here: Option<&ChangeId>) -> bool {
+    let Some(here) = here else {
+        return false;
+    };
+    let at_tree = match change {
+        ChangeId::Commit(sha) => here.head() == Some(sha.as_str()),
+        ChangeId::Snapshot(_) => change == here,
+    };
+    let start = set
+        .info
+        .get(&Node::Run(run.to_owned()))
+        .and_then(|i| i.head.as_deref());
+    at_tree && !matches!(change, ChangeId::Commit(sha) if Some(sha.as_str()) == start)
 }
 
 fn tasks_of_runs(set: &LinkSet, runs: &[String]) -> Vec<TaskKey> {
@@ -1512,8 +1780,14 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// Records a review or verification `record` just created on `change` (in
 /// work tree `workdir`) in the store `log`: what it is (`info`), `Judged`
 /// to the change, the snapshot's capture dir (`capture`), and the `About`
-/// (and rule 2's `Produced`) links of [`source_of`]. The store is read
-/// first without the lock; the writes are deduped under it ([`append`]).
+/// (and rule 2's `Produced`) links of [`source_of`].
+///
+/// The work tree's current change (rule 2) is read before the lock is
+/// taken; the source is decided under it, from the store as it is then,
+/// so two hand-offs at once record what one after the other would (one
+/// producer of a change, not one each). A record already judged on
+/// another change is refused, `Err` of kind `AlreadyExists`
+/// ([`JUDGED_ELSEWHERE`]), and nothing is written.
 pub fn record_handoff(
     log: &Path,
     record: Node,
@@ -1522,8 +1796,54 @@ pub fn record_handoff(
     info: Info,
     capture: Option<&Path>,
 ) -> io::Result<Source> {
-    let set = replay(log)?;
-    let source = source_of(&set, change.as_ref(), workdir);
+    handoff(log, record, change, workdir, info, capture, || {})
+}
+
+/// [`record_handoff`], running `before_lock` once git is done and before
+/// the lock is taken (a test records another hand-off there).
+fn handoff(
+    log: &Path,
+    record: Node,
+    change: Option<ChangeId>,
+    workdir: &Path,
+    info: Info,
+    capture: Option<&Path>,
+    before_lock: impl FnOnce(),
+) -> io::Result<Source> {
+    let here = change.as_ref().and_then(|_| current_change(workdir).ok());
+    before_lock();
+    let mut source = Source::default();
+    append_with(log, now_millis(), |set| {
+        if let Some(change) = &change
+            && set.judged_elsewhere(&record, &Node::Change(change.clone()))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                JUDGED_ELSEWHERE,
+            ));
+        }
+        source = source_of(set, change.as_ref(), workdir, here.as_ref());
+        Ok(handoff_edits(
+            &record,
+            change.as_ref(),
+            workdir,
+            info,
+            capture,
+            &source,
+        ))
+    })?;
+    Ok(source)
+}
+
+/// What a hand-off writes, given its source.
+fn handoff_edits(
+    record: &Node,
+    change: Option<&ChangeId>,
+    workdir: &Path,
+    info: Info,
+    capture: Option<&Path>,
+    source: &Source,
+) -> Vec<Edit> {
     let link = |to: Node, rel: Rel| Edit::Link {
         from: record.clone(),
         to,
@@ -1534,7 +1854,7 @@ pub fn record_handoff(
         node: record.clone(),
         info,
     }];
-    if let Some(change) = &change {
+    if let Some(change) = change {
         let node = Node::Change(change.clone());
         edits.push(link(node.clone(), Rel::Judged));
         if let ChangeId::Snapshot(_) = change {
@@ -1561,7 +1881,7 @@ pub fn record_handoff(
             .iter()
             .map(|task| link(Node::Task(task.clone()), Rel::About)),
     );
-    if let (Some(run), Some(change)) = (&source.produced_by, &change) {
+    if let (Some(run), Some(change)) = (&source.produced_by, change) {
         edits.push(Edit::Link {
             from: Node::Run(run.clone()),
             to: Node::Change(change.clone()),
@@ -1569,8 +1889,7 @@ pub fn record_handoff(
             origin: Origin::Auto,
         });
     }
-    append(log, &edits, now_millis())?;
-    Ok(source)
+    edits
 }
 
 // ------------------------------------------------------------ navigation
@@ -1899,6 +2218,29 @@ mod tests {
         tmp.path().join("links").join("repo-0").join(LINKS_FILE)
     }
 
+    /// The current change `change`, taken from `run`.
+    fn at(run: &str, change: &ChangeId) -> Current {
+        Current {
+            run: run.into(),
+            change: change.clone(),
+        }
+    }
+
+    /// A linked worktree of `main` at `path` on a new branch `branch`.
+    fn worktree(main: &Path, path: &Path, branch: &str) {
+        sh(
+            main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ],
+        );
+    }
+
     /// A task with run-1 (v1) and run-2 (v2), a review of v1 and a
     /// verification of v2.
     fn history(log: &Path) {
@@ -1942,7 +2284,7 @@ mod tests {
         let set = replay(&log).unwrap();
         assert_eq!(set.links.len(), 8);
         let v2 = ChangeId::Commit(sha(2));
-        let related = related(&set, &task("t-1"), Some(&v2));
+        let related = related(&set, &task("t-1"), Some(&at("run-2", &v2)));
         // Oldest run first, whichever was linked first.
         let runs: Vec<&str> = related.runs.iter().map(|r| r.run.as_str()).collect();
         assert_eq!(runs, ["run-1", "run-2"]);
@@ -2294,7 +2636,7 @@ mod tests {
         ]);
         let v1 = ChangeId::Commit(sha(1));
         let v2 = ChangeId::Commit(sha(2));
-        let related = related(&set, &task("t-1"), Some(&v2));
+        let related = related(&set, &task("t-1"), Some(&at("run-1", &v2)));
         let changes = &related.runs[0].changes;
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].change, v1);
@@ -2311,7 +2653,7 @@ mod tests {
             }
         );
         // At v1, the same result is current.
-        let at_v1 = super::related(&set, &task("t-1"), Some(&v1));
+        let at_v1 = super::related(&set, &task("t-1"), Some(&at("run-1", &v1)));
         assert_eq!(at_v1.runs[0].changes.len(), 1);
         assert!(at_v1.runs[0].changes[0].current);
         assert!(!at_v1.runs[0].changes[0].results[0].stale);
@@ -2376,7 +2718,7 @@ mod tests {
         let v2 = commit(&wt, "v2");
         let set = replay(&log).unwrap();
         let now = task_current(&set, &task("t-1")).unwrap();
-        assert_eq!(now, ChangeId::Commit(v2.clone()));
+        assert_eq!(now, at("run-1", &ChangeId::Commit(v2.clone())));
         let related = related(&set, &task("t-1"), Some(&now));
         let changes = &related.runs[0].changes;
         assert_eq!(changes[0].change, ChangeId::Commit(v1));
@@ -2392,7 +2734,7 @@ mod tests {
         let set = replay(&log).unwrap();
         assert_eq!(
             task_current(&set, &task("t-1")),
-            Some(changes[0].change.clone())
+            Some(at("run-1", &changes[0].change))
         );
     }
 
@@ -2454,6 +2796,157 @@ mod tests {
         fs::write(repo.join("big.bin"), big).unwrap();
         assert_eq!(snapshot_id(&repo), Err(TOO_LARGE.to_owned()));
         assert!(snapshot_id(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn an_untracked_entrys_kind_and_execute_bit_are_part_of_the_snapshot() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = Tmp::new("snap-kind");
+        let repo = tmp.path().join("app");
+        repo_at(&repo);
+        let path = repo.join("run");
+        let file = |mode: u32| {
+            let _ = fs::remove_file(&path);
+            fs::write(&path, "target").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        file(0o644);
+        let plain = snapshot_id(&repo).unwrap();
+        file(0o755);
+        let executable = snapshot_id(&repo).unwrap();
+        // A link whose target is the file's text.
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("target", &path).unwrap();
+        let link = snapshot_id(&repo).unwrap();
+        assert_ne!(plain, executable);
+        assert_ne!(plain, link);
+        assert_ne!(executable, link);
+        file(0o644);
+        assert_eq!(snapshot_id(&repo).unwrap(), plain);
+    }
+
+    #[test]
+    fn a_submodule_with_changes_of_its_own_or_an_untracked_repository_has_no_snapshot() {
+        let tmp = Tmp::new("snap-nested");
+        let sub = tmp.path().join("sub");
+        repo_at(&sub);
+        let repo = tmp.path().join("app");
+        repo_at(&repo);
+        sh(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        let head = commit(&repo, "sub");
+        assert_eq!(snapshot_id(&repo).unwrap(), ChangeId::Commit(head));
+        // A tracked file changed inside it, or an untracked one: the
+        // parent's diff names both as `<commit>-dirty`.
+        let inside = repo.join("sub");
+        fs::write(inside.join("a.txt"), "changed\n").unwrap();
+        assert_eq!(snapshot_id(&repo), Err(NESTED.to_owned()));
+        sh(&inside, &["checkout", "-q", "--", "a.txt"]);
+        fs::write(inside.join("new.txt"), "new\n").unwrap();
+        assert_eq!(snapshot_id(&repo), Err(NESTED.to_owned()));
+        fs::remove_file(inside.join("new.txt")).unwrap();
+        // A new commit in it, its work tree clean: the diff names that
+        // commit, whatever diff.submodule says.
+        fs::write(inside.join("a.txt"), "two\n").unwrap();
+        commit(&inside, "two");
+        let moved = snapshot_id(&repo).unwrap();
+        assert!(matches!(moved, ChangeId::Snapshot(_)), "{moved:?}");
+        sh(&repo, &["config", "diff.submodule", "log"]);
+        assert_eq!(snapshot_id(&repo).unwrap(), moved);
+        // An untracked repository in the tree.
+        repo_at(&repo.join("nested"));
+        assert_eq!(snapshot_id(&repo), Err(NESTED.to_owned()));
+    }
+
+    #[test]
+    fn a_head_that_moves_while_the_state_is_read_gives_no_snapshot() {
+        let tmp = Tmp::new("snap-moved");
+        let repo = tmp.path().join("app");
+        repo_at(&repo);
+        fs::write(repo.join("a.txt"), "two\n").unwrap();
+        fs::write(repo.join("b.txt"), "b\n").unwrap();
+        // Everything committed meanwhile: clean on the new HEAD.
+        let moved = snapshot_id_with(&repo, || {
+            commit(&repo, "all");
+        });
+        assert_eq!(moved, Err(HEAD_MOVED.to_owned()));
+        // Part of it committed: still dirty, on the new HEAD.
+        fs::write(repo.join("a.txt"), "three\n").unwrap();
+        fs::write(repo.join("b.txt"), "bb\n").unwrap();
+        let moved = snapshot_id_with(&repo, || {
+            sh(&repo, &["commit", "-q", "-m", "a", "--", "a.txt"]);
+        });
+        assert_eq!(moved, Err(HEAD_MOVED.to_owned()));
+        assert!(matches!(
+            snapshot_id_with(&repo, || {}),
+            Ok(ChangeId::Snapshot(_))
+        ));
+    }
+
+    #[test]
+    fn diff_settings_do_not_change_a_snapshot_id() {
+        let tmp = Tmp::new("snap-config");
+        let repo = tmp.path().join("app");
+        fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q"]);
+        fs::write(
+            repo.join("a.txt"),
+            "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n\n15\n",
+        )
+        .unwrap();
+        fs::write(repo.join("b.txt"), "b\n").unwrap();
+        commit(&repo, "first");
+        // Two hunks eight lines apart, a blank context line, two files.
+        fs::write(
+            repo.join("a.txt"),
+            "1\nX\n3\n4\n5\n6\n7\n8\n9\n10\nY\n12\n13\n14\n\n15\nZ\n",
+        )
+        .unwrap();
+        fs::write(repo.join("b.txt"), "bb\n").unwrap();
+        let before = snapshot_id(&repo).unwrap();
+        // git follows the order file where nothing pins it: b.txt first.
+        let order = tmp.path().join("order");
+        fs::write(&order, "b.txt\na.txt\n").unwrap();
+        sh(
+            &repo,
+            &["config", "diff.orderFile", order.to_str().unwrap()],
+        );
+        let plain = sh(&repo, &["diff", "HEAD"]);
+        assert!(
+            plain.find("b.txt").unwrap() < plain.find("a.txt").unwrap(),
+            "{plain}"
+        );
+        for (key, value) in [
+            ("diff.interHunkContext", "10"),
+            ("diff.suppressBlankEmpty", "true"),
+            ("diff.algorithm", "patience"),
+            ("diff.indentHeuristic", "false"),
+            ("diff.context", "10"),
+            ("diff.noprefix", "true"),
+            ("diff.mnemonicPrefix", "true"),
+            ("diff.srcPrefix", "x/"),
+            ("diff.dstPrefix", "y/"),
+            ("diff.relative", "true"),
+            ("diff.renames", "copies"),
+            ("diff.external", "/bin/false"),
+            ("core.bigFileThreshold", "1"),
+            ("core.quotePath", "true"),
+            ("color.ui", "always"),
+            ("color.diff", "always"),
+        ] {
+            sh(&repo, &["config", key, value]);
+        }
+        assert_eq!(snapshot_id(&repo).unwrap(), before);
     }
 
     #[test]
@@ -2691,12 +3184,15 @@ mod tests {
         let t1 = Node::Task(task("t-1"));
         let t2 = Node::Task(task("t-2"));
         let c = ChangeId::Commit(sha(5));
+        // Every run below started on sha(4).
+        let start = ChangeId::Commit(sha(4));
         let wt = PathBuf::from("/src/app-wt/task-run-2");
         let observed = |run: &str, workdir: &str, branch: Option<&str>| LinkEvent::Observed {
             node: Node::Run(run.into()),
             info: Info {
                 workdir: Some(PathBuf::from(workdir)),
                 branch: branch.map(str::to_owned),
+                head: Some(sha(4)),
                 ..Info::default()
             },
             at: 1,
@@ -2728,47 +3224,77 @@ mod tests {
         ));
         let set = fold(&events);
         assert_eq!(
-            source_of(&set, Some(&c), &wt),
+            source_of(&set, Some(&c), &wt, None),
             Source {
                 runs: vec!["run-1".into()],
                 tasks: vec![task("t-1"), task("t-2")],
                 produced_by: None,
             }
         );
-        // Rule 2: the one run whose own worktree it is.
+        // Rule 2: the one run whose own worktree it is, at that change.
         let set = fold(&base);
+        let rule_two = Source {
+            runs: vec!["run-2".into()],
+            tasks: vec![task("t-1")],
+            produced_by: Some("run-2".into()),
+        };
+        assert_eq!(source_of(&set, Some(&c), &wt, Some(&c)), rule_two);
+        // … its HEAD commit, with uncommitted work on it, or that work.
+        let snap = ChangeId::Snapshot(format!("snap-{}-00000000000000ff", sha(5)));
+        assert_eq!(source_of(&set, Some(&c), &wt, Some(&snap)), rule_two);
+        assert_eq!(source_of(&set, Some(&snap), &wt, Some(&snap)), rule_two);
+        // … uncommitted work on the commit the run started on is its own.
+        let on_start = ChangeId::Snapshot(format!("snap-{}-00000000000000ff", sha(4)));
         assert_eq!(
-            source_of(&set, Some(&c), &wt),
-            Source {
-                runs: vec!["run-2".into()],
-                tasks: vec![task("t-1")],
-                produced_by: Some("run-2".into()),
-            }
+            source_of(&set, Some(&on_start), &wt, Some(&on_start)).produced_by,
+            Some("run-2".into())
         );
-        // … with no change (a Files review): About, no Produced.
-        assert_eq!(source_of(&set, None, &wt).produced_by, None);
-        assert_eq!(source_of(&set, None, &wt).runs, ["run-2"]);
-        // Rule 3: the main checkout (no branch), an unknown work tree.
+        // Not rule 2: a commit the work tree is not at (an explicit ref), a
+        // work tree git cannot read, the commit the run started on.
+        let other = ChangeId::Commit(sha(6));
         assert_eq!(
-            source_of(&set, Some(&c), Path::new("/src/app")),
+            source_of(&set, Some(&other), &wt, Some(&c)),
             Source::default()
         );
         assert_eq!(
-            source_of(&set, Some(&c), Path::new("/elsewhere")),
+            source_of(&set, Some(&snap), &wt, Some(&c)),
+            Source::default()
+        );
+        assert_eq!(source_of(&set, Some(&c), &wt, None), Source::default());
+        assert_eq!(
+            source_of(&set, Some(&start), &wt, Some(&start)),
+            Source::default()
+        );
+        // With no change (a Files review): About, no Produced.
+        assert_eq!(source_of(&set, None, &wt, None).produced_by, None);
+        assert_eq!(source_of(&set, None, &wt, None).runs, ["run-2"]);
+        // Rule 3: the main checkout (no branch), an unknown work tree.
+        assert_eq!(
+            source_of(&set, Some(&c), Path::new("/src/app"), Some(&c)),
+            Source::default()
+        );
+        assert_eq!(
+            source_of(&set, Some(&c), Path::new("/elsewhere"), Some(&c)),
             Source::default()
         );
         // Two runs claiming one worktree: none.
         let mut events = base;
         events.push(observed("run-5", "/src/app-wt/task-run-2", Some("x")));
-        assert_eq!(source_of(&fold(&events), Some(&c), &wt), Source::default());
+        assert_eq!(
+            source_of(&fold(&events), Some(&c), &wt, Some(&c)),
+            Source::default()
+        );
     }
 
-    #[test]
-    fn record_handoff_writes_judged_about_and_produced_once() {
-        let tmp = Tmp::new("handoff");
-        let log = log_in(&tmp);
+    /// A repository `app` in `tmp` and a worktree of it for run-2 of t-1
+    /// (branch `task-run-2`, observed with its start commit); the store
+    /// log, the worktree and the start commit.
+    fn run_in_worktree(tmp: &Tmp) -> (PathBuf, PathBuf, String) {
+        let main = tmp.path().join("app");
+        let start = repo_at(&main);
         let wt = tmp.path().join("app-wt/task-run-2");
-        fs::create_dir_all(&wt).unwrap();
+        worktree(&main, &wt, "task-run-2");
+        let log = log_in(tmp);
         append(
             &log,
             &[
@@ -2778,6 +3304,7 @@ mod tests {
                     Info {
                         workdir: Some(wt.clone()),
                         branch: Some("task-run-2".into()),
+                        head: Some(start.clone()),
                         ..Info::default()
                     },
                 ),
@@ -2785,7 +3312,15 @@ mod tests {
             1,
         )
         .unwrap();
-        let snap = ChangeId::Snapshot(format!("snap-{}-00000000000000ff", sha(7)));
+        (log, wt, start)
+    }
+
+    #[test]
+    fn record_handoff_writes_judged_about_and_produced_once() {
+        let tmp = Tmp::new("handoff");
+        let (log, wt, start) = run_in_worktree(&tmp);
+        fs::write(wt.join("a.txt"), "wip\n").unwrap();
+        let snap = current_change(&wt).unwrap();
         let capture = wt.join(".noa/verify/ver-1/target");
         let rec = Node::Verify("ver-1".into());
         let info = Info {
@@ -2809,18 +3344,448 @@ mod tests {
         assert_eq!(set.links.len(), 5);
         let snap_info = set.info_of(&Node::Change(snap.clone()));
         assert_eq!(snap_info.record, Some(capture));
-        assert_eq!(snap_info.head, Some(sha(7)));
+        assert_eq!(snap_info.head, Some(start));
         assert_eq!(set.info_of(&rec).label.as_deref(), Some("作業ツリー"));
         let back = backlinks(&set, &rec);
         assert_eq!(back.tasks[0].task, task("t-1"));
         assert_eq!(back.changes[0].change, snap);
         assert_eq!(back.changes[0].tasks, [task("t-1")]);
         // The next review of the same change finds it by rule 1.
-        let src = source_of(&set, Some(&snap), Path::new("/x"));
+        let src = source_of(&set, Some(&snap), Path::new("/x"), None);
         assert_eq!(
             (src.runs, src.produced_by),
             (vec!["run-2".to_owned()], None)
         );
+    }
+
+    #[test]
+    fn a_review_of_a_commit_the_worktree_is_not_at_records_no_producer() {
+        let tmp = Tmp::new("explicit-ref");
+        let (log, wt, start) = run_in_worktree(&tmp);
+        fs::write(wt.join("a.txt"), "v1\n").unwrap();
+        let v1 = commit(&wt, "v1");
+        fs::write(wt.join("a.txt"), "v2\n").unwrap();
+        commit(&wt, "v2");
+        // Review of the ref v1 (not where the worktree is) and of the
+        // commit the run started on: no source, no producer.
+        for (id, target) in [("rev-1", &v1), ("rev-2", &start)] {
+            let source = record_handoff(
+                &log,
+                Node::Review(id.into()),
+                Some(ChangeId::Commit(target.clone())),
+                &wt,
+                Info::default(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(source, Source::default(), "{id}");
+        }
+        let set = replay(&log).unwrap();
+        assert_eq!(set.links_to(&commit_node(&v1), Rel::Produced).count(), 0);
+        assert_eq!(set.links_to(&commit_node(&start), Rel::Produced).count(), 0);
+        // The commit it is at: rule 2.
+        let head = sh(&wt, &["rev-parse", "HEAD"]);
+        let source = record_handoff(
+            &log,
+            Node::Review("rev-3".into()),
+            Some(ChangeId::Commit(head.clone())),
+            &wt,
+            Info::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(source.produced_by.as_deref(), Some("run-2"));
+        let set = replay(&log).unwrap();
+        assert!(
+            set.live(&run("run-2"), &commit_node(&head), Rel::Produced)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_hand_off_decides_its_source_under_the_lock() {
+        let tmp = Tmp::new("handoff-race");
+        let main = tmp.path().join("app");
+        let start = repo_at(&main);
+        let (a, b) = (tmp.path().join("wt/a"), tmp.path().join("wt/b"));
+        worktree(&main, &a, "a");
+        worktree(&main, &b, "b");
+        fs::write(a.join("a.txt"), "c\n").unwrap();
+        let c = commit(&a, "c");
+        // Both worktrees at C, which neither run started on.
+        sh(&b, &["reset", "-q", "--hard", &c]);
+        let log = log_in(&tmp);
+        let mut edits = Vec::new();
+        for (r, t, dir, branch) in [("run-a", "t-a", &a, "a"), ("run-b", "t-b", &b, "b")] {
+            edits.push(auto(Node::Task(task(t)), run(r), Rel::Ran));
+            edits.push(observe(
+                run(r),
+                Info {
+                    workdir: Some(dir.clone()),
+                    branch: Some(branch.into()),
+                    head: Some(start.clone()),
+                    ..Info::default()
+                },
+            ));
+        }
+        append(&log, &edits, 1).unwrap();
+        let change = ChangeId::Commit(c.clone());
+        // The verification in b is recorded while the review in a has read
+        // its work tree but not yet taken the lock.
+        let review = handoff(
+            &log,
+            Node::Review("rev-1".into()),
+            Some(change.clone()),
+            &a,
+            Info::default(),
+            None,
+            || {
+                let verify = record_handoff(
+                    &log,
+                    Node::Verify("ver-1".into()),
+                    Some(change.clone()),
+                    &b,
+                    Info::default(),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(verify.produced_by.as_deref(), Some("run-b"));
+            },
+        )
+        .unwrap();
+        // As one after the other: the review finds run-b by rule 1.
+        assert_eq!(
+            review,
+            Source {
+                runs: vec!["run-b".into()],
+                tasks: vec![task("t-b")],
+                produced_by: None,
+            }
+        );
+        let set = replay(&log).unwrap();
+        let producers: Vec<&Node> = set
+            .links_to(&commit_node(&c), Rel::Produced)
+            .map(|l| &l.from)
+            .collect();
+        assert_eq!(producers, [&run("run-b")]);
+    }
+
+    #[test]
+    fn a_record_is_judged_on_one_change_only() {
+        let tmp = Tmp::new("judged-once");
+        let log = log_in(&tmp);
+        let rev = Node::Review("rev-1".into());
+        let (a, b) = (commit_node(&sha(1)), commit_node(&sha(2)));
+        let first =
+            linked(&append(&log, &[auto(rev.clone(), a.clone(), Rel::Judged)], 1).unwrap()[0]);
+        // Another change, automatic or by hand: refused, never added.
+        assert_eq!(
+            append(
+                &log,
+                &[
+                    auto(rev.clone(), b.clone(), Rel::Judged),
+                    manual(rev.clone(), b.clone(), Rel::Judged),
+                ],
+                2
+            )
+            .unwrap(),
+            [
+                Outcome::Refused(JUDGED_ELSEWHERE.to_owned()),
+                Outcome::Refused(JUDGED_ELSEWHERE.to_owned())
+            ]
+        );
+        // The same change again: skipped as before.
+        assert_eq!(
+            append(&log, &[auto(rev.clone(), a.clone(), Rel::Judged)], 3).unwrap(),
+            [Outcome::Skipped]
+        );
+        // A hand-off of the record on another change writes nothing.
+        let lines = fs::read_to_string(&log).unwrap().lines().count();
+        let err = record_handoff(
+            &log,
+            rev.clone(),
+            Some(ChangeId::Commit(sha(2))),
+            tmp.path(),
+            Info {
+                label: Some("x".into()),
+                ..Info::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(err.to_string(), JUDGED_ELSEWHERE);
+        assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), lines);
+        // A second Judged written by hand is skipped on read.
+        let mut file = OpenOptions::new().append(true).open(&log).unwrap();
+        let line = serde_json::to_string(&LinkEvent::Linked {
+            id: LinkId::new("lnk-99"),
+            from: rev.clone(),
+            to: b.clone(),
+            rel: Rel::Judged,
+            origin: Origin::Auto,
+            at: 4,
+        })
+        .unwrap();
+        writeln!(file, "{line}").unwrap();
+        drop(file);
+        let set = replay(&log).unwrap();
+        assert_eq!(set.links_from(&rev, Rel::Judged).count(), 1);
+        assert_eq!(set.judged(&rev), Some(&ChangeId::Commit(sha(1))));
+        assert_eq!(backlinks(&set, &rev).changes.len(), 1);
+        // Once unlinked, another change may be judged.
+        append(&log, &[Edit::Unlink(first)], 5).unwrap();
+        linked(&append(&log, &[manual(rev.clone(), b, Rel::Judged)], 6).unwrap()[0]);
+        assert_eq!(
+            replay(&log).unwrap().judged(&rev),
+            Some(&ChangeId::Commit(sha(2)))
+        );
+    }
+
+    #[test]
+    fn removing_a_row_from_a_task_never_removes_a_shared_judged_link() {
+        let tmp = Tmp::new("rows");
+        let log = log_in(&tmp);
+        let (t1, t2) = (Node::Task(task("t-1")), Node::Task(task("t-2")));
+        let c = commit_node(&sha(3));
+        let rev = Node::Review("rev-1".into());
+        let outcomes = append(
+            &log,
+            &[
+                auto(t1.clone(), run("run-1"), Rel::Ran),
+                auto(t2.clone(), run("run-9"), Rel::Ran),
+                auto(run("run-1"), c.clone(), Rel::Produced),
+                auto(run("run-9"), c.clone(), Rel::Produced),
+                auto(rev.clone(), c.clone(), Rel::Judged),
+                // Added by hand on t-1 only.
+                manual(rev.clone(), t1.clone(), Rel::About),
+            ],
+            1,
+        )
+        .unwrap();
+        let judged = linked(&outcomes[4]);
+        let about = linked(&outcomes[5]);
+        let set = replay(&log).unwrap();
+        // t-1: under the change, carrying its own About link, not the
+        // shared Judged; not listed again as loose.
+        let one = related(&set, &task("t-1"), None);
+        let row = &one.runs[0].changes[0].results[0];
+        assert_eq!(row.node, rev);
+        assert_eq!(row.links, std::slice::from_ref(&about));
+        assert!(one.loose.is_empty(), "{:?}", one.loose);
+        // t-2 lists it for the shared Judged only: nothing to remove.
+        let two = related(&set, &task("t-2"), None);
+        assert!(two.runs[0].changes[0].results[0].links.is_empty());
+        // Removing t-1's row unlinks its About; the Judged link stays, and
+        // t-2 still lists the review.
+        let edits: Vec<Edit> = row.links.iter().cloned().map(Edit::Unlink).collect();
+        assert_eq!(append(&log, &edits, 2).unwrap(), [Outcome::Unlinked]);
+        let set = replay(&log).unwrap();
+        assert!(set.link(&judged).is_some());
+        assert!(set.link(&about).is_none());
+        let two = related(&set, &task("t-2"), None);
+        assert_eq!(two.runs[0].changes[0].results[0].node, rev);
+        let one = related(&set, &task("t-1"), None);
+        assert!(one.runs[0].changes[0].results[0].links.is_empty());
+        // About links to the task and to its run both put a loose row
+        // there; removing it takes both.
+        let ver = Node::Verify("ver-1".into());
+        let outcomes = append(
+            &log,
+            &[
+                auto(ver.clone(), t1.clone(), Rel::About),
+                auto(ver.clone(), run("run-1"), Rel::About),
+            ],
+            3,
+        )
+        .unwrap();
+        let set = replay(&log).unwrap();
+        let one = related(&set, &task("t-1"), None);
+        assert_eq!(one.loose[0].node, ver);
+        assert_eq!(
+            one.loose[0].links,
+            [linked(&outcomes[0]), linked(&outcomes[1])]
+        );
+    }
+
+    #[test]
+    fn the_current_change_is_listed_under_the_run_it_was_taken_from() {
+        let tmp = Tmp::new("current-run");
+        let main = tmp.path().join("app");
+        repo_at(&main);
+        let wt = tmp.path().join("app-wt/task-run-1");
+        worktree(&main, &wt, "task-run-1");
+        fs::write(wt.join("a.txt"), "v1\n").unwrap();
+        let v1 = commit(&wt, "v1");
+        let t = Node::Task(task("t-1"));
+        let log = log_in(&tmp);
+        append(
+            &log,
+            &[
+                auto(t.clone(), run("run-1"), Rel::Ran),
+                auto(t.clone(), run("run-2"), Rel::Ran),
+                auto(run("run-2"), commit_node(&sha(2)), Rel::Produced),
+                observe(
+                    run("run-1"),
+                    Info {
+                        workdir: Some(wt.clone()),
+                        ..Info::default()
+                    },
+                ),
+                // run-2's worktree is gone.
+                observe(
+                    run("run-2"),
+                    Info {
+                        workdir: Some(tmp.path().join("app-wt/task-run-2")),
+                        ..Info::default()
+                    },
+                ),
+            ],
+            1,
+        )
+        .unwrap();
+        let set = replay(&log).unwrap();
+        let now = task_current(&set, &task("t-1")).unwrap();
+        assert_eq!(now, at("run-1", &ChangeId::Commit(v1.clone())));
+        let related = related(&set, &task("t-1"), Some(&now));
+        let runs: Vec<&str> = related.runs.iter().map(|r| r.run.as_str()).collect();
+        assert_eq!(runs, ["run-1", "run-2"]);
+        assert_eq!(
+            related.runs[0].changes,
+            [ChangeEntry {
+                change: ChangeId::Commit(v1),
+                link: None,
+                current: true,
+                results: Vec::new(),
+            }]
+        );
+        assert_eq!(related.runs[1].changes.len(), 1);
+        assert!(!related.runs[1].changes[0].current);
+        // A run that is none of the task's: under the task itself.
+        let elsewhere = super::related(
+            &set,
+            &task("t-1"),
+            Some(&at("run-7", &ChangeId::Commit(sha(9)))),
+        );
+        assert!(elsewhere.changes[0].current);
+    }
+
+    #[test]
+    fn a_snapshot_is_found_while_any_of_its_capture_dirs_is() {
+        let tmp = Tmp::new("captures");
+        let log = log_in(&tmp);
+        let snap = ChangeId::Snapshot(format!("snap-{}-00000000000000ff", sha(7)));
+        let node = Node::Change(snap.clone());
+        let review = tmp.path().join("wt/.noa/reviews/rev-1/target");
+        let verify = tmp.path().join("wt/.noa/verify/ver-1/target");
+        fs::create_dir_all(&review).unwrap();
+        fs::create_dir_all(&verify).unwrap();
+        for dir in [&review, &verify] {
+            append(
+                &log,
+                &[observe(
+                    node.clone(),
+                    Info {
+                        record: Some(dir.clone()),
+                        ..Info::default()
+                    },
+                )],
+                1,
+            )
+            .unwrap();
+        }
+        let set = replay(&log).unwrap();
+        assert_eq!(set.info_of(&node).record.as_ref(), Some(&verify));
+        let data = tmp.path().join("data");
+        // The latest capture removed: the review's still holds it.
+        fs::remove_dir_all(&verify).unwrap();
+        assert_eq!(presence(&set, &node, &data, tmp.path()), Presence::Found);
+        fs::remove_dir_all(&review).unwrap();
+        assert_eq!(
+            presence(&set, &node, &data, tmp.path()),
+            Presence::Missing {
+                what: format!(
+                    "{} {} {}",
+                    snap.as_str(),
+                    review.display(),
+                    verify.display()
+                )
+            }
+        );
+    }
+
+    #[test]
+    fn change_ids_without_their_form_are_skipped_on_read_and_refused_on_write() {
+        let tmp = Tmp::new("ids");
+        let log = log_in(&tmp);
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        let rev = Node::Review("rev-1".into());
+        let bad = [
+            ChangeId::Commit("ああああああああ".into()),
+            ChangeId::Commit(sha(10).to_uppercase()),
+            ChangeId::Commit(sha(1)[..39].to_owned()),
+            ChangeId::Snapshot(format!("snap-{}-ff", sha(1))),
+            ChangeId::Snapshot(format!("snap-{}-あああああ", sha(1))),
+            ChangeId::Snapshot("snap-x".into()),
+        ];
+        let mut lines = String::new();
+        for (n, change) in bad.iter().enumerate() {
+            for event in [
+                LinkEvent::Linked {
+                    id: LinkId::new(format!("lnk-{n}")),
+                    from: run("run-1"),
+                    to: Node::Change(change.clone()),
+                    rel: Rel::Produced,
+                    origin: Origin::Manual,
+                    at: 1,
+                },
+                LinkEvent::Observed {
+                    node: Node::Change(change.clone()),
+                    info: Info {
+                        record: Some(tmp.path().to_path_buf()),
+                        ..Info::default()
+                    },
+                    at: 1,
+                },
+            ] {
+                lines.push_str(&serde_json::to_string(&event).unwrap());
+                lines.push('\n');
+            }
+            // Drawn without a panic, whatever it holds.
+            let _ = change.short();
+            assert!(!change.is_valid(), "{change:?}");
+        }
+        fs::write(&log, lines).unwrap();
+        let set = replay(&log).unwrap();
+        assert!(set.links.is_empty());
+        assert!(set.info.is_empty());
+        assert!(set.captures.is_empty());
+        assert_eq!(
+            ChangeId::Commit("ああああああああ".into()).short(),
+            "あああああああ"
+        );
+        // Written through append: refused.
+        let outcomes = append(
+            &log,
+            &[
+                auto(rev.clone(), Node::Change(bad[0].clone()), Rel::Judged),
+                observe(Node::Change(bad[3].clone()), Info::default()),
+            ],
+            2,
+        )
+        .unwrap();
+        assert!(
+            outcomes.iter().all(|o| matches!(o, Outcome::Refused(_))),
+            "{outcomes:?}"
+        );
+        // Both forms of a good id pass.
+        for good in [
+            ChangeId::Commit(sha(1)),
+            ChangeId::Commit(format!("{}{}", sha(1), &sha(2)[..24])),
+            ChangeId::Snapshot(format!("snap-{}-0123456789abcdef", sha(1))),
+        ] {
+            assert!(good.is_valid(), "{good:?}");
+        }
     }
 
     #[test]

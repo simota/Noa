@@ -7,6 +7,7 @@
 //! the latest [`Snapshot`] and sends [`Command`]s. What it keeps is view
 //! state: the tab, the filters, the selected finding, the composer text.
 
+mod backlinks;
 mod board;
 mod cards;
 mod composer;
@@ -124,6 +125,9 @@ pub enum Action {
         agent: AgentKind,
         scope: FixScope,
     },
+    /// A back-link of the target card: opens the task in Tasks, or copies
+    /// a change's id.
+    OpenLink(review::links::Nav),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +270,8 @@ pub struct Review {
     /// in hello order, and the version): a report from an older connection
     /// that arrives later is not applied.
     noa_version: Option<(u64, String)>,
+    /// The task and change the review on screen came from.
+    back: Option<backlinks::Back>,
 
     start: start::Parts,
     board: WidgetId,
@@ -464,6 +470,7 @@ impl Review {
             detection: start::Detection::all_installed(),
             installed: None,
             noa_version: None,
+            back: None,
             start,
             board,
             left_host,
@@ -605,6 +612,7 @@ impl Review {
         self.session = None;
         self.reply_root = None;
         self.session_dir = None;
+        self.back = None;
         self.read_only = false;
         self.stored_dir = None;
         self.extending = false;
@@ -646,6 +654,13 @@ impl Review {
         let Some(session) = &self.session else {
             return;
         };
+        // L1-5: read when the review is shown; `poll_live` reads again.
+        match &self.session_dir {
+            Some(dir) if self.back.as_ref().is_some_and(|b| b.is_of(dir)) => {}
+            Some(dir) => self.back = Some(backlinks::Back::load(dir, session)),
+            None => self.back = None,
+        }
+        let none = backlinks::Rows::default();
         let target = cards::insert(
             &mut self.tree,
             self.left_host,
@@ -653,6 +668,12 @@ impl Review {
             self.filters.reviewer.as_ref(),
             !self.read_only,
             system_now(),
+            &mut self.actions,
+        );
+        cards::back_rows(
+            &mut self.tree,
+            target,
+            self.back.as_ref().map_or(&none, |b| &b.rows),
             &mut self.actions,
         );
         // L1-5: the target card opens the snapshot, when there is one.
@@ -1196,6 +1217,11 @@ impl Review {
         self.poll_installed(text);
         if matches!(self.source, Source::Live(_)) {
             self.recheck_stored();
+            // At most every `backlinks::REREAD`, live or stored, and only
+            // when the store file changed.
+            if self.back.as_mut().is_some_and(backlinks::Back::reread) {
+                self.built = None;
+            }
         }
         let mut latest = None;
         let mut notices = Vec::new();
@@ -1308,6 +1334,29 @@ impl Review {
     fn drop_hidden_selection(&mut self) {
         if self.selected.is_some() && self.shown_selection().is_none() {
             self.selected = None;
+        }
+    }
+
+    /// Follows a back-link: a change's id goes to the clipboard, a task
+    /// opens in Tasks (a program that cannot be started says why).
+    fn open_link(&mut self, nav: review::links::Nav) {
+        if let review::links::Nav::Copy(id) = &nav {
+            let clipboard = self.tree.clipboard();
+            clipboard.write_text(id);
+            let message = match clipboard.read_text() {
+                Some(held) if &held == id => format!("{id} をコピーしました"),
+                Some(_) => format!("{id} をコピーできませんでした"),
+                None => format!("{id} をコピーしましたが、確かめられませんでした"),
+            };
+            self.toast(message);
+            return;
+        }
+        #[cfg(test)]
+        let opened = tests::launch(&nav);
+        #[cfg(not(test))]
+        let opened = review::links::launch(&nav);
+        if let Err(why) = opened {
+            self.toast(why);
         }
     }
 
@@ -1491,6 +1540,7 @@ impl Review {
                 self.rebuild(text);
             }
             Action::OpenSnapshot(path) => self.open_snapshot(path),
+            Action::OpenLink(nav) => self.open_link(nav),
             Action::CopyReport => {
                 if let Some(session) = &self.session {
                     let md = export::report_markdown(session);

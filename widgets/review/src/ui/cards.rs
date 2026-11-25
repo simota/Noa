@@ -1,6 +1,7 @@
-//! The left pane: the target card (returned, so the screen can add
-//! スナップショットを開く to it), one card per reviewer (lens, model,
-//! this round's receipt, what it wrote, its pane), and the lead's card.
+//! The left pane: the target card (returned, so the screen can add its
+//! back-links and スナップショットを開く to it), one card per reviewer
+//! (lens, model, this round's receipt, what it wrote, its pane), and the
+//! lead's card.
 
 use noa_gpui_core::style::AlignItems;
 use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone, Truncation};
@@ -8,6 +9,7 @@ use noa_gpui_core::{UiTree, WidgetId};
 
 use review::model::types::{Millis, PartId, Participant, Session, short_id};
 
+use super::backlinks::{NO_TASK, Row, Rows};
 use super::progress::{delivery, elapsed};
 use super::{Action, caption, card, heading, keep_scroll, note, scroll_column, spacer, tag};
 
@@ -154,6 +156,53 @@ pub(super) fn insert(
         actions.push((open, Action::FocusPane(session.lead.id.clone())));
     }
     target
+}
+
+/// The target card's rows naming the task and the change the review came
+/// from (artifact-links L1-5).
+pub(super) fn back_rows(
+    tree: &mut UiTree,
+    card: WidgetId,
+    back: &Rows,
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
+    if back.tasks.is_empty() {
+        caption(tree, card, NO_TASK);
+    }
+    for row in back.tasks.iter().chain(&back.change) {
+        back_row(tree, card, row, actions);
+    }
+}
+
+fn back_row(tree: &mut UiTree, card: WidgetId, row: &Row, actions: &mut Vec<(WidgetId, Action)>) {
+    let line = tree.insert(
+        Some(card),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
+    caption(tree, line, row.head);
+    if let Some((badge, tone)) = &row.badge {
+        tag(tree, line, badge.clone(), *tone);
+    }
+    tree.insert(
+        Some(line),
+        Label::new(row.text.clone())
+            .font_size(11.5)
+            .truncation(Truncation::Tail),
+    );
+    spacer(tree, line);
+    if let Some((label, nav)) = &row.open {
+        let open = tree.insert(
+            Some(line),
+            Button::new(*label).control_size(ControlSize::Small),
+        );
+        actions.push((open, Action::OpenLink(nav.clone())));
+    }
+    if let Some(missing) = &row.missing {
+        tree.insert(
+            Some(card),
+            Label::new(missing.clone()).font_size(11.0).wrap(true),
+        );
+    }
 }
 
 fn setup_line(part: &Participant) -> String {

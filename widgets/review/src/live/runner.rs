@@ -15,6 +15,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use review::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
+use review::links::Node;
 use review::model::export;
 use review::model::types::{
     AgentChoice, AgentKind, AgentSetup, Millis, PartId, Phase, ReviewerChoice, RoundNo, Session,
@@ -25,6 +26,8 @@ use review::store::{self, Store};
 use super::ipc::{
     Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement, no_board_tab,
 };
+
+pub(crate) mod handoff;
 
 const POLL: Duration = Duration::from_millis(200);
 const TICK_EVERY: Millis = 1_000;
@@ -371,6 +374,12 @@ struct Runner<C: Connect, K: Clock> {
     /// once the first connection shows which are.
     resumed: bool,
     link_state: Link,
+    /// The link store this review's verdict is recorded in, when its work
+    /// tree is in a repository (artifact-links L1-2).
+    links_log: Option<PathBuf>,
+    /// The outcome recorded there last (a verdict's label, or
+    /// [`handoff::NO_VERDICT`]).
+    outcome: Option<String>,
 }
 
 impl<C: Connect, K: Clock> Runner<C, K> {
@@ -385,12 +394,16 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     ) -> Result<Self, String> {
         let now = clock.now();
         let resumed = matches!(start, Start::Resume { .. } | Start::Extend { .. });
-        let (engine, store) = match start {
+        let (engine, store, links_log, link_notices) = match start {
             Start::New(new) => new_review(*new, config, now)?,
-            Start::Resume { dir } => open_log(dir, None, config, now)?,
-            Start::Extend { dir, by } => open_log(dir, Some(by), config, now)?,
+            Start::Resume { dir } => opened(open_log(dir, None, config, now)?),
+            Start::Extend { dir, by } => opened(open_log(dir, Some(by), config, now)?),
         };
-        let runner = Self {
+        // A review taken up again goes on from the outcome its store holds.
+        let outcome = links_log.as_deref().filter(|_| resumed).and_then(|log| {
+            handoff::recorded_outcome(log, &Node::Review(engine.session().id.to_string()))
+        });
+        let mut runner = Self {
             engine,
             store,
             connector,
@@ -408,9 +421,19 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             started: false,
             resumed,
             link_state: Link::Connecting,
+            links_log,
+            outcome,
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
+        for notice in link_notices {
+            runner.notice(notice);
+        }
+        if resumed {
+            // `open_log` has written the report again (an extension took
+            // its verdict away): the store follows it.
+            runner.observe_outcome();
+        }
         Ok(runner)
     }
 
@@ -825,10 +848,30 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         Ok(())
     }
 
-    fn write_report(&self) {
+    fn write_report(&mut self) {
         let text = export::report_markdown(self.engine.session());
         if let Err(e) = store::write_report(self.engine.dir(), &text) {
             self.notice(format!("レポートの書き出しに失敗しました: {e}"));
+            return;
+        }
+        self.observe_outcome();
+    }
+
+    /// Records the verdict in the link store once the report holding it is
+    /// written, when it differs from the one recorded last: a verdict gone
+    /// (a round added after it) is recorded as [`handoff::NO_VERDICT`].
+    fn observe_outcome(&mut self) {
+        let Some(log) = &self.links_log else {
+            return;
+        };
+        let session = self.engine.session();
+        let Some(outcome) = handoff::outcome_change(session, self.outcome.as_deref()) else {
+            return;
+        };
+        let record = Node::Review(session.id.to_string());
+        match handoff::observe_outcome(log, record, outcome.clone()) {
+            Ok(()) => self.outcome = Some(outcome),
+            Err(why) => self.notice(why),
         }
     }
 
@@ -1348,6 +1391,22 @@ fn open_log(
     Ok((engine, store))
 }
 
+/// A review opened from its log: its link store, found as a new review's
+/// is (beside the reviews holding it, keyed by its work tree's repository),
+/// so the verdict it reaches is recorded; no notices.
+fn opened((engine, store): (Engine, Store)) -> Opened {
+    let links_log = engine
+        .dir()
+        .parent()
+        .zip(engine.session().workdir.as_deref())
+        .and_then(|(root, workdir)| handoff::store_of(root, workdir).ok());
+    (engine, store, links_log, Vec::new())
+}
+
+/// A review's engine and log, its link store, and notices to give once
+/// the runner is up.
+type Opened = (Engine, Store, Option<PathBuf>, Vec<String>);
+
 /// Where a brief too long to paste is written: `r<N>/brief-<part>.md`.
 fn brief_file(reply_dir: &Path, round: RoundNo, part: &PartId) -> PathBuf {
     store::round_dir(reply_dir, round).join(format!("brief-{part}.md"))
@@ -1453,8 +1512,10 @@ pub struct NewReview {
 }
 
 /// Captures the target and creates the review's log: nothing is left
-/// behind when the capture or the setup is refused.
-fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, Store), String> {
+/// behind when the capture or the setup is refused. Then records its
+/// links (artifact-links L1-5): what cannot be recorded is a notice, never
+/// a refusal.
+fn new_review(new: NewReview, config: Config, now: Millis) -> Result<Opened, String> {
     let NewReview {
         request,
         target,
@@ -1479,13 +1540,34 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
         let _ = fs::remove_dir_all(&reply_dir);
         let _ = fs::remove_dir_all(&dir);
     };
-    let manifest = match review::capture::capture(&target, &store::target_dir(&reply_dir), now) {
+    // The change a work-tree review judges, taken before and after the
+    // capture: a tree that moved meanwhile is not tied to the review.
+    let tree = workdir
+        .as_deref()
+        .filter(|_| handoff::reads_work_tree(&target));
+    let before = tree.map(review::links::current_change);
+    #[cfg(test)]
+    tests::before_capture();
+    let capture_dir = store::target_dir(&reply_dir);
+    let manifest = match review::capture::capture(&target, &capture_dir, now) {
         Ok(manifest) => manifest,
         Err(why) => {
             undo();
             return Err(why);
         }
     };
+    #[cfg(test)]
+    tests::after_capture();
+    let after = tree.map(review::links::current_change);
+    let (change, unjudged) = handoff::judged(
+        &target,
+        manifest.head_sha.as_deref(),
+        before.as_ref(),
+        after.as_ref(),
+    );
+    let git = target.kind == TargetKind::Git;
+    let label = manifest.label.clone();
+    let record = Node::Review(id.to_string());
     let setup = Setup {
         request: &request,
         target,
@@ -1507,16 +1589,61 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
         undo();
         format!("create {}: {e}", dir.display())
     })?;
-    Ok((engine, store))
+    let mut notices: Vec<String> = unjudged.into_iter().collect();
+    let links_log = match engine.session().workdir.as_deref() {
+        Some(workdir) => {
+            let (log, told) = handoff::record(handoff::NewLinks {
+                reviews_root: root,
+                record,
+                dir: &dir,
+                label,
+                workdir,
+                change,
+                capture: &capture_dir,
+                git,
+            });
+            notices.extend(told);
+            log
+        }
+        None => None,
+    };
+    Ok((engine, store, links_log, notices))
 }
 #[cfg(test)]
 mod tests {
     use super::super::ipc::BOARD_CAPACITY;
     use super::*;
+    use review::links::ChangeId;
     use review::model::types::{BuiltinLens, Head, LensChoice};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    thread_local! {
+        /// Run once right after a new review's capture, before the work
+        /// tree is read again (a test's stand-in for an agent editing it).
+        static AFTER_CAPTURE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    thread_local! {
+        /// Run once right before a new review's capture, after the work
+        /// tree is first read.
+        static BEFORE_CAPTURE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    /// Called by `new_review` before its capture (tests only).
+    pub(super) fn before_capture() {
+        if let Some(hook) = BEFORE_CAPTURE.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// Called by `new_review` after its capture (tests only).
+    pub(super) fn after_capture() {
+        if let Some(hook) = AFTER_CAPTURE.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
+    }
 
     struct FakePane {
         label: Option<String>,
@@ -3164,5 +3291,470 @@ mod tests {
             "the engine never heard the agent start"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    // ------------------------------------------------- artifact links (AC2)
+
+    /// `git` in `dir`, without the person's `GIT_*` variables or identity.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let mut cmd = std::process::Command::new("git");
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+        let out = cmd
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// `<base>/repo` with `main` at a first commit and `feature` one commit
+    /// on, checked out at `feature`; the reviews root `<base>/noa/reviews`.
+    /// Returns the repository, the two commits and the reviews root.
+    fn feature_repo(base: &Path) -> (PathBuf, String, String, PathBuf) {
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+        let c0 = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "second"]);
+        let c1 = git(&repo, &["rev-parse", "HEAD"]);
+        (repo, c0, c1, base.join("noa").join("reviews"))
+    }
+
+    fn git_target(repo: &Path, head: Head) -> Target {
+        Target {
+            kind: TargetKind::Git,
+            path: Some(repo.to_owned()),
+            base: Some("main".into()),
+            head,
+            paths: Vec::new(),
+            text: None,
+            workdir: None,
+        }
+    }
+
+    /// Opens a new review of `target`; its id, the link store as folded
+    /// after, and the notices it gave.
+    fn hand_off(
+        root: &Path,
+        repo: &Path,
+        target: Target,
+    ) -> (Node, review::links::LinkSet, Vec<String>) {
+        let fake = fake();
+        let (runner, _actions, updates) = open_wired(
+            &fake,
+            new_start_on(
+                root,
+                target,
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                2,
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let record = Node::Review(runner.engine.session().id.to_string());
+        let log = handoff::store_of(root, repo).unwrap();
+        assert_eq!(runner.links_log.as_deref(), Some(log.as_path()));
+        let set = review::links::replay(&log).unwrap();
+        (record, set, notices(&updates))
+    }
+
+    #[test]
+    fn ac2_a_review_of_a_commit_is_judged_on_that_commit() {
+        let base = temp_root();
+        let (repo, _c0, c1, root) = feature_repo(&base);
+        git(&repo, &["checkout", "-q", "main"]);
+        let (record, set, told) =
+            hand_off(&root, &repo, git_target(&repo, Head::Ref("feature".into())));
+        assert_eq!(set.judged(&record), Some(&ChangeId::Commit(c1)));
+        assert!(told.is_empty(), "{told:?}");
+        let info = set.info_of(&record);
+        assert!(info.label.is_some());
+        assert!(info.record.unwrap().ends_with(store::EVENTS_FILE));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn ac2_a_review_of_a_dirty_work_tree_is_judged_on_its_snapshot() {
+        let base = temp_root();
+        let (repo, _c0, c1, root) = feature_repo(&base);
+        fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let (record, set, told) = hand_off(&root, &repo, git_target(&repo, Head::Worktree));
+        let snapshot = review::links::current_change(&repo).unwrap();
+        assert!(matches!(&snapshot, ChangeId::Snapshot(_)), "{snapshot:?}");
+        assert_eq!(snapshot.head(), Some(c1.as_str()));
+        assert_eq!(set.judged(&record), Some(&snapshot));
+        // The snapshot names the capture it was judged from.
+        let info = set.info_of(&Node::Change(snapshot));
+        assert!(info.record.unwrap().ends_with(store::TARGET_DIR));
+        // Recorded canonical (TMPDIR may be a link, as /var on macOS).
+        assert_eq!(
+            info.workdir.map(|dir| dir.canonicalize().unwrap()),
+            Some(repo.canonicalize().unwrap())
+        );
+        assert!(told.is_empty(), "{told:?}");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn ac2_a_work_tree_that_moved_during_capture_is_not_judged() {
+        let base = temp_root();
+        let (repo, _c0, _c1, root) = feature_repo(&base);
+        fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let edited = repo.join("a.txt");
+        AFTER_CAPTURE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                fs::write(&edited, "one\ntwo\nthree\nfour\n").unwrap();
+            }));
+        });
+        let (record, set, told) = hand_off(&root, &repo, git_target(&repo, Head::Worktree));
+        assert_eq!(set.judged(&record), None);
+        assert!(
+            set.links_from(&record, review::links::Rel::Judged)
+                .next()
+                .is_none()
+        );
+        assert!(told.iter().any(|n| n == handoff::MOVED), "{told:?}");
+        // The review itself is still recorded and goes ahead.
+        assert!(set.info_of(&record).record.is_some());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_work_tree_that_moved_away_and_back_during_capture_is_not_judged() {
+        let base = temp_root();
+        let (repo, _c0, c1, root) = feature_repo(&base);
+        let (there, back) = (repo.clone(), repo.clone());
+        // At c1 before, at a new commit while captured, at c1 again after.
+        BEFORE_CAPTURE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                fs::write(there.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+                git(&there, &["commit", "-q", "-am", "third"]);
+            }));
+        });
+        AFTER_CAPTURE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                git(&back, &["reset", "-q", "--hard", &c1]);
+            }));
+        });
+        let (record, set, told) = hand_off(&root, &repo, git_target(&repo, Head::Worktree));
+        assert_eq!(set.judged(&record), None);
+        assert!(told.iter().any(|n| n == handoff::MOVED), "{told:?}");
+        assert!(set.info_of(&record).record.is_some());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Records run `run-1` of local task `t-1`, its work tree `workdir`, in
+    /// the store of `repo`; the task's and the run's nodes.
+    fn run_in(root: &Path, repo: &Path, workdir: &Path, head: String) -> (Node, Node) {
+        use review::links::{Edit, Info, Origin, Rel, TaskKey};
+        let log = handoff::store_of(root, repo).unwrap();
+        let task = Node::Task(TaskKey::Local("t-1".into()));
+        let run = Node::Run("run-1".into());
+        review::links::append(
+            &log,
+            &[
+                Edit::Link {
+                    from: task.clone(),
+                    to: run.clone(),
+                    rel: Rel::Ran,
+                    origin: Origin::Auto,
+                },
+                Edit::Observe {
+                    node: run.clone(),
+                    info: Info {
+                        workdir: Some(workdir.to_owned()),
+                        branch: Some("feature".into()),
+                        head: Some(head),
+                        ..Info::default()
+                    },
+                },
+            ],
+            1,
+        )
+        .unwrap();
+        (task, run)
+    }
+
+    #[test]
+    fn a_files_review_of_a_folder_inside_a_runs_worktree_is_about_the_run() {
+        use review::links::Rel;
+        let base = temp_root();
+        let (repo, c0, _c1, root) = feature_repo(&base);
+        let (task, run) = run_in(&root, &repo, &repo, c0);
+        let src = repo.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("b.txt"), "b\n").unwrap();
+        let target = Target {
+            kind: TargetKind::Files,
+            path: Some(src),
+            base: None,
+            head: Head::Worktree,
+            paths: Vec::new(),
+            text: None,
+            workdir: None,
+        };
+        let (record, set, told) = hand_off(&root, &repo, target);
+        assert_eq!(set.judged(&record), None);
+        assert!(set.live(&record, &run, Rel::About).is_some());
+        assert!(set.live(&record, &task, Rel::About).is_some());
+        assert!(told.is_empty(), "{told:?}");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn ac2_a_review_of_a_runs_worktree_is_about_the_run_and_its_task() {
+        use review::links::{Rel, TaskKey};
+        let base = temp_root();
+        let (repo, c0, c1, root) = feature_repo(&base);
+        let (task, run) = run_in(&root, &repo, &repo, c0);
+        let (record, set, told) = hand_off(&root, &repo, git_target(&repo, Head::Worktree));
+        let change = Node::Change(ChangeId::Commit(c1.clone()));
+        assert_eq!(set.judged(&record), Some(&ChangeId::Commit(c1)));
+        assert!(set.live(&record, &run, Rel::About).is_some());
+        assert!(set.live(&record, &task, Rel::About).is_some());
+        assert!(set.live(&run, &change, Rel::Produced).is_some());
+        let back = review::links::backlinks(&set, &record);
+        assert_eq!(back.tasks.len(), 1);
+        assert_eq!(back.changes[0].tasks, [TaskKey::Local("t-1".into())]);
+        assert!(told.is_empty(), "{told:?}");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn what_a_review_judged_follows_its_target() {
+        let c = |s: &str| ChangeId::Commit(s.repeat(40));
+        let tree = git_target(Path::new("/r"), Head::Worktree);
+        let at_ref = git_target(Path::new("/r"), Head::Ref("v1".into()));
+        let sha = "a".repeat(40);
+        assert_eq!(
+            handoff::judged(&at_ref, Some(&sha), None, None),
+            (Some(c("a")), None)
+        );
+        assert_eq!(
+            handoff::judged(&tree, Some(&sha), Some(&Ok(c("a"))), Some(&Ok(c("a")))),
+            (Some(c("a")), None)
+        );
+        assert_eq!(
+            handoff::judged(&tree, Some(&sha), Some(&Ok(c("a"))), Some(&Ok(c("d")))),
+            (None, Some(handoff::MOVED.to_owned()))
+        );
+        // Away and back during the capture: the capture read another
+        // commit than the one the tree is at before and after.
+        assert_eq!(
+            handoff::judged(&tree, Some(&sha), Some(&Ok(c("b"))), Some(&Ok(c("b")))),
+            (None, Some(handoff::MOVED.to_owned()))
+        );
+        let snap = ChangeId::Snapshot(format!("snap-{}-{}", "b".repeat(40), "0".repeat(16)));
+        assert_eq!(
+            handoff::judged(&tree, Some(&sha), Some(&Ok(snap.clone())), Some(&Ok(snap))),
+            (None, Some(handoff::MOVED.to_owned()))
+        );
+        let (none, why) = handoff::judged(
+            &tree,
+            None,
+            Some(&Err("大きすぎ".into())),
+            Some(&Ok(c("b"))),
+        );
+        assert_eq!(none, None);
+        assert!(why.unwrap().contains("大きすぎ"));
+        assert_eq!(
+            handoff::judged(&document("x"), None, None, None),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn a_verdict_is_recorded_once_when_its_report_is_written() {
+        let base = temp_root();
+        let (repo, _c0, _c1, root) = feature_repo(&base);
+        let fake = fake();
+        let (mut runner, _actions, _updates) = approved(&fake, &root, &repo);
+        let record = Node::Review(runner.engine.session().id.to_string());
+        let log = runner.links_log.clone().expect("the repository's store");
+        let verdict = runner
+            .engine
+            .session()
+            .verdict()
+            .expect("a verdict")
+            .decision
+            .label();
+        assert_eq!(outcomes(&log, &record), (Some(verdict.to_owned()), 1));
+        // The same verdict written again is not recorded again.
+        runner.write_report();
+        assert_eq!(outcomes(&log, &record), (Some(verdict.to_owned()), 1));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A one-round review of a document in `repo` (its store is that
+    /// repository's), taken to an approving verdict.
+    fn approved(fake: &Fake, root: &Path, repo: &Path) -> Wired {
+        let target = Target {
+            workdir: Some(repo.to_owned()),
+            ..document("# Plan\n")
+        };
+        let (mut runner, actions, updates) = rig_on(
+            fake,
+            new_start_on(
+                root,
+                target,
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                1,
+            ),
+        );
+        let mut conn = fake.clone();
+        step(&mut runner, &mut conn);
+        for part in [":claude", ":codex"] {
+            fake.report(fake.pane_of(part), "input", None);
+        }
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        for part in ["claude", "codex"] {
+            reply(
+                fake,
+                &mut runner,
+                &mut conn,
+                &PartId::new(part),
+                r#"{"summary": "done", "findings": []}"#,
+            );
+        }
+        step(&mut runner, &mut conn);
+        fake.report(fake.pane_of(":lead"), "input", None);
+        step(&mut runner, &mut conn);
+        step(&mut runner, &mut conn);
+        reply(
+            fake,
+            &mut runner,
+            &mut conn,
+            &PartId::new("lead"),
+            r#"{"summary": "Nothing.", "verdict": {"decision": "approve", "rationale": "Clean.", "must_fix": []}}"#,
+        );
+        (runner, actions, updates)
+    }
+
+    /// The outcome the store `log` holds for `record`, and how many
+    /// outcomes were observed in all.
+    fn outcomes(log: &Path, record: &Node) -> (Option<String>, usize) {
+        let set = review::links::replay(log).unwrap();
+        let observed = review::links::read_events(log)
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, review::links::LinkEvent::Observed { info, .. } if info.outcome.is_some()))
+            .count();
+        (set.info_of(record).outcome, observed)
+    }
+
+    #[test]
+    fn a_verdict_taken_away_by_an_added_round_is_recorded_as_none() {
+        let base = temp_root();
+        let (repo, _c0, _c1, root) = feature_repo(&base);
+        let fake = fake();
+        let (mut runner, actions, _updates) = approved(&fake, &root, &repo);
+        let record = Node::Review(runner.engine.session().id.to_string());
+        let log = runner.links_log.clone().unwrap();
+        let approve = runner.engine.session().verdict().unwrap().decision.label();
+        assert_eq!(outcomes(&log, &record), (Some(approve.to_owned()), 1));
+
+        let mut conn = fake.clone();
+        actions.send(Action::Extend { by: 1 }).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(runner.engine.session().verdict().is_none());
+        assert_eq!(
+            outcomes(&log, &record),
+            (Some(handoff::NO_VERDICT.to_owned()), 2)
+        );
+        // Ended with no new verdict: the store still says none, once.
+        actions.send(Action::Close).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        let report = fs::read_to_string(store::report_path(runner.engine.dir())).unwrap();
+        assert!(report.contains("判定なし（ユーザーが終了）"), "{report}");
+        assert_eq!(
+            outcomes(&log, &record),
+            (Some(handoff::NO_VERDICT.to_owned()), 2)
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_review_extended_after_its_verdict_records_none_when_taken_up() {
+        let base = temp_root();
+        let (repo, _c0, _c1, root) = feature_repo(&base);
+        let fake = fake();
+        let (runner, actions, _updates) = approved(&fake, &root, &repo);
+        let record = Node::Review(runner.engine.session().id.to_string());
+        let log = runner.links_log.clone().unwrap();
+        let dir = runner.engine.dir().to_owned();
+        drop((runner, actions));
+        wait_unlocked(&dir);
+
+        let (mut runner, actions, _updates) = rig_on(
+            &fake,
+            Start::Extend {
+                dir: dir.clone(),
+                by: 1,
+            },
+        );
+        assert_eq!(
+            outcomes(&log, &record),
+            (Some(handoff::NO_VERDICT.to_owned()), 2)
+        );
+        let mut conn = fake.clone();
+        actions.send(Action::Close).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(
+            outcomes(&log, &record),
+            (Some(handoff::NO_VERDICT.to_owned()), 2)
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_review_records_where_its_links_are_in_its_own_folder() {
+        let base = temp_root();
+        let (repo, _c0, _c1, root) = feature_repo(&base);
+        let wt = base.join("wt");
+        let wt_arg = wt.to_str().unwrap();
+        git(&repo, &["worktree", "add", "-q", "-b", "side", wt_arg]);
+        let fake = fake();
+        let (runner, _actions, _updates) = open_wired(
+            &fake,
+            new_start_on(
+                &root,
+                git_target(&wt, Head::Worktree),
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                1,
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let place = handoff::recorded(runner.engine.dir()).expect("its links' place");
+        // The main worktree's store, named without the linked one.
+        assert_eq!(
+            place.repo.canonicalize().unwrap(),
+            repo.canonicalize().unwrap()
+        );
+        assert_eq!(runner.links_log.as_deref(), Some(place.log.as_path()));
+        assert_eq!(place.log, handoff::store_of(&root, &repo).unwrap());
+        let _ = fs::remove_dir_all(base);
     }
 }

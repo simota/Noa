@@ -28,6 +28,10 @@ pub enum SpawnTarget {
     },
     /// A floating pane over `pane`.
     Float { pane: PaneRef },
+    /// A new tab in `window` (the active window if `None`) whose pane runs
+    /// this Noa's `+ctl board --of self`, labelled `board:<its IPC id>`
+    /// (agent-orchestration D20).
+    BoardTab { window: Option<WindowRef> },
 }
 
 #[derive(Clone, Debug)]

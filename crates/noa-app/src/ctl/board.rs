@@ -743,7 +743,7 @@ impl Board {
         // The orchestrator's state is dated like a worker's: the header
         // says it, and the queue while it needs someone (U3).
         let orchestrator = self
-            .of
+            .orchestrator()
             .and_then(|of| self.panel(of))
             .map(|panel| (panel.pane_id.0, Status::of(panel)));
         for (pane, status) in workers
@@ -828,7 +828,7 @@ impl Board {
         // The orchestrator is selectable only while it is in the queue.
         let lead = self.lead().map(|panel| panel.pane_id.0);
         if self.selected.is_none_or(|pane| {
-            !live.contains(&pane) || (Some(pane) == self.of && Some(pane) != lead)
+            !live.contains(&pane) || (Some(pane) == self.orchestrator() && Some(pane) != lead)
         }) {
             self.past = 0;
             self.selected = self.picks().first().copied();
@@ -880,7 +880,7 @@ impl Board {
     /// The orchestrator while it needs someone (U3): an approval for its own
     /// `+ctl` call holds every worker up, so it heads the queue.
     fn lead(&self) -> Option<&Panel> {
-        self.panel(self.of?)
+        self.panel(self.orchestrator()?)
             .filter(|panel| Status::of(panel).group() == Group::Needs)
     }
 
@@ -950,6 +950,20 @@ impl Board {
         };
         let span = checked.saturating_duration_since(from);
         (span >= QUIET_AFTER).then_some(span)
+    }
+
+    /// Whether the board is its own orchestrator (`--of self`, D20): a
+    /// board tab an IPC client fills with floats, where no orchestrator
+    /// pane is there to lead the queue or to close.
+    fn orchestrates_itself(&self) -> bool {
+        self.of.is_some() && self.of == self.me
+    }
+
+    /// The orchestrator as a pane apart from the board: the one whose state
+    /// heads the queue (U3) and the header. `None` for a board that is its
+    /// own orchestrator (D20): its own pane is no worker and no lead.
+    fn orchestrator(&self) -> Option<u64> {
+        self.of.filter(|_| !self.orchestrates_itself())
     }
 
     /// The workers this board shows, in listing order: the orchestrator's,
@@ -1304,7 +1318,7 @@ impl Board {
     }
 
     fn name(&self, pane: u64) -> String {
-        if Some(pane) == self.of {
+        if Some(pane) == self.orchestrator() {
             return self
                 .lang
                 .pick("オーケストレーター", "orchestrator")
@@ -1460,6 +1474,11 @@ impl Board {
     /// would do) — else `q` again. `^C`, pressed twice by reflex, never ends
     /// it.
     fn quit_key(&self) -> char {
+        // D20: a board tab's workers have no orchestrator to go back to;
+        // every one closes with it.
+        if self.orchestrates_itself() {
+            return 'y';
+        }
         let tree = self.tree();
         let kids = tree
             .iter()
@@ -1663,7 +1682,7 @@ impl Board {
                     Key::Char('x') => {
                         match self.target() {
                             // Closing the orchestrator closes every worker.
-                            Some(pane) if Some(pane) == self.of => {
+                            Some(pane) if Some(pane) == self.orchestrator() => {
                                 let text = self.lang.pick(
                                     "オーケストレーターはボードからは閉じません",
                                     "the board does not close the orchestrator",
@@ -2599,7 +2618,14 @@ impl Board {
                 // A worker's own workers close: their parent is a float then
                 // (D13). The key comes first, as an opened worker covers the
                 // footer (D10); the whole prompt fits 80 columns.
+                let all = self.workers().len();
                 let ask = match (self.lang, self.quit_key(), kids > 0) {
+                    (Lang::En, _, _) if self.orchestrates_itself() => {
+                        format!("y quits · all {all} workers close with the board")
+                    }
+                    (Lang::Ja, _, _) if self.orchestrates_itself() => {
+                        format!("y で終了 · ワーカー {all} 件はボードと一緒にすべて閉じます")
+                    }
                     (Lang::En, 'y', true) => format!(
                         "y quits · {kids} workers' workers and those the orchestrator can't fit close"
                     ),
@@ -2858,6 +2884,11 @@ impl Board {
         // The orchestrator by its pane's name (its session title), which a
         // person recognises; the pane id only when it has none.
         let scope = match self.of {
+            // D20: a board tab's workers are its own; its pane's name is
+            // this board's title.
+            Some(_) if self.orchestrates_itself() => {
+                self.lang.pick("このボード", "this board").to_string()
+            }
             Some(of) => {
                 let panel = self.panel(of);
                 let name = panel
@@ -2876,15 +2907,18 @@ impl Board {
         };
         // What the orchestrator itself is doing, which can hold every worker
         // up (U3): when it is an agent, or needs someone.
-        let state = self.of.and_then(|of| self.panel(of)).and_then(|panel| {
-            let status = Status::of(panel);
-            (panel.agent.is_some() || status.group() == Group::Needs).then(|| {
-                let pane = panel.pane_id.0;
-                let state = self.state_text(pane, status, StateForm::Full, now);
-                let state = format!("  {} {state}", status.mark());
-                (status.color(), state, clean(&self.last_word(panel)))
-            })
-        });
+        let state = self
+            .orchestrator()
+            .and_then(|of| self.panel(of))
+            .and_then(|panel| {
+                let status = Status::of(panel);
+                (panel.agent.is_some() || status.group() == Group::Needs).then(|| {
+                    let pane = panel.pane_id.0;
+                    let state = self.state_text(pane, status, StateForm::Full, now);
+                    let state = format!("  {} {state}", status.mark());
+                    (status.color(), state, clean(&self.last_word(panel)))
+                })
+            });
         let room = cols.saturating_sub(title.width + count.width() + 1);
         // The state before a long name; neither cut to nothing.
         let state = state.filter(|(_, text, _)| text.width() + 1 + 8 <= room);
@@ -2973,6 +3007,11 @@ impl Board {
         // the first listing none is known not to be there (U12).
         let note = if !self.started {
             self.lang.pick("読み込み中…", "Loading…")
+        } else if self.orchestrates_itself() {
+            self.lang.pick(
+                "ワーカーはまだいません。このボードに浮動ペインが開かれると、ここに並びます。",
+                "No workers yet. They appear here once floating panes open on this board.",
+            )
         } else if self.of_gone {
             self.lang.pick(
                 "オーケストレーターのペインは閉じられました。q でボードを終えます。",
@@ -6006,6 +6045,87 @@ mod tests {
         assert!(!board.update(with("running"), at));
         assert_eq!(queue(&board), vec![3]);
         assert_eq!(board.selected(), Some(3));
+    }
+
+    /// D20: board tab 8, its own orchestrator, that rang the bell itself.
+    fn board_tab_pane() -> Panel {
+        let mut me = worker(8, 0, "board:8", None, 0);
+        me.parent_pane_id = None;
+        me.agent = None;
+        me.attention = true;
+        me.name = "ボード".to_string();
+        me
+    }
+
+    // D20: a board tab orchestrates itself (`--of self`). It shows its own
+    // floats and their workers (D13), never itself, and its own pane neither
+    // heads the queue nor stands in the header as an orchestrator.
+    #[test]
+    fn a_board_that_is_its_own_orchestrator_lists_its_workers_not_itself() {
+        let mut nested = worker(20, 2, "nested", Some("running"), 1);
+        nested.name = "nested".to_string();
+        let panels = vec![
+            board_tab_pane(),
+            worker(2, 8, "api", Some("running"), 4),
+            worker(3, 8, "ui", Some("permission"), 5),
+            nested,
+            worker(9, 7, "elsewhere", Some("permission"), 1),
+        ];
+        let mut board = Board::new(Some(8), Some(8));
+        board.update(panels, Instant::now());
+
+        let mut listed: Vec<u64> = board.workers().iter().map(|p| p.pane_id.0).collect();
+        listed.sort_unstable();
+        assert_eq!(listed, vec![2, 3, 20]);
+        assert!(board.lead().is_none());
+        assert_eq!(queue(&board), vec![3]);
+        assert_eq!(board.selected(), Some(3));
+        assert_eq!(board.title(), "ボード · 要対応 1");
+        let all = rendered(&board, 120, 30, Instant::now());
+        assert!(
+            line_with(&all, "NOA / CONTROL").contains("このボード"),
+            "{all}"
+        );
+        assert!(!all.contains("オーケストレーター"), "{all}");
+        assert!(!board.wanted_screens().contains(&8));
+    }
+
+    // D20: quitting a board tab closes every worker with it, since none has
+    // an orchestrator to go back to: it takes `y`, and says so.
+    #[test]
+    fn quitting_a_board_tab_says_every_worker_closes() {
+        let mut board = Board::new(Some(8), Some(8));
+        board.update(
+            vec![board_tab_pane(), worker(2, 8, "api", Some("running"), 1)],
+            Instant::now(),
+        );
+        assert_eq!(board.key(Key::Char('q')), None);
+        assert_eq!(board.mode, Mode::ConfirmQuit);
+        let all = rendered(&board, 120, 30, Instant::now());
+        assert!(
+            all.contains("y で終了 · ワーカー 1 件はボードと一緒にすべて閉じます"),
+            "{all}"
+        );
+        assert!(!all.contains("オーケストレーター"), "{all}");
+        assert_eq!(board.key(Key::Char('q')), None);
+        assert_eq!(board.mode, Mode::Normal);
+        board.key(Key::Char('q'));
+        assert_eq!(board.key(Key::Char('y')), Some(Action::Quit));
+    }
+
+    // D20: with no float yet, a board tab says where its workers come from,
+    // not that an orchestrator should `+ctl spawn` them, and never that its
+    // orchestrator closed.
+    #[test]
+    fn an_empty_board_tab_waits_for_floats() {
+        let mut board = Board::new(Some(8), Some(8));
+        board.update(vec![board_tab_pane()], Instant::now());
+        board.update(vec![board_tab_pane()], Instant::now());
+        assert!(!board.of_gone);
+        assert!(board.lead().is_none());
+        let all = rendered(&board, 120, 30, Instant::now());
+        assert!(all.contains("このボードに浮動ペインが開かれると"), "{all}");
+        assert!(!all.contains("+ctl spawn"), "{all}");
     }
 
     /// Orchestrator 1 waiting for an approval, with no worker yet.

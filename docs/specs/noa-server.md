@@ -107,7 +107,7 @@ Assumptions: iOS reaches the server via a tunnel / loopback bind is possible eve
 | `noa.getGrid` | read | `{ paneId, startRow, rowCount }` | `{ paneId, cols, startRow, coordinateGeneration, oldestRow, nextRow, rows:[Row], hasMore }` |
 | `noa.sendText` | input | `{ paneId, text }` | `{ ok:true }` |
 | `noa.focusPane` | control | `{ paneId }` | `{ ok:true }` |
-| `noa.newTab` | control | `{ windowId? }` | `{ paneId }` |
+| `noa.newTab` | control | `{ windowId?, board? }` (+ the spawn extensions of agent-orchestration D2; `board:true`, D20, also needs `input`) | `{ paneId }` |
 | `noa.split` | control | `{ paneId, direction:"horizontal"|"vertical" }` | `{ paneId }` |
 | `noa.closePane` | control | `{ paneId }` | `{ ok:true }` |
 | `noa.subscribe` | read | `{ events:["state_changed","output"], paneIds?:[…], fields?:[…] }` | `{ subscriptionId }` |

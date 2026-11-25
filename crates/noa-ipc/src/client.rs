@@ -20,7 +20,7 @@ use crate::attach::{ATTACH_BINARY_CHUNK_BYTES, MAX_ATTACH_SEED_BYTES};
 use crate::auth::ScopeSet;
 use crate::protocol::{
     AttachResult, EventKind, GetTextResult, HelloResult, ListPanelsResult, OkResult, PaneIdResult,
-    Panel, PanelField, SpawnParams, SplitDirection, SplitPlacement, TextSource,
+    Panel, PanelField, SpawnConfig, SpawnParams, SplitDirection, SplitPlacement, TextSource,
     UpdateSubscriptionParams, WireId,
 };
 use crate::server::ATTACH_HANDSHAKE_CLOSE_REASON;
@@ -83,6 +83,22 @@ impl Notification {
             Self::StateChanged { dropped, .. } | Self::Other { dropped, .. } => *dropped = true,
         }
     }
+}
+
+/// [`Client::spawn_board_tab`]'s request: `params` with `vars`' `PATH`,
+/// `LANG` and `LC_*` added to its env where it sets none of its own.
+fn board_tab_params(
+    params: &SpawnParams,
+    vars: impl Iterator<Item = (String, String)>,
+) -> SpawnParams {
+    let mut params = params.clone();
+    let config = params.config.get_or_insert_with(SpawnConfig::default);
+    for (key, value) in vars {
+        if key == "PATH" || key == "LANG" || key.starts_with("LC_") {
+            config.env.entry(key).or_insert(value);
+        }
+    }
+    params
 }
 
 /// A connected JSON-RPC control client. Reconnect/backoff belongs to
@@ -242,6 +258,46 @@ impl Client {
         }
         let result: PaneIdResult = self.request("noa.newTab", body)?;
         Ok(result.pane_id.0)
+    }
+
+    /// agent-orchestration D20: `noa.newTab` with `board: true` — a new tab
+    /// whose pane is a board that orchestrates itself. Returns the board's
+    /// IPC id; floats spawned with [`Self::spawn_split`]
+    /// (`SplitPlacement::Float`) over that pane, with `parent_pane_id` set to
+    /// it, are stowed on the board. `params` takes `focus`, `auto_approve`
+    /// and a `config` of only `cwd` and `env`; the server refuses the rest.
+    /// This process's `PATH`, `LANG` and `LC_*` go into the board's env
+    /// unless `params` sets them, as `+ctl board --open` gives a board its
+    /// orchestrator's: a Noa started from the Dock has none of them.
+    ///
+    /// A Noa older than [`crate::BOARD_TAB_SINCE`] ignores `board` and opens a
+    /// shell tab: check [`Self::supports_board_tab`] first.
+    pub fn spawn_board_tab(
+        &mut self,
+        window: Option<u64>,
+        params: &SpawnParams,
+    ) -> Result<u64, ClientError> {
+        let params = board_tab_params(params, std::env::vars());
+        let mut body = serde_json::to_value(&params).map_err(|_| {
+            ClientError::InvalidInput("spawn parameters are not serializable".to_string())
+        })?;
+        if let Some(object) = body.as_object_mut() {
+            object.insert("board".to_string(), Value::Bool(true));
+            if let Some(window) = window {
+                object.insert("windowId".to_string(), serde_json::json!(WireId(window)));
+            }
+        }
+        let result: PaneIdResult = self.request("noa.newTab", body)?;
+        Ok(result.pane_id.0)
+    }
+
+    /// Whether the connected Noa takes `board: true` on `noa.newTab`
+    /// ([`Self::spawn_board_tab`]), by `noa.hello`'s `serverVersion`.
+    pub fn supports_board_tab(&self) -> bool {
+        crate::protocol::server_version_at_least(
+            &self.server_version,
+            crate::protocol::BOARD_TAB_SINCE,
+        )
     }
 
     /// `noa.split` with a placement (`auto` included) and agent-orchestration
@@ -1983,5 +2039,50 @@ mod tests {
             started.elapsed() < Duration::from_millis(250),
             "DNS must not outlive the caller's connect deadline"
         );
+    }
+
+    // agent-orchestration D20: the board gets the client's PATH and locale,
+    // which a Noa started from the Dock lacks, unless the request set them;
+    // the rest of the request and of the environment is left alone.
+    #[test]
+    fn a_board_tab_takes_the_clients_path_and_locale() {
+        let given = SpawnParams {
+            config: Some(SpawnConfig {
+                cwd: Some("/repo".to_string()),
+                env: [("LANG".to_string(), "C".to_string())].into(),
+                ..SpawnConfig::default()
+            }),
+            focus: Some(false),
+            auto_approve: Some(true),
+            ..SpawnParams::default()
+        };
+        let vars = [
+            ("PATH", "/opt/bin:/usr/bin"),
+            ("LANG", "ja_JP.UTF-8"),
+            ("LC_CTYPE", "UTF-8"),
+            ("HOME", "/Users/x"),
+            ("NOA_TOKEN", "secret"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()));
+
+        let params = board_tab_params(&given, vars);
+
+        let config = params.config.as_ref().unwrap();
+        assert_eq!(config.env["PATH"], "/opt/bin:/usr/bin");
+        assert_eq!(config.env["LANG"], "C");
+        assert_eq!(config.env["LC_CTYPE"], "UTF-8");
+        assert_eq!(config.env.len(), 3);
+        assert_eq!(config.cwd.as_deref(), Some("/repo"));
+        assert_eq!(config.command, None);
+        assert_eq!(params.focus, Some(false));
+        assert_eq!(params.auto_approve, Some(true));
+        assert_eq!(params.label, None);
+        // Without a config of its own, one is made for the env.
+        let bare = board_tab_params(
+            &SpawnParams::default(),
+            std::iter::once(("PATH".to_string(), "/usr/bin".to_string())),
+        );
+        assert_eq!(bare.config.unwrap().env["PATH"], "/usr/bin");
     }
 }

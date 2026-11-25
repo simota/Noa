@@ -1727,7 +1727,11 @@ fn handle_new_tab(
 ) -> Result<Value, RpcFail> {
     let p: NewTabParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     let window = p.window_id.map(|w| w.0);
-    let pane_id = if p.spawn.is_extended() {
+    let pane_id = if p.board {
+        check_board_tab_params(session, &p.spawn)?;
+        check_spawn_params(session, &p.spawn)?;
+        backend.spawn(SpawnTarget::BoardTab { window }, p.spawn)?
+    } else if p.spawn.is_extended() {
         check_spawn_params(session, &p.spawn)?;
         backend.spawn(SpawnTarget::Tab { window }, p.spawn)?
     } else {
@@ -1837,6 +1841,41 @@ fn check_spawn_params(session: &Session, params: &SpawnParams) -> Result<(), Rpc
         ));
     }
     Ok(())
+}
+
+/// agent-orchestration D20: what `noa.newTab` with `board: true` refuses.
+/// The server runs the board and names it, so the request may not: no
+/// `label` (the server assigns `board:<id>`), no `parentPaneId` (a board is
+/// nobody's worker), and of `config` only `cwd` and `env`. Running the
+/// board is running a program in a new pane, which takes `input`.
+fn check_board_tab_params(session: &Session, params: &SpawnParams) -> Result<(), RpcFail> {
+    require_scope(session, Scope::Input)?;
+    let refused = if params.label.is_some() {
+        Some("label")
+    } else if params.parent_pane_id.is_some() {
+        Some("parentPaneId")
+    } else if params.max_children.is_some() {
+        Some("maxChildren")
+    } else {
+        params.config.as_ref().and_then(|config| {
+            if config.command.is_some() {
+                Some("config.command")
+            } else if config.initial_input.is_some() {
+                Some("config.initialInput")
+            } else if config.wait_after_command {
+                Some("config.waitAfterCommand")
+            } else {
+                None
+            }
+        })
+    };
+    match refused {
+        Some(field) => Err(RpcFail::new(
+            ErrorCode::InvalidParams,
+            format!("{field} does not go with board: true (the server sets up the board pane)"),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// The label prefix that marks an orchestrator's board pane.

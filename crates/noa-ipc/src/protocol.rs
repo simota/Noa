@@ -794,8 +794,42 @@ pub struct ResizePaneParams {
 pub struct NewTabParams {
     #[serde(default)]
     pub window_id: Option<WireId>,
+    /// agent-orchestration D20: the tab's pane is a board that orchestrates
+    /// itself. The server runs its own `+ctl board --of self` there and
+    /// labels the pane `board:<its own IPC id>`, so floats a client then
+    /// spawns over it with `parentPaneId` set to it are stowed on it. Takes
+    /// the `input` scope; `label`, `parentPaneId` and every `config` field
+    /// but `cwd` and `env` are refused, since the server sets them.
+    #[serde(default)]
+    pub board: bool,
     #[serde(flatten)]
     pub spawn: SpawnParams,
+}
+
+/// agent-orchestration D20: the first Noa whose `noa.newTab` takes
+/// `board: true`. An older one ignores the field and opens a plain shell
+/// tab, so a client compares `noa.hello`'s `serverVersion` against this
+/// (see [`server_version_at_least`]) before asking for a board tab.
+pub const BOARD_TAB_SINCE: (u64, u64, u64) = (0, 9, 16);
+
+/// Whether `version` (`noa.hello`'s `serverVersion`, `MAJOR.MINOR.PATCH`
+/// with an optional `-pre` and `+build`) is `since` or later. A version
+/// that does not read as three decimal numbers is not.
+pub fn server_version_at_least(version: &str, since: (u64, u64, u64)) -> bool {
+    let core = version.split(['+', '-']).next().unwrap_or_default();
+    let numbers: Option<Vec<u64>> = core
+        .split('.')
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            part.parse().ok()
+        })
+        .collect();
+    match numbers.as_deref() {
+        Some(&[major, minor, patch]) => (major, minor, patch) >= since,
+        _ => false,
+    }
 }
 
 /// What a new pane runs (agent-orchestration D2): the IPC form of the
@@ -1587,5 +1621,61 @@ mod subscription_tests {
             serde_json::to_value(&absent).unwrap(),
             serde_json::json!({ "subscriptionId": "4" })
         );
+    }
+}
+
+#[cfg(test)]
+mod board_tab_tests {
+    use super::*;
+
+    // agent-orchestration D20: `board: true` rides on `noa.newTab` beside
+    // the spawn extensions; a request without it reads as before.
+    #[test]
+    fn new_tab_reads_board_beside_the_spawn_extensions() {
+        let p: NewTabParams = serde_json::from_value(serde_json::json!({
+            "windowId": "3",
+            "board": true,
+            "focus": false,
+            "autoApprove": true,
+            "config": { "cwd": "/repo", "env": { "LANG": "ja_JP.UTF-8" } },
+        }))
+        .unwrap();
+        assert!(p.board);
+        assert_eq!(p.window_id, Some(WireId(3)));
+        assert_eq!(p.spawn.focus, Some(false));
+        assert_eq!(p.spawn.auto_approve, Some(true));
+        let config = p.spawn.config.unwrap();
+        assert_eq!(config.cwd.as_deref(), Some("/repo"));
+        assert_eq!(config.env["LANG"], "ja_JP.UTF-8");
+
+        let plain: NewTabParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!plain.board);
+        assert!(!plain.spawn.is_extended());
+    }
+
+    #[test]
+    fn the_board_tab_gate_reads_server_versions_strictly() {
+        assert_eq!(BOARD_TAB_SINCE, (0, 9, 16));
+        for version in [
+            "0.9.16",
+            "0.9.17",
+            "0.10.0",
+            "1.0.0",
+            "0.9.16+abc",
+            "0.9.16-rc.1",
+        ] {
+            assert!(
+                server_version_at_least(version, BOARD_TAB_SINCE),
+                "{version}"
+            );
+        }
+        for version in [
+            "0.9.15", "0.9.9", "", "v0.9.16", "0.9", "0.9.16.1", "0.9.x", "t",
+        ] {
+            assert!(
+                !server_version_at_least(version, BOARD_TAB_SINCE),
+                "{version}"
+            );
+        }
     }
 }

@@ -711,3 +711,92 @@ fn a_v3_panel_without_the_new_fields_still_deserializes() {
         assert!(wire.get(key).is_none(), "{key} must be omitted when absent");
     }
 }
+
+// agent-orchestration D20: `board: true` reaches the backend as a board
+// tab, with the window, focus, auto approval and env the client gave.
+#[test]
+fn a_board_tab_reaches_spawn_as_a_board_tab() {
+    let (backend, _broadcaster, handle) = start(&["read", "control", "input"]);
+    let mut client = connect(&handle, &["read", "control", "input"]);
+    let params = SpawnParams {
+        config: Some(SpawnConfig {
+            cwd: Some("/repo".to_string()),
+            env: [("PATH".to_string(), "/opt/bin".to_string())].into(),
+            ..SpawnConfig::default()
+        }),
+        focus: Some(false),
+        auto_approve: Some(false),
+        ..SpawnParams::default()
+    };
+
+    assert_eq!(client.spawn_board_tab(Some(3), &params).unwrap(), 700);
+
+    let spawns = backend.spawns.lock().unwrap();
+    assert_eq!(spawns[0].0, SpawnTarget::BoardTab { window: Some(3) });
+    let sent = &spawns[0].1;
+    assert_eq!(sent.focus, Some(false));
+    assert_eq!(sent.auto_approve, Some(false));
+    assert_eq!(sent.label, None);
+    assert_eq!(sent.parent_pane_id, None);
+    let config = sent.config.as_ref().unwrap();
+    assert_eq!(config.cwd.as_deref(), Some("/repo"));
+    assert_eq!(config.env["PATH"], "/opt/bin");
+    assert_eq!(config.command, None);
+}
+
+// D20: the server runs and names the board, so a request that would set
+// what it sets is refused, and running it takes `input`.
+#[test]
+fn a_board_tab_refuses_what_the_server_sets_and_needs_input() {
+    let (backend, _broadcaster, handle) = start(&["read", "control"]);
+    let mut client = connect(&handle, &["read", "control"]);
+    assert!(matches!(
+        client.spawn_board_tab(None, &SpawnParams::default()),
+        Err(ClientError::Rpc { code: -32003, .. })
+    ));
+    assert!(backend.spawns.lock().unwrap().is_empty());
+
+    let (backend, _broadcaster, handle) = start(&["read", "control", "input"]);
+    let mut client = connect(&handle, &["read", "control", "input"]);
+    let config = |config: SpawnConfig| SpawnParams {
+        config: Some(config),
+        ..SpawnParams::default()
+    };
+    let refused = [
+        SpawnParams {
+            label: Some("board:1".to_string()),
+            ..SpawnParams::default()
+        },
+        SpawnParams {
+            parent_pane_id: Some(WireId(1)),
+            ..SpawnParams::default()
+        },
+        SpawnParams {
+            max_children: Some(20),
+            ..SpawnParams::default()
+        },
+        config(command_config()),
+        config(SpawnConfig {
+            initial_input: Some("q".to_string()),
+            ..SpawnConfig::default()
+        }),
+        config(SpawnConfig {
+            wait_after_command: true,
+            ..SpawnConfig::default()
+        }),
+        config(SpawnConfig {
+            env: [("A=B".to_string(), "c".to_string())].into(),
+            ..SpawnConfig::default()
+        }),
+    ];
+    for params in refused {
+        assert!(
+            matches!(
+                client.spawn_board_tab(None, &params),
+                Err(ClientError::Rpc { code: -32602, .. })
+            ),
+            "{params:?}"
+        );
+    }
+    assert!(backend.spawns.lock().unwrap().is_empty());
+}

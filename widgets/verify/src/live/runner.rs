@@ -29,6 +29,7 @@ use verify::model::types::{
 };
 use verify::model::validate;
 use verify::store::{self, Store};
+use verify::task_links::{self, Origin, SessionKind};
 use verify::{media, rerun, worktree};
 
 use super::ipc::{
@@ -73,6 +74,11 @@ const RERUN_PANE_GONE: &str = "verifier's pane is gone";
 /// its `run.sh` gone (its worktree was removed, and the recipe rebuilds
 /// none of it): no outcome can come from it.
 const RERUN_FILES_MISSING: &str = "re-run files missing after resume";
+/// What the notice says when the link log cannot be read or written: once,
+/// and the verification goes on.
+fn links_notice(why: impl std::fmt::Display) -> String {
+    format!("タスクとの関連を記録できません: {why}")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
@@ -161,6 +167,10 @@ pub enum Update {
     /// connection, so a reconnect to another Noa shows), with the number
     /// of that connection's hello.
     Version(u64, String),
+    /// The task the verification is linked to (`docs/specs/task-links.md`
+    /// L1-4): found once the runner has opened it, `None` when there is
+    /// none.
+    Origin(Option<Origin>),
     Ended(Result<(), String>),
 }
 
@@ -185,7 +195,10 @@ pub fn spawn_session(start: Start, wake: impl Fn() + Send + 'static) -> SessionH
                 start,
                 IpcConnect,
                 SystemClock,
-                Config::default(),
+                RunConfig {
+                    engine: Config::default(),
+                    tasks_root: task_links::default_root(),
+                },
                 action_rx,
                 update_tx,
                 wake,
@@ -199,7 +212,7 @@ fn run_session<C: Connect, K: Clock>(
     start: Start,
     connector: C,
     clock: K,
-    config: Config,
+    config: RunConfig,
     actions: Receiver<Action>,
     updates: Sender<Update>,
     wake: impl Fn() + 'static,
@@ -217,6 +230,13 @@ fn run_session<C: Connect, K: Clock>(
     let result = opened.and_then(|mut runner| runner.run());
     let _ = updates.send(Update::Ended(result));
     wake();
+}
+
+/// What a runner is set up with: the engine's settings and where the
+/// Tasks link logs are (`task_links::default_root`; `None` links nothing).
+struct RunConfig {
+    engine: Config,
+    tasks_root: Option<PathBuf>,
 }
 
 trait Clock {
@@ -498,6 +518,14 @@ struct Runner<C: Connect, K: Clock> {
     /// Panes of [`Self::rebuilt`] verifiers waiting to be closed.
     stale: Vec<(PartId, u64)>,
     link_state: Link,
+    /// The task this verification is linked to: matched at its creation,
+    /// else found in the link log (a resume, an extension).
+    origin: Option<Origin>,
+    /// `(decision, closed)` as this process last recorded it for
+    /// [`Self::origin`]; `None` until it has (a resumed one records once).
+    outcome: Option<(Option<String>, bool)>,
+    /// Whether the link log's failure was told (it is told once).
+    told_links: bool,
 }
 
 impl<C: Connect, K: Clock> Runner<C, K> {
@@ -505,11 +533,15 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         start: Start,
         connector: C,
         clock: K,
-        config: Config,
+        config: RunConfig,
         actions: Receiver<Action>,
         updates: Sender<Update>,
         wake: Rc<dyn Fn()>,
     ) -> Result<Self, String> {
+        let RunConfig {
+            engine: config,
+            tasks_root,
+        } = config;
         let now = clock.now();
         let resumed = matches!(start, Start::Resume { .. } | Start::Extend { .. });
         let (engine, store) = match start {
@@ -522,7 +554,21 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         } else {
             BTreeSet::new()
         };
-        let runner = Self {
+        let session = engine.session();
+        let (origin, outcome, link_failed) = match &tasks_root {
+            None => (None, None, None),
+            Some(root) if resumed => (
+                task_links::find_origin(root, SessionKind::Verify, session.id.as_str()),
+                None,
+                None,
+            ),
+            // Linked as running: only a change is recorded after.
+            Some(root) => match link_new(root, session, now) {
+                Ok(origin) => (origin, Some((None, false)), None),
+                Err(e) => (None, None, Some(e)),
+            },
+        };
+        let mut runner = Self {
             engine,
             store,
             connector,
@@ -544,10 +590,53 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             rebuilt,
             stale: Vec::new(),
             link_state: Link::Connecting,
+            origin,
+            outcome,
+            told_links: false,
         };
         runner.emit_session();
         runner.emit_link(Link::Connecting);
+        if let Some(e) = link_failed {
+            runner.links_failed(e);
+        }
+        runner.emit(Update::Origin(runner.origin.clone()));
+        runner.record_outcome();
         Ok(runner)
+    }
+
+    /// Tells, once, that the link log could not be read or written.
+    fn links_failed(&mut self, why: impl std::fmt::Display) {
+        if !self.told_links {
+            self.told_links = true;
+            self.notice(links_notice(why));
+        }
+    }
+
+    /// Appends `SessionOutcome` to the linked task's log when the verdict
+    /// or the ended state differs from what this process last wrote.
+    fn record_outcome(&mut self) {
+        let Some(origin) = &self.origin else {
+            return;
+        };
+        let session = self.engine.session();
+        let now = (
+            session.verdict().map(|v| v.decision.name().to_owned()),
+            session.closed,
+        );
+        if self.outcome.as_ref() == Some(&now) {
+            return;
+        }
+        match task_links::record_outcome(
+            origin,
+            SessionKind::Verify,
+            session.id.as_str(),
+            now.0.as_deref(),
+            now.1,
+            self.clock.now(),
+        ) {
+            Ok(()) => self.outcome = Some(now),
+            Err(e) => self.links_failed(e),
+        }
     }
 
     fn emit(&self, update: Update) {
@@ -1186,6 +1275,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
             self.retire_rebuilt();
             self.emit_session();
+            self.record_outcome();
         }
         let now = self.clock.now();
         let mut follow: Vec<Input> = Vec::new();
@@ -2707,6 +2797,52 @@ impl IgnoreFile {
     }
 }
 
+/// The target of a new verification as the task runs are matched against
+/// it (`docs/specs/task-links.md` L1-4), and whether it checks uncommitted
+/// changes: a work-tree head whose capture wrote a non-empty
+/// `target/worktree.patch` or copied an untracked file.
+fn link_target(session: &Session) -> (task_links::Target, bool) {
+    let target = task_links::Target {
+        toplevel: session.workdir.clone(),
+        head_ref: session.manifest.head_ref.clone(),
+        head_sha: session
+            .manifest
+            .head_sha
+            .clone()
+            .or_else(|| Some(session.rebuild.head_sha.clone())),
+    };
+    let empty_patch = verify::capture::digest_bytes(b"");
+    let uncommitted = session.target.head == Head::Worktree
+        && (session
+            .rebuild
+            .worktree_patch
+            .is_some_and(|digest| digest != empty_patch)
+            || !session.rebuild.untracked.is_empty());
+    (target, uncommitted)
+}
+
+/// Links a just created verification to the task run its target belongs
+/// to, if any, in the key dir the run was found in; its origin.
+fn link_new(root: &Path, session: &Session, now: Millis) -> io::Result<Option<Origin>> {
+    let (target, uncommitted) = link_target(session);
+    let Some(matched) = task_links::match_run(root, &target) else {
+        return Ok(None);
+    };
+    task_links::link_session(
+        &matched,
+        SessionKind::Verify,
+        session.id.as_str(),
+        target.head_sha.as_deref(),
+        uncommitted,
+        now,
+    )?;
+    Ok(task_links::find_origin(
+        root,
+        SessionKind::Verify,
+        session.id.as_str(),
+    ))
+}
+
 /// Captures the target and creates the verification's log: nothing is
 /// left behind when the capture or the setup is refused.
 fn new_verification(
@@ -2952,6 +3088,8 @@ pub(crate) mod tests {
         exits_after_paste: Option<u64>,
         /// Panes whose paste readiness check says no (`paste_ready`).
         paste_unready: BTreeSet<u64>,
+        /// The Tasks data root the runner links to (none: no linking).
+        tasks_root: Option<PathBuf>,
     }
 
     /// A fake Noa and clock sharing one world.
@@ -3307,11 +3445,15 @@ pub(crate) mod tests {
     fn open_wired(fake: &Fake, start: Start) -> Result<Wired, String> {
         let (actions_tx, actions) = mpsc::channel();
         let (updates, updates_rx) = mpsc::channel();
+        let tasks_root = fake.0.borrow().tasks_root.clone();
         let runner = Runner::open(
             start,
             fake.clone(),
             fake.clone(),
-            CONFIG,
+            RunConfig {
+                engine: CONFIG,
+                tasks_root,
+            },
             actions,
             updates,
             Rc::new(|| {}),
@@ -6316,6 +6458,332 @@ pub(crate) mod tests {
         assert_eq!(runner.engine.session().max_rounds, 2);
         step(&mut runner, &mut conn);
         assert_eq!(runner.engine.session().rounds.len(), 2, "round 2 started");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // ---- task links (docs/specs/task-links.md, U4) ----
+
+    const ISSUE_12: &str = r#"{"github":{"repo":"o/n","number":12}}"#;
+
+    /// A Tasks key dir under `tasks/` holding one `RunStarted` line, as
+    /// Tasks writes it, and a `Repo` line naming `tasks_repo`.
+    fn task_run(
+        root: &Path,
+        run: &str,
+        workdir: &Path,
+        branch: Option<&str>,
+        tasks_repo: &Path,
+    ) -> PathBuf {
+        let key_dir = root.join("tasks").join("key-1");
+        fs::create_dir_all(&key_dir).unwrap();
+        let line = serde_json::json!({
+            "event": "RunStarted", "run": run,
+            "task": serde_json::from_str::<serde_json::Value>(ISSUE_12).unwrap(),
+            "agent": "codex", "workdir": workdir, "branch": branch,
+            "label": format!("task:{run}"), "at": 5,
+        });
+        fs::write(key_dir.join(task_links::RUNS_FILE), format!("{line}\n")).unwrap();
+        task_links::append(
+            &task_links::links_log(&key_dir),
+            &task_links::LinkEvent::Repo {
+                path: tasks_repo.to_owned(),
+                at: 1,
+            },
+        )
+        .unwrap();
+        key_dir
+    }
+
+    /// A fake Noa whose runners link to the Tasks data under `root`.
+    fn linked_fake(root: &Path) -> Fake {
+        let fake = fake();
+        fake.0.borrow_mut().tasks_root = Some(root.join("tasks"));
+        fake
+    }
+
+    fn link_events(key_dir: &Path) -> Vec<task_links::LinkEvent> {
+        task_links::read(&task_links::links_log(key_dir)).unwrap()
+    }
+
+    fn linked(key_dir: &Path) -> Vec<task_links::LinkEvent> {
+        link_events(key_dir)
+            .into_iter()
+            .filter(|e| matches!(e, task_links::LinkEvent::SessionLinked { .. }))
+            .collect()
+    }
+
+    fn outcomes(key_dir: &Path) -> Vec<(Option<String>, bool)> {
+        link_events(key_dir)
+            .into_iter()
+            .filter_map(|e| match e {
+                task_links::LinkEvent::SessionOutcome {
+                    decision, closed, ..
+                } => Some((decision, closed)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn origins(updates: &Receiver<Update>) -> Vec<Option<Origin>> {
+        updates
+            .try_iter()
+            .filter_map(|u| match u {
+                Update::Origin(origin) => Some(origin),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one `SessionLinked` of `key_dir`, checked against the session.
+    fn assert_linked(
+        key_dir: &Path,
+        runner: &Runner<Fake, Fake>,
+        run: &str,
+        by: task_links::MatchedBy,
+        uncommitted: bool,
+    ) {
+        let s = runner.engine.session();
+        let events = linked(key_dir);
+        assert_eq!(
+            events,
+            [task_links::LinkEvent::SessionLinked {
+                kind: SessionKind::Verify,
+                session: s.id.to_string(),
+                task: task_links::TaskKey(serde_json::from_str(ISSUE_12).unwrap()),
+                run: run.to_owned(),
+                commit: Some(s.rebuild.head_sha.clone()),
+                uncommitted,
+                by,
+                at: 1_000,
+            }]
+        );
+    }
+
+    #[test]
+    fn links_ac3_a_verification_of_a_runs_worktree_is_linked_by_worktree() {
+        let root = temp_root();
+        let repo = repo(&root);
+        let key_dir = task_run(&root, "run-1", &repo, Some("task-run-1"), &repo);
+        let fake = linked_fake(&root);
+        let (runner, _actions, updates) = rig_on(
+            &fake,
+            new_start(&root, state_of(&repo), Isolation::Worktree, true),
+        );
+        assert_linked(
+            &key_dir,
+            &runner,
+            "run-1",
+            task_links::MatchedBy::Worktree,
+            false,
+        );
+        let origin = origins(&updates).pop().flatten().expect("an origin");
+        assert_eq!(origin.key_dir, key_dir);
+        assert_eq!(origin.tasks_repo.as_deref(), Some(repo.as_path()));
+        assert_eq!(origin.run, "run-1");
+        // Linked as running: nothing more until the outcome changes.
+        assert_eq!(outcomes(&key_dir), []);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn links_ac3_a_verification_of_a_runs_branch_is_linked_by_branch() {
+        let root = temp_root();
+        let repo = repo(&root);
+        git(&repo, &["branch", "task-run-2"]);
+        // The run's worktree is elsewhere (or gone): only its branch matches.
+        let key_dir = task_run(
+            &root,
+            "run-2",
+            &root.join("gone-worktree"),
+            Some("task-run-2"),
+            &repo,
+        );
+        let fake = linked_fake(&root);
+        let target = Target {
+            head: Head::Ref("task-run-2".into()),
+            ..state_of(&repo)
+        };
+        let (runner, _actions, _updates) =
+            rig_on(&fake, new_start(&root, target, Isolation::Worktree, true));
+        assert_linked(
+            &key_dir,
+            &runner,
+            "run-2",
+            task_links::MatchedBy::Branch,
+            false,
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn links_ac3_a_verification_of_a_recorded_commit_is_linked_by_commit() {
+        let root = temp_root();
+        let repo = repo(&root);
+        // A この作業ツリー run: no branch, its workdir the repository.
+        let key_dir = task_run(&root, "run-3", &repo, None, &repo);
+        task_links::append(
+            &task_links::links_log(&key_dir),
+            &task_links::LinkEvent::ChangeSeen {
+                run: "run-3".into(),
+                commit: git(&repo, &["rev-parse", "HEAD"]),
+                at: 2,
+            },
+        )
+        .unwrap();
+        let fake = linked_fake(&root);
+        let (runner, _actions, _updates) = rig_on(
+            &fake,
+            new_start(&root, state_of(&repo), Isolation::Worktree, true),
+        );
+        assert_linked(
+            &key_dir,
+            &runner,
+            "run-3",
+            task_links::MatchedBy::Commit,
+            false,
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn links_ac3_uncommitted_changes_are_linked_as_uncommitted() {
+        let root = temp_root();
+        let dirty = repo(&root);
+        fs::write(dirty.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+        let key_dir = task_run(&root, "run-4", &dirty, Some("task-run-4"), &dirty);
+        let fake = linked_fake(&root);
+        let (runner, _actions, _updates) = rig_on(
+            &fake,
+            new_start(&root, state_of(&dirty), Isolation::Shared, true),
+        );
+        assert_linked(
+            &key_dir,
+            &runner,
+            "run-4",
+            task_links::MatchedBy::Worktree,
+            true,
+        );
+        let _ = fs::remove_dir_all(root);
+        // An untracked file alone counts too.
+        let root = temp_root();
+        let fresh = repo(&root);
+        fs::write(fresh.join("src/new.rs"), "pub fn two() {}\n").unwrap();
+        let key_dir = task_run(&root, "run-5", &fresh, Some("task-run-5"), &fresh);
+        let fake = linked_fake(&root);
+        let (runner, _actions, _updates) = rig_on(
+            &fake,
+            new_start(&root, state_of(&fresh), Isolation::Shared, true),
+        );
+        assert_linked(
+            &key_dir,
+            &runner,
+            "run-5",
+            task_links::MatchedBy::Worktree,
+            true,
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn links_ac3_an_unrelated_repository_writes_nothing() {
+        let root = temp_root();
+        let repo = repo(&root);
+        let other = root.join("other");
+        fs::create_dir_all(&other).unwrap();
+        let key_dir = task_run(&root, "run-6", &other, Some("task-run-6"), &other);
+        let before = fs::read(task_links::links_log(&key_dir)).unwrap();
+        let fake = linked_fake(&root);
+        let (_runner, _actions, updates) = rig_on(
+            &fake,
+            new_start(&root, state_of(&repo), Isolation::Worktree, true),
+        );
+        assert_eq!(fs::read(task_links::links_log(&key_dir)).unwrap(), before);
+        assert_eq!(origins(&updates), [None]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn links_ac3_a_verdict_is_recorded_once_per_change() {
+        let root = temp_root();
+        let repo = repo(&root);
+        let key_dir = task_run(&root, "run-7", &repo, Some("task-run-7"), &repo);
+        let fake = linked_fake(&root);
+        let start = new_start(&root, state_of(&repo), Isolation::Worktree, false);
+        let (mut runner, _actions, _updates) = run_to_a_failure_from(&fake, start, |_| {});
+        let decision = runner
+            .engine
+            .session()
+            .verdict()
+            .unwrap()
+            .decision
+            .name()
+            .to_owned();
+        assert_eq!(decision, "fail");
+        assert_eq!(outcomes(&key_dir), [(Some(decision.clone()), true)]);
+        // Nothing changed: nothing more is written.
+        let mut conn = fake.clone();
+        fake.advance(TICK_EVERY + 1);
+        step(&mut runner, &mut conn);
+        assert_eq!(outcomes(&key_dir), [(Some(decision), true)]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn links_ac3_a_resumed_verification_finds_its_origin_and_records_its_outcome_once() {
+        let root = temp_root();
+        let repo = repo(&root);
+        let key_dir = task_run(&root, "run-8", &repo, Some("task-run-8"), &repo);
+        let fake = linked_fake(&root);
+        let (runner, _actions, _updates) = rig_on(
+            &fake,
+            new_start(&root, state_of(&repo), Isolation::Worktree, true),
+        );
+        let id = runner.engine.session().id.to_string();
+        let dir = stop(runner);
+        let (_runner, _actions, updates) = rig_on(&fake, Start::Resume { dir });
+        let origin = origins(&updates).pop().flatten().expect("an origin");
+        assert_eq!(origin.run, "run-8");
+        assert_eq!(linked(&key_dir).len(), 1, "linked at creation only");
+        assert_eq!(outcomes(&key_dir), [(None, false)]);
+        // Removed by the person: a resume no longer has it.
+        task_links::append(
+            &task_links::links_log(&key_dir),
+            &task_links::LinkEvent::LinkRemoved {
+                task: task_links::TaskKey(serde_json::from_str(ISSUE_12).unwrap()),
+                id,
+                at: 9,
+            },
+        )
+        .unwrap();
+        let dir = stop(_runner);
+        let (_runner, _actions, updates) = rig_on(&fake, Start::Resume { dir });
+        assert_eq!(origins(&updates), [None]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn links_ac3_an_unwritable_link_log_leaves_the_verification_created_and_says_why() {
+        let root = temp_root();
+        let repo = repo(&root);
+        let key_dir = task_run(&root, "run-9", &repo, Some("task-run-9"), &repo);
+        // The lock's place is taken by a folder: no append can lock it.
+        let lock = key_dir.join("links.jsonl.lock");
+        fs::remove_file(&lock).unwrap();
+        fs::create_dir(&lock).unwrap();
+        let fake = linked_fake(&root);
+        let (runner, _actions, updates) = rig_on(
+            &fake,
+            new_start(&root, state_of(&repo), Isolation::Worktree, true),
+        );
+        assert!(runner.engine.dir().join(store::EVENTS_FILE).is_file());
+        let told = notices(&updates);
+        assert_eq!(
+            told.iter()
+                .filter(|t| t.starts_with("タスクとの関連を記録できません: "))
+                .count(),
+            1,
+            "{told:?}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

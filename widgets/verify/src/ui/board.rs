@@ -10,6 +10,7 @@ use noa_gpui_text::TextStore;
 
 use noa_gpui_core::style::{Size as LayoutSize, auto, length};
 use verify::model::types::{Phase, Session, WorktreeState};
+use verify::task_links;
 
 use super::{
     Action, EXTEND_BY, Source, Verify, caption, cards, clear_children, decision_tone, tag,
@@ -371,6 +372,22 @@ impl Verify {
                 Action::ClosePanes,
                 actions,
             );
+        }
+        // docs/specs/task-links.md L1-7: back to the task the verification
+        // is linked to, disabled with why when Tasks cannot be pointed at it.
+        if let Some(origin) = &self.origin {
+            let (tooltip, enabled) = match task_links::tasks_args(origin) {
+                Ok(_) => ("このタスクを Tasks で開きます".to_owned(), true),
+                Err(why) => (why, false),
+            };
+            let open = button(
+                tree,
+                trailing,
+                small("元のタスクを開く").tooltip(tooltip),
+                Action::OpenOrigin,
+                actions,
+            );
+            tree.set_enabled(open, enabled);
         }
     }
 }

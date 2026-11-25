@@ -9,9 +9,12 @@ pub mod fsx;
 pub mod github;
 pub mod local;
 pub mod model;
+pub mod related;
 pub mod runs;
 pub mod shell;
+pub mod sibling;
 pub mod store;
+pub mod task_links;
 pub mod worktree;
 
 #[cfg(test)]

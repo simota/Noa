@@ -6,7 +6,9 @@ pub mod capture;
 pub mod engine;
 pub mod fsx;
 pub mod model;
+pub mod sibling;
 pub mod store;
+pub mod task_links;
 
 #[cfg(test)]
 pub(crate) mod testkit;

@@ -669,15 +669,23 @@ impl<C: Connect> Worker<C> {
                     self.here_live.insert(run.run.clone());
                     true
                 }
+                // Marked done below only once read and written.
                 Liveness::Gone => {
-                    self.here_live.contains(&run.run) && self.here_done.insert(run.run.clone())
+                    self.here_live.contains(&run.run) && !self.here_done.contains(&run.run)
                 }
             };
             if look {
                 heads.push((run.run.clone(), None, start::head_of(&run.workdir)));
             }
         }
+        let ended: HashSet<RunId> = self
+            .views(now)
+            .into_iter()
+            .filter(|view| view.run.branch.is_none() && view.liveness == Liveness::Gone)
+            .map(|view| view.run.run)
+            .collect();
         for (run, branch, head) in heads {
+            let last_read = ended.contains(&run);
             let commit = match head {
                 Ok(commit) => commit,
                 Err(why) => {
@@ -686,6 +694,9 @@ impl<C: Connect> Worker<C> {
                 }
             };
             if commit.is_empty() {
+                if last_read {
+                    self.here_done.insert(run);
+                }
                 continue;
             }
             let mut last = recorded.get(run.as_str()).cloned();
@@ -708,16 +719,19 @@ impl<C: Connect> Worker<C> {
                 }
                 last.get_or_insert(base);
             }
-            if last.as_ref() == Some(&commit) {
-                continue;
+            if last.as_ref() != Some(&commit) {
+                let seen = LinkEvent::ChangeSeen {
+                    run: run.to_string(),
+                    commit,
+                    at: now,
+                };
+                if let Err(why) = self.append_link(&seen) {
+                    failure = Some(format!("関連の記録に書けません: {why}"));
+                    continue;
+                }
             }
-            let seen = LinkEvent::ChangeSeen {
-                run: run.to_string(),
-                commit,
-                at: now,
-            };
-            if let Err(why) = self.append_link(&seen) {
-                failure = Some(format!("関連の記録に書けません: {why}"));
+            if last_read {
+                self.here_done.insert(run);
             }
         }
         match failure {
@@ -2667,6 +2681,35 @@ mod tests {
         let c1 = commit_in(&rig.repo, "one");
         rig.feed.act(Intent::ClosePane(run.run.clone()));
         rig.until("closed", |v| v.runs.iter().all(|r| r.run.closed.is_some()));
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen(), [(run.run.to_string(), c1)]);
+        commit_in(&rig.repo, "two");
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen().len(), 1, "not after that");
+    }
+
+    /// AC-3 (Tasks): a last read of an ended この作業ツリー run that could
+    /// not be written is tried again at the next poll, once.
+    #[test]
+    fn links_ac3_a_here_runs_last_head_is_retried_after_a_failed_write() {
+        let mut rig = rig("links-ac3-here-retry", |repo, _, _| {
+            write_task(repo, "t-1", "one")
+        });
+        let run = run_t1(&mut rig, Isolation::Here);
+        let c1 = commit_in(&rig.repo, "one");
+        rig.feed.act(Intent::ClosePane(run.run.clone()));
+        rig.until("closed", |v| v.runs.iter().all(|r| r.run.closed.is_some()));
+        let mut lock = start::links_of(&rig.log).into_os_string();
+        lock.push(".lock");
+        let lock = PathBuf::from(lock);
+        let _ = fs::remove_file(&lock);
+        std::os::unix::fs::symlink(rig.root.join("elsewhere"), &lock).unwrap();
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        fs::remove_file(&lock).unwrap();
+        assert!(rig.seen().is_empty(), "the write failed");
         rig.feed.act(Intent::Refresh);
         rig.settle();
         assert_eq!(rig.seen(), [(run.run.to_string(), c1)]);

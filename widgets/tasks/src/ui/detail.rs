@@ -264,10 +264,11 @@ fn insert_related(
     groups.push(("実行", Tone::Accent, lines));
 
     let current = related.current().map(|v| v.no);
-    let lines = related
-        .versions
-        .iter()
-        .rev()
+    // The current version first, then the others newest first.
+    let mut versions: Vec<_> = related.versions.iter().collect();
+    versions.sort_by_key(|v| (Some(v.no) != current, std::cmp::Reverse(v.no)));
+    let lines = versions
+        .into_iter()
         .map(|v| {
             let place = runs
                 .iter()
@@ -1067,6 +1068,34 @@ mod tests {
         assert!(list.contains(&format!("{verify} · v1 · 合格")), "{list:?}");
         assert!(list.contains(&"検証 v2 未登録".to_owned()), "{list:?}");
         assert!(!list.contains(&"レビュー v2 未登録".to_owned()), "{list:?}");
+    }
+
+    /// The current version is listed first even when the head went back
+    /// to an earlier one (L1-6: versions, current first).
+    #[test]
+    fn links_ac4_a_head_back_on_v1_lists_v1_first() {
+        use tasks::task_links::LinkEvent;
+        let view = demo::view();
+        let mut events = demo::link_events(&view);
+        let (run, v1) = events
+            .iter()
+            .find_map(|e| match e {
+                LinkEvent::ChangeSeen { run, commit, .. } => Some((run.clone(), commit.clone())),
+                _ => None,
+            })
+            .unwrap();
+        events.push(LinkEvent::ChangeSeen {
+            run,
+            commit: v1,
+            at: Millis::MAX,
+        });
+        let (screen, _, _, t3) = linked_screen(Some(events));
+        assert_eq!(t3.current().map(|v| v.no), Some(1));
+        let list = shown(&screen);
+        let first = list.iter().position(|t| t.starts_with("v1")).unwrap();
+        let second = list.iter().position(|t| t.starts_with("v2")).unwrap();
+        assert!(list[first].starts_with("v1（現在） "), "{list:?}");
+        assert!(first < second, "{list:?}");
     }
 
     #[test]

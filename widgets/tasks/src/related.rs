@@ -356,7 +356,8 @@ pub fn parse_pr(input: &str, gh_repo: Option<&str>) -> Result<String, String> {
         return Err(refused());
     };
     let plain = |s: &str| !s.is_empty() && !s.contains(['?', '#', ' ']);
-    if !plain(host) || !plain(owner) || !plain(name) {
+    // A host with `@` carries credentials (`user:token@host`).
+    if !plain(host) || host.contains('@') || !plain(owner) || !plain(name) {
         return Err(refused());
     }
     let end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
@@ -829,6 +830,9 @@ mod tests {
             "https://github.com/o/n/pull/",
             "https://github.com/o/n/pull/45x",
             "https://github.com//n/pull/45",
+            // Credentials in the authority would be kept in the log.
+            "https://user:token@github.com/o/n/pull/45",
+            "https://token@github.com/o/n/pull/45",
         ] {
             let why = parse_pr(bad, o).unwrap_err();
             assert!(why.contains("PR の URL"), "{bad:?}: {why}");

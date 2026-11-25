@@ -301,13 +301,46 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The repository `path` is in: its git common dir, canonicalized (one for
+/// a repository and all its worktrees, another for each clone).
+fn repository_of(path: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    fs::canonicalize(text.trim_end_matches('\n')).ok()
+}
+
+/// The repository of the last `Repo` line of `key_dir`'s link log.
+fn key_repository(key_dir: &Path) -> Option<PathBuf> {
+    let path = read(&links_log(key_dir))
+        .ok()?
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            LinkEvent::Repo { path, .. } => Some(path),
+            _ => None,
+        })?;
+    repository_of(&path)
+}
+
 /// The task run `target` belongs to, over every key dir under `root`: the
 /// first rule that matches, newest run first:
-/// - (a) worktree: the run has a branch (a new worktree) and its workdir is
-///   the target's top level;
+/// - (a) worktree: the run has a branch (a new worktree), its workdir is
+///   the target's top level, and the target has no ref or the run's branch;
 /// - (b) branch: the target's ref is the run's branch;
 /// - (c) commit: the target's commit is one the run's key dir recorded for
 ///   the run (`ChangeSeen`).
+///
+/// (b) and (c) take only key dirs of the target's repository (the git
+/// common dir of their last `Repo`): another clone may hold the same
+/// branch name or commit.
 ///
 /// A run without a branch works in the repository itself, shared with
 /// every other session, so (a) never applies to it.
@@ -327,19 +360,32 @@ pub fn match_run(root: &Path, target: &Target) -> Option<Matched> {
             by,
         })
     };
-    let worktree =
-        |run: &RunRecord| run.branch.is_some() && same_path(&run.workdir, &target.toplevel);
     let head_ref = target
         .head_ref
         .as_deref()
         .map(|r| r.strip_prefix("refs/heads/").unwrap_or(r));
-    let branch = |run: &RunRecord| head_ref.is_some() && run.branch.as_deref() == head_ref;
+    // The work tree itself, or the run's own branch in it: another ref
+    // there (`HEAD~1`, `main`) is not the run's head.
+    let worktree = |run: &RunRecord| {
+        run.branch.is_some()
+            && same_path(&run.workdir, &target.toplevel)
+            && head_ref.is_none_or(|r| run.branch.as_deref() == Some(r))
+    };
+    let mine = repository_of(&target.toplevel);
+    let same_repo: Vec<&PathBuf> = dirs
+        .iter()
+        .filter(|dir| mine.is_some() && key_repository(dir) == mine)
+        .collect();
+    let in_repo = |run: &RunRecord| same_repo.contains(&&run.key_dir);
+    let branch =
+        |run: &RunRecord| head_ref.is_some() && run.branch.as_deref() == head_ref && in_repo(run);
     found(MatchedBy::Worktree, &worktree)
         .or_else(|| found(MatchedBy::Branch, &branch))
         .or_else(|| {
             let sha = target.head_sha.as_deref()?;
-            let seen: Vec<(PathBuf, String)> = dirs
+            let seen: Vec<(PathBuf, String)> = same_repo
                 .iter()
+                .copied()
                 .flat_map(|dir| {
                     read(&links_log(dir))
                         .unwrap_or_default()
@@ -851,6 +897,17 @@ mod tests {
         fs::create_dir_all(&wt7).unwrap();
         let repo = root.join("repo");
         fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        for dir in [&one, &two] {
+            append(
+                &links_log(dir),
+                &LinkEvent::Repo {
+                    path: repo.clone(),
+                    at: 1,
+                },
+            )
+            .unwrap();
+        }
         run_started(
             &one,
             "run-5",
@@ -885,9 +942,12 @@ mod tests {
         let m = match_run(&root, &target(&via_dots, None, None)).unwrap();
         assert_eq!((m.run.run.as_str(), m.by), ("run-5", MatchedBy::Worktree));
         assert_eq!(m.run.key_dir, one);
-        // (a) before (b): run-5's worktree on run-7's branch.
-        let m = match_run(&root, &target(&via_dots, Some("task-run-7"), None)).unwrap();
-        assert_eq!((m.run.run.as_str(), m.by), ("run-5", MatchedBy::Worktree));
+        // Not (a): run-5's worktree on run-7's branch is not run-5's head
+        // (and this worktree is no git work tree, so no other rule).
+        assert_eq!(
+            match_run(&root, &target(&via_dots, Some("task-run-7"), None)),
+            None
+        );
         // (b): the branch, as a ref name or a full ref.
         let repo = root.join("repo");
         let m = match_run(&root, &target(&repo, Some("task-run-7"), None)).unwrap();
@@ -958,6 +1018,94 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.test"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// A worktree run's own work tree on another ref (`HEAD~1`) is not the
+    /// run's head, so the worktree rule does not take it; a ref or a commit
+    /// of another clone with the same branch name or SHA matches nothing.
+    #[test]
+    fn links_ac3_match_run_keeps_to_the_runs_head_and_repository() {
+        let root = scratch("scope");
+        let a = root.join("a");
+        fs::create_dir_all(&a).unwrap();
+        git(&a, &["init", "-q", "-b", "main"]);
+        git(&a, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let wt = root.join("a-wt");
+        git(
+            &a,
+            &["worktree", "add", "-qb", "task-run-5", wt.to_str().unwrap()],
+        );
+        git(&wt, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let sha = git(&wt, &["rev-parse", "HEAD"]);
+        let b = root.join("b");
+        git(
+            &root,
+            &["clone", "-q", a.to_str().unwrap(), b.to_str().unwrap()],
+        );
+        git(&b, &["branch", "-q", "task-run-5", &sha]);
+        let dir = root.join("tasks/a-1");
+        run_started(
+            &dir,
+            "run-5",
+            r#"{"local":"t-1"}"#,
+            &wt,
+            Some("task-run-5"),
+            5,
+        );
+        for event in [
+            LinkEvent::Repo {
+                path: a.clone(),
+                at: 1,
+            },
+            LinkEvent::ChangeSeen {
+                run: "run-5".into(),
+                commit: sha.clone(),
+                at: 6,
+            },
+        ] {
+            append(&links_log(&dir), &event).unwrap();
+        }
+        let tasks = root.join("tasks");
+        let target = |toplevel: &Path, head_ref: Option<&str>, head_sha: Option<&str>| Target {
+            toplevel: toplevel.to_path_buf(),
+            head_ref: head_ref.map(str::to_owned),
+            head_sha: head_sha.map(str::to_owned),
+        };
+        let by = |t: Target| match_run(&tasks, &t).map(|m| m.by);
+        assert_eq!(by(target(&wt, None, Some(&sha))), Some(MatchedBy::Worktree));
+        assert_eq!(
+            by(target(&wt, Some("task-run-5"), Some(&sha))),
+            Some(MatchedBy::Worktree)
+        );
+        assert_eq!(by(target(&wt, Some("HEAD~1"), Some("c1c1"))), None, "F3");
+        assert_eq!(
+            by(target(&a, Some("task-run-5"), Some(&sha))),
+            Some(MatchedBy::Branch)
+        );
+        assert_eq!(
+            by(target(&a, Some("main"), Some(&sha))),
+            Some(MatchedBy::Commit)
+        );
+        assert_eq!(
+            by(target(&b, Some("task-run-5"), Some(&sha))),
+            None,
+            "F5 branch"
+        );
+        assert_eq!(by(target(&b, Some("main"), Some(&sha))), None, "F5 commit");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn links_ac3_a_linked_session_and_its_outcome_go_to_the_runs_key_dir() {
         let (root, one, two) = fixture("link");
@@ -982,8 +1130,16 @@ mod tests {
         )
         .unwrap();
         let task = key(r#"{"github":{"repo":"o/n","number":12}}"#);
+        // The fixture's `Repo` lines aside.
+        let written = |dir: &Path| -> Vec<LinkEvent> {
+            read(&links_log(dir))
+                .unwrap()
+                .into_iter()
+                .filter(|e| !matches!(e, LinkEvent::Repo { .. }))
+                .collect()
+        };
         assert_eq!(
-            read(&links_log(&one)).unwrap(),
+            written(&one),
             vec![
                 LinkEvent::SessionLinked {
                     kind: SessionKind::Verify,
@@ -1004,7 +1160,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(read(&links_log(&two)).unwrap(), Vec::new());
+        assert_eq!(written(&two), Vec::new());
         fs::remove_dir_all(&root).unwrap();
     }
 

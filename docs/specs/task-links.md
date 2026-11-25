@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | slug | task-links |
-| status | proposed (2026-11-26); design only, nothing built; no owner sign-off |
+| status | built on `factory/task-links` (2026-11-26), not merged; no owner sign-off. L2 rows marked "as built" say where the code differs from the design |
 | owner | simota |
 | as-of | 2026-11-26 (HEAD 765da968) |
 | crates | `widgets/tasks`, `widgets/review`, `widgets/verify` (each its own crate outside the workspace) |
@@ -94,9 +94,10 @@ At session creation, right after its log is created (Review: `widgets/review/src
 
 `task_links::match_run(tasks_root, &target)` scans every key dir's `runs.jsonl` (and `links.jsonl` for rule c), first rule that matches, newest run first:
 
-- (a) `worktree`: the run has a branch and its `workdir` is the target's `toplevel` (compared after `fs::canonicalize` when both exist, else as written).
+- (a) `worktree`: the run has a branch, its `workdir` is the target's `toplevel` (compared after `fs::canonicalize` when both exist, else as written), and the target has no `head_ref` or the run's branch as its `head_ref`: another ref in the run's worktree (`HEAD~1`, `main`) is not the run's head.
 - (b) `branch`: `head_ref` is the run's `branch` (`task-run-…`, unique by construction).
 - (c) `commit`: `head_sha` is a commit that key dir's link log records for the run (`ChangeSeen`).
+- (b) and (c) take only key dirs of the target's repository: the git common dir (`git rev-parse --path-format=absolute --git-common-dir`, canonicalized) of the key dir's last `Repo` path equals the target's. Another clone or fork may hold the same branch name or commit.
 
 A この作業ツリー run's `workdir` is the repository itself, shared with every other session on it, so rule (a) never applies to it; it is linked only by (c).
 
@@ -340,7 +341,7 @@ The fold reads no clock, no git and no file, so AC-2 and AC-4 are tests over eve
 
 ### L2-4. Tasks: where the writes go (U2)
 
-- `live.rs` worker: on start, `Repo` (L1-1); the change poll (L1-3) beside the existing 2 s poll (`POLL_MS`, `widgets/tasks/src/model/types.rs`), gated by `CHANGE_POLL_MS`; `LinkScan` + `fold` into `View.related: BTreeMap<TaskRef, Related>` (a new field of `View`, `widgets/tasks/src/ui/mod.rs:52`); jobs for the new intents.
+- `live.rs` worker: on start, `Repo` (L1-1); the change poll (L1-3) beside the existing 2 s poll (`POLL_MS`, `widgets/tasks/src/model/types.rs`), gated by `CHANGE_POLL_MS`; `LinkScan` + `fold` into `BTreeMap<TaskRef, Related>`, handed to the UI by `Feed::related()` (as built: not a field of `View`); jobs for the new intents.
 - `live/start.rs`: `ChangeBase` after the work tree exists and `RunStarted` is logged. Its failure is a notice; the run goes on.
 - New intents in `ui/mod.rs`: `OpenSession { kind: SessionKind, session: String }`, `AddLink { task: TaskRef, input: String }`, `RemoveLink { task: TaskRef, id: String }`. `LiveFeed::with` gains a `launcher: Box<dyn Launcher + Send>` parameter (`sibling::System` in `start`, a recording fake in tests).
 - `ui/detail.rs`: `insert` gains a `related: Option<&Related>` parameter and draws L1-6. `ui/forms.rs`: `Form::add_link(task)`. `ui/mod.rs`: `a` key, `names` learns `code:<key>:<path>` (split at the first `:` after `code:`, L1-7). `demo.rs`: one demo task carries the L0 picture (v2 current, review 承認 on v2, verify 合格 on v1), so `--demo --select=<it> --snapshot` shows the section.
@@ -348,7 +349,7 @@ The fold reads no clock, no git and no file, so AC-2 and AC-4 are tests over eve
 ### L2-5. Review and Verify: where the writes go (U3, U4)
 
 - `live/runner.rs`: after `Store::create`, the match and `SessionLinked` (L1-4); the origin kept with the running session (set by the match, or `find_origin` on `Resume` / `ExtendStored`); after each `append_all`, `SessionOutcome` when `(decision, closed)` changed. The tasks root is injectable (the runner's config), `task_links::default_root()` in production.
-- `live.rs`: `Snapshot` gains `origin: Option<task_links::Origin>`. `main.rs`: the `--session` view finds its origin once with `find_origin`.
+- `live.rs`: Review's `Snapshot` gains `origin: Option<task_links::Origin>`; Verify's origin travels as `Update::Origin` on its own channel (as built). `main.rs`: the `--session` view finds its origin once with `find_origin`.
 - UI: 「元のタスクを開く」 (L1-7) sends a new command/intent that calls `sibling::System.launch(TASKS, tasks_args(origin)?)`; its notice on failure.
 
 ## L3: Acceptance criteria

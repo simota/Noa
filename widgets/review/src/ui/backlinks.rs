@@ -18,6 +18,11 @@ use crate::session::runner::handoff;
 /// The shortest time between two reads of the link store.
 pub(super) const REREAD: Duration = Duration::from_secs(1);
 
+/// How often the records the links point at are looked for again while
+/// the store itself is unchanged (a task file or capture removed or
+/// restored meanwhile).
+pub(super) const RECHECK: Duration = Duration::from_secs(5);
+
 /// What the card says when the review has no task.
 pub(super) const NO_TASK: &str = "関連するタスクはありません";
 
@@ -139,6 +144,9 @@ pub(super) struct Back {
     /// it has none, each store looked through for its links.
     stamps: BTreeMap<PathBuf, Stamp>,
     read_at: Instant,
+    /// The store as last read, and when presence was last looked up.
+    set: Option<LinkSet>,
+    checked_at: Instant,
     links: BackLinks,
     pub rows: Rows,
 }
@@ -176,6 +184,8 @@ impl Back {
             place,
             stamps: BTreeMap::new(),
             read_at: Instant::now(),
+            set: None,
+            checked_at: Instant::now(),
             links: BackLinks::default(),
             rows: Rows::default(),
         };
@@ -192,6 +202,7 @@ impl Back {
     #[cfg(test)]
     pub(super) fn expire(&mut self) {
         self.read_at = Instant::now() - REREAD;
+        self.checked_at = Instant::now() - RECHECK;
     }
 
     /// Reads the store again when [`REREAD`] has passed and it changed;
@@ -204,15 +215,23 @@ impl Back {
     }
 
     /// Reads the store when its file changed since the last read; whether
-    /// the rows changed. Presence (git, stat) is looked at only when the
-    /// links did.
+    /// the rows changed. Presence (git, stat) is looked at again when the
+    /// links changed, else once [`RECHECK`] has passed.
     fn read(&mut self) -> bool {
         self.read_at = Instant::now();
         let set = match &self.place {
             Some(place) => {
                 let log = place.log.clone();
                 if !self.changed(&log) {
-                    return false;
+                    if self.checked_at.elapsed() < RECHECK {
+                        return false;
+                    }
+                    let Some(set) = self.set.take() else {
+                        return false;
+                    };
+                    let changed = self.show(&set);
+                    self.set = Some(set);
+                    return changed;
                 }
                 // An unreadable store keeps what was shown.
                 let Ok(set) = links::replay(&log) else {
@@ -228,7 +247,9 @@ impl Back {
                 None => return false,
             },
         };
-        self.show(&set)
+        let changed = self.show(&set);
+        self.set = Some(set);
+        changed
     }
 
     /// Whether `log` changed since it was last read; notes it as read.
@@ -261,10 +282,8 @@ impl Back {
 
     /// Shows the links `set` holds; whether the rows changed.
     fn show(&mut self, set: &LinkSet) -> bool {
+        self.checked_at = Instant::now();
         let links = links::backlinks(set, &self.record);
-        if links == self.links {
-            return false;
-        }
         let repo = self.place.as_ref().and_then(|p| p.repo.as_deref());
         let presence = |node: &Node| match (&self.data, repo) {
             (Some(data), Some(repo)) => links::presence(set, node, data, repo),

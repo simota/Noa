@@ -14,6 +14,11 @@ use verify::model::types::Session;
 /// screen (as a stored view re-reads its log).
 const RECHECK: Duration = Duration::from_secs(1);
 
+/// How often the records the links point at are looked for again while
+/// the store itself is unchanged (a task file or capture removed or
+/// restored meanwhile).
+const PRESENCE_RECHECK: Duration = Duration::from_secs(5);
+
 /// The text of a row with no link to a task.
 pub(super) const NO_TASK: &str = "関連するタスクはありません";
 
@@ -139,6 +144,10 @@ fn read_rows(set: &LinkSet, id: &str, data: &Path, repo: &Path) -> Vec<Row> {
 struct Shown {
     session: String,
     stamp: Option<(u64, SystemTime)>,
+    /// The store as read (`None`: none, or unreadable), and when presence
+    /// was last looked up in it.
+    set: Option<LinkSet>,
+    looked: Instant,
     rows: Vec<Row>,
 }
 
@@ -215,6 +224,8 @@ impl Reader {
             let next = Shown {
                 session: id.to_owned(),
                 stamp: None,
+                set: None,
+                looked: now,
                 rows: Vec::new(),
             };
             return self.replace(next);
@@ -226,20 +237,41 @@ impl Reader {
             && shown.session == id
             && shown.stamp == stamp
         {
-            return false;
+            if now.duration_since(shown.looked) < PRESENCE_RECHECK {
+                return false;
+            }
+            let Some(set) = shown.set.clone() else {
+                return false;
+            };
+            let rows = read_rows(&set, id, data, repo);
+            return self.replace(Shown {
+                session: id.to_owned(),
+                stamp,
+                set: Some(set),
+                looked: now,
+                rows,
+            });
         }
-        let rows = match links::replay(&log) {
-            Ok(set) => read_rows(&set, id, data, repo),
-            Err(e) => vec![Row {
-                kind: "タスク",
-                badge: None,
-                text: format!("リンクを読めません: {e}"),
-                open: None,
-            }],
+        let (set, rows) = match links::replay(&log) {
+            Ok(set) => {
+                let rows = read_rows(&set, id, data, repo);
+                (Some(set), rows)
+            }
+            Err(e) => (
+                None,
+                vec![Row {
+                    kind: "タスク",
+                    badge: None,
+                    text: format!("リンクを読めません: {e}"),
+                    open: None,
+                }],
+            ),
         };
         self.replace(Shown {
             session: id.to_owned(),
             stamp,
+            set,
+            looked: now,
             rows,
         })
     }

@@ -121,6 +121,7 @@ fn run_info(
         branch: branch.map(str::to_owned),
         head,
         outcome: None,
+        last: None,
     }
 }
 
@@ -225,27 +226,46 @@ pub fn produced(set: &LinkSet, run: &str, workdir: &Path, since: Option<&str>) -
         (None, Some(since)) => Some(since.to_owned()),
         _ => info.head,
     };
+    let mut commits = Vec::new();
     if let Some(base) = base {
         let range = format!("{base}..HEAD");
         let cap = format!("--max-count={COMMITS_CAP}");
         if let Ok(out) = git(workdir, &["rev-list", "--reverse", &cap, &range]) {
-            for sha in String::from_utf8_lossy(&out).split_whitespace() {
-                edits.push(link(ChangeId::Commit(sha.to_owned())));
-            }
+            commits = String::from_utf8_lossy(&out)
+                .split_whitespace()
+                .map(|sha| ChangeId::Commit(sha.to_owned()))
+                .collect();
         }
     }
+    edits.extend(commits.iter().cloned().map(&link));
     // A clean tree is its HEAD, already listed above when the run made it;
     // a state with no id (too large, nested changes) gets no link.
-    if let Ok(change @ ChangeId::Snapshot(_)) = links::snapshot_id(workdir) {
+    let last = match links::snapshot_id(workdir) {
+        Ok(change @ ChangeId::Snapshot(_)) => {
+            edits.push(Edit::Observe {
+                node: Node::Change(change.clone()),
+                info: Info {
+                    workdir: Some(workdir.to_owned()),
+                    head: change.head().map(str::to_owned),
+                    ..Info::default()
+                },
+            });
+            edits.push(link(change.clone()));
+            Some(change)
+        }
+        Ok(head) if commits.contains(&head) => Some(head),
+        _ => None,
+    };
+    // Where the tree is now, also when its link was made before (a tree
+    // back at its commit after a snapshot of it).
+    if let Some(last) = last {
         edits.push(Edit::Observe {
-            node: Node::Change(change.clone()),
+            node,
             info: Info {
-                workdir: Some(workdir.to_owned()),
-                head: change.head().map(str::to_owned),
+                last: Some(last),
                 ..Info::default()
             },
         });
-        edits.push(link(change));
     }
     edits
 }

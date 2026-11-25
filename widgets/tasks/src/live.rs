@@ -2404,6 +2404,29 @@ mod tests {
         });
         assert_eq!(related_of(&seen).runs[0].run, run.run.as_str());
 
+        // Edits on v1 are its snapshot; discarded, v1 is current again
+        // although its link was made before the snapshot's.
+        fs::write(run.workdir.join("draft.txt"), "draft\n").unwrap();
+        rig.feed.watch(None);
+        rig.feed.watch(Some(&t1));
+        related_until(&mut rig.feed, "the snapshot on v1 current", |r| {
+            related_of(r).runs.first().is_some_and(|e| {
+                e.changes
+                    .iter()
+                    .any(|c| matches!(c.change, links::ChangeId::Snapshot(_)) && c.current)
+            })
+        });
+        fs::remove_file(run.workdir.join("draft.txt")).unwrap();
+        rig.feed.watch(None);
+        rig.feed.watch(Some(&t1));
+        related_until(&mut rig.feed, "v1 current again", |r| {
+            related_of(r).runs.first().is_some_and(|e| {
+                e.changes
+                    .iter()
+                    .any(|c| c.change.as_str() == v1 && c.current)
+            })
+        });
+
         // The detail closed; the run ends after a second commit: recorded
         // as it ends, not only when a detail is read.
         rig.feed.watch(None);

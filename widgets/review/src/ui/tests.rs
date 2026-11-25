@@ -3020,6 +3020,30 @@ mod back {
     }
 
     #[test]
+    fn ac4_a_task_removed_while_shown_turns_missing_and_back() {
+        let f = fixture("task-gone", true);
+        hand_off(&f);
+        let (channel, _link) = Channel::fake();
+        let mut screen = stored_ready(channel, &f.dir);
+        assert!(card_labels(&screen).iter().any(|l| l == "Fix the UI"));
+        // The task file goes; the link store does not change.
+        let file = f.repo.join(".noa/tasks/t-1.md");
+        std::fs::remove_file(&file).unwrap();
+        let mut text = TextStore::new(Default::default());
+        screen.back.as_mut().unwrap().expire();
+        screen.poll_live(&mut text);
+        let labels = card_labels(&screen);
+        assert!(
+            labels.iter().any(|l| l.starts_with("記録が見つからない（")),
+            "{labels:?}"
+        );
+        std::fs::write(&file, "# Fix the UI\n").unwrap();
+        screen.back.as_mut().unwrap().expire();
+        screen.poll_live(&mut text);
+        assert!(card_labels(&screen).iter().any(|l| l == "Fix the UI"));
+    }
+
+    #[test]
     fn ac4_a_review_with_no_link_says_it_has_no_task_and_follows_a_later_one() {
         let f = fixture("later", true);
         let (channel, _link) = Channel::fake();

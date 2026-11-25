@@ -3083,6 +3083,31 @@ mod links_card {
     }
 
     #[test]
+    fn ac04_a_task_removed_while_shown_turns_missing_and_back() {
+        let rig = Rig::new("links-task-gone");
+        rig.write(&[rig.link(
+            rig.me(),
+            Node::Task(TaskKey::Local("t-1".into())),
+            Rel::About,
+        )]);
+        let mut reader =
+            backlinks::Reader::new(Some(rig.data.join("links")), Some(rig.data.clone()));
+        let t0 = std::time::Instant::now();
+        assert!(reader.refresh(&rig.session, t0));
+        assert_eq!(reader.rows(&rig.session)[0].text, "t-1");
+        // The task file goes; the store does not change.
+        let file = rig.repo.join(".noa/tasks/t-1.md");
+        std::fs::remove_file(&file).unwrap();
+        let later = t0 + std::time::Duration::from_secs(6);
+        assert!(reader.refresh(&rig.session, later));
+        let text = reader.rows(&rig.session)[0].text.clone();
+        assert!(text.starts_with("記録が見つからない（"), "{text}");
+        std::fs::write(&file, "# Fix the bug\n").unwrap();
+        assert!(reader.refresh(&rig.session, later + std::time::Duration::from_secs(6)));
+        assert_eq!(reader.rows(&rig.session)[0].text, "t-1");
+    }
+
+    #[test]
     fn a_stored_view_reads_the_links_when_shown() {
         let rig = Rig::new("links-stored");
         let root = rig.data.join("verifications");

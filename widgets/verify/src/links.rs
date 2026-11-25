@@ -261,6 +261,11 @@ pub struct Info {
     /// A review's or verification's verdict label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// A run: the change its work tree was last read at. `Produced` links
+    /// are made once, so a tree that comes back to a change it was at
+    /// before (edits discarded) is seen only here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<ChangeId>,
 }
 
 impl Info {
@@ -283,6 +288,7 @@ impl Info {
             take(&mut self.branch, &newer.branch),
             take(&mut self.head, &newer.head),
             take(&mut self.outcome, &newer.outcome),
+            take(&mut self.last, &newer.last),
         ];
         changed.contains(&true)
     }
@@ -1264,9 +1270,9 @@ pub fn task_current(set: &LinkSet, task: &TaskKey, repo: &Path) -> Option<Curren
 ///    fails, counts as a tip (nothing places it under another).
 /// 2. One tip: that commit. Several (a rebase, history that split): the
 ///    tip of the latest recorded change on any of them.
-/// 3. Of that commit and the snapshots on it, the latest recorded (work
-///    restored to the commit after a snapshot of it is recorded after the
-///    snapshot).
+/// 3. Of that commit and the snapshots on it, the one the run's tree was
+///    last read at ([`Info::last`]) when it is one of them, else the
+///    latest recorded.
 ///
 /// `None` when the run produced nothing recorded.
 fn last_produced(set: &LinkSet, run: &Node, repo: &Path) -> Option<ChangeId> {
@@ -1283,6 +1289,12 @@ fn last_produced(set: &LinkSet, run: &Node, repo: &Path) -> Option<ChangeId> {
         .rev()
         .filter_map(|c| c.head())
         .find(|head| tips.contains(head))?;
+    if let Some(last) = set.info_of(run).last
+        && last.head() == Some(tip)
+        && produced.contains(&&last)
+    {
+        return Some(last);
+    }
     produced
         .iter()
         .rev()
@@ -4340,6 +4352,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(current(), Some(at("run-1", &later)));
+    }
+
+    #[test]
+    fn work_back_at_a_commit_linked_before_its_snapshot_leaves_the_commit_current() {
+        let tmp = Tmp::new("back-at");
+        let log = log_in(&tmp);
+        let c = sha(3);
+        let snap = ChangeId::Snapshot(format!("snap-{c}-00000000000000aa"));
+        // C recorded, then a snapshot S on C, then the edits discarded: C
+        // is linked already, so only the run's `last` says so.
+        append(
+            &log,
+            &[
+                auto(Node::Task(task("t-1")), run("run-1"), Rel::Ran),
+                auto(run("run-1"), commit_node(&c), Rel::Produced),
+                auto(run("run-1"), Node::Change(snap.clone()), Rel::Produced),
+            ],
+            1,
+        )
+        .unwrap();
+        let current = || task_current(&replay(&log).unwrap(), &task("t-1"), tmp.path());
+        assert_eq!(current(), Some(at("run-1", &snap)));
+        let last = |change: &ChangeId, at: Millis| {
+            append(
+                &log,
+                &[observe(
+                    run("run-1"),
+                    Info {
+                        last: Some(change.clone()),
+                        ..Info::default()
+                    },
+                )],
+                at,
+            )
+            .unwrap();
+        };
+        last(&ChangeId::Commit(c.clone()), 2);
+        assert_eq!(current(), Some(at("run-1", &ChangeId::Commit(c.clone()))));
+        last(&snap, 3);
+        assert_eq!(current(), Some(at("run-1", &snap)));
+        // A `last` the run has no link to is not taken.
+        last(&ChangeId::Commit(sha(9)), 4);
+        assert_eq!(current(), Some(at("run-1", &snap)));
     }
 
     #[test]

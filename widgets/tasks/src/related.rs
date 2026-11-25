@@ -170,7 +170,16 @@ pub fn fold(runs: &[Run], events: &[LinkEvent]) -> BTreeMap<TaskRef, Related> {
             .push(run.run.clone());
     }
     let by_id: HashMap<&str, &Run> = runs.iter().map(|r| (r.run.as_str(), r)).collect();
+    // Each run's base (the first `ChangeBase`), wherever it is in the log:
+    // one written after a session on it still keeps it out of the versions.
     let mut bases: HashMap<&str, &str> = HashMap::new();
+    for event in events {
+        if let LinkEvent::ChangeBase { run, commit, .. } = event
+            && by_id.contains_key(run.as_str())
+        {
+            bases.entry(run.as_str()).or_insert(commit.as_str());
+        }
+    }
     // Each linked session's task, by (kind, session).
     let mut linked: HashMap<(SessionKind, &str), TaskRef> = HashMap::new();
     // Every (kind, session) whose first `SessionLinked` was taken, removed
@@ -179,11 +188,6 @@ pub fn fold(runs: &[Run], events: &[LinkEvent]) -> BTreeMap<TaskRef, Related> {
     // 3. The log in file order.
     for event in events {
         match event {
-            LinkEvent::ChangeBase { run, commit, .. } => {
-                if by_id.contains_key(run.as_str()) {
-                    bases.entry(run.as_str()).or_insert(commit.as_str());
-                }
-            }
             LinkEvent::ChangeSeen { run, commit, at } => {
                 let Some(found) = by_id.get(run.as_str()) else {
                     continue;
@@ -282,7 +286,9 @@ pub fn fold(runs: &[Run], events: &[LinkEvent]) -> BTreeMap<TaskRef, Related> {
                     at: *at,
                 });
             }
-            LinkEvent::Repo { .. } | LinkEvent::LinkRemoved { .. } => {}
+            LinkEvent::Repo { .. }
+            | LinkEvent::ChangeBase { .. }
+            | LinkEvent::LinkRemoved { .. } => {}
         }
     }
     out
@@ -692,6 +698,38 @@ mod tests {
         ));
         let r = &fold(&runs, &events)[&t];
         assert_eq!(r.current().map(|v| v.no), Some(3));
+    }
+
+    /// A base recorded after a session on it (a run from before the link
+    /// log, linked before Tasks polled it) is still the base, never v1.
+    #[test]
+    fn links_ac4_a_base_written_after_a_session_on_it_is_no_version() {
+        let t = local("t-1");
+        let runs = vec![run("run-5", &t, 1, true)];
+        let events = vec![
+            linked(
+                SessionKind::Verify,
+                "ver-1",
+                &t,
+                "run-5",
+                Some(&sha('0')),
+                false,
+                2,
+            ),
+            base("run-5", &sha('0'), 3),
+            seen("run-5", &sha('1'), 4),
+        ];
+        let r = &fold(&runs, &events)[&t];
+        assert_eq!(
+            r.verifications[0].target,
+            TargetVersion::Base { uncommitted: false }
+        );
+        assert_eq!(r.versions.len(), 1, "{r:#?}");
+        assert_eq!(
+            (r.versions[0].no, r.versions[0].commit.as_str()),
+            (1, sha('1').as_str())
+        );
+        assert_eq!(r.current().map(|v| v.no), Some(1));
     }
 
     #[test]

@@ -75,7 +75,7 @@ Review and Verify read `runs.jsonl` too, but only its `RunStarted` lines and onl
 - Change poll, on the live feed's worker, on start, every `CHANGE_POLL_MS = 10_000` and on 再取得:
   - Runs with a branch (新しい worktree): one `git -C <repo> for-each-ref --format=%(refname:lstrip=2)%00%(objectname) refs/heads/task-run-*` (branch names are `task-<run-id>`, `worktree::branch_for`, `widgets/tasks/src/worktree.rs:78`). The branch ref lives in the repository, not in the worktree, so it is still read after the worktree is removed; a deleted branch stops new versions and keeps the recorded ones.
   - Runs without a branch (この作業ツリー): `git -C <workdir> rev-parse HEAD` while the run is `Starting` or `Alive`, and once more after it turns `Gone`. "Live" is noted at every look of the worker (2 s), not only at the change poll, so a run that commits and ends between two polls still gets its last head; a run this worker never saw live (it ended while no Tasks window was open) gets no last read, since its end time is not known.
-  - A head that differs from the run's last recorded commit (its `ChangeSeen`, else its `ChangeBase`) is appended as `ChangeSeen { run, commit }`.
+  - A head that differs from the run's last recorded commit (taken as the fold takes the head: its last `ChangeSeen`, or a commit one of its sessions named first, else its `ChangeBase`) is appended as `ChangeSeen { run, commit }`, so a reset from a version a session named first back to an earlier one is seen.
 - Version (L2-3 gives the exact fold): the versions of a task are the distinct commits the link log names for the task's runs (`ChangeSeen`, and the `commit` of a `SessionLinked`, so whatever a review or verification targeted is always a version), excluding each run's base, numbered v1, v2, … in the order of their first line in the log. The current version is the one the head was last seen on: the last `ChangeSeen` of the task's runs, or a version a `SessionLinked` names first; a head seen back on a version keeps its number and makes it current again, and a head back on the run's base leaves no current version. Versions span all runs of a task (a retry run's first commit after v2 is v3).
 - A version is a commit, not a snapshot of uncommitted files. A session that checked uncommitted changes on top of commit C is shown as "on vC + 未コミット" and does not count as checking vC (L1-5). Whether it did is read with its snapshot (Review: `uncommitted` in its manifest, from `git status` before a last look at HEAD; Verify: its captured patch and untracked files), never later, when the run may have committed them.
 
@@ -97,7 +97,7 @@ At session creation, right after its log is created (Review: `widgets/review/src
 - (a) `worktree`: the run has a branch, its `workdir` is the target's `toplevel` (compared after `fs::canonicalize` when both exist, else as written), and the target has no `head_ref` or the run's branch as its `head_ref`: another ref in the run's worktree (`HEAD~1`, `main`) is not the run's head.
 - (b) `branch`: `head_ref` is the run's `branch` (`task-run-…`, unique by construction).
 - (c) `commit`: `head_sha` is a commit that key dir's link log records for the run (`ChangeSeen`).
-- (b) and (c) take only key dirs of the target's repository: the git common dir (`git rev-parse --path-format=absolute --git-common-dir`, canonicalized) of the key dir's last `Repo` path equals the target's. Another clone or fork may hold the same branch name or commit.
+- (b) and (c) take only key dirs of the target's repository: the git common dir (`git rev-parse --path-format=absolute --git-common-dir` with `GIT_*` removed from the environment, canonicalized) of the key dir's last `Repo` path equals the target's. Another clone or fork may hold the same branch name or commit.
 
 A この作業ツリー run's `workdir` is the repository itself, shared with every other session on it, so rule (a) never applies to it; it is linked only by (c).
 
@@ -330,7 +330,7 @@ All are `Debug, Clone, PartialEq, Eq` (`Serialize, Deserialize` on the `task_lin
 1. Removed = the set of `(task, id)` of every `LinkRemoved` in the log (ids are never reused, so the order does not matter).
 2. Runs from `runs.jsonl` grouped by task, newest first.
 3. Walk the link log in file order; a `TaskKey` that does not deserialize into a `TaskRef`, or a run id not in `runs.jsonl`, skips the line:
-   - `ChangeBase { run, commit }`: the run's base (first one wins).
+   - `ChangeBase { run, commit }`: the run's base (first one wins), collected in a pass before the walk, so a base written after a session on that commit (a run from before the link log, linked before Tasks polled it) still keeps it out of the versions.
    - `ChangeSeen { run, commit }`: for the run's task, if `commit` is not the run's base and not already a version of the task, push `Version { no: len + 1, commit, run }`; the task's `head` becomes that version's number (`None` when `commit` is the base).
    - `SessionLinked` not in Removed, first per `(kind, session)`: if `commit` is set, not the run's base and not yet a version of `task`, push it as a version (as above) and make it the `head`; then push a `Checked` with `TargetVersion` per L1-5 and `Outcome::Running`.
    - `SessionOutcome` of a linked, not removed session: `decision` set → `Decided(name)`; else `closed` → `EndedWithout`; else `Running` (the last line wins).

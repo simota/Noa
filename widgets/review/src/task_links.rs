@@ -303,13 +303,19 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// The repository `path` is in: its git common dir, canonicalized (one for
 /// a repository and all its worktrees, another for each clone).
+/// `GIT_*` from the environment is dropped, so git finds the repository
+/// from `path` alone (as Tasks' and the captures' git calls do).
 fn repository_of(path: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(path)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-        .ok()?;
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    for (name, _) in std::env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            cmd.env_remove(name);
+        }
+    }
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1103,6 +1109,50 @@ mod tests {
             "F5 branch"
         );
         assert_eq!(by(target(&b, Some("main"), Some(&sha))), None, "F5 commit");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Run by `links_ac3_repository_of_ignores_an_inherited_git_dir` in a
+    /// child process whose environment holds `GIT_DIR`.
+    #[test]
+    #[ignore = "run by links_ac3_repository_of_ignores_an_inherited_git_dir"]
+    fn repository_of_child_with_git_dir() {
+        let path = |name: &str| PathBuf::from(std::env::var_os(name).unwrap());
+        let (a, b) = (path("TASK_LINKS_A"), path("TASK_LINKS_B"));
+        assert_ne!(repository_of(&a), repository_of(&b));
+        assert_eq!(
+            repository_of(&b),
+            Some(fs::canonicalize(b.join(".git")).unwrap())
+        );
+    }
+
+    /// A Review or Verify started with `GIT_DIR` set (to clone A) still
+    /// tells clone B from A: git is asked about the path alone.
+    #[test]
+    fn links_ac3_repository_of_ignores_an_inherited_git_dir() {
+        let root = scratch("git-env");
+        let (a, b) = (root.join("a"), root.join("b"));
+        for repo in [&a, &b] {
+            fs::create_dir_all(repo).unwrap();
+            git(repo, &["init", "-q", "-b", "main"]);
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "repository_of_child_with_git_dir",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("GIT_DIR", a.join(".git"))
+            .env("TASK_LINKS_A", &a)
+            .env("TASK_LINKS_B", &b)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("1 passed"),
+            "{text}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 

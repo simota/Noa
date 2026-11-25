@@ -507,17 +507,49 @@ fn task_key(task: &TaskRef) -> TaskKey {
     TaskKey(serde_json::to_value(task).expect("a task ref is JSON"))
 }
 
-/// The commit each run's head was last recorded at in `events`: its last
-/// `ChangeSeen`, else its first `ChangeBase`.
-fn recorded_heads(events: &[LinkEvent]) -> HashMap<&str, &str> {
-    let mut heads: HashMap<&str, &str> = HashMap::new();
+/// The commit each run's head was last recorded at in `events`, as
+/// `related::fold` takes the head: its last `ChangeSeen`, or a commit one of
+/// its sessions named first (a new version of the run's task), else its
+/// first `ChangeBase`.
+fn recorded_heads<'a>(runs: &[Run], events: &'a [LinkEvent]) -> HashMap<&'a str, &'a str> {
+    let task_of: HashMap<&str, &TaskRef> = runs.iter().map(|r| (r.run.as_str(), &r.task)).collect();
+    let mut bases: HashMap<&str, &str> = HashMap::new();
+    for event in events {
+        if let LinkEvent::ChangeBase { run, commit, .. } = event {
+            bases.entry(run.as_str()).or_insert(commit.as_str());
+        }
+    }
+    let mut heads: HashMap<&str, &str> = bases.clone();
+    let mut named: HashSet<(&TaskRef, &str)> = HashSet::new();
+    let mut sessions: HashSet<(SessionKind, &str)> = HashSet::new();
     for event in events {
         match event {
-            LinkEvent::ChangeBase { run, commit, .. } => {
-                heads.entry(run.as_str()).or_insert(commit.as_str());
-            }
             LinkEvent::ChangeSeen { run, commit, .. } => {
                 heads.insert(run.as_str(), commit.as_str());
+                if let Some(task) = task_of.get(run.as_str())
+                    && bases.get(run.as_str()) != Some(&commit.as_str())
+                {
+                    named.insert((task, commit.as_str()));
+                }
+            }
+            LinkEvent::SessionLinked {
+                kind,
+                session,
+                run,
+                commit: Some(commit),
+                ..
+            } => {
+                if !sessions.insert((*kind, session.as_str())) {
+                    continue;
+                }
+                let Some(task) = task_of.get(run.as_str()) else {
+                    continue;
+                };
+                if bases.get(run.as_str()) != Some(&commit.as_str())
+                    && named.insert((task, commit.as_str()))
+                {
+                    heads.insert(run.as_str(), commit.as_str());
+                }
             }
             _ => {}
         }
@@ -628,7 +660,7 @@ impl<C: Connect> Worker<C> {
             Ok(events) => events,
             Err(e) => return self.change_failed(format!("関連の記録を読めません: {e}")),
         };
-        let recorded: HashMap<String, String> = recorded_heads(&events)
+        let recorded: HashMap<String, String> = recorded_heads(&self.runs, &events)
             .into_iter()
             .map(|(run, commit)| (run.to_owned(), commit.to_owned()))
             .collect();
@@ -2717,6 +2749,46 @@ mod tests {
         rig.feed.act(Intent::Refresh);
         rig.settle();
         assert_eq!(rig.seen().len(), 1, "not after that");
+    }
+
+    /// AC-4 (Tasks): a commit a session named first is the head the poll
+    /// compares with, so a reset back to the earlier version is seen.
+    #[test]
+    fn links_ac4_a_reset_from_a_version_a_session_named_first_is_seen() {
+        let mut rig = rig("links-ac4-reset", |repo, _, _| {
+            write_task(repo, "t-1", "one")
+        });
+        let t = local_ref("t-1");
+        let run = run_t1(&mut rig, Isolation::Worktree);
+        let a = commit_in(&run.workdir, "one");
+        rig.feed.act(Intent::Refresh);
+        rig.until_related(&t, "v1", |r| r.versions.len() == 1);
+        let b = commit_in(&run.workdir, "two");
+        let target = task_links::Target {
+            toplevel: run.workdir.clone(),
+            head_ref: None,
+            head_sha: Some(b.clone()),
+        };
+        let matched = task_links::match_run(&rig.root, &target).expect("the run matches");
+        task_links::link_session(
+            &matched,
+            SessionKind::Review,
+            "rev-1",
+            Some(&b),
+            false,
+            START,
+        )
+        .unwrap();
+        git_ok(&run.workdir, &["reset", "-q", "--hard", &a]);
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        rig.tick();
+        let r = rig.until_related(&t, "the review", |r| r.reviews.len() == 1);
+        assert_eq!(
+            r.current().map(|v| v.commit.as_str()),
+            Some(a.as_str()),
+            "{r:#?}"
+        );
     }
 
     /// A run started before the link log (a `RunStarted`, no `ChangeBase`):

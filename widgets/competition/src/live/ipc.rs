@@ -396,9 +396,8 @@ fn tab_params(spec: &PaneSpec) -> SpawnParams {
 
 /// Why the agents are not started on an older Noa.
 pub(crate) fn no_board_tab(version: &str) -> String {
-    let (major, minor, patch) = noa_ipc::BOARD_TAB_SINCE;
     format!(
-        "この Noa（{version}）はボードのタブを開けないため、エージェントを起動できません（Noa {major}.{minor}.{patch} 以降が必要）"
+        "この Noa（{version}）はボードのタブを開けないため、エージェントを起動できません（Noa 0.9.16 以降が必要）"
     )
 }
 

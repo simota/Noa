@@ -33,7 +33,6 @@ use verify::{media, rerun, worktree};
 
 use super::ipc::{
     Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement, no_board_tab,
-    supports_board_tab,
 };
 use crate::live::Attachment;
 
@@ -952,7 +951,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             self.notice(PANES_AFTER_END);
             return;
         }
-        if self.panes.is_empty() {
+        // A board left by a close that failed after its agents went is
+        // closed on the next try.
+        if self.panes.is_empty() && self.board.is_none() {
             self.notice(NO_PANES);
             return;
         }
@@ -2025,9 +2026,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     /// nothing opened, ending the run (`Fail::Fatal`; the verification
     /// stays in its log).
     fn open_board(&mut self, conn: &mut C::Conn, spec: &PaneSpec) -> Result<u64, Fail> {
-        let version = conn.server_version();
-        if !supports_board_tab(&version) {
-            return Err(Fail::Fatal(no_board_tab(&version)));
+        if !conn.supports_board_tab() {
+            return Err(Fail::Fatal(no_board_tab(&conn.server_version())));
         }
         let board = conn.spawn(Placement::Board, spec).map_err(link)?;
         self.board = Some(board);
@@ -2936,6 +2936,10 @@ pub(crate) mod tests {
         tabs: Vec<u64>,
         /// The version the fake Noa's hello gives (0.9.16 when unset).
         version: Option<String>,
+        /// Its hello lists no `boardTab` (a Noa that predates board tabs).
+        no_board_tab: bool,
+        /// Panes whose close Noa refuses, leaving them open.
+        refuse_close: BTreeSet<u64>,
         /// Panes that are gone by the time they are asked for a paste.
         gone_on_paste: bool,
         /// Panes back at their shell: Noa refuses every write
@@ -3164,6 +3168,10 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| "0.9.16".into())
         }
 
+        fn supports_board_tab(&self) -> bool {
+            !self.0.borrow().no_board_tab
+        }
+
         fn hello_seq(&self) -> u64 {
             1
         }
@@ -3179,6 +3187,9 @@ pub(crate) mod tests {
 
         fn close_pane(&mut self, pane: u64) -> Result<(), NoaError> {
             let mut w = self.0.borrow_mut();
+            if w.refuse_close.contains(&pane) {
+                return Err(NoaError::Refused("refused".into()));
+            }
             if w.panes.remove(&pane).is_none() {
                 return Err(NoaError::PaneGone);
             }
@@ -4237,6 +4248,7 @@ pub(crate) mod tests {
     fn a_noa_without_board_tabs_is_refused_and_nothing_is_spawned() {
         let fake = fake();
         fake.0.borrow_mut().version = Some("0.9.15".into());
+        fake.0.borrow_mut().no_board_tab = true;
         let root = temp_root();
         let (mut runner, _actions, _updates) = rig(&fake, &root, false);
         let mut conn = fake.clone();
@@ -4419,6 +4431,34 @@ pub(crate) mod tests {
             let pane = fake.pane_of(&format!(":{part}"));
             assert_eq!(fake.cwd(pane), store::verifier_root(&s, &PartId::new(part)));
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_board_whose_close_failed_is_closed_on_the_next_try() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, actions, updates) = rig(&fake, &root, false);
+        let mut conn = fake.clone();
+        round_one_briefed(&fake, &mut runner, &mut conn);
+        actions.send(Action::Close).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        let _ = notices(&updates);
+        let board = fake.0.borrow().boards[0];
+        fake.0.borrow_mut().refuse_close.insert(board);
+        actions.send(Action::ClosePanes).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(runner.panes.is_empty(), "the agents went");
+        assert_eq!(runner.board, Some(board), "the board is kept to retry");
+        assert!(fake.0.borrow().panes.contains_key(&board));
+        let _ = notices(&updates);
+
+        fake.0.borrow_mut().refuse_close.clear();
+        actions.send(Action::ClosePanes).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_ne!(notices(&updates), [NO_PANES]);
+        assert!(!fake.0.borrow().panes.contains_key(&board), "closed now");
+        assert_eq!(runner.board, None);
         let _ = fs::remove_dir_all(root);
     }
 

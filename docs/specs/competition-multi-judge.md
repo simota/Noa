@@ -478,6 +478,6 @@ Nothing under `AGENTS.md` Safety: no new dependency, no `Cargo.lock` change, no 
 - A session opens one board tab (`Client::spawn_board_tab`, focus off, `autoApprove: true`, the work directory as `cwd`) and every agent pane is a float stowed on it (`noa.split` float, `parentPaneId` = the board, `maxChildren` 20, no `autoApprove`: the float takes the tab's). The split placements, the column layout and `PANES_PER_AXIS` are gone.
 - The runner keeps the board's id. After a resume it is read back from an adopted pane's `parentPaneId`; when the board is closed or a spawn on it answers `PaneGone`, it is forgotten and the next spawn opens a new board.
 - ペインをすべて閉じる closes the agents' panes, then the board.
-- A Noa older than `BOARD_TAB_SINCE` (0.9.16) would open a plain shell tab: the runner starts no agent and ends with 「この Noa（…）はボードのタブを開けないため、エージェントを起動できません」.
+- A Noa whose `noa.hello` lists no `boardTab` capability (older than 0.9.16) would open a plain shell tab: the runner starts no agent and ends with 「この Noa（…）はボードのタブを開けないため、エージェントを起動できません」.
 - Not changed: the adopt tab (採用して実装) is a plain focused tab.
 - Tests (`runner tests`): `the_first_agent_opens_a_board_and_the_rest_float_on_it`, `a_board_that_is_gone_is_replaced_by_a_new_one`, `a_resume_recovers_the_board_from_the_agents_it_takes_back`, `an_older_noa_starts_no_agents`, `panes_close_together_only_after_the_competition_ends` (board closed last), `{four,six}_entries_and_the_judge_fit_on_one_board`; `live::ipc tests`: `only_the_board_tab_turns_auto_approve_on`, `a_float_is_stowed_on_its_board`.

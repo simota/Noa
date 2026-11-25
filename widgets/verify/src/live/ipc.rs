@@ -139,6 +139,10 @@ pub trait Noa {
     /// The version this connection's `noa.hello` gave (`serverVersion`):
     /// what a request needs of Noa is judged on the server that takes it.
     fn server_version(&self) -> String;
+    /// Whether this connection's Noa opens a board tab (`noa.newTab` with
+    /// `board: true`): its `noa.hello` listed `boardTab`. An older one
+    /// would open a plain shell tab instead.
+    fn supports_board_tab(&self) -> bool;
     /// This connection's place among every hello the window completed
     /// ([`next_hello`]): a later one is newer, whatever order the reports
     /// of them arrive in.
@@ -428,6 +432,10 @@ impl Noa for IpcNoa {
         self.version.clone()
     }
 
+    fn supports_board_tab(&self) -> bool {
+        self.client.supports_board_tab()
+    }
+
     fn hello_seq(&self) -> u64 {
         self.seq
     }
@@ -574,13 +582,6 @@ fn spawn_params(placement: Placement, spec: &PaneSpec) -> SpawnParams {
     }
 }
 
-/// Whether a Noa of `version` opens a board tab (`noa.newTab` with
-/// `board: true`, [`noa_ipc::BOARD_TAB_SINCE`]); an older one opens a plain
-/// shell tab instead.
-pub(crate) fn supports_board_tab(version: &str) -> bool {
-    noa_ipc::server_version_at_least(version, noa_ipc::BOARD_TAB_SINCE)
-}
-
 /// Why no agents start on an older Noa.
 pub(crate) fn no_board_tab(version: &str) -> String {
     format!(
@@ -688,18 +689,8 @@ mod tests {
     }
 
     #[test]
-    fn only_a_noa_from_0_9_16_opens_a_board_tab() {
-        for (version, ok) in [
-            ("0.9.16", true),
-            ("0.9.16-rc.1", true),
-            ("0.10.0", true),
-            ("0.9.15", false),
-            ("0.9.13", false),
-            ("v0.9.16", false),
-            ("t", false),
-        ] {
-            assert_eq!(supports_board_tab(version), ok, "{version}");
-        }
+    fn the_board_tab_refusal_names_the_version_and_what_is_needed() {
+        assert!(no_board_tab("0.9.15").contains("0.9.15"));
         assert!(no_board_tab("0.9.15").contains("0.9.16 以降が必要"));
     }
 

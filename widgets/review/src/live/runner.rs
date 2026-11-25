@@ -24,7 +24,6 @@ use review::store::{self, Store};
 
 use super::ipc::{
     Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement, no_board_tab,
-    opens_board_tab,
 };
 
 const POLL: Duration = Duration::from_millis(200);
@@ -1179,9 +1178,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             let board = match self.board {
                 Some(board) => board,
                 None => {
-                    let version = conn.server_version();
-                    if !opens_board_tab(&version) {
-                        return Err(Fail::Fatal(no_board_tab(&version)));
+                    if !conn.supports_board_tab() {
+                        return Err(Fail::Fatal(no_board_tab(&conn.server_version())));
                     }
                     match conn.spawn(Placement::Board, &spec) {
                         Ok(board) => {
@@ -1551,6 +1549,8 @@ mod tests {
         placements: Vec<Placement>,
         /// The version the fake's hello gives (0.9.16 when unset).
         version: Option<String>,
+        /// Its hello lists no `boardTab` (a Noa that predates board tabs).
+        no_board_tab: bool,
         /// Panes that are gone by the time they are asked for a paste.
         gone_on_paste: bool,
         /// Panes back at their shell: Noa refuses every write
@@ -1728,6 +1728,10 @@ mod tests {
                 .version
                 .clone()
                 .unwrap_or_else(|| "0.9.16".into())
+        }
+
+        fn supports_board_tab(&self) -> bool {
+            !self.0.borrow().no_board_tab
         }
 
         fn hello_seq(&self) -> u64 {
@@ -2273,6 +2277,7 @@ mod tests {
     fn an_older_noa_is_refused_and_nothing_is_spawned() {
         let fake = fake();
         fake.0.borrow_mut().version = Some("0.9.15".into());
+        fake.0.borrow_mut().no_board_tab = true;
         let root = temp_root();
         let (mut runner, _actions, _updates) = rig_on(
             &fake,

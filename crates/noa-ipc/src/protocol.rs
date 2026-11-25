@@ -631,6 +631,10 @@ pub struct HelloResult {
     /// 2026-09 audit). Empty when talking to a server predating the field.
     #[serde(default)]
     pub server_instance_id: String,
+    /// Features this server has beyond its protocol version, by name
+    /// ([`SERVER_CAPABILITIES`]); empty from a server predating the field.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 // ---- noa.listPanels ----
@@ -806,31 +810,15 @@ pub struct NewTabParams {
     pub spawn: SpawnParams,
 }
 
-/// agent-orchestration D20: the first Noa whose `noa.newTab` takes
-/// `board: true`. An older one ignores the field and opens a plain shell
-/// tab, so a client compares `noa.hello`'s `serverVersion` against this
-/// (see [`server_version_at_least`]) before asking for a board tab.
-pub const BOARD_TAB_SINCE: (u64, u64, u64) = (0, 9, 16);
+/// agent-orchestration D20: the `noa.hello` capability a Noa whose
+/// `noa.newTab` takes `board: true` advertises. An older one ignores the
+/// field and opens a plain shell tab, so a client checks for this before
+/// asking for a board tab. A capability, not a version: a development build
+/// keeps the last release's version while it already has the feature.
+pub const CAPABILITY_BOARD_TAB: &str = "boardTab";
 
-/// Whether `version` (`noa.hello`'s `serverVersion`, `MAJOR.MINOR.PATCH`
-/// with an optional `-pre` and `+build`) is `since` or later. A version
-/// that does not read as three decimal numbers is not.
-pub fn server_version_at_least(version: &str, since: (u64, u64, u64)) -> bool {
-    let core = version.split(['+', '-']).next().unwrap_or_default();
-    let numbers: Option<Vec<u64>> = core
-        .split('.')
-        .map(|part| {
-            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            part.parse().ok()
-        })
-        .collect();
-    match numbers.as_deref() {
-        Some(&[major, minor, patch]) => (major, minor, patch) >= since,
-        _ => false,
-    }
-}
+/// Every capability this server advertises in `noa.hello`.
+pub const SERVER_CAPABILITIES: &[&str] = &[CAPABILITY_BOARD_TAB];
 
 /// What a new pane runs (agent-orchestration D2): the IPC form of the
 /// AppleScript `surface configuration`. `command` is an argv, spawned
@@ -1654,28 +1642,18 @@ mod board_tab_tests {
     }
 
     #[test]
-    fn the_board_tab_gate_reads_server_versions_strictly() {
-        assert_eq!(BOARD_TAB_SINCE, (0, 9, 16));
-        for version in [
-            "0.9.16",
-            "0.9.17",
-            "0.10.0",
-            "1.0.0",
-            "0.9.16+abc",
-            "0.9.16-rc.1",
-        ] {
-            assert!(
-                server_version_at_least(version, BOARD_TAB_SINCE),
-                "{version}"
-            );
-        }
-        for version in [
-            "0.9.15", "0.9.9", "", "v0.9.16", "0.9", "0.9.16.1", "0.9.x", "t",
-        ] {
-            assert!(
-                !server_version_at_least(version, BOARD_TAB_SINCE),
-                "{version}"
-            );
-        }
+    fn hello_capabilities_default_to_none_from_an_older_server() {
+        let old: HelloResult = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1, "grantedScopes": [], "serverVersion": "0.9.15"
+        }))
+        .unwrap();
+        assert!(old.capabilities.is_empty());
+        let new: HelloResult = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1, "grantedScopes": [], "serverVersion": "0.9.15",
+            "capabilities": ["boardTab"]
+        }))
+        .unwrap();
+        assert_eq!(new.capabilities, vec![CAPABILITY_BOARD_TAB.to_string()]);
+        assert!(SERVER_CAPABILITIES.contains(&CAPABILITY_BOARD_TAB));
     }
 }

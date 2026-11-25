@@ -1646,6 +1646,7 @@ fn handle_hello(
         granted_scopes: session.granted_scopes.to_strings(),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         server_instance_id: server_instance_id().to_string(),
+        capabilities: SERVER_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
     };
     success_response(&id, &serde_json::to_value(result).unwrap())
 }

@@ -36,11 +36,10 @@ pub use client::{
 };
 pub use error::{ErrorCode, IpcError};
 pub use protocol::{
-    AttachParams, AttachResult, Attr, BOARD_TAB_SINCE, DetachParams, EventKind, FieldMask,
+    AttachParams, AttachResult, Attr, CAPABILITY_BOARD_TAB, DetachParams, EventKind, FieldMask,
     GetTextResult, ListPanelsResult, PROTOCOL_VERSION, PaneIdResult, Panel, PanelAgent, PanelExit,
     PanelField, PanelSpawn, ResizePaneParams, Row, Span, SpanColor, SpawnConfig, SpawnParams,
     SplitDirection, SplitPlacement, TextSource, UpdateSubscriptionParams, WireId, is_plain_shell,
-    server_version_at_least,
 };
 pub use push::{Broadcaster, ChangedPanel, EventMask, PushQueue};
 pub use server::{

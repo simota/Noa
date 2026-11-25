@@ -109,6 +109,8 @@ pub struct Client {
     granted_scopes: ScopeSet,
     server_instance_id: String,
     server_version: String,
+    /// `noa.hello`'s `capabilities` (empty from a server predating them).
+    capabilities: Vec<String>,
     control_origin: (String, u16),
     /// Notifications that arrived while a request waited for its response.
     notifications: VecDeque<Notification>,
@@ -151,6 +153,7 @@ impl Client {
             granted_scopes: ScopeSet::empty(),
             server_instance_id: String::new(),
             server_version: String::new(),
+            capabilities: Vec::new(),
             control_origin,
             notifications: VecDeque::new(),
             notifications_dropped: false,
@@ -172,6 +175,7 @@ impl Client {
         client.granted_scopes = ScopeSet::from_strings(result.granted_scopes);
         client.server_instance_id = result.server_instance_id;
         client.server_version = result.server_version;
+        client.capabilities = result.capabilities;
         Ok(client)
     }
 
@@ -270,8 +274,8 @@ impl Client {
     /// unless `params` sets them, as `+ctl board --open` gives a board its
     /// orchestrator's: a Noa started from the Dock has none of them.
     ///
-    /// A Noa older than [`crate::BOARD_TAB_SINCE`] ignores `board` and opens a
-    /// shell tab: check [`Self::supports_board_tab`] first.
+    /// A Noa without [`crate::CAPABILITY_BOARD_TAB`] ignores `board` and
+    /// opens a shell tab: check [`Self::supports_board_tab`] first.
     pub fn spawn_board_tab(
         &mut self,
         window: Option<u64>,
@@ -292,12 +296,12 @@ impl Client {
     }
 
     /// Whether the connected Noa takes `board: true` on `noa.newTab`
-    /// ([`Self::spawn_board_tab`]), by `noa.hello`'s `serverVersion`.
+    /// ([`Self::spawn_board_tab`]): `noa.hello` listed
+    /// [`crate::CAPABILITY_BOARD_TAB`].
     pub fn supports_board_tab(&self) -> bool {
-        crate::protocol::server_version_at_least(
-            &self.server_version,
-            crate::protocol::BOARD_TAB_SINCE,
-        )
+        self.capabilities
+            .iter()
+            .any(|c| c == crate::protocol::CAPABILITY_BOARD_TAB)
     }
 
     /// `noa.split` with a placement (`auto` included) and agent-orchestration

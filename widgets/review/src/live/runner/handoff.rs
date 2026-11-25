@@ -76,8 +76,10 @@ pub(super) fn reads_work_tree(target: &Target) -> bool {
 /// The exact change a review of `target` judged, and the notice to give
 /// when it has none to record. A ref is its captured commit (`head_sha`);
 /// the work tree is its current change, taken `before` and `after` the
-/// capture, recorded only when the two agree. A files or document review
-/// judges no change.
+/// capture, recorded only when the two agree and sit on the commit the
+/// capture read (`head_sha`): a tree that moved away and back meanwhile
+/// was captured on another commit. A files or document review judges no
+/// change.
 pub(super) fn judged(
     target: &Target,
     head_sha: Option<&str>,
@@ -90,7 +92,9 @@ pub(super) fn judged(
     match &target.head {
         Head::Ref(_) => (head_sha.map(|sha| ChangeId::Commit(sha.to_owned())), None),
         Head::Worktree => match (before, after) {
-            (Some(Ok(before)), Some(Ok(after))) if before == after => (Some(before.clone()), None),
+            (Some(Ok(before)), Some(Ok(after))) if before == after && before.head() == head_sha => {
+                (Some(before.clone()), None)
+            }
             (Some(Ok(_)), Some(Ok(_))) => (None, Some(MOVED.to_owned())),
             (Some(Err(why)), _) | (_, Some(Err(why))) => (
                 None,
@@ -118,10 +122,14 @@ pub(crate) struct NewLinks<'a> {
 
 /// Records a new review's hand-off (`links::record_handoff`). Returns the
 /// store it went to, when there is one, and the notices: links the store
-/// refused, or why nothing was recorded.
+/// refused, or why nothing was recorded. The hand-off names the top level
+/// of the work tree `workdir` is in, so a files or document review of a
+/// folder inside a run's worktree is matched with that run.
 pub(crate) fn record(new: NewLinks<'_>) -> (Option<PathBuf>, Vec<String>) {
-    let place = match place_of(new.reviews_root, new.workdir) {
-        Ok(place) => place,
+    let found = review::capture::repo_root(new.workdir)
+        .and_then(|top| place_of(new.reviews_root, &top).map(|place| (top, place)));
+    let (top, place) = match found {
+        Ok(found) => found,
         // A files or document review outside any repository has no store.
         Err(_) if !new.git => return (None, Vec::new()),
         Err(why) => return (None, vec![format!("リンクを記録できませんでした: {why}")]),
@@ -136,14 +144,7 @@ pub(crate) fn record(new: NewLinks<'_>) -> (Option<PathBuf>, Vec<String>) {
         record: Some(new.dir.join(store::EVENTS_FILE)),
         ..Info::default()
     };
-    match links::record_handoff(
-        &log,
-        new.record,
-        new.change,
-        new.workdir,
-        info,
-        Some(new.capture),
-    ) {
+    match links::record_handoff(&log, new.record, new.change, &top, info, Some(new.capture)) {
         Ok(handoff) => notices.extend(handoff.notice()),
         Err(e) => notices.push(format!("リンクを記録できませんでした: {e}")),
     }

@@ -1546,6 +1546,8 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<Opened, Str
         .as_deref()
         .filter(|_| handoff::reads_work_tree(&target));
     let before = tree.map(review::links::current_change);
+    #[cfg(test)]
+    tests::before_capture();
     let capture_dir = store::target_dir(&reply_dir);
     let manifest = match review::capture::capture(&target, &capture_dir, now) {
         Ok(manifest) => manifest,
@@ -1621,6 +1623,19 @@ mod tests {
         /// Run once right after a new review's capture, before the work
         /// tree is read again (a test's stand-in for an agent editing it).
         static AFTER_CAPTURE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    thread_local! {
+        /// Run once right before a new review's capture, after the work
+        /// tree is first read.
+        static BEFORE_CAPTURE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    /// Called by `new_review` before its capture (tests only).
+    pub(super) fn before_capture() {
+        if let Some(hook) = BEFORE_CAPTURE.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
     }
 
     /// Called by `new_review` after its capture (tests only).
@@ -3427,11 +3442,34 @@ mod tests {
     }
 
     #[test]
-    fn ac2_a_review_of_a_runs_worktree_is_about_the_run_and_its_task() {
-        use review::links::{Edit, Info, Origin, Rel, TaskKey};
+    fn a_work_tree_that_moved_away_and_back_during_capture_is_not_judged() {
         let base = temp_root();
-        let (repo, c0, c1, root) = feature_repo(&base);
-        let log = handoff::store_of(&root, &repo).unwrap();
+        let (repo, _c0, c1, root) = feature_repo(&base);
+        let (there, back) = (repo.clone(), repo.clone());
+        // At c1 before, at a new commit while captured, at c1 again after.
+        BEFORE_CAPTURE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                fs::write(there.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+                git(&there, &["commit", "-q", "-am", "third"]);
+            }));
+        });
+        AFTER_CAPTURE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                git(&back, &["reset", "-q", "--hard", &c1]);
+            }));
+        });
+        let (record, set, told) = hand_off(&root, &repo, git_target(&repo, Head::Worktree));
+        assert_eq!(set.judged(&record), None);
+        assert!(told.iter().any(|n| n == handoff::MOVED), "{told:?}");
+        assert!(set.info_of(&record).record.is_some());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Records run `run-1` of local task `t-1`, its work tree `workdir`, in
+    /// the store of `repo`; the task's and the run's nodes.
+    fn run_in(root: &Path, repo: &Path, workdir: &Path, head: String) -> (Node, Node) {
+        use review::links::{Edit, Info, Origin, Rel, TaskKey};
+        let log = handoff::store_of(root, repo).unwrap();
         let task = Node::Task(TaskKey::Local("t-1".into()));
         let run = Node::Run("run-1".into());
         review::links::append(
@@ -3446,9 +3484,9 @@ mod tests {
                 Edit::Observe {
                     node: run.clone(),
                     info: Info {
-                        workdir: Some(repo.clone()),
+                        workdir: Some(workdir.to_owned()),
                         branch: Some("feature".into()),
-                        head: Some(c0),
+                        head: Some(head),
                         ..Info::default()
                     },
                 },
@@ -3456,6 +3494,41 @@ mod tests {
             1,
         )
         .unwrap();
+        (task, run)
+    }
+
+    #[test]
+    fn a_files_review_of_a_folder_inside_a_runs_worktree_is_about_the_run() {
+        use review::links::Rel;
+        let base = temp_root();
+        let (repo, c0, _c1, root) = feature_repo(&base);
+        let (task, run) = run_in(&root, &repo, &repo, c0);
+        let src = repo.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("b.txt"), "b\n").unwrap();
+        let target = Target {
+            kind: TargetKind::Files,
+            path: Some(src),
+            base: None,
+            head: Head::Worktree,
+            paths: Vec::new(),
+            text: None,
+            workdir: None,
+        };
+        let (record, set, told) = hand_off(&root, &repo, target);
+        assert_eq!(set.judged(&record), None);
+        assert!(set.live(&record, &run, Rel::About).is_some());
+        assert!(set.live(&record, &task, Rel::About).is_some());
+        assert!(told.is_empty(), "{told:?}");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn ac2_a_review_of_a_runs_worktree_is_about_the_run_and_its_task() {
+        use review::links::{Rel, TaskKey};
+        let base = temp_root();
+        let (repo, c0, c1, root) = feature_repo(&base);
+        let (task, run) = run_in(&root, &repo, &repo, c0);
         let (record, set, told) = hand_off(&root, &repo, git_target(&repo, Head::Worktree));
         let change = Node::Change(ChangeId::Commit(c1.clone()));
         assert_eq!(set.judged(&record), Some(&ChangeId::Commit(c1)));
@@ -3480,11 +3553,22 @@ mod tests {
             (Some(c("a")), None)
         );
         assert_eq!(
-            handoff::judged(&tree, Some(&sha), Some(&Ok(c("b"))), Some(&Ok(c("b")))),
-            (Some(c("b")), None)
+            handoff::judged(&tree, Some(&sha), Some(&Ok(c("a"))), Some(&Ok(c("a")))),
+            (Some(c("a")), None)
         );
         assert_eq!(
-            handoff::judged(&tree, Some(&sha), Some(&Ok(c("b"))), Some(&Ok(c("d")))),
+            handoff::judged(&tree, Some(&sha), Some(&Ok(c("a"))), Some(&Ok(c("d")))),
+            (None, Some(handoff::MOVED.to_owned()))
+        );
+        // Away and back during the capture: the capture read another
+        // commit than the one the tree is at before and after.
+        assert_eq!(
+            handoff::judged(&tree, Some(&sha), Some(&Ok(c("b"))), Some(&Ok(c("b")))),
+            (None, Some(handoff::MOVED.to_owned()))
+        );
+        let snap = ChangeId::Snapshot(format!("snap-{}-{}", "b".repeat(40), "0".repeat(16)));
+        assert_eq!(
+            handoff::judged(&tree, Some(&sha), Some(&Ok(snap.clone())), Some(&Ok(snap))),
             (None, Some(handoff::MOVED.to_owned()))
         );
         let (none, why) = handoff::judged(

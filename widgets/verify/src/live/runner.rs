@@ -838,7 +838,14 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 Action::RemoveWorktrees => self.remove_worktrees_now()?,
                 Action::SetHold { hold } => self.feed_user(Input::UserSetHold { hold, at })?,
                 Action::Continue => self.feed_user(Input::UserContinue { at })?,
-                Action::Extend { by } => self.feed_user(Input::UserExtend { by, at })?,
+                Action::Extend { by } => {
+                    // As on an extension through `open_log`: the round it
+                    // opens must verify the code the earlier rounds did.
+                    match check_shared_resume(self.engine.session()) {
+                        Ok(()) => self.feed_user(Input::UserExtend { by, at })?,
+                        Err(why) => self.notice(why),
+                    }
+                }
             }
         }
     }
@@ -6104,6 +6111,68 @@ pub(crate) mod tests {
             });
         assert!(!runner.engine.session().closed);
         assert_eq!(runner.engine.session().max_rounds, 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// AC-38, L1-3: +N in the window whose runner still holds a finished
+    /// 共有 verification of a ref checks the checkout again.
+    #[test]
+    fn ac38_a_shared_ref_plus_n_in_the_same_window_is_refused_after_a_tracked_edit() {
+        let fake = fake();
+        let root = temp_root();
+        let (repo, start) = shared_ref_start(&root);
+        let (mut runner, actions, updates) = run_to_a_failure_from(&fake, start, |_| {});
+        let mut conn = fake.clone();
+        let dir = runner.engine.dir().to_owned();
+        assert!(runner.engine.session().closed);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        assert_eq!(runner.engine.session().rebuild.head_sha, head);
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]),
+            "M .noa/.gitignore",
+            "the start's ignore line"
+        );
+        let log = fs::read(dir.join(store::EVENTS_FILE)).unwrap();
+        let report = fs::read(store::report_path(&dir)).ok();
+        let _ = notices(&updates);
+
+        let edited = "pub fn one() -> u32 { 2 }\n";
+        fs::write(repo.join("src/lib.rs"), edited).unwrap();
+        actions.send(Action::Extend { by: 1 }).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        let refused = notices(&updates);
+        assert!(
+            refused
+                .iter()
+                .any(|n| n.starts_with(SHARED_REF_HEAD) && n.contains("未コミットの変更")),
+            "{refused:?}"
+        );
+        assert!(runner.engine.session().closed);
+        assert_eq!(runner.engine.session().max_rounds, 1);
+        assert_eq!(runner.engine.session().rounds.len(), 1);
+        assert!(
+            fs::read(dir.join(store::EVENTS_FILE)).unwrap() == log,
+            "the log was written"
+        );
+        assert_eq!(fs::read(store::report_path(&dir)).ok(), report);
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]),
+            "M .noa/.gitignore\n M src/lib.rs"
+        );
+
+        git(&repo, &["checkout", "-q", "--", "src/lib.rs"]);
+        actions.send(Action::Extend { by: 1 }).unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert!(
+            !notices(&updates)
+                .iter()
+                .any(|n| n.starts_with(SHARED_REF_HEAD))
+        );
+        assert!(!runner.engine.session().closed);
+        assert_eq!(runner.engine.session().max_rounds, 2);
+        step(&mut runner, &mut conn);
+        assert_eq!(runner.engine.session().rounds.len(), 2, "round 2 started");
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -2,11 +2,12 @@
 //! loop) beside Noa: the agent dashboard (`agent-dashboard.open`), the repo
 //! browser (`repo-browser.open`), the discussion (`discussion.open`), the
 //! competition (`competition.open`), the review (`review.open`), the verify
-//! (`verify.open`) and the agent usage (`agent-usage.open`). Each runs as a
+//! (`verify.open`), the tasks (`tasks.open`) and the agent usage
+//! (`agent-usage.open`). Each runs as a
 //! process of its own. All but the agent usage read Noa's panes through the
 //! control server; the agent usage needs neither the server nor
-//! `server-enable`. Only the review and the verify get an argument: the
-//! focused pane's directory.
+//! `server-enable`. Only the review, the verify and the tasks get an
+//! argument: the focused pane's directory.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -63,6 +64,12 @@ pub(crate) const VERIFY: HelperProgram = HelperProgram {
     crate_name: "verify",
 };
 
+pub(crate) const TASKS: HelperProgram = HelperProgram {
+    title: "Tasks",
+    bundled: "Noa Tasks",
+    crate_name: "tasks",
+};
+
 pub(crate) const AGENT_USAGE: HelperProgram = HelperProgram {
     title: "Agent Usage",
     bundled: "Noa Agent Usage",
@@ -71,13 +78,14 @@ pub(crate) const AGENT_USAGE: HelperProgram = HelperProgram {
 
 /// What `helper` is started with, given the working directory of the
 /// focused pane (local, an existing directory, as `App::focused_pane_cwd`
-/// gives it): the review and the verify take it as `--repo=`, the place their
-/// start views offer first; every other program starts with no argument.
+/// gives it): the review, the verify and the tasks take it as `--repo=`, the
+/// place their start views offer first; every other program starts with no argument.
 pub(crate) fn launch_args(helper: HelperProgram, focused_cwd: Option<&str>) -> Vec<String> {
     match focused_cwd {
         Some(cwd)
             if (helper.crate_name == REVIEW.crate_name
-                || helper.crate_name == VERIFY.crate_name)
+                || helper.crate_name == VERIFY.crate_name
+                || helper.crate_name == TASKS.crate_name)
                 && Path::new(cwd).is_absolute() =>
         {
             vec![format!("--repo={cwd}")]
@@ -288,6 +296,7 @@ mod tests {
             REVIEW,
             VERIFY,
             AGENT_USAGE,
+            TASKS,
         ] {
             let dirs = dev_build_dirs(helper);
             assert_eq!(dirs.len(), 2);
@@ -316,6 +325,29 @@ mod tests {
                     .is_file(),
                 "{dirs:?}"
             );
+        }
+    }
+
+    #[test]
+    fn ac28_tasks_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("tasks-exe");
+        let dev = scratch_dir("tasks-dev");
+        assert_eq!(
+            locate(TASKS, Some(&exe_dir), std::slice::from_ref(&dev)),
+            None
+        );
+        std::fs::write(dev.join("tasks"), "").unwrap();
+        assert_eq!(
+            locate(TASKS, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(dev.join("tasks"))
+        );
+        std::fs::write(exe_dir.join("Noa Tasks"), "").unwrap();
+        assert_eq!(
+            locate(TASKS, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(exe_dir.join("Noa Tasks"))
+        );
+        for dir in [exe_dir, dev] {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 
@@ -456,8 +488,8 @@ mod tests {
     }
 
     #[test]
-    fn only_the_review_and_the_verify_are_given_the_focused_panes_directory() {
-        for helper in [REVIEW, VERIFY] {
+    fn ac28_only_the_review_the_verify_and_the_tasks_are_given_the_focused_panes_directory() {
+        for helper in [REVIEW, VERIFY, TASKS] {
             assert_eq!(
                 launch_args(helper, Some("/Users/me/src/noa")),
                 ["--repo=/Users/me/src/noa"],

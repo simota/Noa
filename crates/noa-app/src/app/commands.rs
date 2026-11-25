@@ -248,6 +248,7 @@ impl App {
             }
             AppCommand::OpenReview => self.open_helper_program(crate::helper_program::REVIEW),
             AppCommand::OpenVerify => self.open_helper_program(crate::helper_program::VERIFY),
+            AppCommand::OpenTasks => self.open_helper_program(crate::helper_program::TASKS),
             AppCommand::OpenAgentUsage => {
                 self.open_helper_program(crate::helper_program::AGENT_USAGE)
             }

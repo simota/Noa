@@ -1178,3 +1178,31 @@ fn skill_table_lists_uses_by_agent_and_agy_has_none() {
         "agy はスキル使用を記録しません"
     );
 }
+
+#[test]
+fn an_empty_skill_table_still_says_agy_records_none() {
+    let now = demo::now();
+    // Claude and Codex logs were read but hold no skill use in the period;
+    // agy is selected too.
+    let mut report = demo::report(Period::Days7, AgentFilter::All, now, &demo::tz());
+    report.skills.clear();
+    assert!(stats::skills_known(&report));
+    let (mut screen, _, mut text) = feed_screen(
+        demo::sources(now),
+        Some(report),
+        Prefs {
+            tab: Tab::Stats,
+            ..Prefs::default()
+        },
+        None,
+    );
+    screen.prepare(window(), &mut text);
+    let labels = labels_under(&screen.tree, screen.stats_host);
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.contains("スキル使用の記録がありません")
+                && l.contains("agy はスキル使用を記録しません")),
+        "{labels:?}"
+    );
+}

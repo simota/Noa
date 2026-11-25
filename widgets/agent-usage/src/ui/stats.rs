@@ -829,10 +829,11 @@ fn skills_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scrol
     // agy records no skill use: say so beside what the others have.
     let reason = unavailable_reason(report, "スキル使用");
     if report.skills.is_empty() {
-        let text = if skills_known(report) {
-            "スキル使用の記録がありません".to_owned()
-        } else {
-            reason
+        // None recorded is not none recordable: keep the reason beside it.
+        let text = match (skills_known(report), reason.is_empty()) {
+            (true, true) => "スキル使用の記録がありません".to_owned(),
+            (true, false) => format!("スキル使用の記録がありません · {reason}"),
+            (false, _) => reason,
         };
         tree.insert(
             Some(c),

@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | slug | artifact-links |
-| status | proposed (2026-11-26); design only, nothing built; no owner sign-off |
+| status | implemented (2026-11-26), first scope; AC9 (GUI) not yet checked by a person |
 | owner | simota |
 | as-of | 2026-11-26 (HEAD 6b4aaf9, branch `orch/design`) |
 | crates | `widgets/tasks`, `widgets/review`, `widgets/verify` (no new crate, no new dependency) |

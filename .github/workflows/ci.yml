@@ -78,11 +78,11 @@ jobs:
       # Only main saves, so pull requests restore main's cache and never
       # evict it from the repository's 10 GB quota with their own.
       - name: Trim build cache
-        if: success() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/claude/noa-ci-performance-k7rqu9') && steps.cache.outputs.cache-hit != 'true'
+        if: success() && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         run: scripts/ci-trim-target.sh
 
       - name: Save build cache
-        if: success() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/claude/noa-ci-performance-k7rqu9') && steps.cache.outputs.cache-hit != 'true'
+        if: success() && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -92,13 +92,8 @@ jobs:
             target/
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
-      - name: TEMP print verify summary
-        if: always()
-        shell: bash
-        run: grep -H -E "Finished|Running|test result" .verify/*.log | sed 's/\x1b\[[0-9;]*m//g' || true
-
       - name: Keep verify output
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: verify-output-macos
@@ -158,11 +153,11 @@ jobs:
       # Only main saves, so pull requests restore main's cache and never
       # evict it from the repository's 10 GB quota with their own.
       - name: Trim build cache
-        if: success() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/claude/noa-ci-performance-k7rqu9') && steps.cache.outputs.cache-hit != 'true'
+        if: success() && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         run: scripts/ci-trim-target.sh
 
       - name: Save build cache
-        if: success() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/claude/noa-ci-performance-k7rqu9') && steps.cache.outputs.cache-hit != 'true'
+        if: success() && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -172,13 +167,8 @@ jobs:
             target/
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
-      - name: TEMP print verify summary
-        if: always()
-        shell: bash
-        run: grep -H -E "Finished|Running|test result" .verify/*.log | sed 's/\x1b\[[0-9;]*m//g' || true
-
       - name: Keep verify output
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: verify-output-linux

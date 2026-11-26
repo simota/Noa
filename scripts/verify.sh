@@ -31,6 +31,38 @@ run() {                       # run <name> <command> [args...]
   printf '%s\t%ss\n' "$name" "$((SECONDS - start))" >>.verify/timings
 }
 
+# The same check, started in the background: `spawn` it, then `reap` it, which
+# reports it as run does. Checks spawned together overlap. Their builds share
+# one target directory, whose lock Cargo holds only while compiling, so the
+# builds still take turns while one check's tests run beside another's build.
+spawn() {                     # spawn <name> <command> [args...]
+  local name=$1; shift
+  rm -f ".verify/$name.status"
+  ( start=$SECONDS
+    "$@" >".verify/$name.log" 2>&1; echo $? >".verify/$name.status"
+    printf '%s\t%ss\n' "$name" "$((SECONDS - start))" >".verify/$name.time" ) </dev/null &
+  pids+=("$!") spawned+=("$name")
+}
+reap() {                      # reports every spawned check, in spawn order
+  local i name
+  for i in "${!spawned[@]}"; do
+    name=${spawned[$i]}
+    wait "${pids[$i]}"
+    printf '== %s\n' "$name"
+    if [ "$(cat ".verify/$name.status" 2>/dev/null)" = 0 ]; then
+      printf '   ok (%s)\n' "$(cut -f2 ".verify/$name.time")"
+    else
+      printf '   FAILED: see %s\n' ".verify/$name.log"
+      tail -n 40 ".verify/$name.log"
+      failed+=("$name")
+    fi
+    cat ".verify/$name.time" >>.verify/timings 2>/dev/null
+    rm -f ".verify/$name.status" ".verify/$name.time"
+  done
+  pids=() spawned=()
+}
+pids=() spawned=()
+
 # A changed path matching this, or a deleted one, reaches code no related test
 # names: the gate itself, the workspace manifests and lockfile, vendored crates.
 widens='^(scripts/verify\.sh|\.github/|Cargo\.(toml|lock)$|vendor/|\.cargo/|rust-toolchain)'
@@ -107,20 +139,23 @@ if [ "$full" = 1 ]; then
   [ "$os" = Linux ] && run clippy cargo clippy --workspace --all-targets --locked -- -D warnings
   run build cargo build --workspace --locked
   run test cargo test --workspace --locked
-  run dashboard widget_check "$dashboard"
-  run browser widget_check "$browser"
-  run discussion widget_check "$discussion"
-  run competition widget_check "$competition"
-  run review widget_check "$review"
-  run verify widget_check "$verify"
-  run tasks usage_check "$tasks"
-  run usage usage_check "$usage"
-  run hook-test python3 -I -B scripts/test_noa_agent_hook.py
-  run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
+  # The widget checks are independent of each other, so they run together,
+  # slowest tests first (CI, macOS: dashboard and verify ~1m40 each).
+  spawn dashboard widget_check "$dashboard"
+  spawn verify widget_check "$verify"
+  spawn review widget_check "$review"
+  spawn tasks usage_check "$tasks"
+  spawn discussion widget_check "$discussion"
+  spawn competition widget_check "$competition"
+  spawn browser widget_check "$browser"
+  spawn usage usage_check "$usage"
+  spawn hook-test python3 -I -B scripts/test_noa_agent_hook.py
+  spawn skill-install-test python3 -I -B scripts/test_install_agent_skill.py
   if [ "$os" = Linux ]; then
-    run desktop-files sh -c 'desktop-file-validate dist/linux/com.simota.noa.desktop &&
+    spawn desktop-files sh -c 'desktop-file-validate dist/linux/com.simota.noa.desktop &&
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
+  reap
 elif [ "${#changed[@]}" -gt 0 ]; then
   pkgs=() hook=0 skill=0 dash=0 rb=0 disc=0 comp=0 rev=0 ver=0 tsk=0 use=0
   for path in "${changed[@]}"; do

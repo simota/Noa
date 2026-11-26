@@ -504,10 +504,23 @@ impl Auto {
             AutoState::Running { planner, .. } => Some(planner.label()),
             _ => None,
         };
+        // Hiding the focused control clears focus: hand it to the control
+        // shown in its place (中止 while planning, the pull-down after), so
+        // a keyboard user keeps their place. Focus elsewhere stays there.
+        let had_focus = tree
+            .focused()
+            .is_some_and(|id| id == ids.menu || id == ids.stop);
         tree.set_hidden(ids.menu, running.is_some());
         tree.set_enabled(ids.menu, !self.planners.is_empty());
         tree.set_hidden(ids.caption, running.is_none());
         tree.set_hidden(ids.stop, running.is_none());
+        if had_focus {
+            tree.set_focus(Some(if running.is_some() {
+                ids.stop
+            } else {
+                ids.menu
+            }));
+        }
         let caption = running
             .map(|p| format!("{p} が割り当てを決めています…"))
             .unwrap_or_default();

@@ -77,7 +77,7 @@ mod timeline {
                     seq: 12,
                     post_id: "po-000000000000000c".into(),
                 },
-                &["タイムライン: 投稿済み #12", "postId po-000000000000000c"],
+                &["タイムライン: 投稿済み #12"],
                 false,
             ),
             (
@@ -190,11 +190,13 @@ mod timeline {
             ))
             .unwrap();
         screen.woken(&mut text);
-        assert_eq!(
-            timeline_texts(&screen),
-            ["タイムライン: 投稿済み #9", "postId po-0000000000000009"]
-        );
+        assert_eq!(timeline_texts(&screen), ["タイムライン: 投稿済み #9"]);
         assert!(!offers_retry(&screen));
+        screen.handle_action(Action::ToggleSessionTools, &mut text);
+        assert!(
+            tests::labels_under(&screen.tree, screen.tools_host)
+                .contains(&"postId po-0000000000000009".to_owned())
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -425,6 +427,9 @@ pub enum Action {
     /// Opens the findings search (on the findings tab, focused), or
     /// closes it and drops its words.
     ToggleSearch,
+    ToggleProgressDetails,
+    ToggleFilterDetails,
+    ToggleSessionTools,
     ClearFilters,
     /// A matrix cell: the board filtered to one lens (and severity).
     ShowCell(String, Option<Severity>),
@@ -564,6 +569,9 @@ pub struct Review {
     timeline: Status,
     tab: CenterTab,
     filters: Filters,
+    progress_details: bool,
+    filter_details: bool,
+    session_tools: bool,
     selected: Option<String>,
     /// An intervention sent and not yet seen in the log.
     pending_intervention: Option<PendingIntervention>,
@@ -624,6 +632,7 @@ pub struct Review {
     center_host: WidgetId,
     right_host: WidgetId,
     composer: composer::Parts,
+    tools_host: WidgetId,
     status_leading: WidgetId,
     status_trailing: WidgetId,
 
@@ -779,6 +788,7 @@ impl Review {
         let center_host = tree.insert(Some(center_col), Container::new(fill()));
         let composer = composer::insert(&mut tree, center_col);
         let right_host = tree.insert(Some(split), pane_column(Role::Surface));
+        let tools_host = tree.insert(Some(root), strip_host());
         let status = StatusBar::insert(&mut tree, root);
 
         let mut screen = Self {
@@ -792,6 +802,9 @@ impl Review {
             timeline: Status::Idle,
             tab: CenterTab::Findings,
             filters: Filters::default(),
+            progress_details: false,
+            filter_details: false,
+            session_tools: false,
             selected: None,
             pending_intervention: None,
             file_dialogs: Vec::new(),
@@ -825,6 +838,7 @@ impl Review {
             center_host,
             right_host,
             composer,
+            tools_host,
             status_leading: status.leading,
             status_trailing: status.trailing,
             actions: Vec::new(),
@@ -963,6 +977,9 @@ impl Review {
         self.extending = false;
         self.tab = CenterTab::Findings;
         self.filters = Filters::default();
+        self.progress_details = false;
+        self.filter_details = false;
+        self.session_tools = false;
         self.search_open = false;
         self.selected = None;
         self.pending_intervention = None;
@@ -1065,7 +1082,7 @@ impl Review {
         self.tree.insert(
             Some(title),
             Label::new(session.manifest.label.clone())
-                .font_size(14.0)
+                .font_size(15.0)
                 .weight(600)
                 .truncation(noa_gpui_core::widgets::Truncation::Tail),
         );
@@ -1095,20 +1112,32 @@ impl Review {
         }
         let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
         if let Some(label) = self.timeline.label() {
+            let row = self.tree.insert(
+                Some(self.header_host),
+                Container::new(Style {
+                    flex_wrap: FlexWrap::Wrap,
+                    align_items: AlignItems::CENTER,
+                    gap: gap(6.0),
+                    padding: LayoutRect {
+                        left: length(12.0),
+                        right: length(12.0),
+                        top: length(0.0),
+                        bottom: length(8.0),
+                    },
+                    ..Default::default()
+                }),
+            );
             let tone = if self.timeline.failed() {
                 Tone::Warning
             } else {
                 Tone::Neutral
             };
             tag(&mut self.tree, row, label, tone);
-            if let Some(detail) = self.timeline.detail() {
-                self.tree.insert(
-                    Some(row),
-                    Label::new(detail)
-                        .font_size(11.0)
-                        .color(Role::Muted)
-                        .truncation(noa_gpui_core::widgets::Truncation::Tail),
-                );
+            if !matches!(self.timeline, Status::Published { .. })
+                && let Some(detail) = self.timeline.detail()
+            {
+                self.tree
+                    .insert(Some(row), Label::new(detail).font_size(12.0).wrap(true));
             }
             // A running review's runner sends what is pending; a stored one
             // has none, so 再試行 is what sends it.
@@ -1138,18 +1167,29 @@ impl Review {
         );
         self.tree.set_accessible_label(search, "指摘を検索");
         self.actions.push((search, Action::ToggleSearch));
-        let copy = self.tree.insert(Some(row), small("コピー"));
-        self.actions.push((copy, Action::CopyReport));
-        let save = self.tree.insert(Some(row), small("レポート保存…"));
-        self.actions.push((save, Action::SaveReport));
     }
 
     fn rebuild_progress(&mut self, text: &mut TextStore) {
+        let restore_focus = self
+            .focused_action()
+            .is_some_and(|(action, _)| action == Action::ToggleProgressDetails);
+        self.actions
+            .retain(|(_, action)| *action != Action::ToggleProgressDetails);
         clear_children(&mut self.tree, self.progress_host, text);
         let Some(session) = &self.session else {
             return;
         };
-        progress::insert(&mut self.tree, self.progress_host, session, system_now());
+        let toggle = progress::insert(
+            &mut self.tree,
+            self.progress_host,
+            session,
+            system_now(),
+            self.progress_details,
+        );
+        self.actions.push((toggle, Action::ToggleProgressDetails));
+        if restore_focus {
+            self.tree.set_focus(Some(toggle));
+        }
     }
 
     fn rebuild_center(&mut self, text: &mut TextStore) {
@@ -1238,6 +1278,7 @@ impl Review {
                 &session,
                 &self.filters,
                 self.selected.as_deref(),
+                self.filter_details,
                 &mut self.actions,
             ),
             CenterTab::Matrix => matrix::insert(
@@ -1380,6 +1421,11 @@ impl Review {
     fn rebuild_status(&mut self, text: &mut TextStore) {
         clear_children(&mut self.tree, self.status_leading, text);
         clear_children(&mut self.tree, self.status_trailing, text);
+        clear_children(&mut self.tree, self.tools_host, text);
+        self.tree.set_hidden(
+            self.tools_host,
+            !self.session_tools || self.session.is_none(),
+        );
         let (link_label, link_tone) = match &self.link {
             Link::Live => ("Noa 接続中", Tone::Success),
             Link::Connecting => ("Noa 接続待ち…", Tone::Warning),
@@ -1418,12 +1464,7 @@ impl Review {
         if !self.read_only && !session.closed {
             let hold = self.tree.insert(
                 Some(self.status_trailing),
-                small(if session.hold {
-                    "ラウンド後に停止: オン"
-                } else {
-                    "ラウンド後に停止: オフ"
-                })
-                .tooltip(
+                small("ラウンドごとに停止").selected(session.hold).tooltip(
                     "オンにすると、リードの取りまとめのあと次のラウンドを始める前に止まります",
                 ),
             );
@@ -1434,32 +1475,6 @@ impl Review {
                     small("次のラウンドへ").default_button(true),
                 );
                 self.actions.push((go, Action::Continue));
-            }
-        }
-        if session.extendable().is_ok()
-            && (!self.read_only
-                || (session.closed
-                    && self.stored_dir.is_some()
-                    && self.stored_free
-                    && !self.extending))
-        {
-            caption(
-                &mut self.tree,
-                self.status_trailing,
-                format!("上限 {} ラウンド", session.max_rounds),
-            );
-            for by in EXTEND_BY {
-                let more = self.tree.insert(
-                    Some(self.status_trailing),
-                    small(&format!("+{by}")).tooltip(if self.read_only {
-                        "再開してラウンドを追加します（エージェントが起動します）"
-                    } else {
-                        "ラウンド上限を増やします。上限で終了していればレビューを続けます"
-                    }),
-                );
-                self.tree
-                    .set_accessible_label(more, format!("ラウンドを {by} 追加"));
-                self.actions.push((more, Action::Extend(by)));
             }
         }
         let stored_free = self.read_only
@@ -1494,31 +1509,6 @@ impl Review {
                 .insert(Some(self.status_trailing), small("失敗を再試行"));
             self.actions.push((retry, Action::Retry));
         }
-        let again = self.tree.insert(
-            Some(self.status_trailing),
-            small("同じ設定で再レビュー").tooltip(
-                "同じ対象・パネル・依頼で開始ビューを埋めます（前回の要修正を依頼に添えます）",
-            ),
-        );
-        self.actions.push((again, Action::ReviewAgain(None)));
-        let new = self
-            .tree
-            .insert(Some(self.status_trailing), small("新しいレビュー"));
-        self.actions.push((new, Action::NewReview));
-        if !self.read_only && !session.closed {
-            let close = self
-                .tree
-                .insert(Some(self.status_trailing), small("レビューを終了"));
-            self.actions.push((close, Action::Close));
-        }
-        if !self.read_only && session.closed {
-            let close = self.tree.insert(
-                Some(self.status_trailing),
-                small("ペインをすべて閉じる")
-                    .tooltip("リードとレビュアーのペインとボードタブを Noa でまとめて閉じます（修正依頼のタブは残します）"),
-            );
-            self.actions.push((close, Action::ClosePanes));
-        }
         if let Some(origin) = &self.origin {
             let availability = task_links::tasks_args(origin);
             let open_task = self
@@ -1529,6 +1519,95 @@ impl Review {
             if let Err(why) = availability {
                 caption(&mut self.tree, self.status_trailing, why);
             }
+        }
+        let tools = self.tree.insert(
+            Some(self.status_trailing),
+            small("操作")
+                .selected(self.session_tools)
+                .tooltip("レポート出力、ラウンド追加、レビューの終了など"),
+        );
+        self.tree.set_accessible_label(
+            tools,
+            if self.session_tools {
+                "レビューの操作を閉じる"
+            } else {
+                "レビューの操作を表示"
+            },
+        );
+        self.actions.push((tools, Action::ToggleSessionTools));
+        if !self.session_tools {
+            return;
+        }
+        let tools = self.tree.insert(
+            Some(self.tools_host),
+            Container::new(Style {
+                flex_wrap: FlexWrap::Wrap,
+                align_items: AlignItems::CENTER,
+                gap: gap(8.0),
+                padding: LayoutRect::length(10.0),
+                size: LayoutSize {
+                    width: percent(1.0),
+                    height: auto(),
+                },
+                ..Default::default()
+            })
+            .background(Role::Surface),
+        );
+        let copy = self.tree.insert(Some(tools), small("レポートをコピー"));
+        self.actions.push((copy, Action::CopyReport));
+        let save = self.tree.insert(Some(tools), small("レポートを保存…"));
+        self.actions.push((save, Action::SaveReport));
+        if session.extendable().is_ok()
+            && (!self.read_only
+                || (session.closed
+                    && self.stored_dir.is_some()
+                    && self.stored_free
+                    && !self.extending))
+        {
+            caption(
+                &mut self.tree,
+                tools,
+                format!("上限 {} ラウンド", session.max_rounds),
+            );
+            for by in EXTEND_BY {
+                let more = self.tree.insert(
+                    Some(tools),
+                    small(&format!("+{by}")).tooltip(if self.read_only {
+                        "再開してラウンドを追加します（エージェントが起動します）"
+                    } else {
+                        "ラウンド上限を増やします。上限で終了していればレビューを続けます"
+                    }),
+                );
+                self.tree
+                    .set_accessible_label(more, format!("ラウンドを {by} 追加"));
+                self.actions.push((more, Action::Extend(by)));
+            }
+        }
+        let again = self.tree.insert(
+            Some(tools),
+            small("同じ設定で再レビュー").tooltip(
+                "同じ対象・パネル・依頼で開始ビューを埋めます（前回の要修正を依頼に添えます）",
+            ),
+        );
+        self.actions.push((again, Action::ReviewAgain(None)));
+        let new = self.tree.insert(Some(tools), small("新しいレビュー"));
+        self.actions.push((new, Action::NewReview));
+        if !self.read_only && !session.closed {
+            let close = self.tree.insert(Some(tools), small("レビューを終了"));
+            self.actions.push((close, Action::Close));
+        }
+        if !self.read_only && session.closed {
+            let close = self.tree.insert(
+                Some(tools),
+                small("ペインをすべて閉じる")
+                    .tooltip("リードとレビュアーのペインとボードタブを Noa でまとめて閉じます（修正依頼のタブは残します）"),
+            );
+            self.actions.push((close, Action::ClosePanes));
+        }
+        if let Status::Published { .. } = self.timeline
+            && let Some(detail) = self.timeline.detail()
+        {
+            note(&mut self.tree, tools, detail);
         }
     }
 
@@ -1876,6 +1955,18 @@ impl Review {
             },
             Action::ShowTab(tab) => {
                 self.tab = tab;
+                self.rebuild(text);
+            }
+            Action::ToggleProgressDetails => {
+                self.progress_details = !self.progress_details;
+                self.rebuild(text);
+            }
+            Action::ToggleFilterDetails => {
+                self.filter_details = !self.filter_details;
+                self.rebuild(text);
+            }
+            Action::ToggleSessionTools => {
+                self.session_tools = !self.session_tools;
                 self.rebuild(text);
             }
             Action::ToggleSeverity(s) => {
@@ -2355,6 +2446,7 @@ pub(super) fn gap(px: f32) -> LayoutSize<LengthPercentage> {
 
 fn strip_host() -> Container {
     Container::new(Style {
+        flex_direction: FlexDirection::Column,
         flex_shrink: 0.0,
         size: LayoutSize {
             width: percent(1.0),
@@ -2421,7 +2513,7 @@ pub(super) fn body(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>)
     tree.insert(
         Some(parent),
         Label::new(text.into())
-            .font_size(12.5)
+            .font_size(14.0)
             .wrap(true)
             .selectable(true),
     );

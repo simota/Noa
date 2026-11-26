@@ -158,6 +158,12 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
 }
 
 pub(super) fn sync(tree: &mut UiTree, parts: &mut Parts, session: &Session, text: &mut TextStore) {
+    // While held, Return belongs to the explicit next-round action.
+    tree.update::<Button, _>(parts.send, |button, cx| {
+        let existing = std::mem::replace(button, Button::new("送信"));
+        *button = existing.default_button(!session.closed && !session.waits_to_continue());
+        cx.request_paint();
+    });
     if parts.built_for.as_deref() == Some(session.id.as_str()) {
         return;
     }

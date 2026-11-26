@@ -3,6 +3,8 @@
 //! panel each judged round also shows its means, a table of scores by
 //! judge with their spread, and each co-judge's overview.
 
+use std::collections::BTreeSet;
+
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
@@ -10,9 +12,9 @@ use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use competition::model::aggregate::SPREAD_WARN;
-use competition::model::types::{AgentKind, JUDGE_ID, Round, RoundKind, Session};
+use competition::model::types::{AgentKind, JUDGE_ID, Round, RoundKind, RoundNo, Session};
 
-use super::{Action, caption, gap, heading, keep_scroll, note, scroll_column, tag};
+use super::{Action, caption, gap, heading, keep_scroll, note, scroll_column, spacer, tag};
 
 pub(super) fn insert(
     tree: &mut UiTree,
@@ -20,23 +22,56 @@ pub(super) fn insert(
     session: &Session,
     can_act: bool,
     agents: &[AgentKind],
+    tools_expanded: bool,
+    expanded_rounds: &BTreeSet<RoundNo>,
     actions: &mut Vec<(WidgetId, Action)>,
-) {
-    heading(tree, host, "審判・アクション");
+) -> Option<WidgetId> {
+    let header = heading(tree, host, "結果・講評");
     let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+    spacer(tree, header);
+    let tools = tree.insert(Some(header), small("操作").selected(tools_expanded));
+    tree.set_accessible_label(tools, "結果の出力・コンペの操作を表示");
+    actions.push((tools, Action::ToggleTools));
 
-    let tools = tree.insert(Some(host), Container::wrapping_row(6.0, 6.0));
-    let viewer = tree.insert(
-        Some(tools),
-        Button::new("比較ビューアーを開く")
-            .control_size(ControlSize::Small)
-            .default_button(true),
-    );
-    actions.push((viewer, Action::OpenViewer));
-    let copy = tree.insert(Some(tools), small("結果をコピー"));
-    actions.push((copy, Action::CopyResult));
-    let export = tree.insert(Some(tools), small("レポート保存…"));
-    actions.push((export, Action::ExportReport));
+    // Keep the opened controls beside their toggle, independent of the
+    // saved scroll position of a long judging history.
+    let tools_host = if tools_expanded {
+        let group = tree.insert(
+            Some(host),
+            Container::new(Style {
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
+                gap: gap(6.0),
+                padding: LayoutRect::length(12.0),
+                size: LayoutSize {
+                    width: percent(1.0),
+                    height: auto(),
+                },
+                ..Default::default()
+            }),
+        );
+        let tools = tree.insert(Some(group), Container::wrapping_row(6.0, 6.0));
+        for (label, action) in [
+            ("比較ビューアーを開く", Action::OpenViewer),
+            ("結果をコピー", Action::CopyResult),
+            ("レポート保存…", Action::ExportReport),
+            ("新しいコンペ", Action::NewCompetition),
+            ("同じ設定でリマッチ", Action::Rematch),
+        ] {
+            let button = tree.insert(Some(tools), small(label));
+            actions.push((button, action));
+        }
+        if can_act && session.workdir.is_none() {
+            note(
+                tree,
+                group,
+                "優勝案の採用には、開始時に参照ディレクトリを指定してください",
+            );
+        }
+        Some(tools)
+    } else {
+        None
+    };
 
     if let Some(winner) = &session.winner {
         let banner = tree.insert(
@@ -56,12 +91,6 @@ pub(super) fn insert(
             .radius(8.0),
         );
         tag(tree, banner, format!("🏆 優勝: {winner}"), Tone::Success);
-        if let Some(verdict) = session.final_verdict() {
-            tree.insert(
-                Some(banner),
-                Label::new(verdict.to_owned()).font_size(12.0).wrap(true),
-            );
-        }
         if can_act && session.workdir.is_some() && !agents.is_empty() {
             let adopt = tree.insert(
                 Some(banner),
@@ -79,16 +108,16 @@ pub(super) fn insert(
                 ));
             }
         }
-    } else if can_act && session.workdir.is_none() {
-        note(
-            tree,
-            host,
-            "優勝案のリポジトリ採用は、参照ディレクトリを指定したコンペで使えます",
-        );
     }
 
     let list = scroll_column(tree, host, 12.0);
     keep_scroll(tree, list, session, "judge");
+    if let Some(verdict) = session.final_verdict() {
+        tree.insert(
+            Some(list),
+            Label::new(verdict.to_owned()).font_size(14.0).wrap(true),
+        );
+    }
 
     let mut any = false;
     for round in session.rounds.iter().rev() {
@@ -118,7 +147,7 @@ pub(super) fn insert(
         );
         let row = tree.insert(
             Some(card),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
         );
         let (kind_label, tone) = match round.kind {
             RoundKind::Blind => ("🔒 ブラインド", Tone::Neutral),
@@ -128,7 +157,7 @@ pub(super) fn insert(
         tree.insert(
             Some(card),
             Label::new(outcome.overview.clone())
-                .font_size(12.0)
+                .font_size(14.0)
                 .wrap(true),
         );
         let panel = !round.scorecards.is_empty();
@@ -152,9 +181,38 @@ pub(super) fn insert(
                 format!("#{} {p}{sc}", i + 1)
             })
             .collect();
-        caption(tree, card, ranks.join(" · "));
+        note(tree, card, ranks.join(" · "));
         if panel {
-            panel_details(tree, card, session, round);
+            let expanded = expanded_rounds.contains(&round.no);
+            let details = tree.insert(
+                Some(card),
+                small(if expanded {
+                    "審判別の詳細を閉じる"
+                } else {
+                    "審判別の評価"
+                })
+                .selected(expanded),
+            );
+            actions.push((details, Action::ToggleJudgeDetails(round.no)));
+            if expanded {
+                panel_details(tree, card, session, round);
+            } else {
+                for part in &outcome.ranking {
+                    if let Some(scores) = session.panel_scores(round.no, part)
+                        && scores.spread() >= SPREAD_WARN
+                    {
+                        tag(
+                            tree,
+                            card,
+                            format!("{part} · 審判間の差 {}", scores.spread()),
+                            Tone::Warning,
+                        );
+                    }
+                }
+            }
+            if awaits_verdict(session, round) {
+                note(tree, card, format!("最終講評を待っています（{JUDGE_ID}）"));
+            }
         }
         // A verdict that is no longer the result (the competition went on,
         // or a later choice overrode it) stays with its round.
@@ -171,10 +229,11 @@ pub(super) fn insert(
     if !any {
         caption(tree, list, "（まだ審判の評価はありません）");
     }
+    tools_host
 }
 
-const NAME_WIDTH: f32 = 72.0;
-const SCORE_WIDTH: f32 = 50.0;
+const NAME_WIDTH: f32 = 58.0;
+const SCORE_WIDTH: f32 = 40.0;
 
 /// One cell of the scores table: `text` in a box `width` wide.
 fn cell(tree: &mut UiTree, row: WidgetId, text: impl Into<String>, width: f32, strong: bool) {
@@ -189,7 +248,7 @@ fn cell(tree: &mut UiTree, row: WidgetId, text: impl Into<String>, width: f32, s
             ..Default::default()
         }),
     );
-    let label = Label::new(text.into()).font_size(11.5);
+    let label = Label::new(text.into()).font_size(12.0);
     let label = if strong {
         label.weight(600)
     } else {
@@ -248,12 +307,9 @@ fn panel_details(tree: &mut UiTree, card: WidgetId, session: &Session, round: &R
         tree.insert(
             Some(card),
             Label::new(card_out.overview.clone())
-                .font_size(12.0)
+                .font_size(14.0)
                 .wrap(true),
         );
-    }
-    if awaits_verdict(session, round) {
-        note(tree, card, format!("最終講評を待っています（{JUDGE_ID}）"));
     }
 }
 

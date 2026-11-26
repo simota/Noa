@@ -150,7 +150,8 @@ fn ac26_a_stored_review_opens_read_only_without_composer_or_pane_buttons() {
     let root = std::env::temp_dir().join(format!("noa-review-ui-{}", std::process::id()));
     let dir = stored_demo(&root);
     let before = std::fs::read(dir.join(store::EVENTS_FILE)).unwrap();
-    let screen = Review::stored(&dir).unwrap();
+    let mut screen = Review::stored(&dir).unwrap();
+    act(&mut screen, Action::ToggleSessionTools);
     // AC-23: a read-only view writes nothing into the session's directory.
     assert!(!store::report_path(&dir).exists());
     assert_eq!(std::fs::read(dir.join(store::EVENTS_FILE)).unwrap(), before);
@@ -314,6 +315,7 @@ fn ac20_an_unfinished_review_is_resumed_from_its_read_only_view_and_goes_live() 
     let mut text = TextStore::new(Default::default());
     screen.poll_live(&mut text);
     assert!(!screen.read_only);
+    act(&mut screen, Action::ToggleSessionTools);
     assert!(acts(&screen).contains(&Action::Close));
     // A finished review is not offered it.
     let done = stored_demo(&root);
@@ -348,7 +350,7 @@ fn ac23_a_missing_report_is_rewritten_from_the_log_only_when_asked() {
 }
 
 /// Every label's and tag's text in `root`'s subtree, in tree order.
-fn labels_under(tree: &UiTree, root: WidgetId) -> Vec<String> {
+pub(super) fn labels_under(tree: &UiTree, root: WidgetId) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
@@ -863,6 +865,7 @@ fn return_on_a_running_review_sends_the_draft() {
 #[test]
 fn the_shown_tab_and_the_filters_on_are_selected_buttons() {
     let mut screen = Review::demo();
+    act(&mut screen, Action::ToggleFilterDetails);
     assert!(is_selected(&screen, &Action::ShowTab(CenterTab::Findings)));
     assert!(!is_selected(&screen, &Action::ShowTab(CenterTab::Matrix)));
     assert!(is_selected(
@@ -931,7 +934,10 @@ fn tag_texts(screen: &Review, host: WidgetId) -> Vec<String> {
 
 #[test]
 fn a_held_review_does_not_read_as_finished() {
-    let screen = Review::demo_held();
+    let mut screen = Review::demo_held();
+    let summary = tag_texts(&screen, screen.progress_host);
+    assert!(summary.contains(&"一時停止中".to_owned()), "{summary:?}");
+    act(&mut screen, Action::ToggleProgressDetails);
     let tags = tag_texts(&screen, screen.progress_host);
     assert!(tags.contains(&"✓ ラウンド完了".to_owned()), "{tags:?}");
     assert!(!tags.contains(&"✓ 完了".to_owned()), "{tags:?}");
@@ -966,6 +972,7 @@ fn the_agents_panes_close_together_once_the_review_has_ended() {
     let finished = crate::demo::session();
     assert!(finished.closed);
     let (mut screen, link) = live_with(finished);
+    act(&mut screen, Action::ToggleSessionTools);
     assert!(acts(&screen).contains(&Action::ClosePanes));
     act(&mut screen, Action::ClosePanes);
     assert_eq!(commands(&link), vec![Command::ClosePanes]);
@@ -973,7 +980,8 @@ fn the_agents_panes_close_together_once_the_review_has_ended() {
     assert_eq!(cut_off(&screen, screen.status_trailing), vec![]);
     // A stored review has no runner and no panes of its own.
     let root = std::env::temp_dir().join(format!("noa-review-ui-panes-{}", std::process::id()));
-    let stored = Review::stored(&stored_demo(&root)).unwrap();
+    let mut stored = Review::stored(&stored_demo(&root)).unwrap();
+    act(&mut stored, Action::ToggleSessionTools);
     assert!(!acts(&stored).contains(&Action::ClosePanes));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1138,7 +1146,8 @@ fn button_label(screen: &Review, action: &Action) -> String {
 
 #[test]
 fn the_agreement_filters_count_live_findings_as_the_severities_do() {
-    let screen = Review::demo();
+    let mut screen = Review::demo();
+    act(&mut screen, Action::ToggleFilterDetails);
     let session = screen.session.as_ref().unwrap();
     let live: Vec<_> = session
         .findings
@@ -1260,6 +1269,7 @@ fn a_copy_that_cannot_be_read_back_is_reported_as_unconfirmed() {
 #[test]
 fn every_filter_count_is_what_choosing_that_value_alone_shows() {
     let mut screen = Review::demo();
+    act(&mut screen, Action::ToggleFilterDetails);
     // Each step adds to the filters before it: none, all cleared, then a
     // severity, then one reviewer.
     let steps = [
@@ -1701,6 +1711,7 @@ fn reviewing_again_fills_the_start_view_with_the_same_target_panel_and_limit() {
     let repo = temp_dir("git");
     let session = demo_in(&repo);
     let (mut screen, _link) = live_with(session.clone());
+    act(&mut screen, Action::ToggleSessionTools);
     assert!(acts(&screen).contains(&Action::ReviewAgain(None)));
     act(&mut screen, Action::ReviewAgain(None));
     assert!(screen.session.is_none());
@@ -2181,6 +2192,7 @@ fn the_fix_and_review_again_buttons_are_pressable_from_the_keyboard() {
     // 同じ設定で再レビュー, then レビューを開始: two presses.
     let repo = temp_dir("press");
     let (mut screen, link) = live_with(demo_in(&repo));
+    press_button(&mut screen, &Action::ToggleSessionTools);
     press_button(&mut screen, &Action::ReviewAgain(None));
     press_button(&mut screen, &Action::Start);
     let started = commands(&link)
@@ -3064,7 +3076,12 @@ mod auto_assign {
         act(&mut screen, Action::RemovePanelRow(0));
         let lines = note_lines(&screen);
         act(&mut screen, Action::Start);
-        let [Command::Start { auto: Some(auto), .. }] = &commands(&link)[..] else {
+        let [
+            Command::Start {
+                auto: Some(auto), ..
+            },
+        ] = &commands(&link)[..]
+        else {
             panic!("expected an assigned start")
         };
         assert_eq!(auto.overridden, [removed.slot.clone()]);
@@ -3089,7 +3106,15 @@ mod auto_assign {
         act(&mut screen, Action::Start);
         assert!(pending.cancel.load(Ordering::Acquire));
         assert!(pending.tx.send(Ok(pending.answer)).is_err());
-        let [Command::Start { auto: Some(auto), lead, panel, .. }] = &commands(&link)[..] else {
+        let [
+            Command::Start {
+                auto: Some(auto),
+                lead,
+                panel,
+                ..
+            },
+        ] = &commands(&link)[..]
+        else {
             panic!("expected the first planner's assignment at start")
         };
         assert_eq!((lead, panel), (&applied.lead, &applied.panel));
@@ -3291,4 +3316,125 @@ mod auto_assign {
         assert_eq!(lead, &manual.lead);
         assert_eq!(panel, &manual.panel);
     }
+}
+
+#[test]
+fn detailed_filters_keep_their_conditions_and_keyboard_focus_when_closed() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    let details = Action::ToggleFilterDetails;
+    let lens = Action::ToggleLens("correctness".into());
+    assert!(!screen.filter_details);
+    assert!(widget_for(&screen, &lens).is_none());
+    assert_eq!(press_focused(&mut screen, &details), Some(details.clone()));
+    assert_eq!(press_focused(&mut screen, &lens), Some(lens));
+    let filters = screen.filters.clone();
+    let shown = shown_ids(&screen);
+    assert_eq!(press_focused(&mut screen, &details), Some(details.clone()));
+    assert_eq!(screen.filters, filters);
+    assert_eq!(shown_ids(&screen), shown);
+    assert!(
+        labels_under(&screen.tree, screen.center_host)
+            .iter()
+            .any(|t| t.contains("観点:"))
+    );
+    assert_eq!(button_label(&screen, &details), "詳細条件 · 2 適用");
+    let mut next = crate::demo::held();
+    next.rev += 1;
+    link.snapshots
+        .send(Snapshot {
+            link: Link::Live,
+            session: Some(Arc::new(next)),
+            reply_root: None,
+            session_dir: None,
+            generation: 0,
+        })
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert!(!screen.filter_details);
+    assert_eq!(screen.filters, filters);
+    assert_eq!(screen.tree.focused(), widget_for(&screen, &details));
+    act(&mut screen, Action::ClearFilters);
+    assert!(widget_for(&screen, &Action::ClearFilters).is_none());
+    assert_eq!(button_label(&screen, &details), "詳細条件");
+}
+
+#[test]
+fn collapsed_progress_keeps_failures_and_rejected_replies_visible() {
+    let mut session = crate::demo::held();
+    let round = session.rounds.last_mut().unwrap();
+    round.briefs[0].receipt.failed = Some("エージェントに接続できません".into());
+    round.briefs[0].receipt.replied = None;
+    round.briefs[1].receipt.rejected = Some("根拠を補ってください".into());
+    round.briefs[1].receipt.replied = None;
+    let (screen, _link) = live_with(session);
+    assert!(!screen.progress_details);
+    let shown = labels_under(&screen.tree, screen.progress_host).join("\n");
+    assert!(shown.contains("エージェントに接続できません"));
+    assert!(shown.contains("根拠を補ってください"));
+    assert!(shown.contains("一時停止中"));
+    assert!(widget_for(&screen, &Action::Continue).is_some());
+}
+
+#[test]
+fn progress_refresh_keeps_one_toggle_its_focus_and_the_composer_draft() {
+    let (mut screen, _link) = live_with(crate::demo::held());
+    let details = Action::ToggleProgressDetails;
+    type_draft(&mut screen, "公開 API の互換性を確認してください");
+    assert_eq!(press_focused(&mut screen, &details), Some(details.clone()));
+    let mut text = TextStore::new(Default::default());
+    for _ in 0..3 {
+        screen.rebuild_progress(&mut text);
+        assert_eq!(
+            screen.actions.iter().filter(|(_, a)| *a == details).count(),
+            1
+        );
+        assert_eq!(screen.tree.focused(), widget_for(&screen, &details));
+        assert!(screen.progress_details);
+    }
+    assert_eq!(press_focused(&mut screen, &details), Some(details));
+    assert!(!screen.progress_details);
+    assert_eq!(draft(&screen), "公開 API の互換性を確認してください");
+}
+
+#[test]
+fn session_tools_open_on_demand_without_hiding_the_next_action() {
+    let (mut screen, _link) = live_with(crate::demo::held());
+    let mut text = TextStore::new(Default::default());
+    let tools = Action::ToggleSessionTools;
+    let toggle = |screen: &mut Review, text: &mut TextStore| {
+        screen.tree.set_focus(widget_for(screen, &tools));
+        noa_gpui_platform::Screen::dispatch(
+            screen,
+            noa_gpui_core::Event::KeyDown {
+                key: noa_gpui_core::Key::Space,
+                modifiers: Default::default(),
+            },
+            text,
+        );
+        assert_eq!(screen.tree.focused(), widget_for(screen, &tools));
+    };
+    assert!(screen.tree.is_hidden(screen.tools_host));
+    assert!(widget_for(&screen, &Action::Continue).is_some());
+    assert!(widget_for(&screen, &Action::CopyReport).is_none());
+    toggle(&mut screen, &mut text);
+    for action in [
+        Action::CopyReport,
+        Action::SaveReport,
+        Action::Extend(1),
+        Action::Close,
+    ] {
+        assert!(widget_for(&screen, &action).is_some(), "{action:?}");
+    }
+    // Text shaping and later key events share the same store, as in the app.
+    noa_gpui_platform::Screen::prepare(
+        &mut screen,
+        noa_gpui_scene::Size::new(SMALLEST.0, SMALLEST.1),
+        &mut text,
+    );
+    assert_eq!(cut_off(&screen, screen.tools_host), vec![]);
+    assert_eq!(cut_off(&screen, screen.status_trailing), vec![]);
+    toggle(&mut screen, &mut text);
+    assert!(screen.tree.is_hidden(screen.tools_host));
+    assert!(widget_for(&screen, &Action::Continue).is_some());
+    assert!(widget_for(&screen, &Action::CopyReport).is_none());
 }

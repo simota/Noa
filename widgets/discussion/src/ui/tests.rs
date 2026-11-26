@@ -52,6 +52,24 @@ fn click(screen: &mut Discussion, text: &mut TextStore, id: WidgetId) {
     screen.prepare(window(), text);
 }
 
+fn open_tools(screen: &mut Discussion, text: &mut TextStore) {
+    if !screen.tools_open {
+        let toggle = widget_for(screen, &Action::ToggleTools);
+        click(screen, text, toggle);
+    }
+}
+
+fn press(screen: &mut Discussion, text: &mut TextStore, key: noa_gpui_core::Key) {
+    screen.dispatch(
+        Event::KeyDown {
+            key,
+            modifiers: Default::default(),
+        },
+        text,
+    );
+    screen.prepare(window(), text);
+}
+
 fn rect(tree: &UiTree, id: WidgetId) -> [f32; 4] {
     let origin = tree.window_origin(id).unwrap();
     let size = tree.layout(id).unwrap().rect;
@@ -161,6 +179,38 @@ fn clicking_the_same_issue_again_or_clear_shows_everything() {
     let clear = widget_for(&screen, &Action::ClearFilter);
     click(&mut screen, &mut text, clear);
     assert_eq!(screen.filter, None);
+}
+
+#[test]
+fn an_issues_individual_stances_are_available_when_it_is_selected() {
+    let (mut screen, mut text) = laid_out();
+    let session = screen.session.as_ref().unwrap();
+    let issue = session.issues.get(&i("B")).unwrap();
+    let stances: Vec<String> = session
+        .panelists
+        .iter()
+        .map(|part| {
+            let pos = issue.stances.get(&part.id).map(|stance| stance.pos);
+            format!("{} {}", part_name(&part.id), position_tag(pos).0)
+        })
+        .collect();
+    let shown_stances = |screen: &Discussion| {
+        subtree_of(&screen.tree, screen.tree_host)
+            .into_iter()
+            .filter_map(|id| screen.tree.get::<Tag>(id).map(|tag| tag.text().to_owned()))
+            .filter(|label| stances.contains(label))
+            .collect::<Vec<_>>()
+    };
+    assert!(shown_stances(&screen).is_empty());
+    assert!(
+        labels_under(&screen.tree, screen.tree_host)
+            .iter()
+            .any(|label| label.contains("賛成 ") || label.contains("反対 "))
+    );
+    screen.run(Action::Filter(i("B")), &mut text);
+    assert_eq!(shown_stances(&screen), stances);
+    screen.run(Action::ClearFilter, &mut text);
+    assert!(shown_stances(&screen).is_empty());
 }
 
 #[test]
@@ -1007,6 +1057,7 @@ fn a_stored_discussion_shows_read_only_without_controls() {
     session.rounds.last_mut().unwrap().briefs[0].receipt.failed = Some("gone".into());
     session.closed = true;
     h.deliver_with(Link::Stored(demo_dir("disc-demo-1")), Some(session));
+    open_tools(&mut h.screen, &mut h.text);
     assert!(!h.screen.tree.is_hidden(h.screen.meeting));
     assert_eq!(status_badges(&h.screen)[0], "記録");
     for action in h.screen.actions.iter().map(|(_, a)| a) {
@@ -1077,6 +1128,7 @@ fn a_new_discussion_returns_to_the_start_view_with_a_fresh_form_state() {
     h.deliver(Some(session.clone()));
     h.screen.run(Action::Filter(i("B")), &mut h.text);
     h.screen.prepare(window(), &mut h.text);
+    open_tools(&mut h.screen, &mut h.text);
     let new = widget_for(&h.screen, &Action::NewDiscussion);
     click(&mut h.screen, &mut h.text, new);
     assert_eq!(h.drain(), vec![Command::NewDiscussion]);
@@ -1240,6 +1292,7 @@ fn more_rounds_are_offered_where_the_engine_takes_them() {
     for by in EXTEND_BY {
         assert!(has_widget_for(&h.screen, &Action::Extend(by)));
     }
+    open_tools(&mut h.screen, &mut h.text);
     let three = widget_for(&h.screen, &Action::Extend(3));
     click(&mut h.screen, &mut h.text, three);
     assert_eq!(h.drain(), vec![Command::Extend { by: 3 }]);
@@ -1256,6 +1309,7 @@ fn more_rounds_are_offered_where_the_engine_takes_them() {
     h.deliver(Some(ran_out.clone()));
     assert!(has_widget_for(&h.screen, &Action::Extend(1)));
     h.deliver_with(Link::Stored(demo_dir("disc-demo-1")), Some(ran_out));
+    open_tools(&mut h.screen, &mut h.text);
     let one = widget_for(&h.screen, &Action::Extend(1));
     click(&mut h.screen, &mut h.text, one);
     assert_eq!(h.drain(), vec![Command::Extend { by: 1 }]);
@@ -1289,6 +1343,248 @@ fn every_status_control_fits_the_smallest_window() {
         lx + lw <= tx + 0.5,
         "leading {lx}+{lw} runs into trailing at {tx}"
     );
+}
+
+#[test]
+fn the_tools_open_from_the_keyboard_and_keep_the_draft_and_focus_on_refresh() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = crate::demo::session();
+    h.deliver(Some(session.clone()));
+    assert!(h.screen.tree.is_hidden(h.screen.tools_host));
+    h.set_text(h.screen.composer.area, "予算も考慮してください");
+    let toggle = widget_for(&h.screen, &Action::ToggleTools);
+    h.screen.tree.set_focus(Some(toggle));
+    press(&mut h.screen, &mut h.text, noa_gpui_core::Key::Space);
+    assert!(h.screen.tools_open);
+    assert!(!h.screen.tree.is_hidden(h.screen.tools_host));
+    assert_eq!(
+        h.screen.tree.focused(),
+        Some(widget_for(&h.screen, &Action::ToggleTools))
+    );
+    session.rev += 1;
+    h.deliver(Some(session));
+    assert!(h.screen.tools_open);
+    assert_eq!(
+        composer::text(&h.screen.tree, &h.screen.composer),
+        "予算も考慮してください"
+    );
+    assert_eq!(
+        h.screen.tree.focused(),
+        Some(widget_for(&h.screen, &Action::ToggleTools))
+    );
+    press(&mut h.screen, &mut h.text, noa_gpui_core::Key::Space);
+    assert!(!h.screen.tools_open);
+    assert!(h.screen.tree.is_hidden(h.screen.tools_host));
+    assert!(h.drain().is_empty());
+    open_tools(&mut h.screen, &mut h.text);
+    h.deliver(None);
+    assert!(!h.screen.tools_open);
+    assert!(h.screen.tree.is_hidden(h.screen.tools_host));
+}
+
+#[test]
+fn focus_on_repeated_issue_links_stays_in_its_pane_and_position() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = crate::demo::session();
+    let action_item = session.minutes.section(MinuteSection::Actions)[0].clone();
+    session
+        .minutes
+        .section_mut(MinuteSection::Actions)
+        .push(action_item);
+    h.deliver(Some(session.clone()));
+    let links = |screen: &Discussion, host| {
+        let pane = subtree_of(&screen.tree, host);
+        screen
+            .actions
+            .iter()
+            .filter(|(id, action)| *action == Action::Filter(i("B")) && pane.contains(id))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+    };
+    for host in [h.screen.center_host, h.screen.minutes_host] {
+        let before = links(&h.screen, host);
+        assert!(before.len() >= 2);
+        h.screen.tree.set_focus(Some(before[1]));
+        let mut message = session
+            .messages
+            .iter()
+            .find(|message| message.issues.contains(&i("B")))
+            .unwrap()
+            .clone();
+        message.id = session.next_message_id(0);
+        session.messages.push(message);
+        session.rev += 1;
+        h.deliver(Some(session.clone()));
+        let after = links(&h.screen, host);
+        assert_eq!(h.screen.tree.focused(), Some(after[1]));
+    }
+}
+
+#[test]
+fn a_blocked_timeline_post_explains_why_from_the_footer() {
+    use crate::live::timeline::{NOT_REGISTERED, Status};
+    use noa_ipc::timeline_outbox::PublishState;
+
+    let (mut screen, mut text) = laid_out();
+    screen.timeline_state = Some(Status::Publish(PublishState::Pending));
+    screen.rebuild(&mut text);
+    assert!(!has_widget_for(&screen, &Action::ShowTimelineDetails));
+    assert!(
+        labels_under(&screen.tree, screen.status_leading)
+            .contains(&"タイムライン: 投稿待ち".to_owned())
+    );
+
+    screen.timeline_state = Some(Status::Waiting {
+        why: NOT_REGISTERED.into(),
+    });
+    screen.rebuild(&mut text);
+    assert!(screen.tree.is_hidden(screen.tools_host));
+    assert!(status_badges(&screen).contains(&"タイムライン: 要確認".to_owned()));
+    let reason = widget_for(&screen, &Action::ShowTimelineDetails);
+    assert_eq!(screen.tree.parent(reason), Some(screen.status_leading));
+    assert_eq!(
+        noa_gpui_core::Widget::tooltip(
+            screen.tree.get::<Button>(reason).unwrap(),
+            Point::new(0.0, 0.0),
+        ),
+        Some(NOT_REGISTERED.to_owned())
+    );
+    screen.tree.set_focus(Some(reason));
+    for _ in 0..2 {
+        screen.dispatch(
+            Event::KeyDown {
+                key: noa_gpui_core::Key::Space,
+                modifiers: Default::default(),
+            },
+            &mut text,
+        );
+        assert!(screen.tools_open);
+        assert!(!screen.tree.is_hidden(screen.tools_host));
+        assert!(labels_under(&screen.tree, screen.tools_host).contains(&NOT_REGISTERED.to_owned()));
+        assert_eq!(
+            screen.tree.focused(),
+            Some(widget_for(&screen, &Action::ShowTimelineDetails))
+        );
+    }
+}
+
+#[test]
+fn the_expanded_tools_fit_the_smallest_window() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = limited(crate::demo::held(), 9);
+    session.workdir = Some(std::path::PathBuf::from("/repo"));
+    h.deliver(Some(session));
+    open_tools(&mut h.screen, &mut h.text);
+    let size = Size::new(MIN_WINDOW.0 as f32, MIN_WINDOW.1 as f32);
+    h.screen.prepare(size, &mut h.text);
+    let tools = subtree_of(&h.screen.tree, h.screen.tools_host);
+    for (id, action) in &h.screen.actions {
+        if tools.contains(id) {
+            let [x, y, w, h_] = rect(&h.screen.tree, *id);
+            assert!(
+                x >= 0.0 && y >= 0.0 && x + w <= size.width + 0.5 && y + h_ <= size.height,
+                "{action:?} is outside the window: {x}, {y}, {w}, {h_}"
+            );
+        }
+    }
+}
+
+#[test]
+fn return_uses_the_next_step_while_tabs_only_indicate_the_selected_view() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = crate::demo::held();
+    h.deliver(Some(session.clone()));
+    let chat = widget_for(&h.screen, &Action::ShowChat);
+    assert!(h.screen.tree.get::<Button>(chat).unwrap().is_selected());
+    h.screen.tree.set_focus(None);
+    press(&mut h.screen, &mut h.text, noa_gpui_core::Key::Enter);
+    assert_eq!(h.drain(), vec![Command::Continue]);
+
+    session.hold = false;
+    session.rev += 1;
+    h.deliver(Some(session));
+    h.screen.run(Action::ShowMap, &mut h.text);
+    let map = widget_for(&h.screen, &Action::ShowMap);
+    let chat = widget_for(&h.screen, &Action::ShowChat);
+    assert!(h.screen.tree.get::<Button>(map).unwrap().is_selected());
+    assert!(!h.screen.tree.get::<Button>(chat).unwrap().is_selected());
+    h.set_text(h.screen.composer.area, "運用コストも見てください");
+    h.screen.tree.set_focus(None);
+    press(&mut h.screen, &mut h.text, noa_gpui_core::Key::Enter);
+    assert!(matches!(
+        h.drain().as_slice(),
+        [Command::Intervene { body, .. }] if body == "運用コストも見てください"
+    ));
+}
+
+#[test]
+fn an_ended_discussion_hides_the_composer_and_restores_its_draft_when_extended() {
+    let (channel, feed) = test_channel();
+    let mut h = Harness::new(channel, feed);
+    let mut session = limited(crate::demo::held(), 4);
+    h.deliver(Some(session.clone()));
+    h.set_text(h.screen.composer.area, "復元手順も確認してください");
+    let [x, y, w, height] = rect(&h.screen.tree, h.screen.composer.send);
+    let old_send = Point::new(x + w / 2.0, y + height / 2.0);
+    h.screen.tree.set_focus(Some(h.screen.composer.area));
+    session.closed = true;
+    session.rev += 1;
+    h.deliver(Some(session.clone()));
+    assert!(h.screen.tree.is_hidden(h.screen.composer.root));
+    assert!(!has_widget_for(&h.screen, &Action::Send));
+    assert!(h.screen.tree.focused().is_none());
+    for event in [
+        Event::PointerMove { pos: old_send },
+        Event::PointerDown {
+            pos: old_send,
+            button: PointerButton::Primary,
+        },
+        Event::PointerUp {
+            pos: old_send,
+            button: PointerButton::Primary,
+        },
+    ] {
+        h.screen.dispatch(event, &mut h.text);
+    }
+    // An action queued before the closing snapshot must not send either.
+    h.screen.run(Action::Send, &mut h.text);
+    assert!(
+        !h.drain()
+            .iter()
+            .any(|command| matches!(command, Command::Intervene { .. }))
+    );
+    h.screen.prepare(window(), &mut h.text);
+
+    open_tools(&mut h.screen, &mut h.text);
+    let more = widget_for(&h.screen, &Action::Extend(1));
+    click(&mut h.screen, &mut h.text, more);
+    assert_eq!(h.drain(), vec![Command::Extend { by: 1 }]);
+    session.closed = false;
+    session.max_rounds = Some(5);
+    session.rev += 1;
+    h.deliver(Some(session.clone()));
+    assert!(!h.screen.tree.is_hidden(h.screen.composer.root));
+    assert_eq!(
+        composer::text(&h.screen.tree, &h.screen.composer),
+        "復元手順も確認してください"
+    );
+    let send = widget_for(&h.screen, &Action::Send);
+    click(&mut h.screen, &mut h.text, send);
+    assert!(matches!(
+        h.drain().as_slice(),
+        [Command::Intervene { body, .. }] if body == "復元手順も確認してください"
+    ));
+
+    session.closed = true;
+    session.rev += 1;
+    h.deliver(Some(session));
+    h.screen.tree.set_focus(None);
+    press(&mut h.screen, &mut h.text, noa_gpui_core::Key::Enter);
+    assert_eq!(h.drain(), vec![Command::NewDiscussion]);
 }
 
 // ── Review fixes ────────────────────────────────────────────────────────────
@@ -1562,11 +1858,12 @@ fn the_round_limit_is_sent_with_the_start() {
 }
 
 #[test]
-fn ending_the_discussion_is_one_click_until_it_has_ended() {
+fn ending_the_discussion_is_available_in_the_tools_until_it_has_ended() {
     let (channel, feed) = test_channel();
     let mut h = Harness::new(channel, feed);
     let mut session = crate::demo::session();
     h.deliver(Some(session.clone()));
+    open_tools(&mut h.screen, &mut h.text);
     let end = widget_for(&h.screen, &Action::Close);
     click(&mut h.screen, &mut h.text, end);
     assert_eq!(h.drain(), vec![Command::Close]);
@@ -1586,6 +1883,7 @@ fn the_panes_close_together_once_the_discussion_has_ended() {
     session.closed = true;
     session.rev += 1;
     h.deliver(Some(session.clone()));
+    open_tools(&mut h.screen, &mut h.text);
     let close = widget_for(&h.screen, &Action::ClosePanes);
     click(&mut h.screen, &mut h.text, close);
     assert_eq!(h.drain(), vec![Command::ClosePanes]);
@@ -1621,6 +1919,7 @@ fn copying_the_result_puts_its_markdown_on_the_clipboard() {
     let mut h = Harness::new(channel, feed);
     let session = crate::demo::session();
     h.deliver(Some(session.clone()));
+    open_tools(&mut h.screen, &mut h.text);
     let copy = widget_for(&h.screen, &Action::CopyResult);
     click(&mut h.screen, &mut h.text, copy);
     assert_eq!(
@@ -1637,6 +1936,7 @@ fn exporting_the_minutes_asks_where_and_writes_the_file() {
     let mut h = Harness::new(channel, feed);
     let session = crate::demo::session();
     h.deliver(Some(session.clone()));
+    open_tools(&mut h.screen, &mut h.text);
     let export = widget_for(&h.screen, &Action::ExportMinutes);
     click(&mut h.screen, &mut h.text, export);
     let dialogs = h.screen.take_file_dialogs();
@@ -1674,6 +1974,7 @@ fn an_implementation_pane_is_offered_only_with_a_working_directory() {
     for kind in AgentKind::ALL {
         assert!(has_widget_for(&h.screen, &Action::Implement(kind)));
     }
+    open_tools(&mut h.screen, &mut h.text);
     let codex = widget_for(&h.screen, &Action::Implement(AgentKind::Codex));
     click(&mut h.screen, &mut h.text, codex);
     assert_eq!(
@@ -2156,7 +2457,9 @@ mod auto_assign {
     #[test]
     fn planner_receives_topic_directory_roles_candidates_and_setup_check() {
         let mut h = form();
-        h.type_into(h.screen.start.workdir, "/tmp");
+        let workdir = std::env::temp_dir();
+        let workdir_text = workdir.to_str().unwrap();
+        h.type_into(h.screen.start.workdir, workdir_text);
         let jobs = h.fake_planner();
         assert_eq!(h.open_planners(), ["claude で決める", "codex で決める"]);
         h.key(Key::ArrowDown);
@@ -2164,9 +2467,9 @@ mod auto_assign {
         h.key(Key::Enter);
         let job = jobs.try_recv().unwrap().job;
         assert_eq!(job.planner.agent, "codex");
-        assert_eq!(job.cwd, PathBuf::from("/tmp"));
+        assert_eq!(job.cwd, workdir);
         let req = (job.request)();
-        assert!(req.content.contains("データベースを比較") && req.content.contains("/tmp"));
+        assert!(req.content.contains("データベースを比較") && req.content.contains(workdir_text));
         assert_eq!(
             req.slots.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             ["moderator", "panelist-1", "panelist-2", "panelist-3"]

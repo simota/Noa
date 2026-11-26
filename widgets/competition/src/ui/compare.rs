@@ -1,6 +1,8 @@
 //! Center pane "Compare" tab: side-by-side comparison of each contestant's
 //! deliverables, scores, private feedback, and submission report for a round.
 
+use std::collections::BTreeSet;
+
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, FlexWrap, Rect as LayoutRect, Size as LayoutSize, auto, length,
     percent,
@@ -19,6 +21,7 @@ pub(super) fn insert(
     selected_round: Option<RoundNo>,
     filter_part: Option<&PartId>,
     can_act: bool,
+    expanded_entries: &BTreeSet<PartId>,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let list = scroll_column(tree, host, 12.0);
@@ -44,7 +47,7 @@ pub(super) fn insert(
     tree.insert(
         Some(req),
         Label::new(session.request.clone())
-            .font_size(13.0)
+            .font_size(14.0)
             .wrap(true),
     );
 
@@ -59,7 +62,7 @@ pub(super) fn insert(
 
     let rhead = tree.insert(
         Some(list),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::wrapping_row(8.0, 4.0).align_items(AlignItems::CENTER),
     );
     let (kind_label, kind_tone) = match round.kind {
         RoundKind::Blind => ("🔒 ブラインドラウンド（他パネル非公開）", Tone::Neutral),
@@ -93,7 +96,7 @@ pub(super) fn insert(
         tree.insert(
             Some(ov),
             Label::new(outcome.overview.clone())
-                .font_size(12.0)
+                .font_size(14.0)
                 .wrap(true),
         );
     }
@@ -131,7 +134,7 @@ pub(super) fn insert(
                 flex_shrink: 1.0,
                 flex_basis: length(0.0),
                 min_size: LayoutSize {
-                    width: length(180.0),
+                    width: length(220.0),
                     height: auto(),
                 },
                 gap: gap(8.0),
@@ -152,7 +155,7 @@ pub(super) fn insert(
 
         let head = tree.insert(
             Some(col),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
         );
         let title = if is_winner {
             format!("🏆 {part}")
@@ -163,8 +166,8 @@ pub(super) fn insert(
         };
         tree.insert(Some(head), Label::new(title).font_size(14.0).weight(600));
         spacer(tree, head);
-        if let Some(ev) = round.outcome.as_ref().and_then(|o| o.evaluations.get(part)) {
-            tag(tree, head, format!("{}/100", ev.score), Tone::Accent);
+        if let Some(score) = session.score_label(round.no, part) {
+            tag(tree, head, format!("{score}/100"), Tone::Neutral);
         }
         // In the header, not after the report: a long report or artifact
         // list must not push the choice out of reach.
@@ -180,7 +183,7 @@ pub(super) fn insert(
             tree.insert(
                 Some(col),
                 Label::new(sub.summary.clone())
-                    .font_size(12.0)
+                    .font_size(14.0)
                     .weight(600)
                     .wrap(true),
             );
@@ -207,10 +210,14 @@ pub(super) fn insert(
                 caption(tree, col, "成果物ファイルなし");
             }
 
+            let expanded = expanded_entries.contains(part);
             if let Some(ev) = round.outcome.as_ref().and_then(|o| o.evaluations.get(part)) {
                 for (title, text, muted) in evaluation_sections(ev) {
+                    if title == "採点の根拠" && !expanded {
+                        continue;
+                    }
                     caption(tree, col, title);
-                    let label = Label::new(text).font_size(11.5).wrap(true);
+                    let label = Label::new(text).font_size(14.0).wrap(true);
                     tree.insert(
                         Some(col),
                         if muted {
@@ -222,11 +229,24 @@ pub(super) fn insert(
                 }
             }
 
-            caption(tree, col, "提出レポート");
-            tree.insert(
+            let details = tree.insert(
                 Some(col),
-                Label::new(sub.body.clone()).font_size(11.5).wrap(true),
+                Button::new(if expanded {
+                    "詳細を閉じる"
+                } else {
+                    "根拠・提出レポート"
+                })
+                .control_size(ControlSize::Small)
+                .selected(expanded),
             );
+            actions.push((details, Action::ToggleEntryDetails(part.clone())));
+            if expanded {
+                caption(tree, col, "提出レポート");
+                tree.insert(
+                    Some(col),
+                    Label::new(sub.body.clone()).font_size(14.0).wrap(true),
+                );
+            }
         } else {
             let status = round
                 .brief(part)

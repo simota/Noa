@@ -109,7 +109,7 @@ fn brief_bar(
     tree.insert(
         Some(row),
         Label::new(format!("▍ブリーフ R{}", round.no))
-            .font_size(12.5)
+            .font_size(13.0)
             .weight(600),
     );
     if let RoundKind::Debate(id) = &round.kind {
@@ -264,7 +264,7 @@ pub(super) fn message_card(
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
     let author = Label::new(author_name(&message.author))
-        .font_size(12.0)
+        .font_size(13.0)
         .weight(600)
         .color(author_color(session, &message.author));
     let link = match &message.author {
@@ -305,7 +305,7 @@ pub(super) fn message_card(
     tree.insert(
         Some(card),
         Label::new(message.body.clone())
-            .font_size(if question { 11.5 } else { 12.5 })
+            .font_size(if question { 13.0 } else { 14.0 })
             .color(if question { Role::Muted } else { Role::Text })
             .wrap(true)
             .selectable(true),
@@ -346,7 +346,7 @@ pub(super) fn issue_link(
     );
     tree.insert(
         Some(link),
-        Tag::new(format!("[{issue}]")).tone(Tone::Accent),
+        Tag::new(format!("[{issue}]")).style(noa_gpui_core::widgets::TagStyle::Outlined),
     );
     actions.push((link, Action::Filter(issue.clone())));
     link

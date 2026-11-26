@@ -1,14 +1,14 @@
-//! The issue tree: the topic, then every issue depth-first with its state
-//! and each panelist's stance. Clicking an issue filters the chat to it; ⚔
+//! The issue tree: the topic, then each issue's state and stance summary.
+//! Selecting an issue reveals individual stances and filters the chat; ⚔
 //! on a contested issue drafts a debate.
 
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
-use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Pressable, Separator, Tone};
+use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Pressable, Separator};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
-use discussion::model::types::{Issue, IssueId, IssueState, Session};
+use discussion::model::types::{Issue, IssueId, IssueState, Position, Session};
 
 use super::{
     Action, caption, debate_in_play, gap, heading, keep_scroll, note, outlined, part_name,
@@ -40,7 +40,7 @@ pub(super) fn insert(
     tree.insert(
         Some(list),
         Label::new(session.topic.clone())
-            .font_size(13.5)
+            .font_size(14.0)
             .weight(600)
             .wrap(true),
     );
@@ -107,8 +107,8 @@ pub(super) fn insert(
     }
 }
 
-/// The clickable node: state, id and title, then one stance chip per
-/// panelist.
+/// The title leads the row. Individual stances are shown for the selected
+/// issue; every other issue keeps the distribution visible in one line.
 fn issue_node(
     tree: &mut UiTree,
     row: WidgetId,
@@ -128,8 +128,8 @@ fn issue_node(
                 width: length(0.0),
                 height: auto(),
             },
-            gap: gap(5.0),
-            padding: LayoutRect::length(6.0),
+            gap: gap(7.0),
+            padding: LayoutRect::length(8.0),
             ..Default::default()
         })
         .label(format!("{} {}", issue.id, issue.title))
@@ -137,40 +137,31 @@ fn issue_node(
     );
     let title = tree.insert(
         Some(node),
-        Container::row().align_items(AlignItems::START).gap(6.0),
+        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
     let (state, tone) = state_tag(issue.state);
     tag(tree, title, state, tone);
     tree.insert(
         Some(title),
         Label::new(issue.id.to_string())
-            .font_size(12.5)
-            .weight(700)
-            .color(Role::Accent),
-    );
-    let name = tree.insert(
-        Some(title),
-        Container::new(Style {
-            flex_grow: 1.0,
-            flex_shrink: 1.0,
-            flex_basis: length(0.0),
-            min_size: LayoutSize {
-                width: length(0.0),
-                height: auto(),
-            },
-            ..Default::default()
-        }),
-    );
-    tree.insert(
-        Some(name),
-        Label::new(issue.title.clone())
-            .font_size(12.5)
-            .wrap(true)
-            .max_lines(2),
+            .font_size(12.0)
+            .color(Role::Muted),
     );
     // New: added by the summary that opened this round, or in it.
     if round > 0 && issue.opened_in + 1 >= round {
-        tag(tree, title, "新規", Tone::Accent);
+        caption(tree, title, "新規");
+    }
+    tree.insert(
+        Some(node),
+        Label::new(issue.title.clone())
+            .font_size(14.0)
+            .weight(600)
+            .wrap(true),
+    );
+
+    if !selected {
+        note(tree, node, stance_summary(session, issue));
+        return node;
     }
 
     let stances = tree.insert(
@@ -179,13 +170,29 @@ fn issue_node(
     );
     for part in &session.panelists {
         let pos = issue.stances.get(&part.id).map(|s| s.pos);
-        let (text, tone) = position_tag(pos);
+        let (text, _) = position_tag(pos);
         let chip = format!("{} {text}", part_name(&part.id));
-        if pos.is_some() {
-            tag(tree, stances, &chip, tone);
-        } else {
-            outlined(tree, stances, &chip);
-        }
+        outlined(tree, stances, &chip);
     }
     node
+}
+
+fn stance_summary(session: &Session, issue: &Issue) -> String {
+    let mut counts = [0; 4];
+    for part in &session.panelists {
+        let index = match issue.stances.get(&part.id).map(|stance| stance.pos) {
+            Some(Position::For) => 0,
+            Some(Position::Against) => 1,
+            Some(Position::Neutral) => 2,
+            Some(Position::Unknown) | None => 3,
+        };
+        counts[index] += 1;
+    }
+    ["賛成", "反対", "中立", "未表明"]
+        .into_iter()
+        .zip(counts)
+        .filter(|(_, count)| *count > 0)
+        .map(|(label, count)| format!("{label} {count}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }

@@ -2,13 +2,13 @@
 //! and next actions, each item linked to its issues.
 
 use noa_gpui_core::style::{FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length};
-use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
+use noa_gpui_core::widgets::{Container, Label};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
-use discussion::model::types::{AgentKind, MinuteSection, Session};
+use discussion::model::types::{MinuteSection, Session};
 
 use super::chat::issue_link;
-use super::{Action, caption, gap, heading, keep_scroll, note, scroll_column, tag};
+use super::{Action, caption, gap, heading, keep_scroll, scroll_column};
 
 pub(crate) fn section_title(section: MinuteSection) -> &'static str {
     match section {
@@ -19,53 +19,21 @@ pub(crate) fn section_title(section: MinuteSection) -> &'static str {
     }
 }
 
-fn section_tone(section: MinuteSection) -> Tone {
-    match section {
-        MinuteSection::Decisions => Tone::Success,
-        MinuteSection::Contested => Tone::Warning,
-        MinuteSection::OpenQuestions => Tone::Accent,
-        MinuteSection::Actions => Tone::Neutral,
-    }
-}
-
 pub(super) fn insert(
     tree: &mut UiTree,
     host: WidgetId,
     session: &Session,
-    live: bool,
-    kinds: &[AgentKind],
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     heading(tree, host, "議事録");
-    let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
-    let tools = tree.insert(Some(host), Container::wrapping_row(6.0, 6.0));
-    let copy = tree.insert(Some(tools), small("結果をコピー"));
-    actions.push((copy, Action::CopyResult));
-    let export = tree.insert(Some(tools), small("議事録を書き出す…"));
-    actions.push((export, Action::ExportMinutes));
-    // An implementation needs a repository to work in, and a running
-    // discussion to start it from (a stored one shown read-only offers
-    // neither the buttons nor the note).
-    if live && session.workdir.is_some() {
-        let implement = tree.insert(
-            Some(host),
-            Container::wrapping_row(6.0, 6.0).align_items(noa_gpui_core::style::AlignItems::CENTER),
-        );
-        caption(tree, implement, "実装を依頼:");
-        for &kind in kinds {
-            let button = tree.insert(Some(implement), small(kind.command()));
-            actions.push((button, Action::Implement(kind)));
-        }
-    } else if live {
-        note(
-            tree,
-            host,
-            "実装の依頼は、作業ディレクトリを指定した議論で使えます",
-        );
-    }
-    let list = scroll_column(tree, host, 14.0);
+    let list = scroll_column(tree, host, 18.0);
     keep_scroll(tree, list, session, "minutes");
-    for section in MinuteSection::ALL {
+    for section in [
+        MinuteSection::Decisions,
+        MinuteSection::Actions,
+        MinuteSection::Contested,
+        MinuteSection::OpenQuestions,
+    ] {
         let items = session.minutes.section(section);
         let block = tree.insert(Some(list), Container::column().gap(6.0));
         let title = tree.insert(
@@ -74,11 +42,13 @@ pub(super) fn insert(
                 .align_items(noa_gpui_core::style::AlignItems::CENTER)
                 .gap(6.0),
         );
-        tag(tree, title, section_title(section), section_tone(section));
+        tree.insert(
+            Some(title),
+            Label::new(section_title(section))
+                .font_size(13.0)
+                .weight(600),
+        );
         caption(tree, title, items.len().to_string());
-        if items.is_empty() {
-            caption(tree, block, "（なし）");
-        }
         for item in items {
             let entry = tree.insert(
                 Some(block),
@@ -88,8 +58,8 @@ pub(super) fn insert(
                     padding: LayoutRect {
                         left: length(10.0),
                         right: length(8.0),
-                        top: length(6.0),
-                        bottom: length(6.0),
+                        top: length(10.0),
+                        bottom: length(10.0),
                     },
                     size: LayoutSize {
                         width: noa_gpui_core::style::percent(1.0),
@@ -102,7 +72,10 @@ pub(super) fn insert(
             );
             tree.insert(
                 Some(entry),
-                Label::new(item.text.clone()).font_size(12.0).wrap(true),
+                Label::new(item.text.clone())
+                    .font_size(14.0)
+                    .wrap(true)
+                    .selectable(true),
             );
             let links = tree.insert(
                 Some(entry),

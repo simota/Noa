@@ -265,7 +265,7 @@ fn a_held_snapshot_keeps_its_age() {
     assert_eq!(dashboard.feed.fleet.workers.len(), 9, "applied");
     assert_eq!(dashboard.feed.synced_at, Some(came));
     let status = crate::dashboard::health::status(&dashboard.feed, applied);
-    assert_eq!(status, "ワーカー 9 · 同期 3 秒前");
+    assert_eq!(status, "同期済み");
 }
 
 #[test]

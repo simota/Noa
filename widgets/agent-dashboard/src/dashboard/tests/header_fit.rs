@@ -365,7 +365,7 @@ const LAYOUTS: [State; 4] = [
 fn a_lost_link_keeps_its_age_readable_at_every_width() {
     // What must show however long the reason is: the link state, the
     // data's age and the stale mark, then the reason's start.
-    let fixed = "切断: 古いデータ（0 秒前）· ";
+    let fixed = "切断: 最後の受信から 0 秒 · ";
     for state in LAYOUTS {
         for width in (1100..=1920).step_by(20) {
             let (mut dashboard, mut text) = at(width as f32, state);
@@ -406,8 +406,8 @@ fn a_stale_link_keeps_its_age_readable_at_every_width() {
                 dashboard.tick(now);
                 dashboard.prepare(size(width as f32), &mut text);
                 let label = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-                let fixed = format!("古いデータ（同期 {age}前）");
-                assert_eq!(label.text(), format!("{fixed}· ワーカー 9"));
+                let fixed = format!("最後の受信から {age}");
+                assert_eq!(label.text(), format!("{fixed}（古いデータ）"));
                 let shown = label.shown_text();
                 assert!(
                     shown.starts_with(&fixed),

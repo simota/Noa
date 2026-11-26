@@ -102,22 +102,19 @@ fn the_status_texts_follow_the_table() {
     let base = Instant::now();
     // Demo and connecting: unchanged.
     let (demo, _) = laid_out(Grouping::Orchestrator);
-    assert_eq!(status_text(&demo), "ワーカー 9 · ダミーデータ");
+    assert_eq!(status_text(&demo), "ダミーデータ");
     // Live, just under and at the limit.
     let (mut dashboard, _) = live_at(base, 0);
     dashboard.tick(base + Duration::from_secs_f64(9.9));
-    assert_eq!(status_text(&dashboard), "ワーカー 9 · 同期 10 秒前");
+    assert_eq!(status_text(&dashboard), "同期済み");
     dashboard.tick(base + secs(10));
     assert_eq!(
         status_text(&dashboard),
-        "古いデータ（同期 10 秒前）· ワーカー 9"
+        "最後の受信から 10 秒（古いデータ）"
     );
     // Minutes once a minute has passed.
     dashboard.tick(base + secs(125));
-    assert_eq!(
-        status_text(&dashboard),
-        "古いデータ（同期 2 分前）· ワーカー 9"
-    );
+    assert_eq!(status_text(&dashboard), "最後の受信から 2 分（古いデータ）");
     // Down with no data ever shown says only why.
     let mut empty = Dashboard::new(Grouping::Orchestrator);
     let mut text = TextStore::new(Default::default());
@@ -129,26 +126,50 @@ fn the_status_texts_follow_the_table() {
 }
 
 #[test]
+fn a_live_link_past_the_limit_reads_its_age() {
+    let base = Instant::now();
+    let (mut dashboard, _) = live_at(base, 0);
+    dashboard.tick(base + secs(12));
+    assert_eq!(
+        status_text(&dashboard),
+        "最後の受信から 12 秒（古いデータ）"
+    );
+}
+
+#[test]
+fn a_lost_link_with_data_keeps_the_fleet_and_reads_its_age() {
+    let base = Instant::now();
+    let (mut dashboard, mut text) = live_at(base, 0);
+    dashboard.apply_received(down("接続できません"), base + secs(5), &mut text);
+    dashboard.tick(base + secs(5));
+    assert_eq!(dashboard.feed.fleet.workers.len(), 9);
+    assert_eq!(
+        status_text(&dashboard),
+        "切断: 最後の受信から 5 秒 · 接続できません"
+    );
+}
+
+#[test]
 fn the_status_ticks_without_a_snapshot() {
     let base = Instant::now();
     let (mut dashboard, mut text) = live_at(base, 1);
     assert_eq!(dot_color(&mut dashboard, &mut text), GREEN);
 
     dashboard.tick(base + secs(3));
-    assert_eq!(status_text(&dashboard), "ワーカー 9 · 同期 4 秒前");
+    assert_eq!(status_text(&dashboard), "同期済み");
     assert_eq!(dot_color(&mut dashboard, &mut text), GREEN);
 
     dashboard.tick(base + secs(12));
     let stale = status_text(&dashboard);
-    assert!(stale.starts_with("古いデータ"), "{stale}");
-    assert_eq!(stale, "古いデータ（同期 13 秒前）· ワーカー 9");
+    assert!(stale.starts_with("最後の受信から"), "{stale}");
+    assert_eq!(stale, "最後の受信から 13 秒（古いデータ）");
     assert_eq!(dot_color(&mut dashboard, &mut text), ORANGE);
 
     // A fresh snapshot makes it live again.
     let later = base + secs(20);
     dashboard.apply_received(live(fleet::canned(), 0), later, &mut text);
     dashboard.tick(later);
-    assert_eq!(status_text(&dashboard), "ワーカー 9 · 同期 0 秒前");
+    assert_eq!(status_text(&dashboard), "同期済み");
     assert_eq!(dot_color(&mut dashboard, &mut text), GREEN);
 }
 
@@ -172,22 +193,22 @@ fn a_lost_link_keeps_the_last_data_marked_stale() {
     assert_eq!(dashboard.feed.fleet.workers.len(), 9);
     let status = status_text(&dashboard);
     assert!(status.starts_with("切断: "), "{status}");
-    assert!(status.contains("古いデータ"), "{status}");
-    assert_eq!(status, "切断: 古いデータ（30 秒前）· 接続が切れました");
+    assert!(status.contains("最後の受信から"), "{status}");
+    assert_eq!(status, "切断: 最後の受信から 30 秒 · 接続が切れました");
     assert_eq!(dot_color(&mut dashboard, &mut text), RED);
 
     // The age keeps counting while the link stays down.
     dashboard.tick(base + secs(200));
     assert_eq!(
         status_text(&dashboard),
-        "切断: 古いデータ（3 分前）· 接続が切れました"
+        "切断: 最後の受信から 3 分 · 接続が切れました"
     );
 
     // The server comes back: live data replaces it.
     let back = base + secs(210);
     dashboard.apply_received(live(fleet::canned(), 0), back, &mut text);
     dashboard.tick(back);
-    assert_eq!(status_text(&dashboard), "ワーカー 9 · 同期 0 秒前");
+    assert_eq!(status_text(&dashboard), "同期済み");
     assert_eq!(dot_color(&mut dashboard, &mut text), GREEN);
 }
 
@@ -237,7 +258,7 @@ fn a_notice_leaves_the_link_state_readable() {
     assert_eq!(notice_of(&dashboard), "通知です");
     assert_eq!(
         status_text(&dashboard),
-        "切断: 古いデータ（30 秒前）· 接続が切れました"
+        "切断: 最後の受信から 30 秒 · 接続が切れました"
     );
     assert_eq!(dot_color(&mut dashboard, &mut text), RED);
     // After `NOTICE_FOR` the notice line is empty again.
@@ -250,9 +271,9 @@ fn a_notice_leaves_the_link_state_readable() {
 fn a_rebuilt_header_starts_on_the_text_tick_will_set() {
     let base = Instant::now();
     for (synced, whole) in [
-        (2, "ワーカー 9 · 同期 2 秒前"),
-        (14, "古いデータ（同期 14 秒前）· ワーカー 9"),
-        (130, "古いデータ（同期 2 分前）· ワーカー 9"),
+        (2, "同期済み"),
+        (14, "最後の受信から 14 秒（古いデータ）"),
+        (130, "最後の受信から 2 分（古いデータ）"),
     ] {
         let (dashboard, _) = live_at(base, synced);
         let feed = &dashboard.feed;
@@ -265,7 +286,7 @@ fn a_rebuilt_header_starts_on_the_text_tick_will_set() {
     // The header a rebuild made, before any tick, carries that text.
     let (mut dashboard, mut text) = live_at(base, 2);
     dashboard.rebuilt(dashboard.view, &mut text);
-    assert_eq!(status_text(&dashboard), "ワーカー 9 · 同期 2 秒前");
+    assert_eq!(status_text(&dashboard), "同期済み");
     // Down: the last data and the age as of the snapshot.
     let lost = base + secs(30);
     dashboard.apply_received(down("切れた"), lost, &mut text);
@@ -310,7 +331,7 @@ fn a_rebuilt_header_draws_the_health_it_had() {
     assert_eq!(
         before,
         (
-            "古いデータ（同期 14 秒前）· ワーカー 9".to_owned(),
+            "最後の受信から 14 秒（古いデータ）".to_owned(),
             ORANGE,
             ORANGE
         )
@@ -330,7 +351,7 @@ fn a_rebuilt_header_draws_the_health_it_had() {
     lost.rebuilt(lost.view, &mut text);
     let (status, color, dot) = drawn(&mut lost, &mut text);
     assert_eq!((color, dot), (RED, RED), "down");
-    assert!(status.starts_with("切断: 古いデータ"), "{status}");
+    assert!(status.starts_with("切断: 最後の受信から"), "{status}");
 }
 
 #[test]
@@ -348,10 +369,10 @@ fn a_fleet_that_emptied_still_had_data() {
         dashboard.feed.fleet.workers.is_empty(),
         "the list stays empty"
     );
-    assert_eq!(status_text(&dashboard), "切断: 古いデータ（30 秒前）· 終了");
+    assert_eq!(status_text(&dashboard), "切断: 最後の受信から 30 秒 · 終了");
     // A rebuild does not forget it.
     dashboard.rebuilt(dashboard.view, &mut text);
-    assert_eq!(status_text(&dashboard), "切断: 古いデータ（30 秒前）· 終了");
+    assert_eq!(status_text(&dashboard), "切断: 最後の受信から 30 秒 · 終了");
     assert_eq!(dot_color(&mut dashboard, &mut text), RED);
 }
 
@@ -365,7 +386,7 @@ fn a_rebuild_between_frames_keeps_the_age() {
     assert_eq!(
         before,
         (
-            "古いデータ（同期 30 秒前）· ワーカー 9".to_owned(),
+            "最後の受信から 30 秒（古いデータ）".to_owned(),
             ORANGE,
             ORANGE
         )
@@ -378,7 +399,7 @@ fn a_rebuild_between_frames_keeps_the_age() {
     dashboard.apply_received(down("接続が切れました"), lost, &mut text);
     dashboard.tick(lost + secs(60));
     let before = drawn(&mut dashboard, &mut text);
-    assert_eq!(before.0, "切断: 古いデータ（2 分前）· 接続が切れました");
+    assert_eq!(before.0, "切断: 最後の受信から 2 分 · 接続が切れました");
     dashboard.rebuilt(dashboard.view, &mut text);
     assert_eq!(drawn(&mut dashboard, &mut text), before, "down");
 }
@@ -392,7 +413,7 @@ fn a_reason_with_line_breaks_shows_on_one_line() {
     dashboard.tick(lost);
     assert_eq!(
         status_text(&dashboard),
-        "切断: 古いデータ（30 秒前）· A B  C D E F"
+        "切断: 最後の受信から 30 秒 · A B  C D E F"
     );
     // Drawn as one 12 px line, inside the 48 px header.
     dashboard.prepare(window(), &mut text);
@@ -457,7 +478,7 @@ fn a_lost_link_shows_while_a_composition_holds_the_snapshot() {
     assert_eq!(dashboard.header.filter_field, field);
     assert!(dashboard.composing(), "the composition goes on");
     // ... the header does not: down, red, with the age of the last data.
-    let down_text = "切断: 古いデータ（30 秒前）· 接続が切れました";
+    let down_text = "切断: 最後の受信から 30 秒 · 接続が切れました";
     assert_eq!(
         drawn(&mut dashboard, &mut text),
         (down_text.into(), RED, RED)
@@ -465,7 +486,7 @@ fn a_lost_link_shows_while_a_composition_holds_the_snapshot() {
     // It stays down as time passes: not "stale" orange.
     dashboard.tick(base + secs(40));
     let (status, color, dot) = drawn(&mut dashboard, &mut text);
-    assert_eq!(status, "切断: 古いデータ（40 秒前）· 接続が切れました");
+    assert_eq!(status, "切断: 最後の受信から 40 秒 · 接続が切れました");
     assert_eq!((color, dot), (RED, RED));
 
     // The composition ends: the snapshot is taken in, the header unchanged.
@@ -475,7 +496,7 @@ fn a_lost_link_shows_while_a_composition_holds_the_snapshot() {
     assert!(matches!(dashboard.feed.link, Some(Link::Down(_))));
     assert_eq!(dashboard.feed.fleet.workers.len(), 9, "the last data stays");
     let (status, color, dot) = drawn(&mut dashboard, &mut text);
-    assert_eq!(status, "切断: 古いデータ（41 秒前）· 接続が切れました");
+    assert_eq!(status, "切断: 最後の受信から 41 秒 · 接続が切れました");
     assert_eq!((color, dot), (RED, RED));
 }
 
@@ -500,7 +521,7 @@ fn a_held_snapshot_from_a_link_back_up_shows_it_live() {
     assert!(dashboard.pending.is_some(), "held");
     assert_eq!(dashboard.feed.fleet.workers.len(), 9, "the body waits");
     // The header counts the workers the snapshot brings, from when it came.
-    let live_text = "ワーカー 4 · 同期 1 秒前".to_owned();
+    let live_text = "同期済み".to_owned();
     let muted = dashboard.tree.theme().color(Role::Muted);
     assert_eq!(drawn(&mut dashboard, &mut text), (live_text, muted, GREEN));
 }
@@ -532,7 +553,7 @@ fn a_notice_asks_for_the_frame_that_ends_it() {
     // The frame the timer brings ends the notice.
     dashboard.frame(at + NOTICE_FOR, &mut text);
     assert_eq!(notice_of(&dashboard), "");
-    assert_eq!(status_text(&dashboard), "ワーカー 9 · ダミーデータ");
+    assert_eq!(status_text(&dashboard), "ダミーデータ");
 }
 
 #[test]
@@ -576,25 +597,18 @@ fn a_header_built_before_any_tick_draws_the_feeds_health() {
         .color(Role::Muted);
 
     let fresh = accepted(vec![(live(fleet::canned(), 2), base)]);
-    assert_eq!(
-        built(fresh),
-        ("ワーカー 9 · 同期 2 秒前".into(), muted, GREEN)
-    );
+    assert_eq!(built(fresh), ("同期済み".into(), muted, GREEN));
     let stale = accepted(vec![(live(fleet::canned(), 14), base)]);
     assert_eq!(
         built(stale),
-        (
-            "古いデータ（同期 14 秒前）· ワーカー 9".into(),
-            ORANGE,
-            ORANGE
-        )
+        ("最後の受信から 14 秒（古いデータ）".into(), ORANGE, ORANGE)
     );
     let lost = accepted(vec![
         (live(fleet::canned(), 0), base),
         (down("切れた"), base + secs(30)),
     ]);
     let (status, color, dot) = built(lost);
-    assert!(status.starts_with("切断: 古いデータ"), "{status}");
+    assert!(status.starts_with("切断: 最後の受信から"), "{status}");
     assert!(status.ends_with("· 切れた"), "{status}");
     assert_eq!((color, dot), (RED, RED));
     let never = accepted(vec![(down("接続できません"), base)]);
@@ -605,8 +619,5 @@ fn a_header_built_before_any_tick_draws_the_feeds_health() {
     };
     assert_eq!(built(connecting), ("接続中…".into(), muted, YELLOW));
     let demo = Feed::demo();
-    assert_eq!(
-        built(demo),
-        ("ワーカー 9 · ダミーデータ".into(), muted, GRAY)
-    );
+    assert_eq!(built(demo), ("ダミーデータ".into(), muted, GRAY));
 }

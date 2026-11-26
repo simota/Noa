@@ -144,10 +144,11 @@ fn a_long_longest_label_leaves_room_for_the_link_status() {
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    let status = rect(&dashboard.tree, dashboard.status);
-    assert!(
-        status[2] >= 100.0,
-        "the link status is squeezed: {status:?}"
+    let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
+    assert_eq!(
+        status.shown_text(),
+        status.text(),
+        "the link status is squeezed"
     );
     let longest = pulse_id(&dashboard, |p| matches!(p, Pulse::Longest));
     let longest = dashboard.tree.get::<Tag>(longest).unwrap().text();

@@ -61,7 +61,7 @@ fn a_volatile_snapshot_updates_in_place() {
     let since = dashboard.tree.get::<Label>(since).unwrap();
     assert_eq!(since.text(), "承認待ち later 14");
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    assert!(status.text().contains("同期 4 秒前"), "{}", status.text());
+    assert!(status.text() == "同期済み", "{}", status.text());
     // The lanes were made again and the old ones' text layouts released:
     // the screen shows and owns what one built for the later fleet, paged
     // the same way, does.
@@ -149,7 +149,7 @@ fn a_live_screen_follows_its_feed() {
     dashboard.prepare(window(), &mut text);
     assert_eq!(commands.try_recv(), Ok(Command::Watch(vec![14])));
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    assert_eq!(status.text(), "ワーカー 9 · 同期 2 秒前");
+    assert_eq!(status.text(), "同期済み");
 
     // The click comes a second later: the link state ages, the notice does
     // not replace it.
@@ -160,11 +160,7 @@ fn a_live_screen_follows_its_feed() {
     assert_eq!(commands.try_recv(), Ok(Command::Focus(pane)));
     assert_eq!(notice_of(&dashboard), "fix-tests のペインへ移動します");
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    assert!(
-        status.text().starts_with("ワーカー 9 · 同期 "),
-        "{}",
-        status.text()
-    );
+    assert!(status.text() == "同期済み", "{}", status.text());
 }
 
 fn text_of(dashboard: &Dashboard, wanted: impl Fn(Pulse) -> bool) -> String {
@@ -253,7 +249,7 @@ fn opening_without_the_control_scope_says_why_and_sends_nothing() {
     dashboard.before_frame(&mut text);
     assert!(notice_of(&dashboard).contains("control"));
     let status = dashboard.tree.get::<Label>(dashboard.status).unwrap();
-    assert_eq!(status.text(), "ワーカー 9 · 同期 3 秒前");
+    assert_eq!(status.text(), "同期済み");
 }
 
 #[test]
@@ -315,13 +311,13 @@ fn a_frame_reads_the_time_once() {
     // The first snapshot rebuilds the screen.
     snapshots.send(live(fleet::canned(), 2)).unwrap();
     dashboard.frame(first, &mut text);
-    assert_eq!(status(&dashboard), "ワーカー 9 · 同期 2 秒前");
+    assert_eq!(status(&dashboard), "同期済み");
 
     // A later one changes only times: in place.
     let second = first + Duration::from_secs(60);
     snapshots.send(live(later(&fleet::canned()), 3)).unwrap();
     dashboard.frame(second, &mut text);
-    assert_eq!(status(&dashboard), "ワーカー 9 · 同期 3 秒前");
+    assert_eq!(status(&dashboard), "同期済み");
 
     // A notice that came shows for NOTICE_FOR from this frame on.
     let third = second + Duration::from_secs(60);
@@ -333,9 +329,9 @@ fn a_frame_reads_the_time_once() {
         notice_of(&dashboard),
         "ペインへ移動できません: no such pane"
     );
-    assert_eq!(status(&dashboard), "古いデータ（同期 1 分前）· ワーカー 9");
+    assert_eq!(status(&dashboard), "最後の受信から 1 分（古いデータ）");
     dashboard.frame(third + NOTICE_FOR, &mut text);
     assert_eq!(notice_of(&dashboard), "");
     // 71 s without an update is stale (AC6).
-    assert_eq!(status(&dashboard), "古いデータ（同期 1 分前）· ワーカー 9");
+    assert_eq!(status(&dashboard), "最後の受信から 1 分（古いデータ）");
 }

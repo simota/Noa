@@ -406,6 +406,24 @@ It names nothing of its crate: no `AgentKind`, no `crate::`. Its tests (`#[cfg(t
   - the codex output file read and removed
   - the shell runs in a session of its own
 
+**U1 note (2026-11-26, as built).** Refinements to the shape above, where the spec was silent or inconsistent:
+- `RawPick` (used, never defined) has `Pick`'s fields and is not serde. `Job.check` is `Box<Check>`, with `pub type Check = dyn Fn(&Pick) -> Result<(), String> + Send` (clippy `type_complexity`); `validate` takes `&dyn Fn(&Pick) -> …`. L1-6's `check(slot, agent, model, effort)` is this `&Pick`.
+- `spawn` takes `thread_name`, as above (L1-5 omits it). `PlanError::Spawn` holds the whole message (shell, thread or temp-dir failure); `message()` returns it as is.
+- Added: `Planner::label()`, and the public constants `PLAN_TIMEOUT`, `PROMPT_MAX`, `CONTENT_MAX`, `OUTPUT_MAX`, `PROMPT_VAR`, `OUT_VAR`. `script` of an agent outside `PLANNERS` is `exit 127`. `AutoRecord::of` is `None` when no pick is unchanged.
+- `prompt` caps the content to `CONTENT_MAX`, less if needed so the whole prompt stays within `PROMPT_MAX`. A candidate with only one list empty renders "models …; effort must be null" or "model must be null; efforts …". `cap`'s marker is on its own line, on top of `max`.
+- `parse` also says 「assignments が配列ではありません」 and 「{n} 件目がオブジェクトではありません」; a missing `slot`/`agent`/`reason` is 「… が文字列ではありません」. `run` keeps `OUTPUT_MAX + 1` bytes and `parse` refuses past `OUTPUT_MAX`.
+- `validate` checks slot coverage first (unknown and duplicate slots in answer order, then missing ones in request order), then each slot in request order: agent, model, effort, the widget's check, the reason. A reason is at most 140 characters, `…` included. `Exit`'s message omits the parenthesis when stderr has no non-empty line.
+- The codex directory is `noa-assign-<pid>-<millis>-<seq>`: two planners of one process may start in the same millisecond.
+- The U1 smoke run settled L1-5's **[unverified]** points (claude 2.1.332, codex-cli 0.172.0, agy 1.5.17, Linux; each planner returned a valid two-slot assignment in 8–14 s). `auto_assign::tests::smoke` (`#[ignore]`d; `NOA_ASSIGN_SMOKE=claude,codex` limits it) reruns it.
+  - codex accepts `--` before the prompt.
+  - claude's `--tools ""` removes only the built-in tools: the person's MCP servers (claude.ai connectors) stayed available. The script adds `--strict-mcp-config`, which left `tools: []` and `mcp_servers: []`.
+  - codex's `--sandbox read-only` refused a write, but under the person's `approval_policy = "on-request"` with `approvals_reviewer = "auto_review"` the command was escalated and run outside the sandbox. The script adds `-c approval_policy=never`, after which the write failed.
+  - agy runs tools in print mode: it created a file and ran `touch`, also with `--mode plan` or `--sandbox`. No flag in its help prevents it (`--settings` takes settings keys whose names were not checked). Whether agy stays a planner is open: Q9.
+
+| # | Question | Default |
+|---|---|---|
+| Q9 | agy as a planner can run commands on content others wrote (an issue body), with no flag to stop it. Keep it in `PLANNERS`? | **Kept** as specified, pending the owner's decision. Dropping it is a one-line edit of `PLANNERS` (its type becomes `[Planner; 2]`). |
+
 ### L2-2. Per-widget adapter
 
 Each in-scope widget gets `src/ui/auto.rs` (binary side, next to the start view). It holds:

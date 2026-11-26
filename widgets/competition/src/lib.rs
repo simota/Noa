@@ -3,6 +3,7 @@
 //! viewer generator. The binary (`main.rs`) adds the UI and the live link to
 //! Noa on top.
 
+pub mod auto_assign;
 pub mod check;
 pub mod engine;
 pub mod model;

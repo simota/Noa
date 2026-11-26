@@ -2,7 +2,9 @@ use noa_gpui_core::widgets::{Badge, ComboBox, Label, PopUpButton, Pressable, Tex
 use noa_gpui_core::{Event, PointerButton};
 use noa_gpui_scene::Point;
 
-use discussion::model::types::{AgentChoice, AgentSetup, Debate, DebateStatus, MinuteSection};
+use discussion::model::types::{
+    AgentChoice, AgentSetup, Debate, DebateStatus, MAX_PANEL, MinuteSection,
+};
 
 use super::*;
 use crate::live::{TestFeed, test_channel};
@@ -526,6 +528,7 @@ fn without_a_session_the_start_view_shows_and_starts_one() {
     assert_eq!(
         h.drain(),
         vec![Command::Start {
+            auto: None,
             topic: "テストの方針".into(),
             workdir: None,
             max_rounds: Some(5),
@@ -589,6 +592,7 @@ fn the_start_view_sends_each_agents_model_and_effort() {
     assert_eq!(
         h.drain(),
         vec![Command::Start {
+            auto: None,
             topic: "テストの方針".into(),
             workdir: None,
             max_rounds: Some(5),
@@ -670,7 +674,7 @@ fn the_agent_menus_offer_only_the_installed_kinds() {
     let form = start::read(&h.screen.tree, &h.screen.start);
     assert_eq!(form.moderator, AgentKind::Codex.into());
     assert!(h.screen.toasts.is_empty());
-    assert!(note_of(&h).is_empty(), "{:?}", note_of(&h));
+    assert_eq!(note_of(&h), ["議題を入力してください"]);
     assert!(h.screen.tree.is_enabled(h.screen.start.start_button));
 
     // Each menu has the two kinds: a third entry cannot be picked, and an
@@ -831,7 +835,8 @@ fn starting_waits_for_the_check_and_needs_an_installed_agent() {
     assert_eq!(
         note_of(&h),
         [
-            "インストール済みエージェントを確認できませんでした（10 秒以内に終わりませんでした）。すべて表示しています"
+            "インストール済みエージェントを確認できませんでした（10 秒以内に終わりませんでした）。すべて表示しています",
+            "議題を入力してください",
         ]
     );
 }
@@ -1990,5 +1995,332 @@ fn six_panel_rows_fit_the_card_and_scroll_into_a_short_window() {
             by + bh <= y + height,
             "{size:?}: the start button is out of view"
         );
+    }
+}
+
+mod auto_assign {
+    use super::*;
+    use discussion::auto_assign::{
+        Assignment, Cancel, Job, Pick, PlanError, Planning, RawPick, validate,
+    };
+    use noa_gpui_core::Key;
+    use noa_gpui_core::widgets::{Menu, MenuItem, PullDownButton};
+    use std::sync::{atomic::Ordering, mpsc};
+
+    struct FakeJob {
+        job: Job,
+        result: mpsc::Sender<Result<Assignment, PlanError>>,
+        cancel: Cancel,
+    }
+
+    impl Harness {
+        fn fake_planner(&mut self) -> mpsc::Receiver<FakeJob> {
+            let (tx, jobs) = mpsc::channel();
+            self.screen.auto.spawn = Box::new(move |job, _wake| {
+                let (result, rx) = mpsc::channel();
+                let cancel = Cancel::default();
+                tx.send(FakeJob {
+                    job,
+                    result,
+                    cancel: cancel.clone(),
+                })
+                .unwrap();
+                Planning { rx, cancel }
+            });
+            jobs
+        }
+
+        fn type_into(&mut self, id: WidgetId, value: &str) {
+            self.screen.tree.set_focus(Some(id));
+            self.screen
+                .dispatch(Event::Text(value.into()), &mut self.text);
+        }
+
+        fn key(&mut self, key: Key) {
+            self.screen.dispatch(
+                Event::KeyDown {
+                    key,
+                    modifiers: Default::default(),
+                },
+                &mut self.text,
+            );
+        }
+
+        fn auto_menu(&self) -> WidgetId {
+            let id = self.screen.tree.children(self.screen.start.auto_controls)[0];
+            assert!(self.screen.tree.get::<PullDownButton>(id).is_some());
+            id
+        }
+
+        fn open_planners(&mut self) -> Vec<String> {
+            let menu = self.auto_menu();
+            self.screen.tree.set_focus(Some(menu));
+            self.key(Key::Space);
+            self.screen
+                .tree
+                .overlays()
+                .find_map(|id| self.screen.tree.get::<Menu>(id))
+                .unwrap()
+                .items()
+                .iter()
+                .map(MenuItem::label)
+                .map(str::to_owned)
+                .collect()
+        }
+
+        fn choose_first(&mut self) {
+            self.open_planners();
+            self.key(Key::ArrowDown);
+            self.key(Key::Enter);
+        }
+
+        fn poll(&mut self) {
+            self.screen.prepare(window(), &mut self.text);
+        }
+    }
+
+    fn form() -> Harness {
+        let (channel, feed) = test_channel();
+        let mut h = Harness::new(channel, feed);
+        h.deliver(None);
+        h.type_into(h.screen.start.topic, "データベースを比較");
+        h
+    }
+
+    fn answer(fake: FakeJob) -> Assignment {
+        let job = fake.job;
+        let request = (job.request)();
+        let raw = request
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                let kind = [AgentKind::Codex, AgentKind::Agy, AgentKind::Claude][i % 3];
+                RawPick {
+                    slot: slot.id.clone(),
+                    agent: kind.command().into(),
+                    model: Some(kind.models()[0].into()),
+                    effort: Some("high".into()),
+                    reason: format!("{} の評価を担当", slot.id),
+                }
+            })
+            .collect();
+        let result = validate(raw, &request, &job.planner, &job.check).unwrap();
+        fake.result.send(Ok(result.clone())).unwrap();
+        result
+    }
+
+    #[test]
+    fn only_installed_planners_are_offered_and_the_form_must_be_readable() {
+        let (channel, feed) = test_channel();
+        let mut h = Harness::pending(channel, feed);
+        h.deliver(None);
+        assert!(!h.screen.tree.is_enabled(h.auto_menu()));
+        h.installed(Installed::Found(vec![AgentKind::Codex, AgentKind::Agy]));
+        assert!(!h.screen.tree.is_enabled(h.auto_menu()));
+        assert!(note_of(&h).iter().any(|s| s == "議題を入力してください"));
+        h.type_into(h.screen.start.topic, "議題");
+        assert_eq!(h.open_planners(), ["codex で決める"]);
+        h.key(Key::Escape);
+        h.type_into(h.screen.start.workdir, "relative");
+        assert!(!h.screen.tree.is_enabled(h.auto_menu()));
+        assert!(
+            note_of(&h)
+                .iter()
+                .any(|s| s.contains("絶対パスではありません"))
+        );
+        h.installed(Installed::Found(vec![AgentKind::Agy]));
+        assert!(!h.screen.tree.is_enabled(h.auto_menu()));
+        assert!(note_of(&h).contains(&PlanError::NoPlanner.message("")));
+    }
+
+    #[test]
+    fn planner_receives_topic_directory_roles_candidates_and_setup_check() {
+        let mut h = form();
+        h.type_into(h.screen.start.workdir, "/tmp");
+        let jobs = h.fake_planner();
+        assert_eq!(h.open_planners(), ["claude で決める", "codex で決める"]);
+        h.key(Key::ArrowDown);
+        h.key(Key::ArrowDown);
+        h.key(Key::Enter);
+        let job = jobs.try_recv().unwrap().job;
+        assert_eq!(job.planner.agent, "codex");
+        assert_eq!(job.cwd, PathBuf::from("/tmp"));
+        let req = (job.request)();
+        assert!(req.content.contains("データベースを比較") && req.content.contains("/tmp"));
+        assert_eq!(
+            req.slots.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["moderator", "panelist-1", "panelist-2", "panelist-3"]
+        );
+        assert_eq!(
+            req.slots[0].role,
+            "moderator: steers the discussion and writes the minutes"
+        );
+        assert!(req.slots[1..].iter().all(|s| s.role == "panelist"));
+        for (candidate, kind) in req.candidates.iter().zip(AgentKind::ALL) {
+            assert_eq!(candidate.agent, kind.command());
+            assert_eq!(candidate.models, kind.models());
+            assert_eq!(candidate.efforts, kind.efforts());
+        }
+        assert_eq!(req.candidates.len(), 3);
+        let unsafe_model = Pick {
+            slot: "moderator".into(),
+            agent: "codex".into(),
+            model: Some("-bad".into()),
+            effort: None,
+            reason: "理由".into(),
+        };
+        assert!(
+            job.check.as_ref()(&unsafe_model)
+                .unwrap_err()
+                .contains("モデル名")
+        );
+    }
+
+    #[test]
+    fn fill_shows_every_reason_then_start_records_only_confirmed_choices() {
+        let mut h = form();
+        let jobs = h.fake_planner();
+        h.choose_first();
+        assert!(h.screen.tree.is_enabled(h.screen.start.start_button));
+        assert!(
+            labels_under(&h.screen.tree, h.screen.start.auto_controls)
+                .iter()
+                .any(|s| s.contains("claude が割り当てを決めています"))
+        );
+        let assignment = answer(jobs.try_recv().unwrap());
+        h.poll();
+        let form = start::read(&h.screen.tree, &h.screen.start);
+        assert_eq!(form.topic, "データベースを比較");
+        assert_eq!(form.max_rounds, 5);
+        assert_eq!(form.panel.len(), 3);
+        let lines = note_of(&h);
+        assert!(
+            lines[0].contains("claude (sonnet · medium) が決定")
+                && lines[0].contains("ディスカッションを開始")
+        );
+        for (i, (picked, choice)) in assignment
+            .picks
+            .iter()
+            .zip(std::iter::once(&form.moderator).chain(&form.panel))
+            .enumerate()
+        {
+            assert_eq!(choice.kind.command(), picked.agent);
+            assert_eq!(choice.setup.model, picked.model);
+            assert_eq!(choice.setup.effort, picked.effort);
+            let slot = if i == 0 {
+                "司会".into()
+            } else {
+                format!("パネリスト {i}")
+            };
+            assert_eq!(
+                lines[i + 1],
+                format!("{slot}: {} — {}", choice.label(), picked.reason)
+            );
+        }
+        assert!(h.drain().is_empty());
+        let model = h.screen.start.panel[0].setup.model;
+        h.type_into(model, "2");
+        assert!(note_of(&h)[2].ends_with("（手動で変更）"));
+        h.screen.run(Action::Start, &mut h.text);
+        let commands = h.drain();
+        let [
+            Command::Start {
+                auto: Some(record),
+                moderator,
+                panel,
+                ..
+            },
+        ] = commands.as_slice()
+        else {
+            panic!("missing automatic start")
+        };
+        assert_eq!(*moderator, form.moderator);
+        assert_ne!(panel[0], form.panel[0]);
+        assert_eq!(record.overridden, ["panelist-1"]);
+        assert_eq!(
+            record.picks,
+            [
+                assignment.picks[0].clone(),
+                assignment.picks[2].clone(),
+                assignment.picks[3].clone()
+            ]
+        );
+        assert_eq!(record.planner, assignment.planner);
+        assert!(record.at > 0);
+    }
+
+    #[test]
+    fn failure_names_cause_and_preserves_rows() {
+        let mut h = form();
+        let jobs = h.fake_planner();
+        let before = start::read(&h.screen.tree, &h.screen.start);
+        h.choose_first();
+        jobs.try_recv()
+            .unwrap()
+            .result
+            .send(Err(PlanError::Invalid("存在しない枠 judge".into())))
+            .unwrap();
+        h.poll();
+        assert!(
+            note_of(&h)[0]
+                .contains("claude (sonnet · medium) の割り当てが不正です: 存在しない枠 judge")
+        );
+        let after = start::read(&h.screen.tree, &h.screen.start);
+        assert_eq!(
+            (after.moderator, after.panel),
+            (before.moderator, before.panel)
+        );
+        assert!(h.drain().is_empty());
+    }
+
+    #[test]
+    fn editing_adding_or_removing_a_row_refuses_the_whole_fill() {
+        for change in 0..3 {
+            let mut h = form();
+            let jobs = h.fake_planner();
+            h.choose_first();
+            match change {
+                0 => h.type_into(h.screen.start.moderator_setup.model, "custom"),
+                1 => h.screen.run(Action::AddPanelRow, &mut h.text),
+                _ => h.screen.run(Action::RemovePanelRow(0), &mut h.text),
+            }
+            let edited = start::read(&h.screen.tree, &h.screen.start);
+            answer(jobs.try_recv().unwrap());
+            h.poll();
+            assert!(note_of(&h)[0].contains("選択が変わったため反映しませんでした"));
+            let after = start::read(&h.screen.tree, &h.screen.start);
+            assert_eq!(
+                (after.moderator, after.panel),
+                (edited.moderator, edited.panel)
+            );
+            assert!(h.drain().is_empty());
+        }
+    }
+
+    #[test]
+    fn cancel_and_manual_start_discard_outstanding_results() {
+        let mut h = form();
+        let jobs = h.fake_planner();
+        h.choose_first();
+        let first = jobs.try_recv().unwrap();
+        h.poll();
+        let cancel = *h
+            .screen
+            .tree
+            .children(h.screen.start.auto_controls)
+            .last()
+            .unwrap();
+        click(&mut h.screen, &mut h.text, cancel);
+        assert!(first.cancel.load(Ordering::Acquire));
+        h.choose_first();
+        assert!(first.result.send(Err(PlanError::Timeout(180))).is_err());
+        let second = jobs.try_recv().unwrap();
+        h.screen.run(Action::Start, &mut h.text);
+        assert!(second.cancel.load(Ordering::Acquire));
+        assert!(
+            matches!(&h.drain()[..], [Command::Start { auto: None, moderator, .. }] if *moderator == AgentKind::Claude.into())
+        );
+        assert!(note_of(&h).is_empty());
     }
 }

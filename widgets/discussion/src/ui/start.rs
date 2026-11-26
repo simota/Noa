@@ -43,6 +43,7 @@ pub(super) struct Parts {
     /// One row per panelist, in panel order.
     pub(super) panel: Vec<PanelRow>,
     pub(super) add_row: WidgetId,
+    pub(super) auto_controls: WidgetId,
     pub(super) start_button: WidgetId,
     /// Says why starting may not work yet.
     pub(super) note: WidgetId,
@@ -69,6 +70,21 @@ pub(crate) struct Form {
     pub max_rounds: RoundNo,
     pub moderator: AgentChoice,
     pub panel: Vec<AgentChoice>,
+}
+
+impl Form {
+    pub(super) fn checked_workdir(&self) -> Result<Option<PathBuf>, String> {
+        if self.topic.is_empty() {
+            return Err("議題を入力してください".into());
+        }
+        if self.panel.is_empty() {
+            return Err("パネリストを 1 人以上選んでください".into());
+        }
+        if self.panel.len() > MAX_PANEL {
+            return Err(format!("パネリストは {MAX_PANEL} 体までです"));
+        }
+        workdir(&self.workdir)
+    }
 }
 
 pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
@@ -189,7 +205,20 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     // Until the check for installed agents is done, every kind is offered.
     let available = AgentKind::ALL.to_vec();
     let left = tree.insert(Some(card), Container::column().gap(6.0));
-    caption(tree, left, "司会 (Noa) のエージェント・モデル・エフォート");
+    let header = tree.insert(
+        Some(left),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
+    caption(
+        tree,
+        header,
+        "司会 (Noa) のエージェント・モデル・エフォート",
+    );
+    spacer(tree, header);
+    let auto_controls = tree.insert(
+        Some(header),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
     let moderator_row = tree.insert(
         Some(left),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
@@ -248,6 +277,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         panel_list,
         panel,
         add_row,
+        auto_controls,
         start_button,
         note,
         history,

@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::dashboard::filter::matches;
 use noa_gpui_core::StyleSheet;
 use noa_gpui_core::clipboard::{Clipboard, MemoryClipboard};
-use noa_gpui_core::widgets::{Badge, Label, TextField};
+use noa_gpui_core::widgets::{Label, TextField};
 
 use super::*;
 
@@ -50,9 +50,11 @@ fn field(dashboard: &Dashboard) -> &TextField {
         .unwrap()
 }
 
-fn panes_in(dashboard: &Dashboard, panel: Panel) -> Vec<u64> {
-    let list = dashboard.registry.lists[panel as usize].as_ref().unwrap();
-    list.items.iter().filter_map(|(_, pane)| *pane).collect()
+/// The texts the list holds, its toolbar's included.
+fn list_texts(dashboard: &Dashboard) -> Vec<String> {
+    let list = dashboard.registry.list.as_ref().unwrap().list;
+    let panel = dashboard.tree.parent(list).unwrap();
+    texts_under(&dashboard.tree, panel)
 }
 
 fn count_label(dashboard: &Dashboard) -> Option<String> {
@@ -62,45 +64,20 @@ fn count_label(dashboard: &Dashboard) -> Option<String> {
 }
 
 #[test]
-fn the_filter_applies_to_all_five_panels() {
+fn the_filter_applies_to_the_list_and_its_counts() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     slash(&mut dashboard, &mut text);
     typed(&mut dashboard, &mut text, "codex");
-    // 判断待ち, then 要確認; the quiet 13 is folded away under 参考情報.
-    assert_eq!(panes_in(&dashboard, Panel::Queue), [15, 19]);
-    assert_eq!(panes_in(&dashboard, Panel::Running), [13]);
-    assert!(panes_in(&dashboard, Panel::Done).is_empty());
-    let tree = &dashboard.tree;
-    let done = dashboard.panels[Panel::Done as usize].unwrap();
-    assert!(labels_under(tree, done).iter().any(|l| l == "該当なし"));
-    assert_eq!(visible_items(&dashboard, Panel::Timeline).len(), 3);
-    let graph = labels_under(tree, dashboard.panels[Panel::Graph as usize].unwrap());
-    for name in ["perf-wish", "perf-probe", "e2e-smoke", "migrate-cfg"] {
-        assert!(graph.iter().any(|l| l == name), "{name} in {graph:?}");
-    }
-    assert!(!graph.iter().any(|l| l == "release-0.9.7"), "{graph:?}");
+    // The approval, the failure, then the (quiet) running perf-probe.
+    assert_eq!(rows_of(&dashboard), [15, 19, 13]);
+    assert_eq!(segment_count(&dashboard, Scope::Current), 3);
+    assert_eq!(segment_count(&dashboard, Scope::Attention), 2);
+    assert_eq!(segment_count(&dashboard, Scope::Ended), 0);
     assert_eq!(count_label(&dashboard).as_deref(), Some("3 / 9 件"));
-}
-
-/// The count badge in a panel's title row.
-fn badge_of(dashboard: &Dashboard, panel: Panel) -> Option<String> {
-    let tree = &dashboard.tree;
-    let row = tree.children(dashboard.panels[panel as usize].unwrap())[0];
-    let badge = tree
-        .children(row)
-        .iter()
-        .find_map(|id| tree.get::<Badge>(*id));
-    badge.and_then(Badge::label)
-}
-
-#[test]
-fn the_timeline_counts_its_lanes() {
-    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    assert_eq!(badge_of(&dashboard, Panel::Timeline).as_deref(), Some("9"));
-    slash(&mut dashboard, &mut text);
-    typed(&mut dashboard, &mut text, "codex");
-    assert_eq!(badge_of(&dashboard, Panel::Timeline).as_deref(), Some("3"));
-    assert_eq!(visible_items(&dashboard, Panel::Timeline).len(), 3);
+    key(&mut dashboard, &mut text, Key::Enter);
+    in_scope(&mut dashboard, &mut text, Scope::Ended);
+    assert!(rows_of(&dashboard).is_empty());
+    assert!(list_texts(&dashboard).contains(&"該当なし".to_owned()));
 }
 
 #[test]
@@ -110,7 +87,9 @@ fn a_query_of_blanks_shows_the_count() {
     typed(&mut dashboard, &mut text, "\u{3000}");
     assert_eq!(dashboard.filter.query, "\u{3000}");
     assert_eq!(count_label(&dashboard).as_deref(), Some("9 / 9 件"));
-    assert_eq!(panes_in(&dashboard, Panel::Timeline).len(), 9);
+    assert_eq!(rows_of(&dashboard).len(), 7, "現在 hides no one");
+    let counts = Scope::ALL.map(|scope| segment_count(&dashboard, scope));
+    assert_eq!(counts, [7, 4, 2]);
 }
 
 #[test]
@@ -124,15 +103,54 @@ fn slash_focuses_the_field_without_typing_a_slash() {
     assert_eq!(field(&dashboard).text(), "");
 }
 
+/// A click on a row (away from its button) takes the focus out of the
+/// field, as a click on space that takes none does: the keys that follow
+/// act on that row, and the query stays as typed.
 #[test]
-fn digits_type_into_the_filter_without_toggling_panels() {
+fn clicking_a_row_leaves_the_filter_field() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    slash(&mut dashboard, &mut text);
+    typed(&mut dashboard, &mut text, "codex");
+    assert_eq!(rows_of(&dashboard), [15, 19, 13]);
+    let pos = row_body(&dashboard, 19);
+    let button = PointerButton::Primary;
+    dashboard.dispatch(Event::PointerMove { pos }, &mut text);
+    dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
+    assert!(!dashboard.pressed_in_filter, "a press in the field, still");
+    dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(dashboard.view.selected, Some(19));
+    assert_eq!(dashboard.tree.focused(), None);
+    assert_eq!(dashboard.mode(), Mode::Browse);
+
+    stroke(&mut dashboard, &mut text, 'j');
+    assert_eq!(dashboard.view.selected, Some(13), "J moves the selection");
+    stroke(&mut dashboard, &mut text, 'k');
+    assert_eq!(dashboard.view.selected, Some(19), "K moves it back");
+    key(&mut dashboard, &mut text, Key::Space);
+    assert_eq!(
+        dashboard.view.detail,
+        Some(19),
+        "Space opens the row's drawer"
+    );
+    assert_eq!(
+        dashboard.filter.query, "codex",
+        "nothing typed into the field"
+    );
+    assert_eq!(field(&dashboard).text(), "codex");
+}
+
+#[test]
+fn digits_type_into_the_filter_without_switching_the_scope() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     slash(&mut dashboard, &mut text);
     key(&mut dashboard, &mut text, Key::Char('1'));
     typed(&mut dashboard, &mut text, "1");
-    assert!(dashboard.panels.iter().all(Option::is_some));
-    assert_eq!(dashboard.filter.query, "1");
-    assert_eq!(field(&dashboard).text(), "1");
+    key(&mut dashboard, &mut text, Key::Char('3'));
+    typed(&mut dashboard, &mut text, "3");
+    assert_eq!(dashboard.view.scope, Scope::Current);
+    assert_eq!(dashboard.filter.query, "13");
+    assert_eq!(field(&dashboard).text(), "13");
 }
 
 #[test]
@@ -144,23 +162,17 @@ fn escape_clears_the_filter_and_enter_keeps_it() {
     assert_eq!(dashboard.tree.focused(), None);
     assert_eq!(dashboard.filter.query, "perf");
     assert_eq!(count_label(&dashboard).as_deref(), Some("1 / 9 件"));
-    // Only the quiet 13 matches: folded away, and the queue says how many
-    // wait on a decision outside the filter.
-    assert!(panes_in(&dashboard, Panel::Queue).is_empty());
-    assert!(dashboard.queue_buttons.info_toggle.is_some());
-    let tree = &dashboard.tree;
-    let queue = dashboard.panels[Panel::Queue as usize].unwrap();
-    let hidden = queue::hidden_text(3);
-    assert!(labels_under(tree, queue).contains(&hidden));
+    // Only the quiet 13 matches; the toolbar says how many need attention
+    // outside the filter.
+    assert_eq!(rows_of(&dashboard), [13]);
+    assert!(list_texts(&dashboard).contains(&crate::dashboard::list::outside_text(4)));
 
     key(&mut dashboard, &mut text, Key::Escape);
     assert_eq!(dashboard.filter.query, "");
     assert_eq!(field(&dashboard).text(), "");
     assert_eq!(count_label(&dashboard), None);
-    assert_eq!(panes_in(&dashboard, Panel::Queue).len(), 4);
-    assert_eq!(panes_in(&dashboard, Panel::Running).len(), 3);
-    assert_eq!(panes_in(&dashboard, Panel::Done).len(), 2);
-    assert_eq!(panes_in(&dashboard, Panel::Timeline).len(), 9);
+    assert_eq!(rows_of(&dashboard).len(), 7);
+    assert!(!list_texts(&dashboard).contains(&crate::dashboard::list::outside_text(4)));
 }
 
 /// Marks the header: a rebuild makes the status label again with the
@@ -191,7 +203,7 @@ fn typing_keeps_focus_caret_and_header() {
     typed(&mut dashboard, &mut text, "c");
     typed(&mut dashboard, &mut text, "o");
     assert!(header_marked(&dashboard), "the header was rebuilt");
-    assert_eq!(panes_in(&dashboard, Panel::Queue), [15, 19], "co");
+    assert_eq!(rows_of(&dashboard)[..2], [15, 19], "co");
     assert_eq!(dashboard.header.filter_field, id);
     assert_eq!(dashboard.tree.focused(), Some(id));
     assert_eq!(field(&dashboard).caret(), 2);
@@ -202,12 +214,13 @@ fn a_full_rebuild_keeps_the_query_and_focus() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     slash(&mut dashboard, &mut text);
     typed(&mut dashboard, &mut text, "co");
-    let control = dashboard.grouping_control;
+    // The scope switch's last segment rebuilds the whole screen.
+    let control = dashboard.registry.scope_control.unwrap();
     let origin = dashboard.tree.window_origin(control).unwrap();
     let size = dashboard.tree.layout(control).unwrap().rect;
     let pos = Point::new(origin.x + size.width - 12.0, origin.y + size.height / 2.0);
     click(&mut dashboard, &mut text, pos);
-    assert_eq!(dashboard.view.grouping, Grouping::Flat);
+    assert_eq!(dashboard.view.scope, Scope::Ended);
     let new = dashboard.header.filter_field;
     assert_eq!(field(&dashboard).text(), "co");
     assert_eq!(dashboard.tree.focused(), Some(new));
@@ -265,7 +278,7 @@ fn a_held_snapshot_keeps_its_age() {
     assert_eq!(dashboard.feed.fleet.workers.len(), 9, "applied");
     assert_eq!(dashboard.feed.synced_at, Some(came));
     let status = crate::dashboard::health::status(&dashboard.feed, applied);
-    assert_eq!(status, "ワーカー 9 · 同期 3 秒前");
+    assert_eq!(status, "同期済み");
 }
 
 #[test]
@@ -283,9 +296,9 @@ fn a_full_rebuild_keeps_what_the_app_installed_on_the_tree() {
     tree.set_multi_click(0.7, 6.0);
     tree.start_recording();
 
-    // A full rebuild: a panel toggle.
-    key(&mut dashboard, &mut text, Key::Char('5'));
-    assert!(dashboard.panels[Panel::Graph as usize].is_none());
+    // A full rebuild: a scope switch.
+    key(&mut dashboard, &mut text, Key::Char('3'));
+    assert_eq!(dashboard.view.scope, Scope::Ended);
 
     slash(&mut dashboard, &mut text);
     let command = Modifiers {
@@ -309,29 +322,36 @@ fn a_full_rebuild_keeps_what_the_app_installed_on_the_tree() {
 }
 
 /// A live fleet of running workers only (api-refactor, docs-sync,
-/// perf-probe): nothing is done.
+/// perf-probe): nothing has ended.
 fn running_only() -> Snapshot {
     let mut fleet = fleet::canned();
     fleet.workers.retain(|w| w.state == fleet::State::Running);
     live(fleet, 0)
 }
 
+/// dashboard-worker-list AC2: an empty scope says so in its own words, or
+/// 該当なし under a filter.
 #[test]
-fn a_query_of_blanks_says_which_panels_have_nobody() {
+fn a_query_of_blanks_says_the_empty_scope_has_no_match() {
     let snapshot = running_only();
     let running = snapshot.fleet.workers.len();
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, snapshot);
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    let done = dashboard.panels[Panel::Done as usize].unwrap();
-    assert!(!labels_under(&dashboard.tree, done).contains(&"該当なし".to_owned()));
+    in_scope(&mut dashboard, &mut text, Scope::Ended);
+    let texts = list_texts(&dashboard);
+    assert!(
+        texts.contains(&"終了したワーカーはありません".to_owned()),
+        "{texts:?}"
+    );
+    in_scope(&mut dashboard, &mut text, Scope::Attention);
+    assert!(list_texts(&dashboard).contains(&"要対応はありません".to_owned()));
 
     slash(&mut dashboard, &mut text);
     typed(&mut dashboard, &mut text, "\u{3000}");
     let count = format!("{running} / {running} 件");
     assert_eq!(count_label(&dashboard), Some(count), "the filter is on");
-    let done = dashboard.panels[Panel::Done as usize].unwrap();
-    let labels = labels_under(&dashboard.tree, done);
-    assert!(labels.contains(&"該当なし".to_owned()), "{labels:?}");
-    assert_eq!(panes_in(&dashboard, Panel::Running).len(), running);
+    let texts = list_texts(&dashboard);
+    assert!(texts.contains(&"該当なし".to_owned()), "{texts:?}");
+    assert_eq!(segment_count(&dashboard, Scope::Current), running);
 }

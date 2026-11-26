@@ -8,6 +8,9 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use super::keymap::{BINDINGS, Mode};
 use super::style::{gap, spacer};
 
+/// What one row of the list stands for.
+pub(super) const ROW_NOTE: &str = "1 行 = 1 ワーカーペイン（依頼の件数ではありません）";
+
 /// Width of the keycaps column.
 const KEYS_WIDTH: f32 = 104.0;
 
@@ -74,9 +77,16 @@ pub(super) fn build(tree: &mut UiTree, root: WidgetId) -> WidgetId {
             for key in row.keys {
                 tree.insert(Some(keys), Kbd::new([key]));
             }
-            tree.insert(Some(line), Label::new(row.title).font_size(12.0));
+            // Wrapped, so a long description (`/`'s) stays inside the
+            // help instead of running past its right edge.
+            tree.insert(Some(line), Label::new(row.title).font_size(12.0).wrap(true));
         }
     }
+    // What a row is: a pane, which can be given more tasks.
+    tree.insert(
+        Some(root),
+        Label::new(ROW_NOTE).font_size(11.0).color(Role::Muted),
+    );
     // The footer: the note on the mouse, and 閉じる at the row's end.
     let footer = tree.insert(
         Some(root),
@@ -84,7 +94,7 @@ pub(super) fn build(tree: &mut UiTree, root: WidgetId) -> WidgetId {
     );
     tree.insert(
         Some(footer),
-        Label::new("マウス: 詳細・開く・グループはクリックでも操作できます")
+        Label::new("マウス: 行のボタン・表示の切替・分析はクリックでも操作できます")
             .font_size(11.0)
             .color(Role::Muted),
     );

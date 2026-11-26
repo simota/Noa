@@ -31,8 +31,7 @@ const SUBMIT_DELAY: Duration = Duration::from_millis(80);
 /// header's time since the last sync ticks between snapshots.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 const SCREEN_MAX_BYTES: usize = 4000;
-/// The drawer shows this many; a queue card the last of them
-/// (`Worker::card_tail`).
+/// The drawer shows this many.
 const SCREEN_TAIL_LINES: usize = 40;
 /// A running pane whose preview has not changed for this long is quiet, as
 /// on the TUI board.
@@ -656,7 +655,7 @@ impl Feed {
                         .is_some_and(|panel| state_of(panel) == State::Permission)
                     {
                         self.notice(
-                            "承認待ちのペインには安全のため送信しませんでした（開く で直接操作してください）"
+                            "承認待ちのペインには安全のため送信しませんでした（承認画面へ で直接操作してください）"
                                 .to_owned(),
                         );
                         self.give_back(instance, pane, text);
@@ -2819,8 +2818,9 @@ pub(crate) mod tests {
     /// The review's sequence, with the feed and the dashboard as the app
     /// runs them: the screen shows server a; while an IME composes in its
     /// filter, a snapshot of server b is held back; the feed is back on a
-    /// when the composition ends and the filter makes the screen watch 3,
-    /// so the feed takes that `Watch` before a's first snapshot, as naming
+    /// when the composition ends, the filter leaves 3 the only row and its
+    /// drawer is opened, so the screen watches 3: the feed takes that
+    /// `Watch` before a's first snapshot, as naming
     /// b's pane 3. The next frame passes over b for a, which looks to the
     /// screen like nothing changed. Taking a's snapshot in tells the feed
     /// again, and on the same connection pane 3's tail is fetched and
@@ -2868,7 +2868,10 @@ pub(crate) mod tests {
         let shown = || {
             let (dashboard, _) = &*screen.borrow();
             let tree = dashboard.tree();
-            labels_under(tree, tree.root().expect("a screen"))
+            let roots = tree.root().into_iter().chain(tree.overlays());
+            roots
+                .flat_map(|root| labels_under(tree, root))
+                .collect::<Vec<_>>()
         };
         frame();
 
@@ -2886,8 +2889,12 @@ pub(crate) mod tests {
         let mut other = asking("b", &clock);
         assert!(matches!(feed.follow(&mut other), Err(Stop::Lost(_))));
         frame();
-        // The composition ends: the filter leaves 3 the only card, expanded.
+        // The composition ends: the filter leaves 3 the only row, and its
+        // drawer is opened (Enter, J, Space).
         input(Event::Text("検査".into()));
+        for key in [Key::Enter, Key::Char('j'), Key::Space] {
+            input(Event::KeyDown { key, modifiers });
+        }
 
         // Back on a. A wait takes 3 s: the first pass sends a's snapshot,
         // the window takes it in during the second, and the third pass,
@@ -2913,7 +2920,7 @@ pub(crate) mod tests {
         frame();
         assert!(
             shown().iter().any(|l| l == "$ cargo test"),
-            "3's tail on its card: {:?}",
+            "3's tail in its drawer: {:?}",
             shown()
         );
     }

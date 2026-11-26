@@ -1,4 +1,4 @@
-//! The `/` text filter (AC2): which workers the panels show.
+//! The `/` text filter (AC2): which workers the list and the analysis views show.
 
 use noa_gpui_core::Event;
 
@@ -15,7 +15,7 @@ pub(super) struct Filter {
 
 impl Filter {
     /// The filter is on once anything is typed, blanks too: the header
-    /// shows the match count, an empty panel says "該当なし" and the graph
+    /// shows the match count, an empty list says "該当なし" and the map
     /// mutes what does not match, all by this one rule. (A query of blanks
     /// matches every worker, so it hides no one.)
     pub(super) fn active(&self) -> bool {
@@ -30,11 +30,13 @@ impl Filter {
 /// Every whitespace-separated term of `query` (ASCII space and U+3000 both
 /// separate), lowercased, must match the worker. A term may be prefixed with
 /// `-` to negate it, and may use a `field:value` qualifier (`state:`/`s:`,
-/// `need:`/`n:`, `agent:`/`a:`, `model:`/`m:`, `branch:`/`b:`,
+/// `need:`/`n:`, `agent:`/`a:`, `model:`/`m:`, `branch:`/`b:`, `cwd:`/`c:`,
 /// `parent:`/`p:`, `label:`/`l:`, `task:`/`t:`, `result:`/`r:`; `state:closed`
-/// is a worker whose pane is gone, rebuilt from its journal). Plain terms
-/// match label, agent, model, branch or task. An empty query matches every
-/// worker.
+/// is a worker whose pane is gone, rebuilt from its journal;
+/// `state:waiting` is [`Worker::needs_attention`], while `need:any` is any
+/// need, notices and quiet workers included). Plain terms match label,
+/// agent, model, branch or task, never the cwd: every cwd shares the repo's
+/// path. An empty query matches every worker.
 pub(super) fn matches(worker: &Worker, query: &str) -> bool {
     let fields = [
         &worker.label,
@@ -69,18 +71,18 @@ fn match_qualified(worker: &Worker, term: &str) -> Option<bool> {
     use crate::fleet::{Need, State};
     let hit = match key {
         "state" | "s" => match value {
-            "running" | "作業中" => worker.state == State::Running,
+            "running" | "作業中" | "実行中" => worker.state == State::Running,
             "permission" | "approval" | "承認" | "承認待ち" => {
                 worker.state == State::Permission
             }
             "input" | "question" | "入力" | "入力待ち" | "質問" => {
                 worker.state == State::Input
             }
-            "finished" | "done" | "完了" => worker.state == State::Finished,
+            "finished" | "done" | "完了" | "終了" => worker.state == State::Finished,
             "error" | "fail" | "failure" | "失敗" => worker.state == State::Error,
             "quiet" | "静止" => worker.quiet,
             "closed" | "閉じた" => worker.is_closed(),
-            "waiting" | "要対応" => worker.need().is_some(),
+            "waiting" | "要対応" => worker.needs_attention(),
             _ => false,
         },
         "need" | "n" => match value {
@@ -101,6 +103,7 @@ fn match_qualified(worker: &Worker, term: &str) -> Option<bool> {
                 || worker.effort.to_lowercase().contains(value)
         }
         "branch" | "b" => worker.branch.to_lowercase().contains(value),
+        "cwd" | "c" => worker.cwd.to_lowercase().contains(value),
         "parent" | "p" => worker.orchestrator.to_lowercase().contains(value),
         "label" | "l" => worker.label.to_lowercase().contains(value),
         "task" | "t" => worker.task.to_lowercase().contains(value),

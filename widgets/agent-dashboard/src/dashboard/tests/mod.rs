@@ -1,11 +1,12 @@
 use noa_gpui_core::Key;
-use noa_gpui_core::widgets::{Label, Tag};
+use noa_gpui_core::widgets::{DisclosureGroup, Label, Tag};
 use noa_gpui_core::{Event, Modifiers, PointerButton};
 use noa_gpui_scene::{Border, DisplayList, DrawCommand, Point, Size};
 
 use super::*;
 
 mod actions;
+mod attention;
 mod bulk_close;
 mod closed_workers;
 mod details;
@@ -17,20 +18,15 @@ mod health;
 mod help_overlay;
 mod hints;
 mod keys;
-mod lanes;
-mod layout;
+mod list;
 mod paging;
 mod paragraphs;
-mod queue_cards;
 mod rebuild;
-mod relations;
 mod saved_view;
 mod selection;
 mod tabs;
 mod triage;
-mod urgency_steps;
 mod view_diff;
-mod window_sizes;
 
 fn window() -> Size {
     Size::new(1440.0, 900.0)
@@ -38,17 +34,6 @@ fn window() -> Size {
 
 fn laid_out(grouping: Grouping) -> (Dashboard, TextStore) {
     let mut dashboard = Dashboard::new(grouping);
-    let mut text = TextStore::new(Default::default());
-    dashboard.prepare(window(), &mut text);
-    (dashboard, text)
-}
-
-/// [`laid_out`] with the queue's 参考情報 shown: the quiet 13 has a card.
-fn laid_out_with_info(grouping: Grouping) -> (Dashboard, TextStore) {
-    let mut dashboard = Dashboard::showing(View {
-        info_open: true,
-        ..View::of(grouping)
-    });
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
     (dashboard, text)
@@ -78,24 +63,6 @@ fn center(tree: &UiTree, id: WidgetId) -> Point {
     Point::new(origin.x + rect.width / 2.0, origin.y + rect.height / 2.0)
 }
 
-fn shown_only(hidden: &[Panel]) -> [bool; 5] {
-    let mut shown = [true; 5];
-    for panel in hidden {
-        shown[*panel as usize] = false;
-    }
-    shown
-}
-
-fn showing(grouping: Grouping, shown: [bool; 5]) -> (Dashboard, TextStore) {
-    let mut dashboard = Dashboard::showing(View {
-        shown,
-        ..View::of(grouping)
-    });
-    let mut text = TextStore::new(Default::default());
-    dashboard.prepare(window(), &mut text);
-    (dashboard, text)
-}
-
 fn rect(tree: &UiTree, id: WidgetId) -> [f32; 4] {
     let origin = tree.window_origin(id).unwrap();
     let size = tree.layout(id).unwrap().rect;
@@ -107,14 +74,6 @@ fn assert_rect(actual: [f32; 4], expected: [f32; 4], what: &str) {
         assert!((a - e).abs() <= 0.5, "{what}: {actual:?} vs {expected:?}");
     }
 }
-
-const KEYS: [(char, Panel, &str); 5] = [
-    ('1', Panel::Queue, "要対応"),
-    ('2', Panel::Running, "作業中"),
-    ('3', Panel::Done, "完了"),
-    ('4', Panel::Timeline, "状態の推移"),
-    ('5', Panel::Graph, "関連"),
-];
 
 fn press(dashboard: &mut Dashboard, text: &mut TextStore, digit: char, modifiers: Modifiers) {
     let key = Key::Char(digit);
@@ -186,12 +145,6 @@ fn tags_under(tree: &UiTree, id: WidgetId) -> Vec<String> {
         .collect()
 }
 
-const REPORTED_ORCHESTRATOR: &str = "noa-gpui ウィジェットによるUI拡張案";
-
-fn tags_of(dashboard: &Dashboard) -> Vec<String> {
-    tags_under(&dashboard.tree, dashboard.tree.root().unwrap())
-}
-
 fn inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
     inner[0] >= outer[0] - 0.5
         && inner[1] >= outer[1] - 0.5
@@ -200,6 +153,22 @@ fn inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
 }
 
 const LONG_LABEL: &str = "noa-gpui ウィジェットによるUI拡張案とその検証作業のまとめ";
+
+/// Expands the drawer's 指示と画面ログ and 実行情報 as assistive technology
+/// clicks their titles: the screen handles the `Toggled` each one sends.
+fn expand_drawer(dashboard: &mut Dashboard, text: &mut TextStore) {
+    let groups = dashboard.registry.disclosures.expect("the drawer is open");
+    // Each toggle is handled in place: the ids stay.
+    for id in groups {
+        let group = dashboard.tree.get::<DisclosureGroup>(id).unwrap();
+        if !group.is_expanded() {
+            let node = noa_gpui_core::access_id(id).0;
+            let click = noa_gpui_core::accesskit::Action::Click;
+            hardening::assistive(dashboard, text, node, click);
+        }
+    }
+    assert_eq!(dashboard.view.drawer_open, [true; 2]);
+}
 
 /// A key pressed with no modifier, then the next frame's layout.
 fn key(dashboard: &mut Dashboard, text: &mut TextStore, key: Key) {
@@ -253,9 +222,22 @@ fn quad_at(dashboard: &Dashboard, rect: [f32; 4]) -> Option<(Color, Border)> {
         })
 }
 
-/// The items a panel's list shows now (the pager hides the others).
-fn visible_items(dashboard: &Dashboard, panel: Panel) -> Vec<WidgetId> {
-    dashboard.registry.lists[panel as usize]
+/// The panes of the list's rows, in order (all of them, shown or paged
+/// away).
+fn rows_of(dashboard: &Dashboard) -> Vec<u64> {
+    dashboard
+        .registry
+        .list
+        .as_ref()
+        .map(|parts| parts.panes())
+        .unwrap_or_default()
+}
+
+/// The rows the list shows now (the pager hides the others).
+fn visible_rows(dashboard: &Dashboard) -> Vec<WidgetId> {
+    dashboard
+        .registry
+        .list
         .as_ref()
         .map(|parts| {
             parts
@@ -266,4 +248,90 @@ fn visible_items(dashboard: &Dashboard, panel: Panel) -> Vec<WidgetId> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The row of `pane`.
+fn row_of(dashboard: &Dashboard, pane: u64) -> WidgetId {
+    let (id, _) = dashboard
+        .registry
+        .rows
+        .iter()
+        .find(|(_, p)| *p == pane)
+        .unwrap_or_else(|| panic!("no row for pane {pane}"));
+    *id
+}
+
+/// The button of `pane`'s row.
+fn row_button(dashboard: &Dashboard, pane: u64) -> WidgetId {
+    let (id, _, _) = dashboard
+        .registry
+        .row_actions
+        .iter()
+        .find(|(_, p, _)| *p == pane)
+        .unwrap_or_else(|| panic!("no button for pane {pane}"));
+    *id
+}
+
+/// A point on `pane`'s row away from its button: near its left edge,
+/// clear of the drawer.
+fn row_body(dashboard: &Dashboard, pane: u64) -> Point {
+    let [x, y, _, height] = rect(&dashboard.tree, row_of(dashboard, pane));
+    Point::new(x + 24.0, y + height / 2.0)
+}
+
+/// Every text under `id`, depth first: labels, tags and buttons.
+fn texts_under(tree: &UiTree, id: WidgetId) -> Vec<String> {
+    let own = tree
+        .get::<Label>(id)
+        .map(|l| l.text().to_owned())
+        .or_else(|| tree.get::<Tag>(id).map(|t| t.text().to_owned()))
+        .or_else(|| {
+            let button = tree.get::<noa_gpui_core::widgets::Button>(id);
+            button.map(|b| b.label().to_owned())
+        });
+    own.into_iter()
+        .chain(
+            tree.children(id)
+                .iter()
+                .flat_map(|child| texts_under(tree, *child)),
+        )
+        .collect()
+}
+
+/// The segment titles of the list's scope switch, as assistive technology
+/// reads them.
+fn scope_segments(dashboard: &Dashboard) -> Vec<String> {
+    let control = dashboard.registry.scope_control.expect("the scope switch");
+    let update = dashboard.tree.accessibility_update(1.0);
+    (0..3)
+        .map(|item| {
+            let id = noa_gpui_core::access_item_id(control, item);
+            let (_, node) = update
+                .nodes
+                .iter()
+                .find(|(node, _)| *node == id)
+                .expect("a segment");
+            node.label().unwrap_or_default().to_owned()
+        })
+        .collect()
+}
+
+/// The N of a segment titled 「{scope} N」.
+fn segment_count(dashboard: &Dashboard, scope: Scope) -> usize {
+    let at = Scope::ALL.iter().position(|s| *s == scope).unwrap();
+    let title = &scope_segments(dashboard)[at];
+    let (name, n) = title.rsplit_once(' ').expect("「{scope} N」");
+    assert_eq!(name, scope.title());
+    n.parse().unwrap()
+}
+
+/// The dashboard switched to `scope` by its key.
+fn in_scope(dashboard: &mut Dashboard, text: &mut TextStore, scope: Scope) {
+    let digit = match scope {
+        Scope::Current => '1',
+        Scope::Attention => '2',
+        Scope::Ended => '3',
+    };
+    key(dashboard, text, Key::Char(digit));
+    assert_eq!(dashboard.view.scope, scope);
 }

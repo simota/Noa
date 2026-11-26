@@ -75,7 +75,12 @@ fn question_mark(dashboard: &mut Dashboard, text: &mut TextStore) {
 /// A request from assistive technology, carried out as the platform does
 /// (`noa_gpui_platform`'s `run_accessibility_actions`): the tree acts on
 /// it without `Screen::dispatch`, the screen handles what it said.
-fn assistive(dashboard: &mut Dashboard, text: &mut TextStore, node: u64, action: Access) {
+pub(super) fn assistive(
+    dashboard: &mut Dashboard,
+    text: &mut TextStore,
+    node: u64,
+    action: Access,
+) {
     let request = ActionRequest {
         action,
         target_tree: TreeId::ROOT,
@@ -88,6 +93,23 @@ fn assistive(dashboard: &mut Dashboard, text: &mut TextStore, node: u64, action:
     }
     dashboard.after_input();
     dashboard.prepare(window(), text);
+}
+
+/// Segment `segment` of the segmented control `control` picked as
+/// assistive technology picks it: the screen handles the same
+/// `SelectionChanged` a click on it gives.
+pub(super) fn pick_segment(
+    dashboard: &mut Dashboard,
+    text: &mut TextStore,
+    control: WidgetId,
+    segment: usize,
+) {
+    assistive(
+        dashboard,
+        text,
+        access_item_id(control, segment).0,
+        Access::Click,
+    );
 }
 
 /// Selects `pane` with J as a person would: at most once per pane J walks,
@@ -129,9 +151,10 @@ fn assistive_technology_cannot_reach_under_the_help() {
     key(&mut dashboard, &mut text, Key::Space);
     assert_eq!(dashboard.view.detail, Some(12));
     commands.try_iter().for_each(drop);
-    let (queue_open, top) = dashboard.queue_buttons.open[0];
+    let top = rows_of(&dashboard)[0];
+    let queue_open = row_button(&dashboard, top);
     let (drawer_open, _) = dashboard.registry.open_buttons[0];
-    let grouping = dashboard.grouping_control;
+    let scopes = dashboard.registry.scope_control.unwrap();
     let before = status_of(&dashboard);
 
     question_mark(&mut dashboard, &mut text);
@@ -141,14 +164,14 @@ fn assistive_technology_cannot_reach_under_the_help() {
         assistive(&mut dashboard, &mut text, node_of(id), Access::Click);
         assistive(&mut dashboard, &mut text, node_of(id), Access::Focus);
     }
-    let last_segment = access_item_id(grouping, Grouping::ALL.len() - 1).0;
+    let last_segment = access_item_id(scopes, Scope::ALL.len() - 1).0;
     assistive(&mut dashboard, &mut text, last_segment, Access::Click);
 
     assert!(dashboard.view.help, "the help stays open");
     assert!(focused_panes(&commands).is_empty(), "a pane was focused");
     assert_eq!(status_of(&dashboard), before);
     assert_eq!(dashboard.view.selected, Some(12));
-    assert_eq!(dashboard.view.grouping, Grouping::Orchestrator);
+    assert_eq!(dashboard.view.scope, Scope::Current);
     assert_eq!(dashboard.tree.focused(), None, "focus went under the help");
 
     // Closed, the help gives the screen back to assistive technology.
@@ -187,7 +210,8 @@ fn the_help_cancels_a_left_press_whatever_else_is_held() {
     for chord in chords {
         let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
         let before = status_of(&dashboard);
-        let (open, pane) = dashboard.queue_buttons.open[0];
+        let pane = rows_of(&dashboard)[0];
+        let open = row_button(&dashboard, pane);
         let pos = center(&dashboard.tree, open);
         dashboard.dispatch(Event::PointerMove { pos }, &mut text);
         let pressed = match chord {
@@ -246,7 +270,8 @@ fn the_help_cancels_a_left_press_whatever_else_is_held() {
 #[test]
 fn a_cancelled_release_leaves_a_press_begun_since_alone() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let control = dashboard.grouping_control;
+    super::tabs::show_tab(&mut dashboard, &mut text, Tab::Analytics);
+    let control = dashboard.registry.grouping_control.unwrap();
     let [x, y, width, height] = rect(&dashboard.tree, control);
     let last = Point::new(x + width - 12.0, y + height / 2.0);
     let (left, middle) = (PointerButton::Primary, PointerButton::Middle);
@@ -282,9 +307,9 @@ fn a_cancelled_release_leaves_a_press_begun_since_alone() {
 #[test]
 fn closing_the_help_with_its_button_gives_the_focus_back() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let (open, _) = dashboard.queue_buttons.open[0];
-    // Tab reaches the top card's 開く long before it has gone round the
-    // screen's controls.
+    let open = row_button(&dashboard, rows_of(&dashboard)[0]);
+    // Tab reaches the top row's 承認画面へ long before it has gone round
+    // the screen's controls.
     for _ in 0..100 {
         if dashboard.tree.focused() == Some(open) {
             break;
@@ -294,7 +319,7 @@ fn closing_the_help_with_its_button_gives_the_focus_back() {
     assert_eq!(
         dashboard.tree.focused(),
         Some(open),
-        "Tab never reached 開く"
+        "Tab never reached 承認画面へ"
     );
 
     question_mark(&mut dashboard, &mut text);
@@ -335,18 +360,18 @@ fn the_help_leaves_disabled_what_it_found_disabled() {
 #[test]
 fn another_server_instance_is_watched_afresh() {
     let (mut dashboard, mut text, snapshots, commands) = live_canned();
-    assert_eq!(dashboard.watched, Some(vec![14]), "the top card");
+    assert_eq!(dashboard.watched, Some(vec![]), "no drawer: no tail");
 
     // Noa restarted and gave every pane id out again; the feed took the
-    // last watch as the old server's panes. The new server's top card has
-    // the same id, and it is asked for again.
+    // last watch as the old server's panes. The watch is sent again for
+    // the new server.
     let restarted = |instance: &str| Snapshot {
         instance: Some(instance.to_owned()),
         ..live(fleet::canned(), 0)
     };
     snapshots.send(restarted("restarted")).unwrap();
     frame(&mut dashboard, &mut text);
-    assert_eq!(last_watch(&commands), Some(vec![14]));
+    assert_eq!(last_watch(&commands), Some(vec![]));
 
     // What is open on the new server is what is watched: the drawer's
     // worker until another restart closes the drawer.
@@ -356,7 +381,7 @@ fn another_server_instance_is_watched_afresh() {
     snapshots.send(restarted("again")).unwrap();
     frame(&mut dashboard, &mut text);
     assert_eq!(dashboard.view.detail, None);
-    assert_eq!(last_watch(&commands), Some(vec![14]));
+    assert_eq!(last_watch(&commands), Some(vec![]));
 }
 
 #[test]
@@ -397,10 +422,7 @@ fn the_filter_field_is_where_its_count_puts_it_at_once() {
     press(&mut dashboard, &mut text, '1', Modifiers::default());
     typed(&mut dashboard, &mut text, "1");
     assert_eq!(dashboard.filter.query, "codex1");
-    assert!(
-        dashboard.panels.iter().all(Option::is_some),
-        "a panel toggled"
-    );
+    assert_eq!(dashboard.view.scope, Scope::Current, "the scope switched");
     let typed_text = dashboard.tree.get::<TextField>(field).unwrap().text();
     assert_eq!(typed_text, "codex1");
 }

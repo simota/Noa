@@ -1,62 +1,17 @@
 //! Keyboard selection (AC1): the order J / K walk and how a selection
 //! survives a change of what is shown.
 
-use crate::fleet::{Fleet, State, Worker};
+use crate::fleet::Fleet;
 
 use super::View;
-use super::cards::shows_done;
 use super::filter::Filter;
-use super::panel::Panel;
-use super::queue::cards;
+use super::list;
 
-/// The order the NOW row shows workers in: the queue's cards in its sort,
-/// then the running cards, then the done cards (each in `grouping.split`
-/// order), of shown panels only, matching the filter only, each pane once.
-/// With none of the three shown, the timeline's lane order.
+/// The order J / K walk: the rows of the scope shown, as `list::rows`
+/// orders them.
 pub(super) fn order(fleet: &Fleet, view: &View, filter: &Filter) -> Vec<u64> {
-    let matching: Vec<&Worker> = fleet.workers.iter().filter(|w| filter.matches(w)).collect();
-    let shown = |panel: Panel| view.shown[panel as usize];
-    let in_state = |state: State| -> Vec<&Worker> {
-        matching
-            .iter()
-            .copied()
-            .filter(|w| w.state == state)
-            .collect()
-    };
-    let mut panes: Vec<u64> = Vec::new();
-    let mut add = |workers: Vec<&Worker>| {
-        for worker in workers {
-            if !panes.contains(&worker.pane) {
-                panes.push(worker.pane);
-            }
-        }
-    };
-    if !Panel::NOW.into_iter().any(shown) {
-        add(flat(view, matching.iter().copied()));
-        return panes;
-    }
-    if shown(Panel::Queue) {
-        add(cards(matching.iter().copied(), view.info_open)
-            .into_iter()
-            .map(|(w, _)| w)
-            .collect());
-    }
-    if shown(Panel::Running) {
-        add(flat(view, in_state(State::Running)));
-    }
-    if shown(Panel::Done) {
-        let done = matching.iter().copied().filter(|w| shows_done(w));
-        add(flat(view, done));
-    }
-    panes
-}
-
-fn flat<'a>(view: &View, workers: impl IntoIterator<Item = &'a Worker>) -> Vec<&'a Worker> {
-    view.grouping
-        .split(workers)
-        .into_iter()
-        .flat_map(|(_, group)| group)
-        .collect()
+    let rows = list::rows(fleet, view.scope, filter);
+    rows.into_iter().map(|w| w.pane).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,18 +45,14 @@ pub(super) fn reselect(old: &[u64], new: &[u64], selected: Option<u64>) -> Optio
     new.get(at.min(new.len().checked_sub(1)?)).copied()
 }
 
-/// The next waiting worker in queue order (wrapping around): jumps straight
-/// to the top urgent worker from anywhere, or cycles through waiting ones.
-pub(super) fn next_waiting(
-    fleet: &Fleet,
-    view: &View,
-    filter: &Filter,
-    selected: Option<u64>,
-) -> Option<u64> {
-    let matching = fleet.workers.iter().filter(|w| filter.matches(w));
-    let waiting: Vec<u64> = cards(matching, view.info_open)
-        .into_iter()
-        .map(|(w, _)| w.pane)
+/// The next worker that needs attention in `order` after `selected`
+/// (wrapping around), or the first one: N jumps straight to the top of the
+/// list's attention rows from anywhere, then cycles through them.
+pub(super) fn next_waiting(fleet: &Fleet, order: &[u64], selected: Option<u64>) -> Option<u64> {
+    let waiting: Vec<u64> = order
+        .iter()
+        .copied()
+        .filter(|pane| fleet.worker(*pane).is_some_and(|w| w.needs_attention()))
         .collect();
     if waiting.is_empty() {
         return None;

@@ -1,16 +1,12 @@
 use noa_gpui_core::style::{LengthPercentage, Size as LayoutSize, auto, length};
-use noa_gpui_core::widgets::{Container, Label, Tag};
+use noa_gpui_core::widgets::{Container, Label};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Color;
 
-use crate::fleet::{Need, Phase};
+use crate::fleet::{Need, Phase, Status};
 
 pub(super) const HEADER_HEIGHT: f32 = 48.0;
 pub(super) const GUTTER: f32 = 12.0;
-
-/// Small but not zero: flex shrinks in proportion to `flex_shrink` times the
-/// basis, so this lets the status label absorb a deficit before the strip.
-pub(super) const HINT_STRIP_SHRINK: f32 = 0.0001;
 
 pub(super) const GREEN: Color = Color::hex(0x34c759);
 pub(super) const DIM_GREEN: Color = Color::hex(0x2f5d3c);
@@ -53,6 +49,17 @@ pub(super) fn need_color(need: Need) -> Color {
     }
 }
 
+/// The colour a row's status is drawn in: its need's, for what needs
+/// attention; `None` (muted) for what runs or has ended.
+pub(super) fn status_color(status: Status) -> Option<Color> {
+    match status {
+        Status::Approval => Some(need_color(Need::Approval)),
+        Status::Input => Some(need_color(Need::Question)),
+        Status::Failed => Some(need_color(Need::Failure)),
+        Status::Running | Status::Ended => None,
+    }
+}
+
 pub(super) fn phase_color(phase: Phase) -> Color {
     match phase {
         Phase::Running => GREEN,
@@ -83,10 +90,6 @@ pub(super) fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<Strin
 
 pub(super) fn set_label(tree: &mut UiTree, id: WidgetId, text: String) {
     tree.update::<Label, _>(id, |l, cx| l.set_text(cx, text));
-}
-
-pub(super) fn set_tag(tree: &mut UiTree, id: WidgetId, text: String) {
-    tree.update::<Tag, _>(id, |t, cx| t.set_text(cx, text));
 }
 
 /// The parts that are known, joined by `separator`.

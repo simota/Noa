@@ -1,118 +1,33 @@
 use std::path::PathBuf;
 
-use noa_gpui_core::widgets::Badge;
-
 use crate::fleet::{State, Tier};
 
 use super::*;
 
-fn queue_labels(dashboard: &Dashboard) -> Vec<String> {
-    let queue = dashboard.panels[Panel::Queue as usize].unwrap();
-    labels_under(&dashboard.tree, queue)
+/// The texts the list holds, its toolbar's included.
+fn list_texts(dashboard: &Dashboard) -> Vec<String> {
+    let list = dashboard.registry.list.as_ref().unwrap().list;
+    let panel = dashboard.tree.parent(list).unwrap();
+    texts_under(&dashboard.tree, panel)
 }
 
-fn queue_panes(dashboard: &Dashboard) -> Vec<u64> {
-    let list = dashboard.registry.lists[Panel::Queue as usize].as_ref();
-    list.unwrap().items.iter().filter_map(|(_, p)| *p).collect()
-}
-
-fn badge_of(dashboard: &Dashboard) -> Option<String> {
-    let queue = dashboard.panels[Panel::Queue as usize].unwrap();
-    let title = dashboard.tree.children(queue)[0];
-    let tree = &dashboard.tree;
-    let badge = tree
-        .children(title)
-        .iter()
-        .find_map(|id| tree.get::<Badge>(*id));
-    badge.and_then(Badge::label)
-}
-
-fn click_info(dashboard: &mut Dashboard, text: &mut TextStore) {
-    let toggle = dashboard.queue_buttons.info_toggle.unwrap();
-    let pos = center(&dashboard.tree, toggle);
-    click(dashboard, text, pos);
-}
-
+/// dashboard-worker-list AC2: a notice or a quiet worker needs no
+/// attention: 要対応 has no row for it, and a quiet one runs in 現在.
 #[test]
-fn the_queue_puts_decisions_first_and_folds_what_only_informs() {
-    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    assert_eq!(queue_panes(&dashboard), [14, 15, 16, 19]);
-    let labels = queue_labels(&dashboard);
-    assert!(labels.contains(&"判断待ち · 3".to_owned()), "{labels:?}");
-    assert!(labels.contains(&"要確認 · 1".to_owned()), "{labels:?}");
-    assert!(!labels.iter().any(|l| l.starts_with("参考情報 ·")));
-    assert_eq!(
-        badge_of(&dashboard).as_deref(),
-        Some("4"),
-        "13 is not counted"
-    );
-    assert_eq!(dashboard.queue_buttons.expanded, Some(14));
-
-    click_info(&mut dashboard, &mut text);
-    assert!(dashboard.view.info_open);
-    assert_eq!(queue_panes(&dashboard), [14, 15, 16, 19, 13]);
-    assert!(queue_labels(&dashboard).contains(&"参考情報 · 1".to_owned()));
-    assert_eq!(badge_of(&dashboard).as_deref(), Some("4"));
-    assert_eq!(dashboard.queue_buttons.expanded, Some(14), "not 13");
-
-    click_info(&mut dashboard, &mut text);
-    assert!(!dashboard.view.info_open);
-    assert_eq!(queue_panes(&dashboard), [14, 15, 16, 19]);
-}
-
-#[test]
-fn what_only_informs_is_never_expanded_on_its_own() {
+fn what_only_informs_never_needs_attention() {
     let mut fleet = fleet::canned();
     fleet
         .workers
         .retain(|w| w.need().is_none_or(|n| n.tier() == Tier::Info));
-    let mut dashboard = Dashboard::showing(View {
-        info_open: true,
-        ..View::of(Grouping::Orchestrator)
-    });
+    fleet.workers[0].attention = true;
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
     let mut text = TextStore::new(Default::default());
-    dashboard.apply(live(fleet, 0), &mut text);
     dashboard.prepare(window(), &mut text);
-    assert_eq!(queue_panes(&dashboard), [13]);
-    assert_eq!(dashboard.queue_buttons.expanded, None);
-    assert_eq!(badge_of(&dashboard), Badge::count(0).label());
-}
-
-#[test]
-fn an_open_info_section_reorders_in_place_as_a_build_shows_it() {
-    let view = View {
-        info_open: true,
-        ..View::of(Grouping::Orchestrator)
-    };
-    let mut dashboard = Dashboard::showing(view);
-    let mut text = TextStore::new(Default::default());
-    dashboard.apply(live(fleet::canned(), 0), &mut text);
-    dashboard.prepare(window(), &mut text);
-    let mut fleet = fleet::canned();
-    fleet
-        .workers
-        .iter_mut()
-        .find(|w| w.pane == 15)
-        .unwrap()
-        .wait_minutes = 3.0;
-    let structure = dashboard.queue_buttons.details.clone();
-    dashboard.apply(live(fleet.clone(), 0), &mut text);
-    dashboard.prepare(window(), &mut text);
-    assert_eq!(queue_panes(&dashboard), [15, 14, 16, 19, 13]);
-    assert_eq!(dashboard.queue_buttons.expanded, Some(15));
-    assert_ne!(
-        dashboard.queue_buttons.details, structure,
-        "expanded in place"
-    );
-
-    let mut fresh = Dashboard::showing(view);
-    let mut fresh_text = TextStore::new(Default::default());
-    fresh.apply(live(fleet, 0), &mut fresh_text);
-    fresh.prepare(window(), &mut fresh_text);
-    assert_eq!(
-        frame_of(dashboard.display_list(), &text),
-        frame_of(fresh.display_list(), &fresh_text)
-    );
+    assert_eq!(segment_count(&dashboard, Scope::Attention), 0);
+    assert!(rows_of(&dashboard).contains(&13), "the quiet 13 runs");
+    in_scope(&mut dashboard, &mut text, Scope::Attention);
+    assert!(rows_of(&dashboard).is_empty());
+    assert!(list_texts(&dashboard).contains(&"要対応はありません".to_owned()));
 }
 
 /// A file under the temporary directory, removed when dropped.
@@ -217,10 +132,8 @@ fn the_drawer_names_the_pane_and_what_opening_it_needs() {
     let file = TempFile::new("scopes.md", b"ok\n");
     let (dashboard, _text) = drawer_on_result(file.0.clone(), false);
     let texts = drawer_texts(&dashboard);
-    assert!(
-        texts.iter().any(|t| t.starts_with("ID 17 · 親 ")),
-        "{texts:?}"
-    );
+    assert!(texts.iter().any(|t| t == "ペイン ID 17"), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("親 ")), "{texts:?}");
     assert!(
         texts.contains(&drawer::NEEDS_CONTROL.to_owned()),
         "{texts:?}"
@@ -231,7 +144,7 @@ fn the_drawer_names_the_pane_and_what_opening_it_needs() {
 }
 
 #[test]
-fn the_drawer_shows_more_of_the_screen_than_a_card() {
+fn the_drawer_shows_the_whole_screen_tail_and_a_row_none() {
     let mut fleet = fleet::canned();
     let tail: Vec<String> = (0..20).map(|n| format!("line {n}")).collect();
     fleet
@@ -243,10 +156,8 @@ fn the_drawer_shows_more_of_the_screen_than_a_card() {
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    let card = queue_labels(&dashboard);
-    assert!(card.contains(&"line 19".to_owned()));
-    assert!(card.contains(&"line 14".to_owned()));
-    assert!(!card.contains(&"line 13".to_owned()), "a card shows six");
+    let row = texts_under(&dashboard.tree, row_of(&dashboard, 14));
+    assert!(!row.iter().any(|t| t.starts_with("line ")), "{row:?}");
 
     dashboard.set_detail(Some(14), &mut text);
     let texts = drawer_texts(&dashboard);
@@ -254,18 +165,20 @@ fn the_drawer_shows_more_of_the_screen_than_a_card() {
     assert!(texts.contains(&"line 19".to_owned()));
 }
 
+/// dashboard-worker-list AC7: what needs attention outside the filter is
+/// counted whether it is a decision or a failure.
 #[test]
-fn a_visible_failure_still_says_how_many_decisions_the_filter_hides() {
+fn a_visible_failure_still_says_how_many_need_attention_outside() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     key(&mut dashboard, &mut text, Key::Char('/'));
     typed(&mut dashboard, &mut text, "/");
     typed(&mut dashboard, &mut text, "e2e-smoke");
-    assert_eq!(queue_panes(&dashboard), [19], "only the failure matches");
-    let hidden = queue::hidden_text(3);
+    assert_eq!(rows_of(&dashboard), [19], "only the failure matches");
+    let outside = crate::dashboard::list::outside_text(3);
     assert!(
-        queue_labels(&dashboard).contains(&hidden),
+        list_texts(&dashboard).contains(&outside),
         "{:?}",
-        queue_labels(&dashboard)
+        list_texts(&dashboard)
     );
 }
 
@@ -292,7 +205,7 @@ fn the_drawer_names_the_direct_parent() {
     dashboard.set_detail(Some(14), &mut text);
     let parent = label_of(&dashboard, 11).to_owned();
     let texts = drawer_texts(&dashboard);
-    assert!(texts.contains(&format!("ID 14 · 親 {parent}")), "{texts:?}");
+    assert!(texts.contains(&format!("親 {parent}")), "{texts:?}");
 }
 
 /// The result path swapped back and forth between a regular file and a
@@ -399,11 +312,11 @@ fn a_root_agent_has_no_parent_in_the_drawer() {
     dashboard.prepare(window(), &mut text);
     dashboard.set_detail(Some(11), &mut text);
     let texts = drawer_texts(&dashboard);
-    assert!(texts.contains(&"ID 11 · 親 なし".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"親 なし".to_owned()), "{texts:?}");
 }
 
 #[test]
-fn a_filter_that_matches_only_folded_cards_says_so() {
+fn a_filter_that_matches_only_a_quiet_worker_shows_it_running() {
     let mut fleet = fleet::canned();
     fleet.workers.retain(|w| !matches!(w.pane, 14..=16));
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet, 0));
@@ -412,13 +325,13 @@ fn a_filter_that_matches_only_folded_cards_says_so() {
     key(&mut dashboard, &mut text, Key::Char('/'));
     typed(&mut dashboard, &mut text, "/");
     typed(&mut dashboard, &mut text, "perf-probe");
-    assert!(queue_panes(&dashboard).is_empty());
-    assert!(dashboard.queue_buttons.info_toggle.is_some());
-    assert!(
-        queue_labels(&dashboard).contains(&"該当なし".to_owned()),
-        "{:?}",
-        queue_labels(&dashboard)
-    );
+    assert_eq!(rows_of(&dashboard), [13]);
+    let texts = texts_under(&dashboard.tree, row_of(&dashboard, 13));
+    assert_eq!(texts[0], "実行中", "{texts:?}");
+    assert_eq!(segment_count(&dashboard, Scope::Attention), 0);
+    // e2e-smoke's failure is outside the filter.
+    let outside = crate::dashboard::list::outside_text(1);
+    assert!(list_texts(&dashboard).contains(&outside));
 }
 
 #[test]
@@ -458,7 +371,7 @@ fn a_lone_agent_has_no_parent_in_the_drawer() {
     dashboard.prepare(window(), &mut text);
     dashboard.set_detail(Some(11), &mut text);
     let texts = drawer_texts(&dashboard);
-    assert!(texts.contains(&"ID 11 · 親 なし".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"親 なし".to_owned()), "{texts:?}");
 }
 
 #[test]

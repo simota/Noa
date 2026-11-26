@@ -24,10 +24,10 @@ fn walk(dashboard: &mut Dashboard, text: &mut TextStore, key_: Key, n: usize) ->
 }
 
 #[test]
-fn j_and_k_walk_the_panel_order() {
-    // 判断待ち (approvals, then the question), 要確認, then the running and
-    // done cards; the quiet 13 is folded away in the queue.
-    let order = [14, 15, 16, 19, 11, 12, 13, 17, 18];
+fn j_and_k_walk_the_list_order() {
+    // What needs attention (the approvals by wait, the question, the
+    // failure), then what runs; nothing that ended is in 現在.
+    let order = [14, 15, 16, 19, 11, 12, 13];
     let mut back: Vec<u64> = order.iter().rev().copied().skip(1).collect();
     back.push(14);
     for (next, prev) in [
@@ -35,28 +35,11 @@ fn j_and_k_walk_the_panel_order() {
         (Key::ArrowDown, Key::ArrowUp),
     ] {
         let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-        assert_eq!(walk(&mut dashboard, &mut text, next, 9), order);
-        assert_eq!(walk(&mut dashboard, &mut text, next, 1), [18], "no wrap");
-        assert_eq!(walk(&mut dashboard, &mut text, prev, 9), back);
+        assert_eq!(rows_of(&dashboard), order);
+        assert_eq!(walk(&mut dashboard, &mut text, next, 7), order);
+        assert_eq!(walk(&mut dashboard, &mut text, next, 1), [13], "no wrap");
+        assert_eq!(walk(&mut dashboard, &mut text, prev, 7), back);
     }
-}
-
-#[test]
-fn an_open_info_section_walks_its_cards_after_the_others() {
-    let (mut dashboard, mut text) = showing(Grouping::Orchestrator, [true; 5]);
-    dashboard.view.info_open = true;
-    let view = dashboard.view;
-    dashboard.rebuilt(view, &mut text);
-    let order = [14, 15, 16, 19, 13, 11, 12, 17, 18];
-    assert_eq!(walk(&mut dashboard, &mut text, Key::Char('j'), 9), order);
-}
-
-fn running_card(dashboard: &Dashboard, pane: u64) -> WidgetId {
-    let list = dashboard.registry.lists[Panel::Running as usize]
-        .as_ref()
-        .unwrap();
-    let (card, _) = list.items.iter().find(|(_, p)| *p == Some(pane)).unwrap();
-    *card
 }
 
 /// Every mark shows whether its worker is `selected`; returns the kinds of
@@ -108,10 +91,10 @@ fn assert_marks(dashboard: &Dashboard, selected: u64) -> Vec<&'static str> {
 }
 
 #[test]
-fn the_selection_shows_in_card_lane_and_node() {
+fn the_selection_shows_in_place_on_its_row() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     select(&mut dashboard, &mut text, 11);
-    let card = running_card(&dashboard, 12);
+    let row = row_of(&dashboard, 12);
     // A rebuild makes the status label again: the mark shows there was none
     // (a new tree hands out the same widget ids again).
     let status = dashboard.status;
@@ -124,29 +107,36 @@ fn the_selection_shows_in_card_lane_and_node() {
     key(&mut dashboard, &mut text, Key::Char('j'));
     assert_eq!(dashboard.view.selected, Some(12));
     assert!(marked(&dashboard), "the screen was rebuilt");
-    assert_eq!(running_card(&dashboard, 12), card, "the screen was rebuilt");
-    assert_eq!(assert_marks(&dashboard, 12), ["bar", "lane", "node"]);
+    assert_eq!(row_of(&dashboard, 12), row, "the screen was rebuilt");
+    assert_eq!(assert_marks(&dashboard, 12), ["bar"]);
     key(&mut dashboard, &mut text, Key::Char('j'));
     assert_eq!(dashboard.view.selected, Some(13));
-    key(&mut dashboard, &mut text, Key::Char('j'));
-    assert_eq!(dashboard.view.selected, Some(17));
     assert!(marked(&dashboard), "the screen was rebuilt");
-    assert_eq!(running_card(&dashboard, 12), card, "the screen was rebuilt");
-    assert_eq!(assert_marks(&dashboard, 17), ["bar", "lane", "node"]);
+    assert_eq!(assert_marks(&dashboard, 13), ["bar"]);
 }
 
+/// The タイムライン tab's lane of `pane`.
+fn lane(dashboard: &Dashboard, pane: u64) -> WidgetId {
+    let mut marks = dashboard.registry.marks.iter();
+    let found = marks.find(|(_, p, mark)| *p == pane && matches!(mark, Mark::Lane));
+    found.unwrap_or_else(|| panic!("no lane for {pane}")).0
+}
+
+/// A click on a lane of the タイムライン tab selects its worker and opens
+/// its drawer, as a node of the マップ does; the lane shows the selection,
+/// and another lane's click moves it there.
 #[test]
-fn selecting_a_queue_worker_expands_its_card() {
-    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    select(&mut dashboard, &mut text, 19);
-    assert_eq!(dashboard.view.expanded, Some(19));
-    let open: Vec<u64> = dashboard
-        .queue_buttons
-        .open
-        .iter()
-        .map(|(_, pane)| *pane)
-        .collect();
-    assert_eq!(open, [19]);
+fn clicking_a_timeline_lane_selects_its_worker() {
+    let mut dashboard = Dashboard::new(Grouping::Orchestrator).with_tab(Tab::Timeline);
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    for pane in [12, 13] {
+        let pos = center(&dashboard.tree, lane(&dashboard, pane));
+        click(&mut dashboard, &mut text, pos);
+        assert_eq!(dashboard.view.selected, Some(pane));
+        assert_eq!(dashboard.view.detail, Some(pane));
+        assert_eq!(assert_marks(&dashboard, pane), ["lane"], "{pane}");
+    }
 }
 
 fn live_with(snapshot: Snapshot) -> (Dashboard, TextStore, std::sync::mpsc::Receiver<Command>) {
@@ -214,11 +204,11 @@ fn enter_opens_the_selected_worker_like_the_open_button() {
 fn a_vanished_selection_moves_to_its_neighbour() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     select(&mut dashboard, &mut text, 11);
-    // Hiding the running panel is the user's own change: the selection
-    // moves to what is now at api-refactor's place, the done panel's first
-    // card.
-    key(&mut dashboard, &mut text, Key::Char('2'));
-    assert_eq!(dashboard.view.selected, Some(17));
+    // Showing 終了 is the user's own change: the selection moves to what
+    // is now at api-refactor's place (the fifth row), clamped to the last
+    // of 終了's two.
+    key(&mut dashboard, &mut text, Key::Char('3'));
+    assert_eq!(dashboard.view.selected, Some(18));
 }
 
 #[test]
@@ -236,7 +226,7 @@ fn a_live_update_that_takes_the_selection_selects_nothing() {
     assert_eq!(dashboard.view.detail, None);
     assert!(drawer_labels(&dashboard).is_none());
     let label = label_of_canned(15);
-    assert_eq!(status_of(&dashboard), dropped_text(&label));
+    assert_eq!(status_of(&dashboard), dropped_text(&label, None));
     // Enter, once or again, reaches no pane.
     key(&mut dashboard, &mut text, Key::Enter);
     key(&mut dashboard, &mut text, Key::Enter);
@@ -256,6 +246,68 @@ fn a_live_update_that_only_reorders_keeps_the_selection() {
     assert_eq!(dashboard.view.selected, Some(15));
     key(&mut dashboard, &mut text, Key::Enter);
     assert_eq!(focused_panes(&commands), [15]);
+}
+
+/// dashboard-worker-list AC5: a selected worker that finished while 現在
+/// is shown leaves it, and the notice says where it went; an open drawer
+/// stays on it.
+#[test]
+fn a_selection_that_leaves_the_scope_says_where_it_went() {
+    let (mut dashboard, mut text, _commands) = live_with(live(fleet::canned(), 0));
+    select(&mut dashboard, &mut text, 11);
+    key(&mut dashboard, &mut text, Key::Space);
+    let mut fleet = fleet::canned();
+    let api = fleet.workers.iter_mut().find(|w| w.pane == 11).unwrap();
+    api.state = fleet::State::Finished;
+    dashboard.apply(live(fleet, 0), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(dashboard.view.selected, None);
+    assert!(!rows_of(&dashboard).contains(&11));
+    assert_eq!(
+        status_of(&dashboard),
+        dropped_text("api-refactor", Some(Scope::Ended))
+    );
+    assert!(status_of(&dashboard).contains("api-refactor は 終了 に移りました"));
+    assert_eq!(dashboard.view.detail, Some(11), "the drawer stays");
+}
+
+/// dashboard-worker-list AC5: a worker selected outside the scope's rows
+/// (lint-pass, finished, chosen on its タイムライン lane while 現在 is the
+/// scope) that a live update takes out of the fleet or out of the filter
+/// is no longer selected, and the notice names it.
+#[test]
+fn a_selection_outside_the_list_that_leaves_says_so() {
+    for case in ["the fleet", "the filter"] {
+        let (mut dashboard, mut text, _commands) = live_with(live(fleet::canned(), 0));
+        if case == "the filter" {
+            typed(&mut dashboard, &mut text, "/");
+            typed(&mut dashboard, &mut text, "branch:chore");
+            key(&mut dashboard, &mut text, Key::Enter);
+        }
+        super::tabs::show_tab(&mut dashboard, &mut text, Tab::Timeline);
+        let pos = center(&dashboard.tree, lane(&dashboard, 17));
+        click(&mut dashboard, &mut text, pos);
+        super::tabs::show_tab(&mut dashboard, &mut text, Tab::Operations);
+        assert_eq!(dashboard.view.scope, Scope::Current, "{case}");
+        assert!(!rows_of(&dashboard).contains(&17), "{case}: 17 is in 現在");
+        assert_eq!(dashboard.view.selected, Some(17), "{case}");
+
+        let mut fleet = fleet::canned();
+        if case == "the fleet" {
+            fleet.workers.retain(|w| w.pane != 17);
+        } else {
+            let lint = fleet.workers.iter_mut().find(|w| w.pane == 17).unwrap();
+            lint.branch = "fix/clippy".into();
+        }
+        dashboard.apply(live(fleet, 0), &mut text);
+        dashboard.prepare(window(), &mut text);
+        assert_eq!(dashboard.view.selected, None, "{case}");
+        assert_eq!(
+            status_of(&dashboard),
+            dropped_text("lint-pass", None),
+            "{case}"
+        );
+    }
 }
 
 fn label_of_canned(pane: u64) -> String {
@@ -299,9 +351,9 @@ fn the_drawer_follows_any_reselection() {
     key(&mut dashboard, &mut text, Key::Char('j'));
     key(&mut dashboard, &mut text, Key::Space);
     assert_eq!(dashboard.view.detail, Some(14));
-    // Hiding the queue takes fix-tests out of the order: the selection
-    // moves to the pane now at its place, and the drawer with it.
-    key(&mut dashboard, &mut text, Key::Char('1'));
+    // 終了 takes fix-tests out of the order: the selection moves to the
+    // pane now at its place, and the drawer with it.
+    key(&mut dashboard, &mut text, Key::Char('3'));
     let selected = dashboard.view.selected.unwrap();
     assert_ne!(selected, 14);
     assert_eq!(dashboard.view.detail, Some(selected));
@@ -337,37 +389,33 @@ fn a_live_drawer_watches_the_worker_it_moved_to() {
     key(&mut dashboard, &mut text, Key::Char('j'));
     key(&mut dashboard, &mut text, Key::Space);
     commands.try_iter().for_each(drop);
-    key(&mut dashboard, &mut text, Key::Char('1'));
+    key(&mut dashboard, &mut text, Key::Char('3'));
     let selected = dashboard.view.selected.unwrap();
     let watched: Vec<Command> = commands.try_iter().collect();
     assert_eq!(watched.last(), Some(&Command::Watch(vec![selected])));
 }
 
-/// The queue's cards from top to bottom on screen.
-fn queue_on_screen(dashboard: &Dashboard) -> Vec<u64> {
-    let list = dashboard.registry.lists[Panel::Queue as usize]
-        .as_ref()
-        .unwrap();
-    let mut cards: Vec<(f32, u64)> = list
+/// The list's rows from top to bottom on screen.
+fn rows_on_screen(dashboard: &Dashboard) -> Vec<u64> {
+    let list = dashboard.registry.list.as_ref().unwrap();
+    let mut rows: Vec<(f32, u64)> = list
         .items
         .iter()
-        .map(|(id, pane)| (rect(&dashboard.tree, *id)[1], pane.unwrap()))
+        .map(|(id, pane)| (rect(&dashboard.tree, *id)[1], *pane))
         .collect();
-    cards.sort_by(|a, b| a.0.total_cmp(&b.0));
-    cards.into_iter().map(|(_, pane)| pane).collect()
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    rows.into_iter().map(|(_, pane)| pane).collect()
 }
 
+/// dashboard-worker-list AC5: time passing moves no row, whatever the
+/// waits say now; J walks the rows as shown.
 #[test]
-fn the_queue_cards_keep_the_order_j_walks() {
+fn the_rows_keep_their_order_as_time_passes() {
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, live(fleet::canned(), 0));
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    assert_eq!(queue_on_screen(&dashboard), [14, 15, 16, 19]);
-    let card = |d: &Dashboard, pane: u64| {
-        let list = d.registry.lists[Panel::Queue as usize].as_ref().unwrap();
-        list.items.iter().find(|(_, p)| *p == Some(pane)).unwrap().0
-    };
-    let second = card(&dashboard, 15);
+    assert_eq!(rows_on_screen(&dashboard)[..4], [14, 15, 16, 19]);
+    let second = row_of(&dashboard, 15);
 
     // Only the second approval's wait grows, past fix-tests' (the same
     // need).
@@ -380,47 +428,16 @@ fn the_queue_cards_keep_the_order_j_walks() {
         .wait_minutes = 3.0;
     dashboard.apply(live(fleet, 0), &mut text);
     dashboard.prepare(window(), &mut text);
-    assert_eq!(card(&dashboard, 15), second, "updated in place");
-    let shown = queue_on_screen(&dashboard);
-    assert_eq!(shown, [15, 14, 16, 19]);
-    assert_eq!(dashboard.order()[..4], shown);
+    assert_eq!(row_of(&dashboard, 15), second, "updated in place");
+    let shown = rows_on_screen(&dashboard);
+    assert_eq!(shown[..4], [14, 15, 16, 19], "no row moved");
+    assert_eq!(rows_of(&dashboard), shown);
     key(&mut dashboard, &mut text, Key::Char('j'));
     assert_eq!(
         dashboard.view.selected,
         Some(shown[0]),
-        "J takes the top card"
+        "J takes the top row"
     );
-}
-
-#[test]
-fn every_graph_node_names_its_root_row() {
-    let (dashboard, _text) = laid_out(Grouping::Orchestrator);
-    let tree = &dashboard.tree;
-    let graph = dashboard.registry.lists[Panel::Graph as usize]
-        .as_ref()
-        .unwrap();
-    for worker in &dashboard.feed.fleet.workers {
-        let item = graph.item_of(worker.pane).unwrap_or_else(|| {
-            panic!("no root row shows {}", worker.label);
-        });
-        let (row, _) = graph.items[item];
-        let (pill, _, _) = dashboard
-            .registry
-            .marks
-            .iter()
-            .find(|(_, pane, mark)| *pane == worker.pane && matches!(mark, Mark::Node { .. }))
-            .unwrap();
-        let mut up = Some(*pill);
-        while up.is_some() && up != Some(row) {
-            up = up.and_then(|id| tree.parent(id));
-        }
-        assert_eq!(up, Some(row), "{}'s node is not in its row", worker.label);
-    }
-    // perf-wish has no pane of its own: its row holds perf-probe (a child)
-    // and e2e-smoke (a grandchild).
-    let perf_wish = graph.item_of(13).unwrap();
-    assert_eq!(graph.items[perf_wish].1, None);
-    assert_eq!(graph.item_of(19), Some(perf_wish));
 }
 
 fn last_watch(commands: &std::sync::mpsc::Receiver<Command>) -> Option<Vec<u64>> {
@@ -436,11 +453,6 @@ fn last_watch(commands: &std::sync::mpsc::Receiver<Command>) -> Option<Vec<u64>>
         .last()
 }
 
-fn open_panes(dashboard: &Dashboard) -> Vec<u64> {
-    let open = dashboard.queue_buttons.open.iter();
-    open.map(|(_, pane)| *pane).collect()
-}
-
 #[test]
 fn a_reselection_to_nobody_closes_the_drawer() {
     let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
@@ -453,8 +465,8 @@ fn a_reselection_to_nobody_closes_the_drawer() {
     assert_eq!(dashboard.view.detail, Some(14));
     commands.try_iter().for_each(drop);
 
-    // Hiding the queue leaves fix-tests nowhere to be selected.
-    key(&mut dashboard, &mut text, Key::Char('1'));
+    // 終了 leaves fix-tests nowhere to be selected.
+    key(&mut dashboard, &mut text, Key::Char('3'));
     assert_eq!(dashboard.view.selected, None);
     assert_eq!(dashboard.view.detail, None);
     assert!(drawer_labels(&dashboard).is_none());
@@ -470,119 +482,32 @@ fn a_reselection_to_nobody_closes_the_drawer() {
 }
 
 #[test]
-fn the_queue_comes_back_with_the_selected_card_expanded() {
-    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
-    key(&mut dashboard, &mut text, Key::Char('1'));
-    select(&mut dashboard, &mut text, 13);
-    commands.try_iter().for_each(drop);
-
-    // The quiet 13 has no card while 参考情報 is folded away: the top card
-    // is expanded.
-    key(&mut dashboard, &mut text, Key::Char('1'));
-    assert_eq!(dashboard.view.selected, Some(13));
-    assert_eq!(dashboard.queue_buttons.expanded, Some(14));
-
-    // Shown, its card comes back expanded.
-    let toggle = dashboard.queue_buttons.info_toggle.unwrap();
-    let pos = center(&dashboard.tree, toggle);
-    click(&mut dashboard, &mut text, pos);
-    assert!(dashboard.view.info_open);
-    assert_eq!(dashboard.view.selected, Some(13));
-    assert_eq!(dashboard.queue_buttons.expanded, Some(13));
-    assert_eq!(open_panes(&dashboard), [13], "開く is on the selected card");
-    assert_eq!(last_watch(&commands), Some(vec![13]));
-}
-
-/// The queue's card widgets, by pane.
-fn queue_cards(dashboard: &Dashboard) -> Vec<(WidgetId, Option<u64>)> {
-    let list = dashboard.registry.lists[Panel::Queue as usize].as_ref();
-    let mut cards = list.unwrap().items.clone();
-    cards.sort_by_key(|(_, pane)| *pane);
-    cards
-}
-
-#[test]
-fn a_new_top_card_is_expanded_in_place() {
-    let (mut dashboard, mut text, commands) = live_with(live(fleet::canned(), 0));
-    assert_eq!(dashboard.queue_buttons.expanded, Some(14));
-    let cards = queue_cards(&dashboard);
-    // Only the second approval's wait grows, past fix-tests': it is the top
-    // card now.
-    let mut fleet = fleet::canned();
-    let second = fleet.workers.iter_mut().find(|w| w.pane == 15).unwrap();
-    second.wait_minutes = 3.0;
-    dashboard.apply(live(fleet.clone(), 0), &mut text);
-    dashboard.prepare(window(), &mut text);
-
-    assert_eq!(queue_cards(&dashboard), cards, "no rebuild");
-    assert_eq!(queue_on_screen(&dashboard), [15, 14, 16, 19]);
-    assert_eq!(dashboard.queue_buttons.expanded, Some(15));
-    assert_eq!(open_panes(&dashboard), [15]);
-    let details: Vec<u64> = dashboard
-        .queue_buttons
-        .details
-        .iter()
-        .map(|b| b.1)
-        .collect();
-    assert_eq!(details, [14, 16, 19]);
-    assert_eq!(last_watch(&commands), Some(vec![15]));
-    // What a screen built for this fleet shows (and owns).
-    let mut fresh = Dashboard::live(Grouping::Orchestrator, Channel::detached().0);
-    let mut fresh_text = TextStore::new(Default::default());
-    fresh.prepare(window(), &mut fresh_text);
-    fresh.apply(live(fleet, 0), &mut fresh_text);
-    fresh.prepare(window(), &mut fresh_text);
-    assert_eq!(fresh.queue_buttons.expanded, Some(15));
-    assert_eq!(
-        frame_of(dashboard.display_list(), &text),
-        frame_of(fresh.display_list(), &fresh_text)
-    );
-    assert_eq!(text.layouts().len(), fresh_text.layouts().len());
-
-    // A rebuild for something else keeps it.
-    key(&mut dashboard, &mut text, Key::Char('5'));
-    assert_eq!(dashboard.queue_buttons.expanded, Some(15));
-    assert_eq!(last_watch(&commands), None, "the watch did not change");
-}
-
-#[test]
-fn running_and_done_cards_are_named_groups() {
-    // A card the pager hides is not exposed to assistive technology: at
-    // 1920×1200 every running and done card is on its page.
-    let mut dashboard = Dashboard::new(Grouping::Orchestrator);
-    let mut text = TextStore::new(Default::default());
-    dashboard.prepare(Size::new(1920.0, 1200.0), &mut text);
-    for panel in [Panel::Running, Panel::Done] {
-        let parts = dashboard.registry.lists[panel as usize].as_ref().unwrap();
+fn rows_are_named_groups() {
+    // A row the pager hides is not exposed to assistive technology: at
+    // 1440×900 every row of either scope is on its page.
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    for scope in [Scope::Current, Scope::Ended] {
+        in_scope(&mut dashboard, &mut text, scope);
         assert_eq!(
-            visible_items(&dashboard, panel).len(),
-            parts.items.len(),
-            "{panel:?} pages cards out at 1920×1200"
+            visible_rows(&dashboard).len(),
+            rows_of(&dashboard).len(),
+            "{scope:?} pages rows out at 1440×900"
         );
+        let update = dashboard.tree.accessibility_update(1.0);
+        let groups: Vec<&str> = update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == noa_gpui_core::accesskit::Role::Group)
+            .filter_map(|(_, node)| node.label())
+            .collect();
+        for pane in rows_of(&dashboard) {
+            let label = label_of(&dashboard, pane);
+            assert!(
+                groups.contains(&label),
+                "no group for {label} in {groups:?}"
+            );
+        }
     }
-    let update = dashboard.tree.accessibility_update(1.0);
-    let groups: Vec<&str> = update
-        .nodes
-        .iter()
-        .filter(|(_, node)| node.role() == noa_gpui_core::accesskit::Role::Group)
-        .filter_map(|(_, node)| node.label())
-        .collect();
-    let carded = dashboard
-        .feed
-        .fleet
-        .workers
-        .iter()
-        .filter(|w| matches!(w.state, fleet::State::Running | fleet::State::Finished));
-    let mut count = 0;
-    for worker in carded {
-        count += 1;
-        let label = worker.label.as_str();
-        assert!(
-            groups.contains(&label),
-            "no group for {label} in {groups:?}"
-        );
-    }
-    assert_eq!(count, 5, "three running cards and two done cards");
 }
 
 #[test]
@@ -628,7 +553,7 @@ fn another_server_instance_forgets_the_chosen_panes() {
         dashboard.registry.open_buttons.is_empty(),
         "the drawer's 開く"
     );
-    assert_eq!(dashboard.queue_buttons.expanded, Some(14), "the top card");
+    assert_eq!(dashboard.view.anchor, Some(14), "the list from its top");
     key(&mut dashboard, &mut text, Key::Enter);
     assert!(
         focused_panes(&commands).is_empty(),

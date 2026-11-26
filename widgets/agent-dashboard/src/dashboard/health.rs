@@ -82,7 +82,6 @@ struct Seen<'a> {
     synced_at: Option<Instant>,
     synced_secs: u64,
     had_data: bool,
-    workers: usize,
     notice: Option<&'a (String, Instant)>,
 }
 
@@ -93,7 +92,6 @@ impl<'a> Seen<'a> {
             synced_at: feed.synced_at,
             synced_secs: feed.synced_secs,
             had_data: feed.had_data,
-            workers: feed.fleet.workers.len(),
             notice: feed.notice.as_ref(),
         }
     }
@@ -113,7 +111,6 @@ impl<'a> Seen<'a> {
             synced_at: feed.synced_at_after(held, received),
             synced_secs: held.synced_secs,
             had_data: feed.had_data || kept > 0,
-            workers: kept,
             notice: feed.notice.as_ref(),
         }
     }
@@ -168,7 +165,6 @@ fn built_at(seen: Seen) -> Option<Instant> {
 /// The link state in words. `now` is `None` only when the feed has never
 /// been synced, which leaves nothing to count from.
 fn link_text(seen: Seen, now: Option<Instant>) -> String {
-    let n = seen.workers;
     let age = age(seen, now);
     let ago = minutes_text(age.as_secs_f64() / 60.0);
     let reason = match seen.link {
@@ -176,19 +172,16 @@ fn link_text(seen: Seen, now: Option<Instant>) -> String {
         _ => String::new(),
     };
     match health(seen, now) {
-        Health::Demo => format!("ワーカー {n} · ダミーデータ"),
+        Health::Demo => "ダミーデータ".to_owned(),
         Health::Connecting => "接続中…".to_owned(),
-        Health::Live => format!("ワーカー {n} · 同期 {ago}前"),
+        Health::Live => "同期済み".to_owned(),
         // The label cuts its tail (the slot is at most 200 px wide), so
-        // what must stay readable comes first: the stale mark and the
-        // data's age; the worker count may be cut.
-        Health::Stale => format!("古いデータ（同期 {ago}前）· ワーカー {n}"),
+        // the age comes first: a cut keeps it.
+        Health::Stale => format!("最後の受信から {ago}（古いデータ）"),
         Health::Down { had_data: false } => format!("切断: {reason}"),
-        // The reason can be any length: here too the stale mark and the
-        // data's age come first (164 px for "59 分", in a slot of up to
-        // 200 px, which leaves room for the reason's first characters).
+        // The reason can be any length: the age comes before it.
         Health::Down { had_data: true } => {
-            format!("切断: 古いデータ（{ago}前）· {reason}")
+            format!("切断: 最後の受信から {ago} · {reason}")
         }
     }
 }

@@ -42,7 +42,7 @@ pub(super) struct FleetMetrics {
 pub(super) fn compute_metrics(workers: &[&Worker]) -> FleetMetrics {
     let total = workers.len();
     let running = workers.iter().filter(|w| w.state == State::Running).count();
-    let waiting = workers.iter().filter(|w| w.need().is_some()).count();
+    let waiting = workers.iter().filter(|w| w.needs_attention()).count();
     let finished = workers
         .iter()
         .filter(|w| w.state == State::Finished)

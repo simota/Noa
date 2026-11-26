@@ -138,10 +138,7 @@ fn build_orchestrator_map(
             Container::row().align_items(AlignItems::CENTER),
         );
         let (symbol, color) = own.map_or(("◆", BLUE), mark);
-        let waiting_count = children
-            .iter()
-            .filter(|w| w.need().is_some_and(|n| n.tier() != Tier::Info))
-            .count();
+        let waiting_count = children.iter().filter(|w| w.needs_attention()).count();
         let root_card = root_hub(
             tree,
             row,
@@ -186,7 +183,7 @@ fn build_branch_map(tree: &mut UiTree, canvas: WidgetId, workers: &[&Worker], re
             Some(canvas),
             Container::row().align_items(AlignItems::CENTER),
         );
-        let waiting = members.iter().filter(|w| w.need().is_some()).count();
+        let waiting = members.iter().filter(|w| w.needs_attention()).count();
         root_hub(
             tree,
             row,

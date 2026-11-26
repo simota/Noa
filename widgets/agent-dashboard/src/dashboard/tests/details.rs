@@ -1,5 +1,6 @@
+use noa_gpui_core::clipboard::MemoryClipboard;
 use noa_gpui_core::widget::Widget;
-use noa_gpui_core::widgets::{Container, Label};
+use noa_gpui_core::widgets::{Button, Container, Label};
 use noa_gpui_core::{Role, accesskit};
 use noa_gpui_scene::Color;
 use noa_gpui_text::TextStyle;
@@ -19,8 +20,12 @@ fn key_at(dashboard: &mut Dashboard, text: &mut TextStore, key: Key, size: Size)
 }
 
 /// [`select`] in a window of `size`: J, then K when `pane` comes before
-/// the selection.
+/// the selection, in 終了 for a worker that has ended.
 fn select_at(dashboard: &mut Dashboard, text: &mut TextStore, pane: u64, size: Size) {
+    // A worker that has ended is in 終了's list.
+    if !dashboard.order().contains(&pane) {
+        key_at(dashboard, text, Key::Char('3'), size);
+    }
     for step in ['j', 'k'] {
         for _ in 0..20 {
             if dashboard.view.selected == Some(pane) {
@@ -161,6 +166,7 @@ fn space_opens_the_drawer_for_any_worker() {
     key(&mut dashboard, &mut text, Key::Space);
     assert_eq!(dashboard.tree.overlays().count(), 1);
     assert_eq!(dashboard.view.detail, Some(17));
+    expand_drawer(&mut dashboard, &mut text);
     for wanted in [
         "lint-pass",
         "依頼",
@@ -181,14 +187,9 @@ fn space_opens_the_drawer_for_any_worker() {
 }
 
 #[test]
-fn the_card_details_button_opens_the_drawer() {
+fn the_row_details_button_opens_the_drawer() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let (button, _) = *dashboard
-        .registry
-        .detail_buttons
-        .iter()
-        .find(|(_, pane)| *pane == 11)
-        .expect("running card 11 has a 詳細 button");
+    let button = row_button(&dashboard, 11);
     let pos = center(&dashboard.tree, button);
     click(&mut dashboard, &mut text, pos);
     assert_eq!(dashboard.view.detail, Some(11));
@@ -280,6 +281,7 @@ fn the_drawer_shows_the_screen_tail() {
     let (mut dashboard, mut text) = live_of(fleet);
     select(&mut dashboard, &mut text, 12);
     key(&mut dashboard, &mut text, Key::Space);
+    expand_drawer(&mut dashboard, &mut text);
     assert_eq!(tail_texts(&dashboard), ["$ make"]);
     assert!(!shows(&dashboard, "まだ取得していません"));
     assert_monospace(&dashboard, &mut text, 0, "$ make");
@@ -297,6 +299,7 @@ fn the_drawer_shows_the_screen_tail() {
     let (mut dashboard, mut text) = live_of(fleet);
     select(&mut dashboard, &mut text, 12);
     key(&mut dashboard, &mut text, Key::Space);
+    expand_drawer(&mut dashboard, &mut text);
     assert_eq!(tail_texts(&dashboard), ["$ make", narrow]);
     let proportional = width_in(&mut text, narrow, TextStyle::new(11.0));
     let mono = assert_monospace(&dashboard, &mut text, 1, narrow);
@@ -305,6 +308,7 @@ fn the_drawer_shows_the_screen_tail() {
     let (mut dashboard, mut text) = live_of(fleet::canned());
     select(&mut dashboard, &mut text, 12);
     key(&mut dashboard, &mut text, Key::Space);
+    expand_drawer(&mut dashboard, &mut text);
     assert!(tail_lines(&dashboard).is_empty());
     assert_caption(&dashboard, &mut text, "まだ取得していません");
 
@@ -312,6 +316,7 @@ fn the_drawer_shows_the_screen_tail() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     select(&mut dashboard, &mut text, 12);
     key(&mut dashboard, &mut text, Key::Space);
+    expand_drawer(&mut dashboard, &mut text);
     assert_caption(&dashboard, &mut text, "なし");
 }
 
@@ -320,8 +325,8 @@ fn a_rebuild_keeps_the_drawer_open() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     select(&mut dashboard, &mut text, 11);
     key(&mut dashboard, &mut text, Key::Space);
-    key(&mut dashboard, &mut text, Key::Char('5'));
-    assert!(!dashboard.view.shown[Panel::Graph as usize]);
+    key(&mut dashboard, &mut text, Key::Char('g'));
+    assert_eq!(dashboard.view.grouping, Grouping::Agent);
     assert_eq!(dashboard.view.detail, Some(11));
     assert_eq!(dashboard.tree.overlays().count(), 1);
     assert!(shows(&dashboard, label_of(&dashboard, 11)));
@@ -332,6 +337,7 @@ fn the_time_rows_follow_the_worker_in_place() {
     let (mut dashboard, mut text) = live_of(fleet::canned());
     select(&mut dashboard, &mut text, 11);
     key(&mut dashboard, &mut text, Key::Space);
+    expand_drawer(&mut dashboard, &mut text);
     assert!(shows(&dashboard, "人待ち合計 3 分"));
     let mut fleet = dashboard.feed.fleet.clone();
     let worker = fleet.workers.iter_mut().find(|w| w.pane == 11).unwrap();
@@ -397,49 +403,6 @@ fn the_drawer_stays_inside_the_window() {
     }
 }
 
-/// `GroupBox::card` made the running cards 247 / 231 / 255 px and the done
-/// cards 198 px tall (measured before U1). The caption line (15 px) became a
-/// row with a small 詳細 button, 26.32 px tall: every card grew by 11.32 px.
-///
-/// Measured where every card is shown whole: a hidden card (one a list
-/// pages out) measures 0. The cards' widths are fixed (336 px running, the
-/// 270 px done panel), so their heights do not depend on the window; at
-/// 1440×1800 the lists are about 900 px taller than at 1440×900, far more
-/// than both panels' cards need, so nothing has to page out.
-#[test]
-fn the_running_cards_keep_their_height() {
-    const ROW_GROWTH: f32 = 26.32 - 15.0;
-    let size = Size::new(1440.0, 1800.0);
-    let mut dashboard = Dashboard::new(Grouping::Orchestrator);
-    let mut text = TextStore::new(Default::default());
-    dashboard.prepare(size, &mut text);
-    let tree = &dashboard.tree;
-    for (panel, pane, group_box) in [
-        (Panel::Running, 11, 247.0),
-        (Panel::Running, 12, 231.0),
-        (Panel::Running, 13, 255.0),
-        (Panel::Done, 17, 198.0),
-        (Panel::Done, 18, 198.0),
-    ] {
-        let parts = dashboard.registry.lists[panel as usize].as_ref().unwrap();
-        let (card, _) = *parts.items.iter().find(|(_, p)| *p == Some(pane)).unwrap();
-        assert!(!tree.is_hidden(card), "card {pane} is shown");
-        let card_rect = rect(tree, card);
-        assert!(
-            inside(card_rect, rect(tree, parts.list)),
-            "card {pane} {card_rect:?} lies inside its list"
-        );
-        let height = card_rect[3];
-        assert!(
-            (height - (group_box + ROW_GROWTH)).abs() <= 0.5,
-            "card {pane}: {height} vs {}",
-            group_box + ROW_GROWTH
-        );
-    }
-}
-
-/// AC8: the start row says "開始 {started}前", or "不明" when the start is
-/// not known.
 #[test]
 fn an_unknown_start_says_unknown() {
     let mut fleet = fleet::canned();
@@ -452,7 +415,9 @@ fn an_unknown_start_says_unknown() {
     let (mut dashboard, mut text) = live_of(fleet);
     select(&mut dashboard, &mut text, 11);
     key(&mut dashboard, &mut text, Key::Space);
-    let started = pulse_id(&dashboard, |p| matches!(p, Pulse::Drawer(11)));
+    let started = pulse_id(&dashboard, |p| {
+        matches!(p, Pulse::Drawer(11, drawer::Slot::Started))
+    });
     assert_eq!(dashboard.tree.get::<Label>(started).unwrap().text(), "不明");
     assert!(!shows(&dashboard, "開始 不明"));
 
@@ -520,11 +485,27 @@ fn long_tags_stay_inside_the_drawer() {
                 key_at(&mut dashboard, &mut text, Key::Space, size);
             }
             assert_eq!(dashboard.view.detail, Some(pane));
+            // Only 実行情報 open, the content at its top: the head and the
+            // tags both in view, even in the smallest window.
+            if !dashboard.view.drawer_open[1] {
+                let run = dashboard.registry.disclosures.unwrap()[1];
+                let node = noa_gpui_core::access_id(run).0;
+                let click = accesskit::Action::Click;
+                super::hardening::assistive(&mut dashboard, &mut text, node, click);
+            }
+            let content = dashboard.tree.children(drawer(&dashboard).unwrap())[0];
+            dashboard.tree.update::<ScrollView, _>(content, |s, cx| {
+                s.set_scroll_position(cx, Point::new(0.0, 0.0));
+            });
+            dashboard.prepare(size, &mut text);
             let root = drawer(&dashboard).unwrap();
             let tree = &dashboard.tree;
             let content = tree.children(root)[0];
             let inner = rect(tree, content);
-            let rows = &tree.children(content)[..2];
+            // The head, and the row of the model and the branch under
+            // 実行情報.
+            let run = dashboard.registry.disclosures.unwrap()[1];
+            let rows = &[tree.children(content)[0], tree.children(run)[0]];
             for row in rows {
                 for id in shown_under(tree, *row) {
                     let r = rect(tree, id);
@@ -610,6 +591,7 @@ fn a_tag_with_line_breaks_is_drawn_on_one_line() {
     let (mut dashboard, mut text) = live_of(fleet);
     select(&mut dashboard, &mut text, 11);
     key(&mut dashboard, &mut text, Key::Space);
+    expand_drawer(&mut dashboard, &mut text);
     let tree = &dashboard.tree;
     let id = shown_under(tree, drawer(&dashboard).unwrap())
         .into_iter()
@@ -745,34 +727,22 @@ fn hostile_on(grouping: Grouping, pane: u64, edit: impl Fn(&mut Worker)) -> (Das
     let mut dashboard = Dashboard::live(grouping, channel);
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    for digit in ['4', '5'] {
-        press(&mut dashboard, &mut text, digit, Modifiers::default());
-    }
-    assert_eq!(
-        dashboard.view.shown,
-        shown_only(&[Panel::Timeline, Panel::Graph])
-    );
     snapshots.send(live(fleet, 0)).unwrap();
     dashboard.before_frame(&mut text);
     dashboard.prepare(window(), &mut text);
     select(&mut dashboard, &mut text, 11);
     key(&mut dashboard, &mut text, Key::Space);
     assert_eq!(dashboard.view.detail, Some(11));
+    expand_drawer(&mut dashboard, &mut text);
     (dashboard, text)
 }
 
-/// Every label and tag shown in the drawer and in the running and done
-/// lists is drawn on one line; returns what they say.
+/// Every label and tag shown in the drawer and in the list is drawn on
+/// one line; returns what they say.
 fn assert_one_line_everywhere(dashboard: &Dashboard, what: &str) -> Vec<String> {
     let tree = &dashboard.tree;
     let mut roots = vec![drawer(dashboard).expect("the drawer is open")];
-    for panel in [Panel::Running, Panel::Done] {
-        roots.extend(
-            dashboard.registry.lists[panel as usize]
-                .as_ref()
-                .map(|l| l.list),
-        );
-    }
+    roots.extend(dashboard.registry.list.as_ref().map(|l| l.list));
     let texts: Vec<String> = roots
         .into_iter()
         .flat_map(|root| shown_under(tree, root))
@@ -785,8 +755,8 @@ fn assert_one_line_everywhere(dashboard: &Dashboard, what: &str) -> Vec<String> 
 }
 
 /// D1: a kind, model or branch with a paragraph break (live input) is
-/// drawn on one line in the drawer's tags, the card's tags and the group
-/// titles; the drawer's tags keep the text as given for assistive
+/// drawn on one line in the drawer's tags and the row's kind tag (a row
+/// shows no model or branch, and the list no group title); the drawer's tags keep the text as given for assistive
 /// technology. Before the fix, laying it out panicked in the shaper.
 #[test]
 fn tags_with_a_paragraph_break_are_drawn_on_one_line() {
@@ -807,9 +777,10 @@ fn tags_with_a_paragraph_break_are_drawn_on_one_line() {
             let what = format!("{given:?} {grouping:?}");
             let texts = assert_one_line_everywhere(&dashboard, &what);
             let line = drawer::one_line(given);
-            // The drawer's two tags, the card's two tags, the group title.
+            // The drawer's two tags, and the row's kind tag.
+            let wanted = if grouping == Grouping::Agent { 3 } else { 2 };
             let shown = texts.iter().filter(|t| t.starts_with(&line)).count();
-            assert_eq!(shown, 5, "{what}: {line:?} in {texts:?}");
+            assert_eq!(shown, wanted, "{what}: {line:?} in {texts:?}");
             let tree = &dashboard.tree;
             let tags: Vec<&drawer::FitTag> = shown_under(tree, drawer(&dashboard).unwrap())
                 .into_iter()
@@ -823,6 +794,31 @@ fn tags_with_a_paragraph_break_are_drawn_on_one_line() {
                 assert_eq!(node.label(), Some(given), "{what}");
             }
         }
+    }
+}
+
+/// D1: a done worker's model with a paragraph break is drawn on one line
+/// as its group's title in the タイムライン tab, grouped by model: the tab
+/// draws its group titles itself (`panel::group_header`).
+#[test]
+fn a_done_group_title_with_a_paragraph_break_is_drawn_on_one_line() {
+    for given in PARAGRAPH_BREAKS {
+        let mut fleet = fleet::canned();
+        let worker = fleet.workers.iter_mut().find(|w| w.pane == 17).unwrap();
+        assert_eq!(worker.state, crate::fleet::State::Finished, "17 is done");
+        worker.model = given.to_owned();
+        worker.effort.clear();
+        let mut dashboard =
+            Dashboard::of_snapshot(Grouping::Model, live(fleet, 0)).with_tab(Tab::Timeline);
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let what = format!("{given:?}");
+        let texts = labels_under(&dashboard.tree, dashboard.body);
+        for shown in &texts {
+            assert!(!breaks_lines(shown), "{what}: {shown:?} is drawn");
+        }
+        let wanted = format!("{} · 1", drawer::one_line(given));
+        assert!(texts.contains(&wanted), "{what}: {wanted:?} in {texts:?}");
     }
 }
 
@@ -843,7 +839,7 @@ fn a_cut_tag_shows_its_one_line_text_as_its_tooltip() {
 }
 
 /// D1: a worker label with a paragraph break is drawn on one line as the
-/// drawer's head and as the card's title.
+/// drawer's head and in the row's エージェント column.
 #[test]
 fn a_label_with_a_paragraph_break_is_drawn_on_one_line() {
     for given in PARAGRAPH_BREAKS {
@@ -853,10 +849,7 @@ fn a_label_with_a_paragraph_break_is_drawn_on_one_line() {
         let texts = assert_one_line_everywhere(&dashboard, &format!("{given:?}"));
         let line = drawer::one_line(given);
         let shown = texts.iter().filter(|t| **t == line).count();
-        assert_eq!(
-            shown, 2,
-            "{given:?}: the head and the card title in {texts:?}"
-        );
+        assert_eq!(shown, 2, "{given:?}: the head and the row in {texts:?}");
     }
 }
 
@@ -878,8 +871,8 @@ fn drawer_section(dashboard: &Dashboard, title: &str) -> Vec<String> {
 
 /// D1: a task and a detail with a paragraph break are each drawn as one
 /// paragraph, wrapped, where they belong: the detail under the drawer's
-/// 状態 after the state, the task under its 依頼, and on the running card
-/// the task after "依頼: " and the detail on a line of its own.
+/// 状態 after the state, the task under its 依頼, and in the row the task
+/// on its line and the detail before the parent on the next.
 #[test]
 fn a_task_and_detail_with_a_paragraph_break_are_drawn_as_one_paragraph() {
     for given in PARAGRAPH_BREAKS {
@@ -893,55 +886,21 @@ fn a_task_and_detail_with_a_paragraph_break_are_drawn_as_one_paragraph() {
         let (task, detail) = (drawer::one_line(&task), drawer::one_line(&detail));
 
         let state = drawer_section(&dashboard, "状態");
-        assert_eq!(state.len(), 2, "{what}: {state:?}");
+        assert_eq!(state[0], "実行中", "{what}: 状態 {state:?}");
         assert_eq!(state[1], detail, "{what}: 状態 {state:?}");
         let asked = drawer_section(&dashboard, "依頼");
         assert_eq!(asked, std::slice::from_ref(&task), "{what}");
 
         let tree = &dashboard.tree;
-        let running = dashboard.registry.lists[Panel::Running as usize].as_ref();
-        let (card, _) = running
-            .unwrap()
-            .items
-            .iter()
-            .find(|(_, pane)| *pane == Some(11))
-            .expect("11's running card");
-        let on_card: Vec<String> = shown_under(tree, *card)
+        let on_row: Vec<String> = shown_under(tree, row_of(&dashboard, 11))
             .into_iter()
             .filter_map(|id| text_of(tree, id))
             .collect();
-        let lines = |wanted: &str| on_card.iter().filter(|t| *t == wanted).count();
-        assert_eq!(lines(&format!("依頼: {task}")), 1, "{what}: {on_card:?}");
-        assert_eq!(lines(&detail), 1, "{what}: {on_card:?}");
-        assert_eq!(lines(&task), 0, "{what}: {on_card:?}");
-        assert_eq!(lines(&format!("依頼: {detail}")), 0, "{what}: {on_card:?}");
-    }
-}
-
-/// D1: a done worker's model with a paragraph break is drawn on one line
-/// as its group's title in the done panel, grouped by model: the done
-/// panel draws its group titles itself.
-#[test]
-fn a_done_group_title_with_a_paragraph_break_is_drawn_on_one_line() {
-    for given in PARAGRAPH_BREAKS {
-        let (dashboard, _text) = hostile_on(Grouping::Model, 17, |worker| {
-            assert_eq!(worker.state, crate::fleet::State::Finished, "17 is done");
-            worker.model = given.to_owned();
-            worker.effort.clear();
-        });
-        let what = format!("{given:?}");
-        assert_one_line_everywhere(&dashboard, &what);
-        let tree = &dashboard.tree;
-        let done = dashboard.registry.lists[Panel::Done as usize].as_ref();
-        let titles: Vec<String> = done
-            .unwrap()
-            .headers
-            .iter()
-            .filter(|(id, _)| !tree.is_hidden(*id))
-            .filter_map(|(id, _)| text_of(tree, *id))
-            .collect();
-        let wanted = format!("{} · 1", drawer::one_line(given));
-        assert!(titles.contains(&wanted), "{what}: {wanted:?} in {titles:?}");
+        let lines = |wanted: &str| on_row.iter().filter(|t| *t == wanted).count();
+        assert_eq!(lines(&task), 1, "{what}: {on_row:?}");
+        let report = format!("{detail} · 親 release-0.9.7");
+        assert_eq!(lines(&report), 1, "{what}: {on_row:?}");
+        assert_eq!(lines(&detail), 0, "{what}: {on_row:?}");
     }
 }
 
@@ -1085,4 +1044,439 @@ fn a_cut_keeps_a_cluster_with_a_space_whole() {
         seen.push(start.to_owned());
     }
     assert!(seen.iter().any(|s| s == "a\u{600} "), "{seen:?}");
+}
+
+/// What the drawer says from top to bottom, hidden or not: each label's,
+/// tag's and button's text and each disclosure's title.
+fn drawer_outline(dashboard: &Dashboard) -> Vec<String> {
+    fn walk(tree: &UiTree, id: WidgetId, out: &mut Vec<String>) {
+        if let Some(text) = text_of(tree, id) {
+            out.push(text);
+        }
+        if let Some(button) = tree.get::<Button>(id) {
+            out.push(button.label().to_owned());
+        }
+        if let Some(group) = tree.get::<DisclosureGroup>(id) {
+            let mut node = accesskit::Node::new(accesskit::Role::Group);
+            group.accessibility(&mut node);
+            out.push(node.label().unwrap_or_default().to_owned());
+        }
+        for child in tree.children(id) {
+            walk(tree, *child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&dashboard.tree, drawer(dashboard).unwrap(), &mut out);
+    out
+}
+
+/// 11 with a cwd, in a live dashboard, its drawer open.
+fn drawer_on_11() -> (Dashboard, TextStore) {
+    let mut fleet = fleet::canned();
+    let worker = fleet.workers.iter_mut().find(|w| w.pane == 11).unwrap();
+    worker.cwd = "/work/noa-api".to_owned();
+    worker.screen_tail = vec!["$ cargo test".to_owned()];
+    let (mut dashboard, mut text) = live_of(fleet);
+    dashboard.set_detail(Some(11), &mut text);
+    dashboard.prepare(window(), &mut text);
+    (dashboard, text)
+}
+
+/// Where a pointer clicks the title of the disclosure `id`.
+fn title_of(dashboard: &Dashboard, id: WidgetId) -> Point {
+    let [x, y, _, _] = rect(&dashboard.tree, id);
+    Point::new(x + 40.0, y + 12.0)
+}
+
+/// AC9: under the head, 状態, 操作, 結果・差分, then 指示と画面ログ and
+/// 実行情報; 状態 says the status, the report, the update and the parent.
+#[test]
+fn the_drawer_sections_come_in_order() {
+    let (dashboard, _text) = drawer_on_11();
+    let outline = drawer_outline(&dashboard);
+    let at = |wanted: &str| {
+        outline
+            .iter()
+            .position(|t| t == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} in {outline:?}"))
+    };
+    let order = [
+        "api-refactor",
+        "状態",
+        "実行中",
+        "cargo test -p noa-grid を実行中",
+        "8 秒前に出力",
+        "親 release-0.9.7",
+        "操作",
+        "開く",
+        "ペインを閉じる",
+        "送信",
+        "結果・差分",
+        drawer::NO_RESULT_FILE,
+        drawer::DIFF,
+        drawer::DISCLOSURES[0],
+        "依頼",
+        "Handler の分割を noa-grid 側に反映し、テストを通す",
+        "画面の末尾",
+        "$ cargo test",
+        drawer::DISCLOSURES[1],
+        "opus · high",
+        "feat/api-v2",
+        "ペイン ID 11",
+        "/work/noa-api",
+        "時間",
+        "閉じる",
+    ];
+    let places: Vec<usize> = order.iter().map(|wanted| at(wanted)).collect();
+    assert!(
+        places.windows(2).all(|pair| pair[0] < pair[1]),
+        "{order:?} at {places:?} in {outline:?}"
+    );
+    // The tags under the head went: 閉じた and 結果あり are qualifiers.
+    assert!(!outline.iter().any(|t| t == "結果なし"), "{outline:?}");
+}
+
+/// AC6 / AC9: a worker with no task says 作業内容未取得 under 依頼 inside
+/// 指示と画面ログ, never its label there; hidden until the group opens.
+#[test]
+fn an_empty_task_says_so_inside_the_instructions() {
+    let mut fleet = fleet::canned();
+    let worker = fleet.workers.iter_mut().find(|w| w.pane == 11).unwrap();
+    worker.task.clear();
+    worker.label = "x".to_owned();
+    let (mut dashboard, mut text) = live_of(fleet);
+    dashboard.set_detail(Some(11), &mut text);
+    dashboard.prepare(window(), &mut text);
+    let groups = dashboard.registry.disclosures.unwrap();
+    assert!(
+        !shows(&dashboard, "作業内容未取得"),
+        "shown while collapsed"
+    );
+
+    let pos = title_of(&dashboard, groups[0]);
+    click(&mut dashboard, &mut text, pos);
+    assert_eq!(dashboard.view.drawer_open, [true, false]);
+    let tree = &dashboard.tree;
+    let found: Vec<WidgetId> = shown_under(tree, drawer(&dashboard).unwrap())
+        .into_iter()
+        .filter(|id| text_of(tree, *id).as_deref() == Some("作業内容未取得"))
+        .collect();
+    assert_eq!(found.len(), 1, "作業内容未取得 shown once");
+    assert!(
+        tree.ancestors(found[0]).any(|a| a == groups[0]),
+        "作業内容未取得 is under 指示と画面ログ"
+    );
+    assert_eq!(
+        drawer_section(&dashboard, "依頼"),
+        ["作業内容未取得"],
+        "依頼 says only that"
+    );
+}
+
+/// AC9: both disclosures start collapsed, hiding their children; model,
+/// branch and cwd are under 実行情報 only, and shown once it is open.
+#[test]
+fn the_disclosures_start_collapsed_and_hold_the_run_information() {
+    let (mut dashboard, mut text) = drawer_on_11();
+    let groups = dashboard.registry.disclosures.unwrap();
+    for id in groups {
+        let tree = &dashboard.tree;
+        assert!(!tree.get::<DisclosureGroup>(id).unwrap().is_expanded());
+        assert!(!tree.children(id).is_empty());
+        for child in tree.children(id) {
+            assert!(tree.is_hidden(*child), "a collapsed group hides {child:?}");
+        }
+    }
+    let run_texts = [
+        "opus · high",
+        "feat/api-v2",
+        "/work/noa-api",
+        "ペイン ID 11",
+    ];
+    for wanted in run_texts {
+        assert!(!shows(&dashboard, wanted), "{wanted} shown while collapsed");
+    }
+    assert!(!shows(
+        &dashboard,
+        "Handler の分割を noa-grid 側に反映し、テストを通す"
+    ));
+
+    // A pointer on the title opens it.
+    let pos = title_of(&dashboard, groups[1]);
+    click(&mut dashboard, &mut text, pos);
+    assert_eq!(dashboard.view.drawer_open, [false, true]);
+    let tree = &dashboard.tree;
+    for wanted in run_texts {
+        let found: Vec<WidgetId> = shown_under(tree, drawer(&dashboard).unwrap())
+            .into_iter()
+            .filter(|id| text_of(tree, *id).as_deref() == Some(wanted))
+            .collect();
+        assert_eq!(found.len(), 1, "{wanted} shown once");
+        assert!(
+            tree.ancestors(found[0]).any(|a| a == groups[1]),
+            "{wanted} is under 実行情報"
+        );
+    }
+}
+
+/// AC9: what was expanded stays so when a structural snapshot builds the
+/// drawer again, and for the next worker.
+#[test]
+fn an_expanded_disclosure_stays_expanded_across_rebuilds() {
+    let (mut dashboard, mut text) = drawer_on_11();
+    let groups = dashboard.registry.disclosures.unwrap();
+    let pos = title_of(&dashboard, groups[1]);
+    click(&mut dashboard, &mut text, pos);
+    assert_eq!(dashboard.view.drawer_open, [false, true]);
+
+    // Another worker needs attention: a structural snapshot.
+    let mut fleet = dashboard.feed.fleet.clone();
+    fleet
+        .workers
+        .iter_mut()
+        .find(|w| w.pane == 12)
+        .unwrap()
+        .state = crate::fleet::State::Input;
+    let before = drawer(&dashboard);
+    dashboard.apply(live(fleet, 0), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_ne!(drawer(&dashboard), before, "the drawer is built again");
+    let groups = dashboard.registry.disclosures.unwrap();
+    let tree = &dashboard.tree;
+    assert!(
+        !tree
+            .get::<DisclosureGroup>(groups[0])
+            .unwrap()
+            .is_expanded()
+    );
+    assert!(
+        tree.get::<DisclosureGroup>(groups[1])
+            .unwrap()
+            .is_expanded()
+    );
+    assert!(shows(&dashboard, "opus · high"));
+
+    // Collapsing it again, then another worker: still collapsed.
+    let pos = title_of(&dashboard, groups[1]);
+    click(&mut dashboard, &mut text, pos);
+    assert_eq!(dashboard.view.drawer_open, [false, false]);
+    dashboard.set_detail(Some(13), &mut text);
+    let groups = dashboard.registry.disclosures.unwrap();
+    assert!(
+        !dashboard
+            .tree
+            .get::<DisclosureGroup>(groups[1])
+            .unwrap()
+            .is_expanded()
+    );
+}
+
+/// AC9: 状態's qualifiers and update tick after a time-only snapshot, in
+/// place, while 実行情報's times (collapsed) follow too.
+#[test]
+fn the_state_section_ticks_in_place() {
+    let (mut dashboard, mut text) = live_of(fleet::canned());
+    dashboard.set_detail(Some(13), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert!(
+        shows(&dashboard, "出力未変化 3 分"),
+        "{:?}",
+        drawer_texts(&dashboard)
+    );
+    let mut fleet = dashboard.feed.fleet.clone();
+    let worker = fleet.workers.iter_mut().find(|w| w.pane == 13).unwrap();
+    worker.wait_minutes = 5.0;
+    worker.since = "出力なし 5 分".to_owned();
+    worker.started_minutes = Some(40.0);
+    let before = drawer(&dashboard);
+    dashboard.apply(live(fleet, 0), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert_eq!(drawer(&dashboard), before, "no rebuild");
+    for wanted in ["出力未変化 5 分", "出力なし 5 分"] {
+        assert!(
+            shows(&dashboard, wanted),
+            "{wanted}: {:?}",
+            drawer_texts(&dashboard)
+        );
+    }
+    expand_drawer(&mut dashboard, &mut text);
+    assert!(
+        shows(&dashboard, "開始 40 分前"),
+        "{:?}",
+        drawer_texts(&dashboard)
+    );
+}
+
+/// AC9 risk: a collapsed disclosure's hidden children take no click and
+/// no focus.
+#[test]
+fn a_collapsed_disclosure_takes_no_click_or_focus() {
+    let (mut dashboard, mut text) = drawer_on_11();
+    dashboard
+        .tree_mut()
+        .set_clipboard(Box::new(MemoryClipboard::default()));
+    let groups = dashboard.registry.disclosures.unwrap();
+    let pos = title_of(&dashboard, groups[0]);
+    click(&mut dashboard, &mut text, pos);
+    let copy = dashboard.registry.tail_copy.unwrap();
+    assert!(!dashboard.tree.is_hidden(copy));
+    let at = center(&dashboard.tree, copy);
+    // Collapsed again: where コピー was copies nothing.
+    let pos = title_of(&dashboard, groups[0]);
+    click(&mut dashboard, &mut text, pos);
+    assert_eq!(dashboard.view.drawer_open, [false, false]);
+    assert!(dashboard.tree.is_hidden(copy));
+    click(&mut dashboard, &mut text, at);
+    assert_eq!(dashboard.tree_mut().clipboard().read_text(), None);
+    assert_ne!(notice_of(&dashboard), "画面の末尾をコピーしました（1 行）");
+    // Tab goes round the screen without stopping on a hidden widget.
+    let mut reached = Vec::new();
+    for _ in 0..200 {
+        key(&mut dashboard, &mut text, Key::Tab);
+        let focused = dashboard.tree.focused().expect("Tab focuses something");
+        assert!(
+            !dashboard.tree.is_hidden(focused),
+            "Tab reached a hidden {focused:?}"
+        );
+        reached.push(focused);
+    }
+    assert!(
+        reached.contains(&groups[0]),
+        "Tab reaches the group's title"
+    );
+    assert!(!reached.contains(&copy));
+}
+
+/// The list narrows by the drawer's width while it is open: every row's
+/// button lies beside the drawer, and a pointer click on it acts.
+#[test]
+fn the_list_stays_usable_beside_the_drawer() {
+    for size in [Size::new(1100.0, 700.0), Size::new(1440.0, 900.0)] {
+        let (mut dashboard, mut text) = live_at(fleet::canned(), size);
+        let wide = rect(
+            &dashboard.tree,
+            dashboard.registry.list.as_ref().unwrap().list,
+        );
+        let shown = rows_of(&dashboard);
+        dashboard.set_detail(Some(13), &mut text);
+        dashboard.prepare(size, &mut text);
+        let area = rect(&dashboard.tree, drawer(&dashboard).unwrap());
+        let list = rect(
+            &dashboard.tree,
+            dashboard.registry.list.as_ref().unwrap().list,
+        );
+        assert!(
+            list[0] + list[2] <= area[0],
+            "{size:?}: the list {list:?} ends before the drawer {area:?}"
+        );
+        assert!(list[2] < wide[2], "{size:?}: narrower than {wide:?}");
+        assert_eq!(rows_of(&dashboard), shown, "{size:?}: the same rows");
+        let rows = visible_rows(&dashboard);
+        assert!(!rows.is_empty());
+        for row in &rows {
+            let pane = dashboard
+                .registry
+                .rows
+                .iter()
+                .find(|(id, _)| id == row)
+                .unwrap()
+                .1;
+            let button = rect(&dashboard.tree, row_button(&dashboard, pane));
+            assert!(
+                button[0] + button[2] <= area[0] && inside(button, list),
+                "{size:?}: {pane}'s button {button:?} beside the drawer {area:?}"
+            );
+            let row = rect(&dashboard.tree, *row);
+            assert!(
+                inside(row, list),
+                "{size:?}: {pane}'s row {row:?} in {list:?}"
+            );
+        }
+        // A pointer on 11's 詳細 moves the drawer to 11.
+        let pos = center(&dashboard.tree, row_button(&dashboard, 11));
+        click_at(&mut dashboard, &mut text, pos, size);
+        assert_eq!(dashboard.view.detail, Some(11), "{size:?}");
+        assert_eq!(dashboard.view.selected, Some(11), "{size:?}");
+        // And on the top row's 承認画面へ: the pane is opened.
+        let top = rows_of(&dashboard)[0];
+        let pos = center(&dashboard.tree, row_button(&dashboard, top));
+        click_at(&mut dashboard, &mut text, pos, size);
+        assert_eq!(dashboard.view.selected, Some(top), "{size:?}");
+        let label = label_of(&dashboard, top).to_owned();
+        assert_eq!(
+            notice_of(&dashboard),
+            format!("{label} のペインへ移動します")
+        );
+        // Closed, the list takes the width back.
+        dashboard.set_detail(None, &mut text);
+        dashboard.prepare(size, &mut text);
+        let list = rect(
+            &dashboard.tree,
+            dashboard.registry.list.as_ref().unwrap().list,
+        );
+        assert_rect(list, wide, "the list without the drawer");
+    }
+}
+
+fn click_at(dashboard: &mut Dashboard, text: &mut TextStore, pos: Point, size: Size) {
+    let button = PointerButton::Primary;
+    dashboard.dispatch(Event::PointerMove { pos }, text);
+    dashboard.dispatch(Event::PointerDown { pos, button }, text);
+    dashboard.dispatch(Event::PointerUp { pos, button }, text);
+    dashboard.prepare(size, text);
+}
+
+/// AC9 操作: the row's action where it does more than the drawer shows:
+/// an approval's 承認画面へ in place of 開く, an input's 入力する, which
+/// focuses the send field; a running worker has 開く only.
+#[test]
+fn the_drawer_offers_the_rows_action() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let buttons = |dashboard: &Dashboard| -> Vec<String> {
+        let tree = &dashboard.tree;
+        shown_under(tree, drawer(dashboard).unwrap())
+            .into_iter()
+            .filter_map(|id| tree.get::<Button>(id).map(|b| b.label().to_owned()))
+            .collect()
+    };
+    dashboard.set_detail(Some(14), &mut text);
+    let shown = buttons(&dashboard);
+    assert!(shown.contains(&"承認画面へ".to_owned()), "{shown:?}");
+    assert!(!shown.contains(&"開く".to_owned()), "{shown:?}");
+    let (open, _) = dashboard.registry.open_buttons[0];
+    let pos = center(&dashboard.tree, open);
+    click(&mut dashboard, &mut text, pos);
+    let label = label_of(&dashboard, 14).to_owned();
+    assert_eq!(
+        notice_of(&dashboard),
+        format!("{label} のペインへ移動します")
+    );
+
+    dashboard.set_detail(Some(11), &mut text);
+    let shown = buttons(&dashboard);
+    assert!(shown.contains(&"開く".to_owned()), "{shown:?}");
+    assert!(!shown.contains(&"入力する".to_owned()), "{shown:?}");
+
+    dashboard.set_detail(Some(16), &mut text);
+    dashboard.prepare(window(), &mut text);
+    assert!(buttons(&dashboard).contains(&"入力する".to_owned()));
+    let (start, _) = dashboard.registry.start_send_button.unwrap();
+    let pos = center(&dashboard.tree, start);
+    click(&mut dashboard, &mut text, pos);
+    let (field, pane) = dashboard.registry.send_field.unwrap();
+    assert_eq!(pane, 16);
+    assert_eq!(dashboard.tree.focused(), Some(field));
+
+    // While a close waits for its second press, too: the drawer is built
+    // again for the press, and the field it builds is focused.
+    key(&mut dashboard, &mut text, Key::Escape);
+    dashboard.tree.set_focus(None);
+    key(&mut dashboard, &mut text, Key::Char('x'));
+    assert_eq!(dashboard.view.confirm_close, Some(16));
+    let (start, _) = dashboard.registry.start_send_button.unwrap();
+    let pos = center(&dashboard.tree, start);
+    click(&mut dashboard, &mut text, pos);
+    assert_eq!(dashboard.view.confirm_close, None);
+    let (field, _) = dashboard.registry.send_field.unwrap();
+    assert_eq!(dashboard.tree.focused(), Some(field));
 }

@@ -1,5 +1,6 @@
-//! Workers whose panes are gone, rebuilt from the journals: shown done and
-//! tagged 閉じた, their results readable, and nothing sent to their panes.
+//! Workers whose panes are gone, rebuilt from the journals: listed under
+//! 終了 with 閉じた, their results readable, and nothing sent to their
+//! panes.
 
 use std::sync::mpsc::Receiver;
 
@@ -30,15 +31,19 @@ fn sent(commands: &Receiver<Command>) -> Vec<Command> {
 }
 
 #[test]
-fn closed_workers_are_done_and_tagged() {
-    let (dashboard, _text, _commands) = live_closed();
-    let done = dashboard.panels[Panel::Done as usize].expect("the done panel");
-    let tags = tags_under(&dashboard.tree, done);
-    assert_eq!(
-        tags.iter().filter(|t| *t == "閉じた").count(),
-        2,
-        "{tags:?}"
-    );
+fn closed_workers_are_ended_and_say_so() {
+    let (mut dashboard, mut text, _commands) = live_closed();
+    assert!(!rows_of(&dashboard).contains(&BENCH), "not in 現在");
+    in_scope(&mut dashboard, &mut text, Scope::Ended);
+    let closed_rows: Vec<Vec<String>> = rows_of(&dashboard)
+        .into_iter()
+        .map(|pane| texts_under(&dashboard.tree, row_of(&dashboard, pane)))
+        .filter(|texts| texts.iter().any(|t| t.contains("閉じた")))
+        .collect();
+    assert_eq!(closed_rows.len(), 2, "{closed_rows:?}");
+    for texts in &closed_rows {
+        assert_eq!(texts[0], "終了", "{texts:?}");
+    }
     let fleet = fleet::canned_with_closed();
     let closed: Vec<u64> = fleet
         .workers
@@ -90,7 +95,7 @@ fn nothing_reaches_the_pane_of_a_closed_worker() {
     let drawer = dashboard.drawer.unwrap().0;
     let labels = labels_under(&dashboard.tree, drawer);
     assert!(
-        labels.iter().any(|l| l == "ID 21 · 親 perf-wish"),
+        labels.iter().any(|l| l == "ペイン ID 21") && labels.iter().any(|l| l == "親 perf-wish"),
         "{labels:?}"
     );
     assert!(
@@ -174,22 +179,20 @@ fn closed_workers_count_in_the_statistics() {
 }
 
 /// Review #8: a closed failure stays failed — in the statistics and the
-/// state filter — yet is shown done (tagged 失敗) and not queued.
+/// state filter — yet is listed under 終了 (失敗 · 閉じた), never 要対応.
 #[test]
-fn a_closed_failure_is_shown_done_and_counted_failed() {
+fn a_closed_failure_is_ended_and_counted_failed() {
     let mut fleet = fleet::canned_with_closed();
     let bench = fleet.workers.iter_mut().find(|w| w.pane == BENCH).unwrap();
     bench.state = State::Error;
-    let dashboard = Dashboard::of_snapshot(Grouping::Flat, live(fleet.clone(), 0));
-    let done = dashboard.panels[Panel::Done as usize].unwrap();
-    let tags = tags_under(&dashboard.tree, done);
-    assert!(tags.iter().any(|t| t == "失敗"), "{tags:?}");
-    let queue = dashboard.panels[Panel::Queue as usize].unwrap();
-    assert!(
-        !labels_under(&dashboard.tree, queue)
-            .iter()
-            .any(|l| l == "bench-ascii")
-    );
+    let mut dashboard = Dashboard::of_snapshot(Grouping::Flat, live(fleet.clone(), 0));
+    let mut text = TextStore::new(Default::default());
+    dashboard.prepare(window(), &mut text);
+    assert!(!rows_of(&dashboard).contains(&BENCH), "not in 現在");
+    in_scope(&mut dashboard, &mut text, Scope::Ended);
+    let texts = texts_under(&dashboard.tree, row_of(&dashboard, BENCH));
+    assert_eq!(texts[0], "失敗", "{texts:?}");
+    assert!(texts[1].contains("閉じた"), "{texts:?}");
     assert!(dashboard.order().contains(&BENCH), "J / K reach it");
     let metrics = analytics::compute_metrics(&fleet.workers.iter().collect::<Vec<_>>());
     assert_eq!(metrics.error, 2, "e2e-smoke and bench-ascii");

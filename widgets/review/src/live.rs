@@ -1,6 +1,6 @@
 //! The link between the UI and the running review session.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use review::model::types::{AgentChoice, PartId, ReviewerChoice, RoundNo, Session, Target};
 use review::sibling::{self, Launcher};
 use review::task_links::{self, Origin};
+use review::timeline::{self, Status, TimelineApi};
 
 use crate::session::fix::{self, FixRequest};
 use crate::session::ipc::IpcConnect;
@@ -32,6 +33,8 @@ pub struct Snapshot {
     /// The session's store directory (`events.jsonl`, `report.md`).
     pub session_dir: Option<PathBuf>,
     pub origin: Option<Origin>,
+    /// Where the review's Board Timeline posts stand (its header says).
+    pub timeline: Status,
     /// The [`Channel::generation`] it was sent in; one sent before the
     /// screen last left a review is stale.
     pub generation: u64,
@@ -63,6 +66,15 @@ pub enum Command {
     /// Brings `part`'s pane to the front in Noa.
     Focus {
         part: PartId,
+    },
+    /// Sends the review's unpublished timeline posts again (再試行).
+    RetryTimeline,
+    /// Where the stored review in `dir` stands on its board's timeline,
+    /// answered on [`Channel::timelines`]; with `resend` (再試行: it has no
+    /// runner) its posts not yet published are sent first.
+    StoredTimeline {
+        dir: PathBuf,
+        resend: bool,
     },
     /// Holds the running review after each consolidated round, or lets it
     /// go on.
@@ -107,6 +119,10 @@ pub struct Channel {
     /// The running Noa's version, once a look at it at startup could read
     /// it (what 修正を依頼 can offer depends on it).
     pub versions: Receiver<(u64, String)>,
+    /// Where a stored review's timeline posts stand
+    /// ([`Command::StoredTimeline`]); a running one's come in its
+    /// snapshots.
+    pub timelines: Receiver<(u64, Status)>,
     commands: Sender<(u64, Command)>,
     generation: Arc<AtomicU64>,
 }
@@ -148,6 +164,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
     let (notice_tx, notices) = mpsc::channel();
     let (released_tx, released) = mpsc::channel();
     let (version_tx, versions) = mpsc::channel();
+    let (timeline_tx, timelines) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let told = Arc::clone(&wake);
@@ -168,6 +185,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
         reply_root: None,
         session_dir: None,
         origin: None,
+        timeline: Status::Idle,
         generation: 0,
     });
     wake();
@@ -195,6 +213,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
                     notices: notice_tx,
                     released: released_tx,
                     versions: version_tx,
+                    timelines: timeline_tx,
                     wake,
                 },
             )
@@ -206,6 +225,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
         notices,
         released,
         versions,
+        timelines,
         commands,
         generation,
     }
@@ -220,6 +240,7 @@ struct Outlets {
     /// The version of each Noa a runner or a fix request connected to,
     /// with the number of that connection's hello.
     versions: Sender<(u64, String)>,
+    timelines: Sender<(u64, Status)>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -263,6 +284,24 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                 .expect("spawn review-fix thread");
             continue;
         }
+        // A stored review has no runner: one request of its own.
+        if let Command::StoredTimeline { dir, resend } = cmd {
+            let outlets = outlets.clone();
+            std::thread::Builder::new()
+                .name("review-timeline".into())
+                .spawn(move || {
+                    let root = noa_config::timeline_outbox_dir();
+                    let connect = || {
+                        timeline::connect().map(|client| Box::new(client) as Box<dyn TimelineApi>)
+                    };
+                    stored_timeline(root.as_deref(), &dir, resend, connect, &mut |status| {
+                        let _ = outlets.timelines.send((generation, status));
+                        (outlets.wake)();
+                    });
+                })
+                .expect("spawn review-timeline thread");
+            continue;
+        }
         let start = match (cmd, &handle) {
             (Command::Leave, _) => {
                 if let Some((actions, _)) = handle.take() {
@@ -274,6 +313,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     reply_root: None,
                     session_dir: None,
                     origin: None,
+                    timeline: Status::Idle,
                     generation,
                 });
                 wake();
@@ -348,6 +388,39 @@ pub(crate) fn open_original_task(
     launcher.launch(sibling::TASKS, task_links::tasks_args(origin)?)
 }
 
+/// What the stored review in `dir` shows of its timeline posts, said to
+/// `tell`: where they stand in its outbox (under `root`), and with
+/// `resend` a pending state while its posts not yet published are sent
+/// through `connect`, then where they stand after.
+pub(crate) fn stored_timeline(
+    root: Option<&Path>,
+    dir: &Path,
+    resend: bool,
+    connect: impl FnOnce() -> Result<Box<dyn TimelineApi>, String>,
+    tell: &mut dyn FnMut(Status),
+) {
+    let Some(root) = root else {
+        return tell(Status::Idle);
+    };
+    let session = match review::store::read_session(dir) {
+        Ok(session) => session,
+        Err(e) => {
+            return tell(Status::Failed {
+                message: format!("{} を読めません: {e}", dir.display()),
+            });
+        }
+    };
+    let status = timeline::stored_status(root, &session);
+    if !resend || !status.unsent() {
+        return tell(status);
+    }
+    tell(Status::Pending);
+    tell(match connect() {
+        Ok(mut api) => timeline::resend_stored(root, &session, api.as_mut()),
+        Err(message) => Status::Failed { message },
+    });
+}
+
 /// The runner start a command on a stored review asks for.
 fn stored_start(cmd: Command) -> Option<runner::Start> {
     match cmd {
@@ -364,6 +437,7 @@ fn forwarded(cmd: Command) -> Option<Action> {
         Command::Retry => Action::Retry,
         Command::Close => Action::Close,
         Command::Focus { part } => Action::Focus { part },
+        Command::RetryTimeline => Action::RetryTimeline,
         Command::SetHold { hold } => Action::SetHold { hold },
         Command::Continue => Action::Continue,
         Command::Extend { by } => Action::Extend { by },
@@ -373,6 +447,7 @@ fn forwarded(cmd: Command) -> Option<Action> {
         | Command::ExtendStored { .. }
         | Command::OpenOriginalTask(_)
         | Command::RequestFix(_)
+        | Command::StoredTimeline { .. }
         | Command::Leave => return None,
     })
 }
@@ -391,12 +466,14 @@ fn forward_updates(
         released,
         versions,
         wake,
+        ..
     } = outlets;
     let mut link = Link::Connecting;
     let mut session = None;
     let mut reply_root = None;
     let mut session_dir = None;
     let mut origin = None;
+    let mut timeline = Status::Idle;
     for update in &handle.updates {
         let sent = match update {
             Update::Session {
@@ -416,6 +493,7 @@ fn forward_updates(
                         reply_root: reply_root.clone(),
                         session_dir: session_dir.clone(),
                         origin: origin.clone(),
+                        timeline: timeline.clone(),
                         generation,
                     })
                     .is_ok()
@@ -433,6 +511,21 @@ fn forward_updates(
                         reply_root: reply_root.clone(),
                         session_dir: session_dir.clone(),
                         origin: origin.clone(),
+                        timeline: timeline.clone(),
+                        generation,
+                    })
+                    .is_ok()
+            }
+            Update::Timeline(next) => {
+                timeline = next;
+                snapshots
+                    .send(Snapshot {
+                        link: link.clone(),
+                        session: session.clone(),
+                        reply_root: reply_root.clone(),
+                        session_dir: session_dir.clone(),
+                        origin: origin.clone(),
+                        timeline: timeline.clone(),
                         generation,
                     })
                     .is_ok()
@@ -452,6 +545,7 @@ fn forward_updates(
                     reply_root,
                     session_dir,
                     origin,
+                    timeline,
                     generation,
                 });
                 wake();
@@ -476,6 +570,7 @@ pub struct FakeLink {
     pub notices: Sender<Notice>,
     pub released: Sender<()>,
     pub versions: Sender<(u64, String)>,
+    pub timelines: Sender<(u64, Status)>,
     pub commands: Receiver<(u64, Command)>,
 }
 
@@ -494,7 +589,7 @@ pub struct FakeSnapshots(Sender<Snapshot>);
 
 #[cfg(test)]
 impl FakeSnapshots {
-    pub fn send(&self, snapshot: TestSnapshot) -> Result<(), mpsc::SendError<Snapshot>> {
+    pub fn send(&self, snapshot: TestSnapshot) -> Result<(), Box<mpsc::SendError<Snapshot>>> {
         let TestSnapshot {
             link,
             session,
@@ -502,14 +597,17 @@ impl FakeSnapshots {
             session_dir,
             generation,
         } = snapshot;
-        self.0.send(Snapshot {
-            link,
-            session,
-            reply_root,
-            session_dir,
-            origin: None,
-            generation,
-        })
+        self.0
+            .send(Snapshot {
+                link,
+                session,
+                reply_root,
+                session_dir,
+                origin: None,
+                timeline: Status::Idle,
+                generation,
+            })
+            .map_err(Box::new)
     }
 }
 
@@ -521,6 +619,7 @@ impl Channel {
         let (notice_tx, notices) = mpsc::channel();
         let (released_tx, released) = mpsc::channel();
         let (version_tx, versions) = mpsc::channel();
+        let (timeline_tx, timelines) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let channel = Channel {
             wake: Arc::new(|| {}),
@@ -528,6 +627,7 @@ impl Channel {
             notices,
             released,
             versions,
+            timelines,
             commands,
             generation: Arc::new(AtomicU64::new(0)),
         };
@@ -536,6 +636,7 @@ impl Channel {
             notices: notice_tx,
             released: released_tx,
             versions: version_tx,
+            timelines: timeline_tx,
             commands: command_rx,
         };
         (channel, link)
@@ -633,6 +734,7 @@ mod tests {
                 notices: notice_tx,
                 released: released_tx,
                 versions: mpsc::channel().0,
+                timelines: mpsc::channel().0,
                 wake: Arc::new(|| {}),
             },
         );
@@ -662,6 +764,7 @@ mod tests {
                 notices: notice_tx,
                 released: released_tx,
                 versions: mpsc::channel().0,
+                timelines: mpsc::channel().0,
                 wake: Arc::new(|| {}),
             },
         );
@@ -671,5 +774,121 @@ mod tests {
         let last = snapshots.recv_timeout(WAIT).unwrap();
         assert_eq!(last.generation, 0);
         released.recv_timeout(WAIT).unwrap();
+    }
+
+    /// A Noa with the timeline that answers each post (the first one, when
+    /// `lose_first`, stored but unanswered).
+    struct Answering {
+        posts: Vec<noa_ipc::timeline::PostParams>,
+        lose_first: bool,
+    }
+
+    impl noa_ipc::timeline_outbox::PostSink for Answering {
+        fn post(
+            &mut self,
+            p: &noa_ipc::timeline::PostParams,
+        ) -> Result<noa_ipc::timeline::PostResult, noa_ipc::ClientError> {
+            self.posts.push(p.clone());
+            if std::mem::take(&mut self.lose_first) {
+                return Err(noa_ipc::ClientError::Timeout("noa.timeline.post".into()));
+            }
+            Ok(noa_ipc::timeline::PostResult {
+                created_at: "2026-11-26T00:00:00Z".into(),
+                duplicate: self.posts.len() > 1,
+                post_id: "po-0000000000000001".into(),
+                seq: noa_ipc::timeline::Seq(1),
+            })
+        }
+    }
+
+    impl TimelineApi for Answering {
+        fn supports(&self) -> bool {
+            true
+        }
+
+        fn register_run(
+            &mut self,
+            p: &noa_ipc::timeline::RegisterRunParams,
+        ) -> Result<noa_ipc::timeline::RegisterRunResult, noa_ipc::ClientError> {
+            Ok(noa_ipc::timeline::RegisterRunResult {
+                board_id: "bd-0000000000000001".into(),
+                created: true,
+                producer_id: p.publish_policy.producer_id.clone().unwrap(),
+                run_id: "rn-0000000000000001".into(),
+                worker_id: None,
+            })
+        }
+    }
+
+    // Review defect 3: a finished review has no runner; its stored state
+    // is read from its outbox, and 再試行 sends what was never answered.
+    #[test]
+    fn ac5_a_stored_review_says_where_its_posts_stand_and_resends_them() {
+        let tmp = std::env::temp_dir().join(format!("noa-review-stored-tl-{}", std::process::id()));
+        let dir = tmp.join("reviews").join("rev-1");
+        let batches = crate::demo::log();
+        let mut store = review::store::Store::create(&dir, &batches[0]).unwrap();
+        store.append_all(&batches[1..]).unwrap();
+        drop(store);
+        let session = review::store::read_session(&dir).unwrap();
+        assert!(!timeline::candidates(&session).is_empty());
+        let root = tmp.join("outbox");
+        let ask = |root: Option<&Path>, resend: bool, api: Option<Answering>| {
+            let mut told = Vec::new();
+            let connect = || {
+                api.map(|a| Box::new(a) as Box<dyn TimelineApi>)
+                    .ok_or_else(|| "Noa に接続できません".to_owned())
+            };
+            stored_timeline(root, &dir, resend, connect, &mut |s| told.push(s));
+            told
+        };
+        // Never posted (or no data directory): nothing to show, nothing made.
+        assert_eq!(ask(Some(&root), true, None), [Status::Idle]);
+        assert_eq!(ask(None, true, None), [Status::Idle]);
+        assert!(!root.exists());
+
+        // Its runner staged the verdict and lost the answer, then it ended.
+        let mut noa = Answering {
+            posts: Vec::new(),
+            lose_first: true,
+        };
+        let mut publisher =
+            timeline::Publisher::open(&root, session.id.as_str(), Default::default()).unwrap();
+        let failed = publisher.sync(&mut noa, Some(7), &timeline::candidates(&session));
+        assert!(failed.failed(), "{failed:?}");
+        drop(publisher);
+        assert_eq!(ask(Some(&root), false, None), std::slice::from_ref(&failed));
+        // 再試行 while Noa is down: pending, then why it failed.
+        assert_eq!(
+            ask(Some(&root), true, None),
+            [
+                Status::Pending,
+                Status::Failed {
+                    message: "Noa に接続できません".into()
+                }
+            ]
+        );
+        let sent = noa.posts.clone();
+        noa.posts.clear();
+        let told = ask(
+            Some(&root),
+            true,
+            Some(Answering {
+                posts: Vec::new(),
+                lose_first: false,
+            }),
+        );
+        let published = Status::Published {
+            seq: 1,
+            post_id: "po-0000000000000001".into(),
+        };
+        assert_eq!(told, [Status::Pending, published.clone()]);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            ask(Some(&root), true, None),
+            [published],
+            "published: not sent again"
+        );
+        let _ = std::fs::remove_dir_all(tmp);
     }
 }

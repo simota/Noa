@@ -24,6 +24,7 @@ use crate::protocol::{
     UpdateSubscriptionParams, WireId,
 };
 use crate::server::ATTACH_HANDSHAKE_CLOSE_REASON;
+use crate::timeline;
 
 type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -299,9 +300,87 @@ impl Client {
     /// ([`Self::spawn_board_tab`]): `noa.hello` listed
     /// [`crate::CAPABILITY_BOARD_TAB`].
     pub fn supports_board_tab(&self) -> bool {
-        self.capabilities
-            .iter()
-            .any(|c| c == crate::protocol::CAPABILITY_BOARD_TAB)
+        self.has_capability(crate::protocol::CAPABILITY_BOARD_TAB)
+    }
+
+    /// Whether this connection's `noa.hello` listed `capability`.
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
+    }
+
+    /// Whether the connected Noa serves the `noa.timeline.*` methods
+    /// (`docs/specs/board-timeline.md` D5): `noa.hello` listed
+    /// [`crate::CAPABILITY_BOARD_TIMELINE_V1`]. An older one answers them
+    /// with -32601.
+    pub fn supports_board_timeline(&self) -> bool {
+        self.has_capability(crate::protocol::CAPABILITY_BOARD_TIMELINE_V1)
+    }
+
+    /// `noa.timeline.context`.
+    pub fn timeline_context(
+        &mut self,
+        params: &timeline::ContextParams,
+    ) -> Result<timeline::ContextResult, ClientError> {
+        self.request(timeline::METHOD_CONTEXT, params)
+    }
+
+    /// `noa.timeline.boards`: one page, newest activity first. For the next
+    /// page while `hasMore`, pass the result's `next_before` back as
+    /// `params.before`.
+    pub fn timeline_boards(
+        &mut self,
+        params: &timeline::BoardsParams,
+    ) -> Result<timeline::BoardsResult, ClientError> {
+        self.request(timeline::METHOD_BOARDS, params)
+    }
+
+    /// `noa.timeline.registerRun`.
+    pub fn timeline_register_run(
+        &mut self,
+        params: &timeline::RegisterRunParams,
+    ) -> Result<timeline::RegisterRunResult, ClientError> {
+        self.request(timeline::METHOD_REGISTER_RUN, params)
+    }
+
+    /// `noa.timeline.setPublishPolicy`.
+    pub fn timeline_set_publish_policy(
+        &mut self,
+        params: &timeline::SetPublishPolicyParams,
+    ) -> Result<timeline::RunInfo, ClientError> {
+        self.request(timeline::METHOD_SET_PUBLISH_POLICY, params)
+    }
+
+    /// `noa.timeline.post`. A `ClientError::Rpc` code names the failure's
+    /// kind through [`timeline::TimelineErrorKind::from_code`].
+    pub fn timeline_post(
+        &mut self,
+        params: &timeline::PostParams,
+    ) -> Result<timeline::PostResult, ClientError> {
+        self.request(timeline::METHOD_POST, params)
+    }
+
+    /// `noa.timeline.list`.
+    pub fn timeline_list(
+        &mut self,
+        params: &timeline::ListParams,
+    ) -> Result<timeline::PageResult, ClientError> {
+        self.request(timeline::METHOD_LIST, params)
+    }
+
+    /// `noa.timeline.get`.
+    pub fn timeline_get(
+        &mut self,
+        params: &timeline::GetParams,
+    ) -> Result<timeline::GetResult, ClientError> {
+        self.request(timeline::METHOD_GET, params)
+    }
+
+    /// `noa.timeline.changes`.
+    pub fn timeline_changes(
+        &mut self,
+        params: &timeline::ChangesParams,
+    ) -> Result<timeline::PageResult, ClientError> {
+        self.request(timeline::METHOD_CHANGES, params)
     }
 
     /// `noa.split` with a placement (`auto` included) and agent-orchestration

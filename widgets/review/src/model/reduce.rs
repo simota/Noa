@@ -478,6 +478,7 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
                 reviews: BTreeMap::new(),
                 lead_brief: None,
                 outcome: None,
+                verdict_post: None,
             });
         }
         Event::MessagePosted { message } => {
@@ -629,6 +630,11 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
         }
         Event::SessionClosed => {
             session.closed = true;
+            if let Some(no) = session.verdict_round
+                && let Some(post) = crate::timeline::verdict_post(session, no)
+            {
+                round_mut(session, no)?.verdict_post = Some(Box::new(post));
+            }
         }
     }
     Ok(())

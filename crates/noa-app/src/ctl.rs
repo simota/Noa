@@ -13,6 +13,8 @@ mod prompt;
 mod ready;
 mod result;
 mod retry;
+mod run_attr;
+mod timeline;
 mod worktree;
 
 use std::collections::HashMap;
@@ -117,7 +119,7 @@ Commands:
                         Prints \"result\" too (none, with a warning, when the
                         cwd is not writable).
   send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer]
-       [--queue] [--any-pane] [--] TEXT|-
+       [--queue] [--new-run] [--any-pane] [--] TEXT|-
                                 Type TEXT (or stdin) into PANE; prints the
                                 report count to pass to `wait --after`. Refused
                                 while PANE waits for an approval or for the
@@ -136,6 +138,10 @@ Commands:
                                 clears what the input line holds (Ctrl-E, then
                                 Ctrl-U per line, up to 32 lines). --wait prints
                                 how to resume on stderr once the text is in.
+                                --new-run starts a new piece of work: when Noa
+                                has a board timeline, PANE gets a new run and
+                                its header is typed before TEXT (spawn --task
+                                and retry do this themselves).
   wait PANE...|--children [--after SEQ | --after PANE=SEQ ...] [--for LIST]
        [--all] [--timeout SECS] [--tail N] [--stall SECS] [--settle SECS]
        [--any-pane]
@@ -233,14 +239,26 @@ Commands:
                                 start of needs --task-file.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
-  board [--of PANE|self]        Show an orchestrator's workers in this pane
+  board [--of PANE|self] [--timeline [--board-id B]]
+                                Show an orchestrator's workers in this pane
                                 (default: this pane's own orchestrator, else
                                 every worker; self: this pane's own, for a
                                 board that is its own orchestrator). Keys are
-                                listed at the bottom.
+                                listed at the bottom. --timeline starts in its
+                                timeline (t switches), or board B's.
   board --open [--split right|down | --tab]
                                 Open a board on this pane's workers next to it
                                 (an open one is printed with \"existing\":true).
+  timeline context [--pane PANE] | boards [--limit N]
+         | post [--board B] [--run R] [--request-id ID]
+                (--file F | --from-result PATH --title T --summary S
+                 --outcome O [--kind K] [--take-over])
+         | list [--board B] [--before SEQ] [--limit N] [filters] [--query Q]
+         | show [--board B] POST | changes [--board B] [--after SEQ]
+         | export [--board B] --format markdown|json --output PATH
+                                Read or write a board's timeline (default
+                                board: this pane's). One JSON document on
+                                stdout; exit 3 when Noa has no timeline.
 
 Use `--` before a TEXT or DETAIL that starts with `--`. A pane that exits
 and stays open ends a wait whatever --for lists, as a closed pane does; one
@@ -287,6 +305,13 @@ pub(crate) enum Command {
         /// `--open`: start a board pane next to this one instead.
         open: Option<Placement>,
     },
+    /// `board --timeline [--board-id B] [--of PANE|self]`: run the board
+    /// here, starting in its timeline view (`docs/specs/board-timeline.md`
+    /// AC-3).
+    BoardTimeline {
+        of: Option<BoardOf>,
+        board_id: Option<String>,
+    },
     /// `status [--answers]`: this pane's workers with what the journal
     /// knows of them, or every answered prompt.
     Status {
@@ -299,6 +324,9 @@ pub(crate) enum Command {
         max_bytes: Option<usize>,
         path: bool,
     },
+    /// `timeline SUBCOMMAND ...`: a board's timeline
+    /// (`docs/specs/board-timeline.md` AC-2).
+    Timeline(timeline::TimelineCommand),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -366,6 +394,25 @@ pub(crate) enum TaskText {
     File(String),
 }
 
+impl TaskText {
+    fn read(&self) -> Result<String, Failure> {
+        match self {
+            Self::Literal(text) => Ok(text.clone()),
+            Self::File(file) => std::fs::read_to_string(file)
+                .map_err(|err| Failure::error(format!("cannot read --task-file {file:?}: {err}"))),
+        }
+    }
+}
+
+impl Task {
+    fn prepare(self, supports_timeline: bool) -> Result<(String, WaitOptions), Failure> {
+        let text = self.text.read()?;
+        check_send_size(&run_attr::prospective_text(&text, supports_timeline))
+            .map_err(Failure::error)?;
+        Ok((text, self.wait))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TextArg {
     Literal(String),
@@ -385,6 +432,9 @@ pub(crate) struct SendArgs {
     pub(crate) replace: bool,
     /// `--queue`: type into a pane whose agent is still working.
     pub(crate) queue: bool,
+    /// `--new-run`: register a new timeline run for PANE and type its
+    /// header before the text.
+    pub(crate) new_run: bool,
     /// `--wait`: block like `wait PANE --after <seq before sending>`.
     pub(crate) wait: Option<WaitOptions>,
 }
@@ -497,6 +547,9 @@ const REPORT_STATES: [&str; 6] = [
 
 pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
     let (name, rest) = args.split_first().ok_or("missing command")?;
+    if name == "timeline" {
+        return timeline::parse(rest).map(Command::Timeline);
+    }
     let mut rest = Args::new(rest);
     let command = match name.as_str() {
         "self" => Command::SelfPanel,
@@ -537,6 +590,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
         }
         "board" => {
             let opening = rest.flag("--open");
+            let timeline = rest.flag("--timeline");
+            let board_id = rest.value("--board-id")?;
             let placement = parse_placement(&mut rest)?;
             let of = rest
                 .value("--of")?
@@ -551,9 +606,28 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
             if opening && of == Some(BoardOf::Own) {
                 return Err("--of self runs the board here; it does not go with --open".to_string());
             }
-            Command::Board {
-                of,
-                open: opening.then_some(placement),
+            if opening && timeline {
+                return Err(
+                    "--timeline runs the board here; it does not go with --open".to_string()
+                );
+            }
+            if let Some(board) = &board_id {
+                if !timeline {
+                    return Err("--board-id goes with --timeline".to_string());
+                }
+                if !noa_ipc::timeline::valid_id(noa_ipc::timeline::IdKind::Board, board) {
+                    return Err(format!(
+                        "--board-id {board:?} is not bd-<16 lowercase hex digits>"
+                    ));
+                }
+            }
+            if timeline {
+                Command::BoardTimeline { of, board_id }
+            } else {
+                Command::Board {
+                    of,
+                    open: opening.then_some(placement),
+                }
             }
         }
         "status" => Command::Status {
@@ -795,6 +869,20 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
     let answer = rest.flag("--answer");
     let replace = rest.flag("--replace");
     let queue = rest.flag("--queue");
+    let new_run = rest.flag("--new-run");
+    if new_run && (answer || raw) {
+        // An answer or raw keys are not a new piece of work, and a header
+        // typed into a prompt would answer it.
+        return Err("--new-run does not go with --answer or --raw".to_string());
+    }
+    if new_run && (queue || replace) {
+        // A queued follow-up or a rewritten draft is the same piece of work
+        // (board-timeline AC-4): neither registers a run.
+        return Err(
+            "--new-run does not go with --queue or --replace: they continue the same run"
+                .to_string(),
+        );
+    }
     if replace && answer {
         // The keys that clear an input line would land in the prompt.
         return Err("--replace does not go with --answer: a prompt has no input line".to_string());
@@ -825,6 +913,7 @@ fn parse_send(rest: &mut Args) -> Result<SendArgs, String> {
         answer,
         replace,
         queue,
+        new_run,
         wait,
     })
 }
@@ -1988,7 +2077,9 @@ impl Session {
                 };
                 panels.into_iter().for_each(print_panel);
             }
-            Command::Spawn(args) => return self.spawn(args, serde_json::Map::new()),
+            Command::Spawn(args) => {
+                return self.spawn(args, serde_json::Map::new(), run_attr::NewRun::SpawnTask);
+            }
             Command::Retry(args) => return self.retry(args),
             Command::Send(args) => return self.send(args),
             Command::Wait(args) => {
@@ -2037,13 +2128,23 @@ impl Session {
                 let panes = self.resolve(&panes)?;
                 return self.close(&panes, any_pane, prune);
             }
-            Command::Board { of, open } => return self.board(of, open),
+            Command::Board { of, open } => return self.board(of, open, board::Open::default()),
+            Command::BoardTimeline { of, board_id } => {
+                let view = board::Open {
+                    timeline: true,
+                    board_id,
+                };
+                return self.board(of, None, view);
+            }
             Command::Status { answers } => return self.status(answers),
             Command::Result {
                 pane,
                 max_bytes,
                 path,
             } => return self.result(pane, max_bytes, path),
+            Command::Timeline(command) => {
+                return timeline::execute(&mut self.client, self.own, command);
+            }
             Command::Report { .. } => unreachable!("handled before connecting"),
         }
         Ok(EXIT_OK)
@@ -2052,7 +2153,12 @@ impl Session {
     /// `board`: run the board here, or with `--open` start one next to
     /// this pane. The board pane has no parent, so it never counts as one
     /// of this pane's workers.
-    fn board(&mut self, of: Option<BoardOf>, open: Option<Placement>) -> Result<i32, Failure> {
+    fn board(
+        &mut self,
+        of: Option<BoardOf>,
+        open: Option<Placement>,
+        view: board::Open,
+    ) -> Result<i32, Failure> {
         let Some(placement) = open else {
             let of = match of {
                 Some(BoardOf::Pane(of)) => Some(of),
@@ -2069,7 +2175,7 @@ impl Session {
                         .map(|parent| parent.0)
                 }),
             };
-            return board::run(&mut self.client, of, self.own);
+            return board::run(&mut self.client, of, self.own, view);
         };
         let own = self.require_own()?;
         if let Some(board) = board_pane(&self.client.list_panels()?, own) {
@@ -2147,25 +2253,18 @@ impl Session {
 
     /// `spawn`; `extra` goes on the spawn line and its journal event
     /// (`retry`'s `retryOf`, and the worktree and branch it reuses).
+    /// `new_run`: why a task, once it is to be typed, gets a timeline run.
     fn spawn(
         &mut self,
         args: SpawnArgs,
         extra: serde_json::Map<String, serde_json::Value>,
+        new_run: run_attr::NewRun,
     ) -> Result<i32, Failure> {
         // Read and checked before anything starts.
-        let task = match &args.task {
-            Some(task) => {
-                let text = match &task.text {
-                    TaskText::Literal(text) => text.clone(),
-                    TaskText::File(file) => std::fs::read_to_string(file).map_err(|err| {
-                        Failure::error(format!("cannot read --task-file {file:?}: {err}"))
-                    })?,
-                };
-                check_send_size(&text).map_err(Failure::error)?;
-                Some((text, task.wait.clone()))
-            }
-            None => None,
-        };
+        let task = args
+            .task
+            .map(|task| task.prepare(self.client.supports_board_timeline()))
+            .transpose()?;
         let own = self.require_own()?;
         let panels = self.client.list_panels()?;
         let is_worker = panels
@@ -2388,6 +2487,15 @@ impl Session {
             print_json(&line);
             return Ok(EXIT_OK);
         }
+        // Registered before the task is typed, so the header names the run.
+        let run = self.register_run(pane, new_run);
+        if let Some(run) = &run
+            && let (Some(fields), serde_json::Value::Object(ids)) =
+                (line.as_object_mut(), run_attr::journal_fields(run))
+        {
+            fields.extend(ids);
+        }
+        let text = run_attr::with_header(run.as_ref(), &text);
         let send = SendArgs {
             pane,
             text: TextArg::Literal(text.clone()),
@@ -2397,6 +2505,7 @@ impl Session {
             answer: false,
             replace: false,
             queue: false,
+            new_run: false,
             wait: Some(wait),
         };
         let mut sent = false;
@@ -2416,20 +2525,21 @@ impl Session {
     /// [`retry::steps`]: check the spawn as `run` checks one, close the old
     /// pane (journaled, not printed, never pruned), and spawn with the task.
     fn retry(&mut self, args: RetryArgs) -> Result<i32, Failure> {
-        let given = match &args.task {
-            Some(TaskText::Literal(text)) => Some(text.clone()),
-            Some(TaskText::File(file)) => Some(std::fs::read_to_string(file).map_err(|err| {
-                Failure::error(format!("cannot read --task-file {file:?}: {err}"))
-            })?),
-            None => None,
-        };
+        let given = args.task.as_ref().map(TaskText::read).transpose()?;
         let own = self.require_own()?;
         let panels = self.client.list_panels()?;
         let workers = journal::workers(&self.journal.events());
-        let plan = retry::plan(&args, given, &workers, &panels, own, |path| {
-            std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
-        })
+        let plan = retry::plan(
+            &args,
+            given,
+            &workers,
+            &panels,
+            own,
+            self.client.supports_board_timeline(),
+            |path| std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0),
+        )
         .map_err(Failure::error)?;
+        let of_run = run_attr::retry_of(&mut self.client, &workers, plan.old, plan.listed);
         retry::steps(
             self,
             plan,
@@ -2474,7 +2584,7 @@ impl Session {
                     })
                 }
             },
-            |session, spawn, extra| session.spawn(spawn, extra),
+            |session, spawn, extra| session.spawn(spawn, extra, run_attr::NewRun::Retry { of_run }),
         )
     }
 
@@ -2490,7 +2600,45 @@ impl Session {
                 text
             }
         };
+        let text = if args.new_run {
+            let supports_timeline = self.client.supports_board_timeline();
+            new_run_text(self, &args, &text, supports_timeline, |session| {
+                session.register_run(args.pane, run_attr::NewRun::SendNewRun)
+            })?
+        } else {
+            text
+        };
         self.deliver(&args, &text, || {})
+    }
+
+    /// Registers a timeline run for `worker` (`docs/specs/board-timeline.md`
+    /// AC-4) and journals its ids as a `run` event. `None` when the server
+    /// has no timeline, or when registering failed: then the task is still
+    /// typed, without a header, and stderr says the worker cannot publish.
+    fn register_run(
+        &mut self,
+        worker: u64,
+        new_run: run_attr::NewRun,
+    ) -> Option<run_attr::RunAttr> {
+        let request_id = run_attr::new_request_id();
+        match run_attr::register(&mut self.client, self.own, worker, new_run, &request_id) {
+            Ok(run) => {
+                if let Some(run) = &run {
+                    let mut event = serde_json::json!({ "pane": worker });
+                    if let (Some(event), serde_json::Value::Object(ids)) =
+                        (event.as_object_mut(), run_attr::journal_fields(run))
+                    {
+                        event.extend(ids);
+                    }
+                    self.journal.append("run", event);
+                }
+                run
+            }
+            Err(kind) => {
+                eprintln!("timeline: run not registered ({kind}): this worker cannot publish");
+                None
+            }
+        }
     }
 
     /// `send`'s typing and what follows it: journal the send, then wait
@@ -2910,9 +3058,14 @@ pub(crate) fn send_refusal(panel: &Panel, args: &SendArgs, text: &str) -> Option
         .is_some_and(|agent| agent.state.as_deref() == Some("running"));
     let keys = args.raw && !text.is_empty();
     if working && !args.queue && !keys {
+        // `--new-run` does not go with `--queue`: a new run waits.
+        let queue = if args.new_run {
+            ""
+        } else {
+            ", or pass --queue (the wait may then end with the current turn)"
+        };
         return Some(format!(
-            "pane {} is working; wait for its turn to end, or pass --queue (the wait may then \
-             end with the current turn)",
+            "pane {} is working; wait for its turn to end{queue}",
             args.pane
         ));
     }
@@ -2925,11 +3078,11 @@ pub(crate) fn resume_hint(pane: u64, seq: u64) -> String {
     format!("Noa +ctl: sent to pane {pane}; resume with: wait {pane} --after {seq}")
 }
 
-/// `send`'s checks and typing, before any wait: refuse a text too large or
-/// a pane that should not take it, subscribe for `--wait`, clear the input
-/// line for `--replace`, type, and press Enter. Returns the panel as it was
-/// before typing.
-pub(crate) fn send_steps(
+/// `send`'s refusals that are known before anything is typed: a text too
+/// large for one request, an unknown pane, one that should not take the
+/// text ([`send_refusal`]), and one whose program has not enabled
+/// bracketed paste in time. Writes nothing; returns the panel as it was.
+pub(crate) fn send_checks(
     target: &mut impl SendTarget,
     args: &SendArgs,
     text: &str,
@@ -2946,6 +3099,42 @@ pub(crate) fn send_steps(
     if !args.raw && !text.is_empty() && needs_paste_mode(&before) {
         wait_for_paste_mode(target, args.pane)?;
     }
+    Ok(before)
+}
+
+/// `send --new-run`'s text: the header of the run `register` registers,
+/// then `text` (`text` alone when no run was registered). [`send_checks`]
+/// runs first, counting the header on timeline-capable servers, so a send
+/// that would be refused registers and journals no run (board-timeline
+/// AC-4). [`send_steps`] checks again when it types.
+pub(crate) fn new_run_text<T: SendTarget>(
+    target: &mut T,
+    args: &SendArgs,
+    text: &str,
+    supports_timeline: bool,
+    register: impl FnOnce(&mut T) -> Option<run_attr::RunAttr>,
+) -> Result<String, Failure> {
+    send_checks(
+        target,
+        args,
+        &run_attr::prospective_text(text, supports_timeline),
+    )?;
+    if !supports_timeline {
+        return Ok(text.to_owned());
+    }
+    let run = register(target);
+    Ok(run_attr::with_header(run.as_ref(), text))
+}
+
+/// `send`'s checks and typing, before any wait: [`send_checks`], subscribe
+/// for `--wait`, clear the input line for `--replace`, type, and press
+/// Enter. Returns the panel as it was before typing.
+pub(crate) fn send_steps(
+    target: &mut impl SendTarget,
+    args: &SendArgs,
+    text: &str,
+) -> Result<Panel, Failure> {
+    let before = send_checks(target, args, text)?;
     // Subscribe before typing, so the reply cannot arrive unobserved.
     if args.wait.is_some() {
         target.subscribe(args.pane)?;
@@ -4916,6 +5105,7 @@ mod tests {
                 answer: false,
                 replace: false,
                 queue: false,
+                new_run: false,
                 wait: Some(WaitOptions {
                     reasons: vec![Reason::Finished, Reason::Error],
                     all: false,
@@ -5231,6 +5421,154 @@ mod tests {
         other.label = Some(board_label(2));
         assert_eq!(board_pane(&[other.clone(), board], 1), Some(5));
         assert_eq!(board_pane(&[other], 1), None);
+    }
+
+    // board-timeline AC-3: `board --timeline` runs the board here in its
+    // timeline view, of this pane's board or of the one `--board-id` names.
+    #[test]
+    fn board_timeline_runs_here_on_this_or_a_named_board() {
+        assert_eq!(
+            parse_args(&args(&["board", "--timeline"])),
+            Ok(Command::BoardTimeline {
+                of: None,
+                board_id: None
+            })
+        );
+        assert_eq!(
+            parse_args(&args(&[
+                "board",
+                "--timeline",
+                "--board-id",
+                "bd-0123456789abcdef",
+                "--of",
+                "self"
+            ])),
+            Ok(Command::BoardTimeline {
+                of: Some(BoardOf::Own),
+                board_id: Some("bd-0123456789abcdef".to_string())
+            })
+        );
+        assert!(parse_args(&args(&["board", "--board-id", "bd-0123456789abcdef"])).is_err());
+        assert!(parse_args(&args(&["board", "--timeline", "--board-id", "../x"])).is_err());
+        assert!(parse_args(&args(&["board", "--timeline", "--open"])).is_err());
+    }
+
+    // board-timeline AC-4: only `send --new-run` starts a new run; an answer
+    // or raw keys never do.
+    #[test]
+    fn send_new_run_is_a_flag_refused_with_answer_or_raw() {
+        assert!(send_args(&["--new-run", "next task"]).new_run);
+        assert!(!send_args(&["next task"]).new_run);
+        assert!(parse_args(&args(&["send", "8", "--new-run", "--answer", "1"])).is_err());
+        assert!(parse_args(&args(&["send", "8", "--new-run", "--raw", "x"])).is_err());
+    }
+
+    // Review defect 4: `--queue` and `--replace` continue the same run
+    // (AC-4), so `--new-run` with either is refused before anything runs.
+    #[test]
+    fn send_new_run_is_refused_with_queue_or_replace() {
+        for flag in ["--queue", "--replace"] {
+            let message =
+                parse_args(&args(&["send", "8", "--new-run", flag, "next task"])).unwrap_err();
+            assert!(message.contains("--new-run"), "{flag}: {message}");
+        }
+        assert!(!send_args(&["--queue", "more"]).new_run);
+        assert!(!send_args(&["--replace", "more"]).new_run);
+    }
+
+    #[test]
+    fn ac4_spawn_task_checks_the_encoded_payload_before_spawning() {
+        let header = run_attr::with_longest_header("");
+        let overhead = serde_json::to_string(&header).unwrap().len();
+        let body = "x".repeat(MAX_SEND_TEXT_BYTES - overhead);
+        let prepare = |body: &str, supports_timeline| {
+            Task {
+                text: TaskText::Literal(body.to_owned()),
+                wait: WaitOptions::default(),
+            }
+            .prepare(supports_timeline)
+        };
+        assert!(prepare(&body, true).is_ok());
+        let over = body + "x";
+        assert!(prepare(&over, true).unwrap_err().message.contains("KiB"));
+        assert_eq!(prepare(&over, false).unwrap().0, over);
+    }
+
+    // Review defect 2: every refusal `send` knows before typing is checked
+    // before a run is registered, so a refused `send --new-run` registers
+    // (and journals) nothing.
+    #[test]
+    fn send_new_run_registers_only_once_the_send_would_go() {
+        let attr = run_attr::RunAttr {
+            board_id: "bd-0123456789abcdef".to_string(),
+            run_id: "rn-0123456789abcdef".to_string(),
+            worker_id: Some("wk-0123456789abcdef".to_string()),
+            producer_id: "wk-0123456789abcdef".to_string(),
+            retry_of: None,
+        };
+        let send = send_args(&["--new-run", "--enter", "next task"]);
+        let at_limit = "x".repeat(MAX_SEND_TEXT_BYTES - 2);
+        assert!(check_send_size(&at_limit).is_ok());
+        for (panel, text, why) in [
+            (
+                blocked(2, "permission", "permission"),
+                "next task",
+                "an approval",
+            ),
+            (
+                blocked(2, "input", "question"),
+                "next task",
+                "an answer to a question",
+            ),
+            (panel(2, Some("running"), false), "next task", "is working"),
+            // Fits alone, not with the header in front.
+            (panel(2, Some("finished"), false), at_limit.as_str(), "KiB"),
+        ] {
+            let mut target = FakeTarget::new(vec![panel]);
+            let mut registered = 0;
+            let failure = new_run_text(&mut target, &send, text, true, |_| {
+                registered += 1;
+                Some(attr.clone())
+            })
+            .unwrap_err();
+            assert!(failure.message.contains(why), "{why}: {}", failure.message);
+            assert_eq!(registered, 0, "{why}");
+            assert!(target.log.is_empty(), "{why}: {:?}", target.log);
+        }
+        // Bracketed paste that never comes on refuses too.
+        let mut target = FakeTarget::new(vec![panel(2, Some("finished"), false)]);
+        target.paste_ready_after = Some(usize::MAX);
+        let mut registered = 0;
+        assert!(
+            new_run_text(&mut target, &send, "next task", true, |_| {
+                registered += 1;
+                None
+            })
+            .is_err()
+        );
+        assert_eq!(registered, 0);
+
+        // A send that goes registers once, then types the header first.
+        let mut target = FakeTarget::new(vec![panel(2, Some("finished"), false)]);
+        let mut registered = 0;
+        let text = new_run_text(&mut target, &send, "next task", true, |_| {
+            registered += 1;
+            Some(attr.clone())
+        })
+        .unwrap();
+        assert_eq!(registered, 1);
+        assert_eq!(text, run_attr::with_header(Some(&attr), "next task"));
+        assert!(
+            target.log.iter().all(|line| line == "paste ready?"),
+            "{:?}",
+            target.log
+        );
+        // No timeline: the text goes as it is.
+        let mut target = FakeTarget::new(vec![panel(2, Some("finished"), false)]);
+        assert_eq!(
+            new_run_text(&mut target, &send, "next task", false, |_| None).unwrap(),
+            "next task"
+        );
     }
 
     #[test]

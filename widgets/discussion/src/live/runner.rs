@@ -173,7 +173,10 @@ pub enum Link {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     /// The session after a change (sent first once it is open).
-    Session(Arc<Session>),
+    Session {
+        session: Arc<Session>,
+        log_dir: PathBuf,
+    },
     Link(Link),
     /// Something to show briefly: a refused action, a pane that closed.
     Notice(String),
@@ -702,7 +705,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
 
     fn publish(&mut self) {
         let session = Arc::new(self.engine.session().clone());
-        self.update(Update::Session(session));
+        self.update(Update::Session {
+            session,
+            log_dir: self.store.dir().to_owned(),
+        });
     }
 
     fn notice(&mut self, text: String) {
@@ -3495,7 +3501,7 @@ mod tests {
         assert!(
             updates
                 .iter()
-                .any(|u| matches!(u, Update::Session(s) if s.messages.iter().any(|m| m.body == "Consider cost.")))
+                .any(|u| matches!(u, Update::Session {session: s, ..} if s.messages.iter().any(|m| m.body == "Consider cost.")))
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -3526,7 +3532,7 @@ mod tests {
             || {},
         );
         let updates: Vec<Update> = updates.try_iter().collect();
-        assert!(matches!(updates.first(), Some(Update::Session(_))));
+        assert!(matches!(updates.first(), Some(Update::Session { .. })));
         assert_eq!(updates.last(), Some(&Update::Ended(Ok(()))));
 
         // A session that cannot be opened ends at once with why.

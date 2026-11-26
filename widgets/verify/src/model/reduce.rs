@@ -635,6 +635,7 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
                 tails: BTreeMap::new(),
                 assignments: assignments.clone(),
                 outcome: None,
+                verdict_post: None,
             });
         }
         Event::MessagePosted { message } => session.messages.push(message.clone()),
@@ -771,7 +772,14 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             // The verdict was for the old limit: the verification goes on.
             session.verdict_round = None;
         }
-        Event::SessionClosed => session.closed = true,
+        Event::SessionClosed => {
+            session.closed = true;
+            if let Some(no) = session.verdict_round
+                && let Some(post) = crate::timeline::verdict_post(session, no)
+            {
+                round_mut(session, no)?.verdict_post = Some(Box::new(post));
+            }
+        }
     }
     Ok(())
 }

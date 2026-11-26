@@ -10,6 +10,7 @@ pub mod model;
 pub mod sibling;
 pub mod store;
 pub mod task_links;
+pub mod timeline;
 
 #[cfg(test)]
 pub(crate) mod testkit;

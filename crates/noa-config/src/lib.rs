@@ -2291,6 +2291,38 @@ pub fn scrollback_dir_in(data_dir: &Path) -> PathBuf {
     data_dir.join("noa").join("scrollback")
 }
 
+/// Board Timeline store (`<data-dir>/noa/boards/`): one directory per board
+/// with its `meta.json`, `posts.jsonl` and `lock`. Only the GUI process's
+/// timeline service writes there. See `docs/specs/board-timeline.md` L2-4.
+pub fn timeline_boards_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|path| timeline_boards_dir_in(&path))
+}
+
+pub fn timeline_boards_dir_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("noa").join("boards")
+}
+
+/// Board Timeline client outboxes (`<data-dir>/noa/timeline-outbox/`):
+/// posts a client made durable before sending, one subdirectory per client
+/// (`cli`, or a widget's namespace and session).
+pub fn timeline_outbox_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|path| timeline_outbox_dir_in(&path))
+}
+
+pub fn timeline_outbox_dir_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("noa").join("timeline-outbox")
+}
+
+/// Where `+ctl board` keeps, per board, the highest post seq a person saw
+/// when they last left its timeline (`<data-dir>/noa/timeline-visits.json`).
+pub fn timeline_visits_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|path| timeline_visits_path_in(&path))
+}
+
+pub fn timeline_visits_path_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("noa").join("timeline-visits.json")
+}
+
 /// Every file the config at `path` includes via `config-file`, directly or
 /// transitively (optional includes that don't exist yet included), so a
 /// live-reload watcher can track edits to split-out config files. An
@@ -2863,6 +2895,24 @@ font-size = 15.5
                 .parent()
                 .expect("session state lives in a directory")
                 .join("scrollback")
+        );
+    }
+
+    #[test]
+    fn timeline_paths_sit_beside_the_session_state_file() {
+        let data_dir = Path::new("/tmp/data");
+        let dir = session_state_path_in(data_dir)
+            .parent()
+            .expect("session state lives in a directory")
+            .to_path_buf();
+        assert_eq!(timeline_boards_dir_in(data_dir), dir.join("boards"));
+        assert_eq!(
+            timeline_outbox_dir_in(data_dir),
+            dir.join("timeline-outbox")
+        );
+        assert_eq!(
+            timeline_visits_path_in(data_dir),
+            dir.join("timeline-visits.json")
         );
     }
 

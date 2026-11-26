@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::AttachOutputSender;
 use crate::error::IpcError;
 use crate::protocol::{Panel, Row, SpawnParams, SplitDirection, TextSource};
+use crate::timeline::{TimelineCall, TimelineError};
 
 /// An IPC-visible pane id. The app maps this to its internal pointer-derived
 /// id; `noa-ipc` only ever sees `u64`.
@@ -162,5 +163,21 @@ pub trait IpcBackend: Send + Sync + 'static {
     /// Applies grid-first remote resize for an attached pane.
     fn resize_pane(&self, _pane: PaneRef, _cols: u16, _rows: u16) -> Result<(), IpcError> {
         Err(IpcError::Unsupported("resize_pane"))
+    }
+
+    /// One parsed `noa.timeline.*` request (`docs/specs/board-timeline.md`
+    /// D2), called from the connection thread after its scope was checked;
+    /// the result is the method's result object. A backend without a
+    /// timeline service refuses every call as `unsupported`.
+    fn timeline(&self, _call: TimelineCall) -> Result<serde_json::Value, TimelineError> {
+        Err(TimelineError::unsupported())
+    }
+
+    /// Capabilities this backend adds to `noa.hello` after the server's own
+    /// ([`crate::protocol::SERVER_CAPABILITIES`]), e.g.
+    /// [`crate::protocol::CAPABILITY_BOARD_TIMELINE_V1`] once its timeline
+    /// service started (D5).
+    fn capabilities(&self) -> Vec<&'static str> {
+        Vec::new()
     }
 }

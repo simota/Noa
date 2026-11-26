@@ -41,14 +41,29 @@ pub(super) enum Task {
     NotSent,
     /// The last task sent: whole when the journal kept it whole (D19's
     /// `full`), without the preface `retry` put before it; else the last
-    /// text sent that was not an answer, `cut` when it is as long as the
-    /// journal keeps ([`journal::TEXT_CHARS`]). `retry_of`: the pane this
+    /// non-answer send's preview, `cut` when it may be incomplete.
+    /// Neither form displays the timeline header. `retry_of`: the pane this
     /// worker was started again from (`+ctl retry`).
     Sent {
         text: String,
         cut: bool,
         retry_of: Option<u64>,
     },
+}
+
+impl Task {
+    fn from_worker(worker: &journal::Worker) -> Self {
+        let (text, cut) = match (&worker.task, &worker.last_task) {
+            (Some(whole), _) => (crate::ctl::run_attr::strip_header(whole), false),
+            (None, Some(start)) => (start.text.as_str(), start.cut),
+            (None, None) => return Self::NotSent,
+        };
+        Self::Sent {
+            text: crate::ctl::retry::strip_preface(text).to_owned(),
+            cut,
+            retry_of: worker.retry_of,
+        }
+    }
 }
 
 /// A worker's result file, from an `lstat` of it.
@@ -204,19 +219,7 @@ impl Insight {
                 Err(why) => why.clone(),
                 Ok(workers) => match workers.iter().find(|worker| worker.pane == pane) {
                     None => Task::NotJournaled,
-                    Some(worker) => match (&worker.task, &worker.last_task) {
-                        (Some(whole), _) => Task::Sent {
-                            text: crate::ctl::retry::strip_preface(whole).to_string(),
-                            cut: false,
-                            retry_of: worker.retry_of,
-                        },
-                        (None, Some(text)) => Task::Sent {
-                            cut: text.chars().count() >= journal::TEXT_CHARS,
-                            text: text.clone(),
-                            retry_of: worker.retry_of,
-                        },
-                        (None, None) => Task::NotSent,
-                    },
+                    Some(worker) => Task::from_worker(worker),
                 },
             };
             let result = match crate::ctl::result_path(workers.unwrap_or(&[]), panel) {
@@ -302,5 +305,68 @@ fn file_state(path: &Path, now: Instant) -> FileState {
             seen: now,
             stamp: stamp_of(&meta),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ctl::{retry, run_attr};
+
+    #[test]
+    fn ac4_clipped_board_task_uses_the_full_send_when_available() {
+        let body = "界".repeat(journal::TEXT_CHARS + 1);
+        let sent = run_attr::with_longest_header(&body);
+        // A raw send is shown as the last send but is never used as a whole task for retry.
+        let workers = journal::workers(&[
+            serde_json::json!({"ev":"spawn", "pane":4}),
+            serde_json::json!({"ev":"send", "pane":4, "text":journal::clip(&sent),
+                "full":sent, "bytes":sent.len(), "raw":true}),
+        ]);
+        assert_eq!(
+            Task::from_worker(&workers[0]),
+            Task::Sent {
+                text: journal::clip(&body),
+                cut: true,
+                retry_of: None
+            }
+        );
+    }
+
+    #[test]
+    fn ac4_task_text_strips_header() {
+        let task = "\n調査\n";
+        let worker = journal::Worker {
+            task: Some(run_attr::with_longest_header(&retry::compose(
+                &retry::preface(9, "claude", None, None),
+                task,
+            ))),
+            retry_of: Some(9),
+            ..Default::default()
+        };
+        assert_eq!(
+            Task::from_worker(&worker),
+            Task::Sent {
+                text: task.to_owned(),
+                cut: false,
+                retry_of: Some(9)
+            }
+        );
+
+        let text = "長".repeat(journal::TEXT_CHARS);
+        let clipped = journal::clip(&run_attr::with_longest_header(&text));
+        let workers = journal::workers(&[
+            serde_json::json!({"ev":"spawn", "pane":4}),
+            serde_json::json!({"ev":"send", "pane":4, "text":clipped}),
+        ]);
+        let shown_chars = journal::TEXT_CHARS - run_attr::with_longest_header("").len();
+        assert_eq!(
+            Task::from_worker(&workers[0]),
+            Task::Sent {
+                text: "長".repeat(shown_chars),
+                cut: true,
+                retry_of: None
+            }
+        );
     }
 }

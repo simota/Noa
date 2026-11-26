@@ -1932,6 +1932,9 @@ pub struct Round {
     pub assignments: BTreeMap<PartId, Vec<Subject>>,
     /// The judge's accepted output.
     pub outcome: Option<JudgeOutput>,
+    /// The bounded timeline post at session close, rebuilt from the event log.
+    #[serde(skip)]
+    pub(crate) verdict_post: Option<Box<noa_ipc::timeline::PostInput>>,
 }
 
 impl Round {
@@ -3076,6 +3079,7 @@ mod tests {
             tails: BTreeMap::from([(key("claude/r1/e1"), "error[E0425]\n".into())]),
             assignments: BTreeMap::new(),
             outcome: Some(judge_output()),
+            verdict_post: None,
         };
         let session = Session {
             id,

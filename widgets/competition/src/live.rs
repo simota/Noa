@@ -96,7 +96,12 @@ pub enum Command {
 /// (and so of the competition) it is about.
 pub type Notice = (u64, String);
 
+#[path = "timeline.rs"]
+pub(crate) mod timeline;
+use timeline::Timeline;
+
 pub struct Channel {
+    pub timeline: Option<Timeline>,
     pub snapshots: Receiver<Snapshot>,
     pub notices: Receiver<Notice>,
     /// One `()` each time a runner has stopped and let go of its log, so
@@ -130,11 +135,16 @@ impl Channel {
 }
 
 pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let timeline = Timeline::start(wake.clone());
+    start_with(wake, Some(timeline))
+}
+
+fn start_with(wake: Arc<dyn Fn() + Send + Sync>, timeline: Option<Timeline>) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
     let (notice_tx, notices) = mpsc::channel();
     let (released_tx, released) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
-    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let generation = Arc::new(AtomicU64::new(0));
     let _ = snapshot_tx.send(Snapshot {
         link: Link::Connecting,
@@ -143,6 +153,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
         generation: 0,
     });
     wake();
+    let publisher = timeline.clone();
     let tick = Arc::clone(&wake);
     let screen_wake = Arc::clone(&wake);
     // Wakes the screen so the elapsed times in the progress strip move while
@@ -163,6 +174,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
             run_commands(
                 command_rx,
                 Outlets {
+                    timeline: publisher,
                     snapshots: snapshot_tx,
                     notices: notice_tx,
                     released: released_tx,
@@ -172,6 +184,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
         })
         .expect("spawn competition-commands thread");
     Channel {
+        timeline,
         snapshots,
         notices,
         released,
@@ -184,6 +197,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
 /// Where the command thread and the runners' forwarders deliver to.
 #[derive(Clone)]
 struct Outlets {
+    timeline: Option<Timeline>,
     snapshots: Sender<Snapshot>,
     notices: Sender<Notice>,
     released: Sender<()>,
@@ -320,6 +334,7 @@ fn forward_updates(
     generation: u64,
 ) {
     let Outlets {
+        timeline,
         snapshots,
         notices,
         released,
@@ -333,7 +348,11 @@ fn forward_updates(
             Update::Session {
                 session: next,
                 artifact_root: root,
+                log_dir,
             } => {
+                if let Some(timeline) = &timeline {
+                    timeline.observe(session.as_deref(), &next, log_dir);
+                }
                 session = Some(next);
                 artifact_root = Some(root);
                 snapshots
@@ -407,6 +426,7 @@ impl Channel {
         let (released_tx, released) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let channel = Channel {
+            timeline: None,
             snapshots,
             notices,
             released,
@@ -433,7 +453,7 @@ mod tests {
 
     #[test]
     fn leaving_sends_the_start_view_in_a_new_generation() {
-        let channel = start(|| {});
+        let channel = start_with(Arc::new(|| {}), None);
         let first = channel.snapshots.recv_timeout(WAIT).unwrap();
         assert_eq!(first.generation, 0);
         channel.leave();
@@ -445,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_command_for_a_competition_that_is_not_running_says_so() {
-        let channel = start(|| {});
+        let channel = start_with(Arc::new(|| {}), None);
         channel.send(Command::Focus {
             part: PartId::new("claude"),
         });
@@ -513,6 +533,7 @@ mod tests {
         run_commands(
             command_rx,
             Outlets {
+                timeline: None,
                 snapshots: snapshot_tx,
                 notices: notice_tx,
                 released: released_tx,
@@ -543,6 +564,7 @@ mod tests {
         run_commands(
             command_rx,
             Outlets {
+                timeline: None,
                 snapshots: snapshot_tx,
                 notices: notice_tx,
                 released: released_tx,

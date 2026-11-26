@@ -28,6 +28,24 @@ pub enum ErrorCode {
     NotReady,
     /// A spawn would exceed the caller's `maxChildren` for its parent pane.
     LimitReached,
+    /// Board timeline (`docs/specs/board-timeline.md` L2-3): an idempotency
+    /// key or the one-summary-per-run rule matched a different payload.
+    TimelineConflict,
+    /// Board timeline: the board, post, run or pane binding is unknown.
+    TimelineNotFound,
+    /// Board timeline: the service queue is full, a read timed out, or
+    /// another Noa instance holds the board.
+    Busy,
+    /// Board timeline: the append would take the board over its size limit.
+    StorageFull,
+    /// Board timeline: a write, sync or rename failed; nothing was acked.
+    StoreIo,
+    /// Board timeline: the board's post log has an unparsable line or a seq
+    /// regression; reads serve the valid prefix, writes are refused.
+    CorruptStore,
+    /// Board timeline: this backend has no timeline service, or the post's
+    /// schema version is not one it takes.
+    Unsupported,
     Internal,
 }
 
@@ -50,6 +68,13 @@ impl ErrorCode {
             ErrorCode::OutcomeUnknown => -32009,
             ErrorCode::NotReady => -32010,
             ErrorCode::LimitReached => -32011,
+            ErrorCode::TimelineConflict => -32012,
+            ErrorCode::TimelineNotFound => -32013,
+            ErrorCode::Busy => -32014,
+            ErrorCode::StorageFull => -32015,
+            ErrorCode::StoreIo => -32016,
+            ErrorCode::CorruptStore => -32017,
+            ErrorCode::Unsupported => -32018,
         }
     }
 }

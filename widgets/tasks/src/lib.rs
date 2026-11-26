@@ -16,6 +16,7 @@ pub mod shell;
 pub mod sibling;
 pub mod store;
 pub mod task_links;
+pub mod timeline;
 pub mod worktree;
 
 #[cfg(test)]

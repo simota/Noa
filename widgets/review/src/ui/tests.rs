@@ -281,8 +281,18 @@ fn ac20_an_unfinished_review_is_resumed_from_its_read_only_view_and_goes_live() 
     let mut screen = stored_ready(channel, &dir);
     assert!(screen.read_only);
     assert!(acts(&screen).contains(&Action::ResumeShown));
-    // Opening it left whatever was on screen before.
-    assert_eq!(commands(&link), [Command::Leave]);
+    // Opening it left whatever was on screen before, and asked where its
+    // timeline posts stand (it has no runner to say).
+    assert_eq!(
+        commands(&link),
+        [
+            Command::Leave,
+            Command::StoredTimeline {
+                dir: dir.clone(),
+                resend: false,
+            }
+        ]
+    );
     act(&mut screen, Action::ResumeShown);
     assert_eq!(commands(&link), [Command::Resume { dir: dir.clone() }]);
     assert!(
@@ -1627,10 +1637,18 @@ fn a_stored_review_in_the_live_window_can_be_fixed() {
             scope: FixScope::MustFix,
         },
     );
-    // (Showing it left whatever was on screen first.)
+    // (Showing it left whatever was on screen first, and asked where its
+    // timeline posts stand.)
     let sent: Vec<Command> = commands(&link)
         .into_iter()
-        .filter(|c| *c != Command::Leave)
+        .filter(|c| {
+            *c != Command::Leave
+                && *c
+                    != Command::StoredTimeline {
+                        dir: dir.clone(),
+                        resend: false,
+                    }
+        })
         .collect();
     let [Command::RequestFix(req)] = sent.as_slice() else {
         panic!("{sent:?}");

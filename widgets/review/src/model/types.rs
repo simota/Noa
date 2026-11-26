@@ -1176,6 +1176,9 @@ pub struct Round {
     pub lead_brief: Option<Brief>,
     /// The lead's accepted output.
     pub outcome: Option<LeadOutput>,
+    /// The bounded timeline post at session close, rebuilt from the event log.
+    #[serde(skip)]
+    pub(crate) verdict_post: Option<Box<noa_ipc::timeline::PostInput>>,
 }
 
 impl Round {

@@ -53,6 +53,7 @@ use verify::model::types::{
 };
 use verify::store::{self, Listed};
 use verify::task_links::{self, Origin, SessionKind};
+use verify::timeline::Status;
 
 use crate::installed::Installed;
 use crate::live::{Attachment, Channel, Command, Link, Snapshot};
@@ -136,6 +137,8 @@ pub enum Action {
     NewVerification,
     Send,
     Retry,
+    /// Sends the verification's unpublished timeline posts again.
+    RetryTimeline,
     Close,
     FocusPane(PartId),
     SetHold(bool),
@@ -291,6 +294,8 @@ pub struct Verify {
     /// (`docs/specs/task-links.md` L1-7): from its runner, or found in the
     /// link log for a stored one.
     origin: Option<Origin>,
+    /// Where the verification's Board Timeline posts stand.
+    timeline: Status,
     /// Where the link logs are (`task_links::default_root`).
     tasks_root: Option<PathBuf>,
     built: Option<BuiltKey>,
@@ -535,6 +540,7 @@ impl Verify {
             panes_alert: None,
             stored_panes: None,
             origin: None,
+            timeline: Status::Idle,
             tasks_root: task_links::default_root(),
             built: None,
             detection: start::Detection::all_installed(),
@@ -703,6 +709,7 @@ impl Verify {
         self.stored_dir = None;
         self.stored_panes = None;
         self.origin = None;
+        self.timeline = Status::Idle;
         self.extending = false;
         self.tab = CenterTab::Criteria;
         self.defect_filters = defects::Filters::default();
@@ -744,6 +751,13 @@ impl Verify {
             && store::report_is_stale(dir, self.session.as_deref().expect("just set"));
         if closed {
             self.probe_panes(dir);
+        }
+        // A stored verification has no runner to say where its posts stand.
+        if let Source::Live(channel) = &self.source {
+            channel.send(Command::StoredTimeline {
+                dir: dir.to_owned(),
+                resend: false,
+            });
         }
         self.rebuild(text);
         Ok(())
@@ -1241,6 +1255,12 @@ impl Verify {
             while let Ok((generation, origin)) = channel.origins.try_recv() {
                 if generation >= current {
                     self.origin = origin;
+                    self.built = None;
+                }
+            }
+            while let Ok((generation, status)) = channel.timelines.try_recv() {
+                if generation >= current && self.timeline != status {
+                    self.timeline = status;
                     self.built = None;
                 }
             }
@@ -1831,6 +1851,10 @@ impl Verify {
                 self.send_cmd(Command::Intervene { to, body });
             }
             Action::Retry => self.send_cmd(Command::Retry),
+            Action::RetryTimeline => match self.stored_dir.clone().filter(|_| self.read_only) {
+                Some(dir) => self.send_cmd(Command::StoredTimeline { dir, resend: true }),
+                None => self.send_cmd(Command::RetryTimeline),
+            },
             // Ending before the last round cannot be undone, so it is asked
             // first; Return and Escape keep it running.
             Action::Close => {
@@ -2473,6 +2497,172 @@ pub(super) fn card(tree: &mut UiTree, parent: WidgetId, accent: bool) -> WidgetI
 
 /// 元のタスクを開く (`docs/specs/task-links.md` L1-7, U4).
 #[cfg(test)]
+mod timeline {
+    use super::*;
+
+    /// The header's tags and labels, in order.
+    fn header_tags(screen: &Verify) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![screen.header_host];
+        while let Some(id) = stack.pop() {
+            if let Some(tag) = screen.tree.get::<noa_gpui_core::widgets::Tag>(id) {
+                out.push(tag.text().to_owned());
+            } else if let Some(label) = screen.tree.get::<Label>(id) {
+                out.push(label.text().to_owned());
+            }
+            stack.extend(screen.tree.children(id).iter().rev());
+        }
+        out
+    }
+
+    /// The timeline label and the text after it.
+    fn timeline_texts(screen: &Verify) -> Vec<String> {
+        let texts = header_tags(screen);
+        let at = texts.iter().position(|t| t.starts_with("タイムライン"));
+        at.map_or_else(Vec::new, |at| texts[at..].iter().take(2).cloned().collect())
+    }
+
+    #[test]
+    fn ac5_state_visible_in_the_header() {
+        let (channel, link) = Channel::fake();
+        let (tx, installed) = std::sync::mpsc::channel();
+        tx.send(Installed::Found(AgentKind::ALL.to_vec())).unwrap();
+        let mut screen = Verify::live(channel, installed);
+        let mut text = TextStore::new(Default::default());
+        link.snapshots
+            .send(Snapshot {
+                link: Link::Live,
+                session: Some(Arc::new(crate::demo::session())),
+                reply_root: None,
+                session_dir: None,
+                generation: 0,
+            })
+            .unwrap();
+        screen.woken(&mut text);
+        assert!(timeline_texts(&screen).is_empty());
+        let cases: [(Status, &[&str], bool); 4] = [
+            (Status::Pending, &["タイムライン: 投稿待ち"], false),
+            (
+                Status::Waiting {
+                    why: "ボードに登録されていないため送れません".into(),
+                },
+                &[
+                    "タイムライン: 投稿待ち",
+                    "ボードに登録されていないため送れません",
+                ],
+                false,
+            ),
+            (
+                Status::Failed {
+                    message: "busy".into(),
+                },
+                &["タイムライン: 投稿失敗（再試行）", "busy"],
+                true,
+            ),
+            (
+                Status::Published {
+                    seq: 3,
+                    post_id: "po-0000000000000003".into(),
+                },
+                &["タイムライン: 投稿済み #3", "postId po-0000000000000003"],
+                false,
+            ),
+        ];
+        for (status, texts, retry) in cases {
+            link.timelines.send((0, status.clone())).unwrap();
+            screen.woken(&mut text);
+            let shown = timeline_texts(&screen);
+            let shown: Vec<&str> = shown.iter().map(String::as_str).take(texts.len()).collect();
+            assert_eq!(shown, texts, "{status:?}: {:?}", header_tags(&screen));
+            assert_eq!(screen.offered().contains(&Action::RetryTimeline), retry);
+        }
+        link.timelines
+            .send((
+                0,
+                Status::Failed {
+                    message: "busy".into(),
+                },
+            ))
+            .unwrap();
+        screen.woken(&mut text);
+        screen.handle_action(Action::RetryTimeline, &mut text);
+        let asked: Vec<Command> = link.commands.try_iter().map(|(_, c)| c).collect();
+        assert!(asked.contains(&Command::RetryTimeline), "{asked:?}");
+    }
+
+    /// A finished verification opened from the list has no runner: it asks
+    /// where its posts stand, shows the answer with 再試行 while they are
+    /// not published, and 再試行 asks for its posts to be sent.
+    #[test]
+    fn ac5_a_stored_verification_shows_its_post_state_and_retries_it() {
+        let mut text = TextStore::new(Default::default());
+        let root =
+            std::env::temp_dir().join(format!("noa-verify-stored-timeline-{}", std::process::id()));
+        let dir = root.join("verifications").join(crate::demo::DONE_ID);
+        let log = crate::demo::log();
+        let mut store = store::Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+        drop(store);
+        let (channel, link) = Channel::fake();
+        let (tx, installed) = std::sync::mpsc::channel();
+        tx.send(Installed::Found(AgentKind::ALL.to_vec())).unwrap();
+        let mut screen = Verify::live(channel, installed);
+        screen.timeline = Status::Published {
+            seq: 3,
+            post_id: "po-0000000000000003".into(),
+        };
+        screen.show_stored(&dir, &mut text).unwrap();
+        assert!(screen.read_only);
+        assert!(timeline_texts(&screen).is_empty(), "nothing carried over");
+        let asked: Vec<_> = link.commands.try_iter().collect();
+        let (generation, _) = asked
+            .iter()
+            .find(|(_, c)| {
+                *c == Command::StoredTimeline {
+                    dir: dir.clone(),
+                    resend: false,
+                }
+            })
+            .cloned()
+            .expect("asked where its posts stand");
+        link.timelines
+            .send((generation - 1, Status::Pending))
+            .unwrap();
+        link.timelines
+            .send((
+                generation,
+                Status::Failed {
+                    message: "タイムラインが応答しません".into(),
+                },
+            ))
+            .unwrap();
+        screen.woken(&mut text);
+        assert_eq!(
+            timeline_texts(&screen),
+            [
+                "タイムライン: 投稿失敗（再試行）",
+                "タイムラインが応答しません"
+            ]
+        );
+        assert!(screen.offered().contains(&Action::RetryTimeline));
+        screen.handle_action(Action::RetryTimeline, &mut text);
+        assert_eq!(
+            link.commands.try_iter().map(|(_, c)| c).collect::<Vec<_>>(),
+            [Command::StoredTimeline {
+                dir: dir.clone(),
+                resend: true,
+            }]
+        );
+        // Staged and never answered: no runner sends it, so 再試行 does.
+        link.timelines.send((generation, Status::Pending)).unwrap();
+        screen.woken(&mut text);
+        assert_eq!(timeline_texts(&screen)[0], "タイムライン: 投稿待ち");
+        assert!(screen.offered().contains(&Action::RetryTimeline));
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
 mod links_tests {
     use super::*;
     use crate::live::FakeLink;
@@ -2593,7 +2783,12 @@ mod links_tests {
             .commands
             .try_iter()
             .map(|(_, c)| c)
-            .filter(|c| *c != Command::Leave)
+            .filter(|c| {
+                !matches!(
+                    c,
+                    Command::Leave | Command::StoredTimeline { resend: false, .. }
+                )
+            })
             .collect();
         let expected = Origin {
             key_dir: key_dir.clone(),

@@ -309,8 +309,9 @@ command worker's log, which `--max-bytes` cannot show the end of:
 
 One line per live worker of this pane, in listing order: `paneId`, `cwd`, and
 when known `label`, `state`, `seq`, `blocked`, `exit`, `branch`; from the
-journal `tier`, `argv` (else Noa's `spawn.argv`), `lastTask` (the last text sent
-that was not an answer), `lastSentSeq` (the `seq` before the last send),
+journal `tier`, `argv` (else Noa's `spawn.argv`), `lastTask` (at most 200 characters
+of the last text sent that was not an answer, with any `[noa-timeline …]` header
+removed), `lastSentSeq` (the `seq` before the last send),
 `lastOutcome` (`{reason,seq,ts}`), `answers` (a count), `result` (where
 `close --prune` moved it, after a prune), `worktree`, `retryOf` (the pane a
 `retry` replaced).

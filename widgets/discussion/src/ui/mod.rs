@@ -75,6 +75,7 @@ pub enum Action {
     CancelDebate,
     BackToChat,
     Retry,
+    RetryTimeline,
     Send,
     Start,
     /// Add a row to the start view's panel.
@@ -162,6 +163,7 @@ pub struct Discussion {
     tree: UiTree,
     source: Source,
     link: Link,
+    timeline_state: Option<crate::live::timeline::Status>,
     session: Option<Arc<Session>>,
     filter: Option<IssueId>,
     center: Center,
@@ -323,6 +325,7 @@ impl Discussion {
             file_dialogs: Vec::new(),
             export: None,
             built: None,
+            timeline_state: None,
             history: Arc::new(Vec::new()),
             installed,
             auto,
@@ -600,6 +603,44 @@ impl Discussion {
         let Some(session) = &self.session else {
             return;
         };
+        if let Some(status) = &self.timeline_state {
+            use crate::live::timeline::Status;
+            use noa_ipc::timeline_outbox::PublishState;
+            match status {
+                Status::Waiting { why } => {
+                    caption(
+                        &mut self.tree,
+                        self.status_leading,
+                        "タイムライン: 投稿待ち",
+                    );
+                    caption(&mut self.tree, self.status_leading, why.clone());
+                }
+                Status::Publish(state) => {
+                    let label = crate::live::timeline::label(state);
+                    match state {
+                        PublishState::Failed { message, .. } => {
+                            let button = self.tree.insert(
+                                Some(self.status_leading),
+                                Button::new(label)
+                                    .tooltip(message.clone())
+                                    .control_size(ControlSize::Small),
+                            );
+                            self.actions.push((button, Action::RetryTimeline));
+                        }
+                        PublishState::Published { post_id, .. } => {
+                            caption(
+                                &mut self.tree,
+                                self.status_leading,
+                                format!("{label} ({post_id})"),
+                            );
+                        }
+                        PublishState::Pending => {
+                            caption(&mut self.tree, self.status_leading, label);
+                        }
+                    }
+                }
+            }
+        }
         if let Some(round) = session.current_round() {
             caption(
                 &mut self.tree,
@@ -780,6 +821,14 @@ impl Discussion {
         // A new list is shown on the start view, also when a snapshot in the
         // same poll left the view as it was built (the start view's first
         // one at launch).
+        let next_state = match (&self.source, &self.session) {
+            (Source::Live(ch), Some(s)) => ch.timeline.as_ref().and_then(|t| t.status(s)),
+            _ => None,
+        };
+        if self.timeline_state != next_state {
+            self.timeline_state = next_state;
+            stale = true;
+        }
         if stale || (listed && self.session.is_none()) {
             self.rebuild(text);
         }
@@ -869,6 +918,17 @@ impl Discussion {
                         file_name: format!("{}-map.png", session.id),
                         filters: vec![("PNG".into(), vec!["png".into()])],
                     });
+                }
+            }
+            Action::RetryTimeline => {
+                if let (Source::Live(ch), Some(s)) = (&self.source, &self.session)
+                    && let Some(timeline) = &ch.timeline
+                {
+                    if let Link::Stored(dir) = &self.link {
+                        timeline.recover(s, dir);
+                    } else {
+                        timeline.retry(s);
+                    }
                 }
             }
             Action::Retry => self.send(Command::Retry, "失敗したブリーフを再送します"),
@@ -1428,5 +1488,63 @@ pub(crate) fn clear_children(tree: &mut UiTree, parent: WidgetId, text: &mut Tex
     let children: Vec<WidgetId> = tree.children(parent).to_vec();
     for child in children {
         tree.remove(child, text);
+    }
+}
+
+#[cfg(test)]
+mod timeline_header_tests {
+    use super::*;
+    use crate::live::timeline::{NOT_REGISTERED, Status};
+    use noa_ipc::timeline::Seq;
+    use noa_ipc::timeline_outbox::PublishState;
+
+    #[test]
+    fn ac5_state_visible() {
+        let mut screen = Discussion::demo();
+        let mut text = TextStore::new(Default::default());
+        for (state, expected) in [
+            (
+                Status::Publish(PublishState::Pending),
+                "タイムライン: 投稿待ち",
+            ),
+            (
+                Status::Waiting {
+                    why: NOT_REGISTERED.into(),
+                },
+                NOT_REGISTERED,
+            ),
+            (
+                Status::Publish(PublishState::Published {
+                    post_id: "po-001".into(),
+                    seq: Seq(7),
+                }),
+                "タイムライン: 投稿済み #7 (po-001)",
+            ),
+            (
+                Status::Publish(PublishState::Failed {
+                    kind: None,
+                    message: "offline".into(),
+                }),
+                "タイムライン: 投稿失敗（再試行）",
+            ),
+        ] {
+            screen.timeline_state = Some(state);
+            screen.rebuild(&mut text);
+            let text_visible = screen
+                .tree
+                .children(screen.status_leading)
+                .iter()
+                .any(|&w| {
+                    screen
+                        .tree
+                        .get::<Label>(w)
+                        .is_some_and(|l| l.text() == expected)
+                        || screen.tree.get::<Button>(w).is_some_and(|b| {
+                            b.label() == expected
+                                && screen.actions.contains(&(w, Action::RetryTimeline))
+                        })
+                });
+            assert!(text_visible, "{expected}");
+        }
     }
 }

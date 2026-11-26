@@ -22,6 +22,7 @@ use review::model::types::{
 };
 use review::store::{self, Store};
 use review::task_links::{self, LinkEvent, Origin, SessionKind};
+use review::timeline::{self, Publisher, RunSpec, Status, TimelineApi};
 
 use super::ipc::{
     Changes, Connect, IpcConnect, Noa, NoaError, PaneSpec, PaneView, Placement, no_board_tab,
@@ -77,6 +78,8 @@ pub enum Action {
     Focus {
         part: PartId,
     },
+    /// Sends the review's timeline posts that are not published again.
+    RetryTimeline,
     /// Holds the review after each consolidated round, or lets it go on.
     SetHold {
         hold: bool,
@@ -115,6 +118,8 @@ pub enum Update {
     /// connection, so a reconnect to another Noa shows), with the number
     /// of that connection's hello.
     Version(u64, String),
+    /// Where the review's Board Timeline posts stand.
+    Timeline(Status),
     Ended(Result<(), String>),
 }
 
@@ -142,6 +147,7 @@ pub fn spawn_session(start: Start, wake: impl Fn() + Send + 'static) -> SessionH
                 RunnerConfig {
                     engine: Config::default(),
                     tasks_root: task_links::default_root(),
+                    timeline: noa_config::timeline_outbox_dir().map(TimelineLink::system),
                 },
                 action_rx,
                 update_tx,
@@ -155,6 +161,100 @@ pub fn spawn_session(start: Start, wake: impl Fn() + Send + 'static) -> SessionH
 pub struct RunnerConfig {
     pub engine: Config,
     pub tasks_root: Option<PathBuf>,
+    /// Where the review posts its verdicts on its board's timeline; `None`
+    /// posts nothing.
+    pub timeline: Option<TimelineLink>,
+}
+
+/// How the runner reaches the Board Timeline: the outbox root
+/// (`noa_config::timeline_outbox_dir()`) and a connection of its own (the
+/// agents' [`Noa`] link knows nothing of the timeline).
+pub struct TimelineLink {
+    pub outbox_root: PathBuf,
+    pub connect: Box<dyn FnMut() -> Result<Box<dyn TimelineApi>, String>>,
+}
+
+impl TimelineLink {
+    /// The running Noa's control server.
+    pub fn system(outbox_root: PathBuf) -> Self {
+        Self {
+            outbox_root,
+            connect: Box::new(|| {
+                timeline::connect().map(|client| Box::new(client) as Box<dyn TimelineApi>)
+            }),
+        }
+    }
+}
+
+/// The runner's side of the timeline: the publisher, opened once the
+/// server is known to have the timeline (or its outbox is there from
+/// before), and its connection, dropped after a failure.
+struct Timeline {
+    link: TimelineLink,
+    publisher: Option<Publisher>,
+    api: Option<Box<dyn TimelineApi>>,
+    /// How many confirmed points the last attempt covered.
+    tried: usize,
+    /// The board pane the run was last registered (or tried) from.
+    offered: Option<u64>,
+    status: Status,
+}
+
+impl Timeline {
+    fn new(link: TimelineLink) -> Self {
+        Self {
+            link,
+            publisher: None,
+            api: None,
+            tried: 0,
+            offered: None,
+            status: Status::Idle,
+        }
+    }
+
+    /// Whether some of `candidates` are not published, as far as the
+    /// outbox says (an outbox not made yet has nothing published).
+    fn unsent(&mut self, session: &str, candidates: &[timeline::Candidate]) -> bool {
+        if self.publisher.is_none()
+            && let Ok(existing) = Publisher::existing(&self.link.outbox_root, session)
+        {
+            self.publisher = existing;
+        }
+        !candidates.is_empty()
+            && self
+                .publisher
+                .as_ref()
+                .is_none_or(|p| !matches!(p.status(candidates), Status::Published { .. }))
+    }
+
+    /// Connects when not connected and opens the publisher once the server
+    /// has the timeline, then sends `candidates`, or with none registers
+    /// the run from `board`.
+    fn attempt(
+        &mut self,
+        session: &str,
+        board: Option<u64>,
+        candidates: &[timeline::Candidate],
+    ) -> Result<Status, String> {
+        if self.api.is_none() {
+            self.api = Some((self.link.connect)()?);
+        }
+        let api = self.api.as_mut().expect("connected above");
+        if !api.supports() {
+            return Ok(Status::Idle);
+        }
+        if self.publisher.is_none() {
+            let publisher = Publisher::open(&self.link.outbox_root, session, RunSpec::default())
+                .map_err(|e| format!("outbox: {e}"))?;
+            self.publisher = Some(publisher);
+        }
+        let publisher = self.publisher.as_mut().expect("opened above");
+        Ok(if candidates.is_empty() {
+            publisher.register(api.as_mut(), board)
+        } else {
+            publisher.sync(api.as_mut(), board, candidates)
+        })
+    }
 }
 
 pub fn run_session<C: Connect, K: Clock>(
@@ -384,6 +484,7 @@ struct Runner<C: Connect, K: Clock> {
     /// once the first connection shows which are.
     resumed: bool,
     link_state: Link,
+    timeline: Option<Timeline>,
 }
 
 impl<C: Connect, K: Clock> Runner<C, K> {
@@ -431,6 +532,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             started: false,
             resumed,
             link_state: Link::Connecting,
+            timeline: config.timeline.map(Timeline::new),
         };
         runner.emit_session();
         if let Some(error) = link_error {
@@ -556,6 +658,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             if let Some(changes) = conn.changes(POLL).map_err(link)? {
                 self.apply_changes(conn, changes)?;
             }
+            // A board tab opened since registers the run from it.
+            self.publish_timeline(false);
         }
         Ok(())
     }
@@ -575,7 +679,58 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 self.redeliver_lost()?;
             }
         }
+        // A post staged before a restart or a lost link goes out now.
+        self.publish_timeline(true);
         Ok(())
+    }
+
+    /// Registers the run on the board's timeline once a board pane names
+    /// the board (the first connection, a new board tab), and posts the
+    /// confirmed verdicts not there yet: on a new one (or with `again`,
+    /// every one not published). After the source event is in the log; a
+    /// failure only changes what the header says.
+    fn publish_timeline(&mut self, again: bool) {
+        let Some(mut tl) = self.timeline.take() else {
+            return;
+        };
+        let session = self.engine.session();
+        let confirmed = timeline::confirmed(session);
+        let new_board = self.board.is_some() && self.board != tl.offered;
+        if again || new_board || confirmed != tl.tried {
+            tl.tried = confirmed;
+            if self.board.is_some() {
+                tl.offered = self.board;
+            }
+            let id = session.id.as_str().to_owned();
+            let candidates = if confirmed == 0 {
+                Vec::new()
+            } else {
+                timeline::candidates(session)
+            };
+            // The header says pending while the post is on its way.
+            if tl.unsent(&id, &candidates) && tl.status != Status::Pending {
+                tl.status = Status::Pending;
+                self.emit(Update::Timeline(Status::Pending));
+            }
+            let status = tl
+                .attempt(&id, self.board, &candidates)
+                .unwrap_or_else(|message| Status::Failed { message });
+            if status.failed() {
+                // Reconnects on the next attempt.
+                tl.api = None;
+            }
+            // A registration alone shows nothing: the next post tries again.
+            let status = if candidates.is_empty() {
+                Status::Idle
+            } else {
+                status
+            };
+            if status != tl.status {
+                tl.status = status.clone();
+                self.emit(Update::Timeline(status));
+            }
+        }
+        self.timeline = Some(tl);
     }
 
     fn sync_panes(&mut self, conn: &mut C::Conn) -> Result<(), Fail> {
@@ -716,6 +871,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 Ok(Action::Focus { part }) => {
                     self.focus_pane(conn.as_deref_mut(), &part);
                 }
+                Ok(Action::RetryTimeline) => self.publish_timeline(true),
                 Ok(Action::ClosePanes) => {
                     self.close_panes(conn.as_deref_mut());
                 }
@@ -919,6 +1075,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 .map_err(|e| format!("write log: {e}"))?;
             self.record_outcome();
             self.emit_session();
+            self.publish_timeline(false);
         }
         let now = self.clock.now();
         let mut failed = Vec::new();
@@ -2282,6 +2439,15 @@ mod tests {
         start: Start,
         tasks_root: Option<PathBuf>,
     ) -> Result<Wired, String> {
+        open_wired_with(fake, start, tasks_root, None)
+    }
+
+    fn open_wired_with(
+        fake: &Fake,
+        start: Start,
+        tasks_root: Option<PathBuf>,
+        timeline: Option<TimelineLink>,
+    ) -> Result<Wired, String> {
         let (actions_tx, actions) = mpsc::channel();
         let (updates, updates_rx) = mpsc::channel();
         let runner = Runner::open(
@@ -2291,6 +2457,7 @@ mod tests {
             RunnerConfig {
                 engine: CONFIG,
                 tasks_root,
+                timeline,
             },
             actions,
             updates,
@@ -3681,5 +3848,216 @@ mod tests {
             "the engine never heard the agent start"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    mod timeline {
+        use super::*;
+        use noa_ipc::ClientError;
+        use noa_ipc::timeline::{
+            PostParams, PostResult, RegisterRunParams, RegisterRunResult, Seq,
+        };
+        use noa_ipc::timeline_outbox::PostSink;
+
+        #[derive(Default)]
+        struct World {
+            posts: Vec<PostParams>,
+            runs: Vec<RegisterRunParams>,
+        }
+
+        #[derive(Clone, Default)]
+        struct Tl(Rc<RefCell<World>>);
+
+        impl PostSink for Tl {
+            fn post(&mut self, p: &PostParams) -> Result<PostResult, ClientError> {
+                let mut w = self.0.borrow_mut();
+                w.posts.push(p.clone());
+                Ok(PostResult {
+                    created_at: "2026-11-26T00:00:00Z".into(),
+                    duplicate: false,
+                    post_id: format!("po-{:016x}", w.posts.len()),
+                    seq: Seq(w.posts.len() as u64),
+                })
+            }
+        }
+
+        impl TimelineApi for Tl {
+            fn supports(&self) -> bool {
+                true
+            }
+
+            fn register_run(
+                &mut self,
+                p: &RegisterRunParams,
+            ) -> Result<RegisterRunResult, ClientError> {
+                self.0.borrow_mut().runs.push(p.clone());
+                Ok(RegisterRunResult {
+                    board_id: "bd-0000000000000001".into(),
+                    created: true,
+                    producer_id: p.publish_policy.producer_id.clone().unwrap(),
+                    run_id: "rn-0000000000000001".into(),
+                    worker_id: None,
+                })
+            }
+        }
+
+        const VERDICT: &str = r#"{"summary": "Ready with one fix.", "ops": [
+          {"op": "add", "id": "F1", "from": ["claude/1", "codex/1"], "claim": "No rollback", "severity": "medium", "category": "correctness", "confidence": "high", "status": "agreed", "rationale": "Both."}],
+          "verdict": {"decision": "approve_with_fixes", "rationale": "One fix.", "must_fix": ["F1"]}}"#;
+
+        /// Runs a two-reviewer, one-round review to the lead's verdict.
+        fn to_verdict(link: TimelineLink) -> (Runner<Fake, Fake>, Receiver<Update>, Fake, PathBuf) {
+            let fake = fake();
+            let root = temp_root();
+            let (mut runner, _actions, updates) = open_wired_with(
+                &fake,
+                new_start_on(
+                    &root,
+                    document("# Plan\n\n1. Move the data\n"),
+                    vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                    1,
+                ),
+                None,
+                Some(link),
+            )
+            .unwrap();
+            let mut conn = fake.clone();
+            assert!(runner.begin(&mut conn).is_ok());
+            step(&mut runner, &mut conn);
+            for part in [":claude", ":codex"] {
+                fake.report(fake.pane_of(part), "input", None);
+            }
+            step(&mut runner, &mut conn);
+            step(&mut runner, &mut conn);
+            for part in ["claude", "codex"] {
+                reply(&fake, &mut runner, &mut conn, &PartId::new(part), BLIND);
+            }
+            step(&mut runner, &mut conn);
+            fake.report(fake.pane_of(":lead"), "input", None);
+            step(&mut runner, &mut conn);
+            step(&mut runner, &mut conn);
+            reply(&fake, &mut runner, &mut conn, &PartId::new("lead"), VERDICT);
+            (runner, updates, fake, root)
+        }
+
+        fn statuses(updates: &Receiver<Update>) -> Vec<Status> {
+            updates
+                .try_iter()
+                .filter_map(|u| match u {
+                    Update::Timeline(status) => Some(status),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn ac5_the_verdict_is_posted_once_after_it_is_logged_from_the_board() {
+            let tl = Tl::default();
+            let outbox = temp_root();
+            let shared = tl.clone();
+            let link = TimelineLink {
+                outbox_root: outbox.clone(),
+                connect: Box::new(move || Ok(Box::new(shared.clone()) as Box<dyn TimelineApi>)),
+            };
+            let (runner, updates, _fake, root) = to_verdict(link);
+            let session = runner.engine.session();
+            assert!(session.verdict().is_some());
+            let world = tl.0.borrow();
+            assert_eq!(world.posts.len(), 1, "one post, after the verdict only");
+            let post = &world.posts[0];
+            assert_eq!(post.request_id, format!("review-{}-verdict-r1", session.id));
+            assert_eq!(post.post.summary, "Ready with one fix.");
+            assert_eq!(world.runs.len(), 1);
+            assert_eq!(
+                world.runs[0].orchestrator_pane_id.map(|p| p.0),
+                runner.board,
+                "registered from the review's board tab"
+            );
+            // Pending while the post is on its way, then where it landed.
+            assert_eq!(
+                statuses(&updates),
+                [
+                    Status::Pending,
+                    Status::Published {
+                        seq: 1,
+                        post_id: "po-0000000000000001".into()
+                    }
+                ]
+            );
+            let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_dir_all(outbox);
+        }
+
+        #[test]
+        fn ac5_a_timeline_that_cannot_be_reached_leaves_the_review_as_it_is() {
+            let outbox = temp_root();
+            let link = TimelineLink {
+                outbox_root: outbox.clone(),
+                connect: Box::new(|| Err("Noa に接続できません".into())),
+            };
+            let (runner, updates, _fake, root) = to_verdict(link);
+            let session = runner.engine.session();
+            assert!(session.closed && session.verdict().is_some());
+            assert!(store::report_path(runner.engine.dir()).exists());
+            assert!(matches!(
+                statuses(&updates).as_slice(),
+                [Status::Pending, Status::Failed { message }] if message == "Noa に接続できません"
+            ));
+            let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_dir_all(outbox);
+        }
+
+        // Review defect 8: the run exists from the session's start, before
+        // any verdict, registered from the review's board tab.
+        #[test]
+        fn ac5_the_run_is_registered_when_the_review_starts() {
+            let tl = Tl::default();
+            let outbox = temp_root();
+            let shared = tl.clone();
+            let link = TimelineLink {
+                outbox_root: outbox.clone(),
+                connect: Box::new(move || Ok(Box::new(shared.clone()) as Box<dyn TimelineApi>)),
+            };
+            let fake = fake();
+            let root = temp_root();
+            let (mut runner, _actions, updates) = open_wired_with(
+                &fake,
+                new_start_on(
+                    &root,
+                    document("# Plan\n\n1. Move the data\n"),
+                    vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                    1,
+                ),
+                None,
+                Some(link),
+            )
+            .unwrap();
+            let mut conn = fake.clone();
+            assert!(runner.begin(&mut conn).is_ok());
+            step(&mut runner, &mut conn);
+            assert!(runner.board.is_some());
+            assert_eq!(review::timeline::confirmed(runner.engine.session()), 0);
+            let world = tl.0.borrow();
+            assert_eq!(world.runs.len(), 1, "registered before any verdict");
+            assert_eq!(
+                world.runs[0].orchestrator_pane_id.map(|p| p.0),
+                runner.board
+            );
+            assert!(world.posts.is_empty());
+            assert_eq!(
+                Publisher::existing(&outbox, runner.engine.session().id.as_str())
+                    .unwrap()
+                    .and_then(|p| p.binding().cloned())
+                    .map(|b| b.run_id),
+                Some("rn-0000000000000001".to_owned()),
+                "saved for a restart"
+            );
+            assert!(
+                statuses(&updates).is_empty(),
+                "a registration alone shows nothing"
+            );
+            drop(world);
+            let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_dir_all(outbox);
+        }
     }
 }

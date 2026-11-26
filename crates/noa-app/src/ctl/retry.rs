@@ -46,6 +46,7 @@ pub(crate) fn plan(
     workers: &[journal::Worker],
     panels: &[Panel],
     own: u64,
+    supports_timeline: bool,
     report_written: impl Fn(&Path) -> bool,
 ) -> Result<Plan, String> {
     let old = args.pane;
@@ -115,15 +116,15 @@ pub(crate) fn plan(
     })?;
     let task = match given {
         Some(task) => task,
-        None => strip_preface(worker.task.as_deref().ok_or_else(|| {
-            format!(
+        None => {
+            let sent = worker.task.as_deref().ok_or_else(|| format!(
                 "this pane's journal does not hold pane {old}'s last task whole (none was sent, \
                  it was over {} KiB, or an older Noa +ctl kept only its start): pass \
                  --task-file F. Nothing was done",
                 journal::FULL_TEXT_BYTES / 1024
-            )
-        })?)
-        .to_string(),
+            ))?;
+            strip_preface(super::run_attr::strip_header(sent)).to_string()
+        }
     };
     let outcome = worker
         .last_outcome
@@ -137,7 +138,7 @@ pub(crate) fn plan(
         &preface(old, &describe(&argv, old_tier), outcome, report),
         &task,
     );
-    check_send_size(&text)?;
+    check_send_size(&super::run_attr::prospective_text(&text, supports_timeline))?;
     let mut extra = serde_json::Map::new();
     extra.insert("retryOf".to_string(), serde_json::json!(WireId(old)));
     if let (Some(path), Some(branch)) = (&worker.worktree, &worker.branch) {
@@ -222,7 +223,7 @@ pub(crate) fn compose(preface: &str, task: &str) -> String {
     format!("{preface}{PREFACE_END}{task}")
 }
 
-/// `text` without a preface [`compose`] put before it.
+/// Recover the task from its retry preface, after removing any timeline header.
 pub(crate) fn strip_preface(text: &str) -> &str {
     if text.starts_with(PREFACE_START)
         && let Some((_, task)) = text.split_once(PREFACE_END)
@@ -288,7 +289,6 @@ mod tests {
             worktree: Some("/r-wt/fix".to_string()),
             branch: Some("orch/fix".to_string()),
             result: Some("/r-wt/fix/.noa/result-fix.md".to_string()),
-            last_task: Some("fix the test".to_string()),
             task: Some("fix the test".to_string()),
             last_outcome: Some(serde_json::json!({ "reason": "finished", "seq": 2, "ts": 9 })),
             ..journal::Worker::default()
@@ -341,6 +341,7 @@ mod tests {
             workers,
             panels,
             1,
+            true,
             |_| true,
         )
     }
@@ -519,6 +520,7 @@ mod tests {
             &[worker(12)],
             &[listed(13, 1, None)],
             1,
+            true,
             |_| true,
         );
         let message = stranger.map(|_| ()).unwrap_err();
@@ -561,6 +563,21 @@ mod tests {
         let mut nowhere = worker(12);
         nowhere.cwd = None;
         assert!(plan_of(&[], None, &[nowhere], &[]).is_err());
+    }
+
+    #[test]
+    fn ac4_retry_checks_the_encoded_header_and_preface_while_planning() {
+        let workers = [worker(12)];
+        let empty = plan_of(&[], Some(""), &workers, &[]).unwrap();
+        let wire = crate::ctl::run_attr::with_longest_header(task_text(&empty));
+        let overhead = serde_json::to_string(&wire).unwrap().len();
+        let body = "x".repeat(noa_ipc::MAX_SEND_TEXT_BYTES - overhead);
+        assert!(plan_of(&[], Some(&body), &workers, &[]).is_ok());
+        let over = body + "x";
+        let error = plan_of(&[], Some(&over), &workers, &[]).unwrap_err();
+        assert!(error.contains("KiB"), "{error}");
+        let args = retry_args(&["12"]);
+        assert!(plan(&args, Some(over), &workers, &[], 1, false, |_| true).is_ok());
     }
 
     #[test]
@@ -616,7 +633,7 @@ mod tests {
     fn the_report_is_named_only_when_written_and_the_outcome_when_known() {
         let args = retry_args(&["12"]);
         let with = |written: bool, journaled: journal::Worker| {
-            let plan = plan(&args, None, &[journaled], &[], 1, |path| {
+            let plan = plan(&args, None, &[journaled], &[], 1, true, |path| {
                 assert_eq!(path, Path::new("/r-wt/fix/.noa/result-fix.md"));
                 written
             })
@@ -653,6 +670,21 @@ mod tests {
         // A task that merely contains the separator keeps it.
         let task = "a\n\n---\n\nb";
         assert_eq!(strip_preface(task), task);
+    }
+
+    #[test]
+    fn ac4_strip_header_then_preface_on_retry() {
+        let task = "fix the test\n\n---\n\nkeep this part";
+        let mut again = worker(12);
+        again.task = Some(crate::ctl::run_attr::with_longest_header(&compose(
+            &preface(9, "claude", None, None),
+            task,
+        )));
+        let plan = plan_of(&[], None, &[again], &[]).unwrap();
+        let text = task_text(&plan);
+        assert_eq!(text.matches(PREFACE_START).count(), 1);
+        assert!(!text.contains("[noa-timeline"));
+        assert_eq!(strip_preface(text), task);
     }
 
     /// [`steps`] with each step logged; `fail` names the step that fails.

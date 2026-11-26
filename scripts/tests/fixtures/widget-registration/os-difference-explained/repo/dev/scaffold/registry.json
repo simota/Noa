@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "widgets": {
+    "alpha": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "beta": {
+      "ships": [
+        "macos"
+      ],
+      "reason": "Linux では動作未確認のため、配布しない。"
+    }
+  },
+  "assets": []
+}

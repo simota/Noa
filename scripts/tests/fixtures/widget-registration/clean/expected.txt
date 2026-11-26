@@ -1,0 +1,6 @@
+Checked: registration consistency only. Not checked: the contents of built artifacts.
+sources: 14 ok, 0 unknown
+widgets: 2 (alpha, beta)
+explained differences: 0
+unexplained differences: 0
+result: consistent

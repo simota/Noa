@@ -1,0 +1,1444 @@
+{
+  "exit": 1,
+  "explained": [
+    {
+      "evidence": [
+        {
+          "line": 10,
+          "path": "dev/scaffold/registry.json"
+        }
+      ],
+      "reason": "macOS 専用の想定。",
+      "rule": "os-difference",
+      "target": "linux",
+      "widget": "beta"
+    }
+  ],
+  "findings": [
+    {
+      "evidence": [
+        {
+          "line": 10,
+          "path": "dev/scaffold/registry.json"
+        },
+        {
+          "line": 5,
+          "path": "scripts/package-linux.sh"
+        }
+      ],
+      "parts": [],
+      "rule": "ship-unintended",
+      "target": "linux",
+      "widget": "beta"
+    },
+    {
+      "evidence": [
+        {
+          "line": 2,
+          "path": "widgets/delta/Cargo.toml"
+        }
+      ],
+      "parts": [],
+      "rule": "name-mismatch",
+      "target": "crate",
+      "widget": "delta"
+    },
+    {
+      "evidence": [
+        {
+          "line": 18,
+          "path": "crates/noa-app/src/helper_program.rs"
+        },
+        {
+          "line": 6,
+          "path": "scripts/package-linux.sh"
+        }
+      ],
+      "parts": [],
+      "rule": "name-mismatch",
+      "target": "linux_package",
+      "widget": "delta"
+    },
+    {
+      "evidence": [
+        {
+          "line": 18,
+          "path": "crates/noa-app/src/helper_program.rs"
+        },
+        {
+          "line": 29,
+          "path": "scripts/bundle-macos.sh"
+        }
+      ],
+      "parts": [],
+      "rule": "name-mismatch",
+      "target": "macos_bundle",
+      "widget": "delta"
+    },
+    {
+      "evidence": [
+        {
+          "line": 57,
+          "path": "crates/noa-app/src/helper_program.rs"
+        },
+        {
+          "line": 2,
+          "path": "widgets/epsilon/Cargo.toml"
+        },
+        {
+          "line": 2,
+          "path": "widgets/epsilon/src/main.rs"
+        }
+      ],
+      "parts": [],
+      "rule": "repo-arg-mismatch",
+      "target": "launch",
+      "widget": "epsilon"
+    },
+    {
+      "evidence": [
+        {
+          "line": 3,
+          "path": "dev/scaffold/registry.json"
+        },
+        {
+          "line": 2,
+          "path": "widgets/kappa/Cargo.toml"
+        }
+      ],
+      "parts": [],
+      "rule": "no-intent",
+      "target": "registry",
+      "widget": "kappa"
+    },
+    {
+      "evidence": [
+        {
+          "line": 2,
+          "path": "crates/noa-app/src/macos_menu.rs"
+        },
+        {
+          "line": 2,
+          "path": "widgets/nu/Cargo.toml"
+        }
+      ],
+      "parts": [],
+      "rule": "missing-registration",
+      "target": "menu",
+      "widget": "nu"
+    },
+    {
+      "evidence": [
+        {
+          "line": 1,
+          "path": "crates/noa-app/src/command_palette.rs"
+        },
+        {
+          "line": 2,
+          "path": "widgets/nu/Cargo.toml"
+        }
+      ],
+      "parts": [],
+      "rule": "missing-registration",
+      "target": "palette",
+      "widget": "nu"
+    },
+    {
+      "evidence": [
+        {
+          "line": 34,
+          "path": "dev/scaffold/registry.json"
+        }
+      ],
+      "parts": [],
+      "rule": "stale-intent",
+      "target": "registry",
+      "widget": "omega"
+    },
+    {
+      "evidence": [
+        {
+          "line": 13,
+          "path": "crates/noa-app/src/app/commands.rs"
+        },
+        {
+          "line": 11,
+          "path": "crates/noa-app/src/commands/command.rs"
+        },
+        {
+          "line": 44,
+          "path": "crates/noa-app/src/commands/command.rs"
+        }
+      ],
+      "parts": [
+        "menu-id-lookup"
+      ],
+      "rule": "incomplete-registration",
+      "target": "command",
+      "widget": "theta"
+    },
+    {
+      "evidence": [
+        {
+          "line": 1,
+          "path": "crates/noa-app/src/command_palette.rs"
+        },
+        {
+          "line": 19,
+          "path": "crates/noa-app/src/command_palette.rs"
+        }
+      ],
+      "parts": [
+        "title"
+      ],
+      "rule": "incomplete-registration",
+      "target": "palette",
+      "widget": "theta"
+    },
+    {
+      "evidence": [
+        {
+          "line": 2,
+          "path": "crates/noa-app/src/app/commands.rs"
+        },
+        {
+          "line": 2,
+          "path": "widgets/xi/Cargo.toml"
+        }
+      ],
+      "parts": [],
+      "rule": "missing-registration",
+      "target": "command",
+      "widget": "xi"
+    },
+    {
+      "evidence": [
+        {
+          "line": 3,
+          "path": "scripts/bundle-macos.sh"
+        },
+        {
+          "line": 31,
+          "path": "scripts/bundle-macos.sh"
+        }
+      ],
+      "parts": [
+        "sign"
+      ],
+      "rule": "incomplete-registration",
+      "target": "macos_bundle",
+      "widget": "zeta"
+    },
+    {
+      "evidence": [
+        {
+          "line": 7,
+          "path": "scripts/verify.sh"
+        },
+        {
+          "line": 12,
+          "path": "scripts/verify.sh"
+        },
+        {
+          "line": 24,
+          "path": "scripts/verify.sh"
+        }
+      ],
+      "parts": [
+        "widget-uses"
+      ],
+      "rule": "incomplete-registration",
+      "target": "verify",
+      "widget": "zeta"
+    }
+  ],
+  "schema": 1,
+  "scope": "Checked: registration consistency only. Not checked: the contents of built artifacts.",
+  "sources": [
+    {
+      "error": null,
+      "path": "crates/noa-app/src/app/commands.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "crates/noa-app/src/command_palette.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "crates/noa-app/src/commands/command.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "crates/noa-app/src/helper_program.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "crates/noa-app/src/macos_menu.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "dev/scaffold/registry.json",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "scripts/bundle-macos.sh",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "scripts/package-linux.sh",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "scripts/verify.sh",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/alpha/Cargo.toml",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/alpha/src/main.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/beta/Cargo.toml",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/beta/src/main.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/delta/Cargo.toml",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/delta/src/main.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/epsilon/Cargo.toml",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/epsilon/src/main.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/kappa/Cargo.toml",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/kappa/src/main.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/nu/Cargo.toml",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/nu/src/main.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/theta/Cargo.toml",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/theta/src/main.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/xi/Cargo.toml",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/xi/src/main.rs",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/zeta/Cargo.toml",
+      "state": "ok"
+    },
+    {
+      "error": null,
+      "path": "widgets/zeta/src/main.rs",
+      "state": "ok"
+    }
+  ],
+  "status": "inconsistent",
+  "widgets": [
+    {
+      "intent": {
+        "evidence": [
+          {
+            "line": 4,
+            "path": "dev/scaffold/registry.json"
+          }
+        ],
+        "reason": null,
+        "ships": [
+          "linux",
+          "macos"
+        ]
+      },
+      "points": {
+        "command": {
+          "action": "alpha.open",
+          "evidence": [
+            {
+              "line": 8,
+              "path": "crates/noa-app/src/app/commands.rs"
+            },
+            {
+              "line": 39,
+              "path": "crates/noa-app/src/commands/command.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present",
+          "variant": "OpenAlpha"
+        },
+        "crate": {
+          "accepts_repo": true,
+          "binary": "alpha",
+          "evidence": [
+            {
+              "line": 2,
+              "path": "widgets/alpha/Cargo.toml"
+            },
+            {
+              "line": 2,
+              "path": "widgets/alpha/src/main.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "launch": {
+          "bundled": "Noa Alpha",
+          "const": "ALPHA",
+          "evidence": [
+            {
+              "line": 6,
+              "path": "crates/noa-app/src/helper_program.rs"
+            }
+          ],
+          "missing": [],
+          "repo_arg": true,
+          "state": "present"
+        },
+        "linux_package": {
+          "evidence": [
+            {
+              "line": 4,
+              "path": "scripts/package-linux.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Alpha",
+          "state": "present"
+        },
+        "macos_bundle": {
+          "evidence": [
+            {
+              "line": 27,
+              "path": "scripts/bundle-macos.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Alpha",
+          "state": "present"
+        },
+        "menu": {
+          "evidence": [
+            {
+              "line": 2,
+              "path": "crates/noa-app/src/macos_menu.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "palette": {
+          "evidence": [
+            {
+              "line": 3,
+              "path": "crates/noa-app/src/command_palette.rs"
+            },
+            {
+              "line": 14,
+              "path": "crates/noa-app/src/command_palette.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "verify": {
+          "check": "widget_check",
+          "evidence": [
+            {
+              "line": 3,
+              "path": "scripts/verify.sh"
+            },
+            {
+              "line": 20,
+              "path": "scripts/verify.sh"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        }
+      },
+      "widget": "alpha"
+    },
+    {
+      "intent": {
+        "evidence": [
+          {
+            "line": 10,
+            "path": "dev/scaffold/registry.json"
+          }
+        ],
+        "reason": "macOS 専用の想定。",
+        "ships": [
+          "macos"
+        ]
+      },
+      "points": {
+        "command": {
+          "action": "beta.open",
+          "evidence": [
+            {
+              "line": 9,
+              "path": "crates/noa-app/src/app/commands.rs"
+            },
+            {
+              "line": 40,
+              "path": "crates/noa-app/src/commands/command.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present",
+          "variant": "OpenBeta"
+        },
+        "crate": {
+          "accepts_repo": false,
+          "binary": "beta",
+          "evidence": [
+            {
+              "line": 2,
+              "path": "widgets/beta/Cargo.toml"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "launch": {
+          "bundled": "Noa Beta",
+          "const": "BETA",
+          "evidence": [
+            {
+              "line": 12,
+              "path": "crates/noa-app/src/helper_program.rs"
+            }
+          ],
+          "missing": [],
+          "repo_arg": false,
+          "state": "present"
+        },
+        "linux_package": {
+          "evidence": [
+            {
+              "line": 5,
+              "path": "scripts/package-linux.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Beta",
+          "state": "present"
+        },
+        "macos_bundle": {
+          "evidence": [
+            {
+              "line": 28,
+              "path": "scripts/bundle-macos.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Beta",
+          "state": "present"
+        },
+        "menu": {
+          "evidence": [
+            {
+              "line": 3,
+              "path": "crates/noa-app/src/macos_menu.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "palette": {
+          "evidence": [
+            {
+              "line": 4,
+              "path": "crates/noa-app/src/command_palette.rs"
+            },
+            {
+              "line": 15,
+              "path": "crates/noa-app/src/command_palette.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "verify": {
+          "check": "usage_check",
+          "evidence": [
+            {
+              "line": 4,
+              "path": "scripts/verify.sh"
+            },
+            {
+              "line": 21,
+              "path": "scripts/verify.sh"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        }
+      },
+      "widget": "beta"
+    },
+    {
+      "intent": {
+        "evidence": [
+          {
+            "line": 16,
+            "path": "dev/scaffold/registry.json"
+          }
+        ],
+        "reason": null,
+        "ships": [
+          "linux",
+          "macos"
+        ]
+      },
+      "points": {
+        "command": {
+          "action": "delta.open",
+          "evidence": [
+            {
+              "line": 10,
+              "path": "crates/noa-app/src/app/commands.rs"
+            },
+            {
+              "line": 41,
+              "path": "crates/noa-app/src/commands/command.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present",
+          "variant": "OpenDelta"
+        },
+        "crate": {
+          "accepts_repo": false,
+          "binary": "delt",
+          "evidence": [
+            {
+              "line": 2,
+              "path": "widgets/delta/Cargo.toml"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "launch": {
+          "bundled": "Noa Delta",
+          "const": "DELTA",
+          "evidence": [
+            {
+              "line": 18,
+              "path": "crates/noa-app/src/helper_program.rs"
+            }
+          ],
+          "missing": [],
+          "repo_arg": false,
+          "state": "present"
+        },
+        "linux_package": {
+          "evidence": [
+            {
+              "line": 6,
+              "path": "scripts/package-linux.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Delt",
+          "state": "present"
+        },
+        "macos_bundle": {
+          "evidence": [
+            {
+              "line": 29,
+              "path": "scripts/bundle-macos.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Dlta",
+          "state": "present"
+        },
+        "menu": {
+          "evidence": [
+            {
+              "line": 4,
+              "path": "crates/noa-app/src/macos_menu.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "palette": {
+          "evidence": [
+            {
+              "line": 5,
+              "path": "crates/noa-app/src/command_palette.rs"
+            },
+            {
+              "line": 16,
+              "path": "crates/noa-app/src/command_palette.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "verify": {
+          "check": "usage_check",
+          "evidence": [
+            {
+              "line": 5,
+              "path": "scripts/verify.sh"
+            },
+            {
+              "line": 22,
+              "path": "scripts/verify.sh"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        }
+      },
+      "widget": "delta"
+    },
+    {
+      "intent": {
+        "evidence": [
+          {
+            "line": 22,
+            "path": "dev/scaffold/registry.json"
+          }
+        ],
+        "reason": null,
+        "ships": [
+          "linux",
+          "macos"
+        ]
+      },
+      "points": {
+        "command": {
+          "action": "epsilon.open",
+          "evidence": [
+            {
+              "line": 11,
+              "path": "crates/noa-app/src/app/commands.rs"
+            },
+            {
+              "line": 42,
+              "path": "crates/noa-app/src/commands/command.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present",
+          "variant": "OpenEpsilon"
+        },
+        "crate": {
+          "accepts_repo": true,
+          "binary": "epsilon",
+          "evidence": [
+            {
+              "line": 2,
+              "path": "widgets/epsilon/Cargo.toml"
+            },
+            {
+              "line": 2,
+              "path": "widgets/epsilon/src/main.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "launch": {
+          "bundled": "Noa Epsilon",
+          "const": "EPSILON",
+          "evidence": [
+            {
+              "line": 24,
+              "path": "crates/noa-app/src/helper_program.rs"
+            }
+          ],
+          "missing": [],
+          "repo_arg": false,
+          "state": "present"
+        },
+        "linux_package": {
+          "evidence": [
+            {
+              "line": 7,
+              "path": "scripts/package-linux.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Epsilon",
+          "state": "present"
+        },
+        "macos_bundle": {
+          "evidence": [
+            {
+              "line": 30,
+              "path": "scripts/bundle-macos.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Epsilon",
+          "state": "present"
+        },
+        "menu": {
+          "evidence": [
+            {
+              "line": 5,
+              "path": "crates/noa-app/src/macos_menu.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "palette": {
+          "evidence": [
+            {
+              "line": 6,
+              "path": "crates/noa-app/src/command_palette.rs"
+            },
+            {
+              "line": 17,
+              "path": "crates/noa-app/src/command_palette.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "verify": {
+          "check": "usage_check",
+          "evidence": [
+            {
+              "line": 6,
+              "path": "scripts/verify.sh"
+            },
+            {
+              "line": 23,
+              "path": "scripts/verify.sh"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        }
+      },
+      "widget": "epsilon"
+    },
+    {
+      "intent": null,
+      "points": {
+        "command": {
+          "action": "kappa.open",
+          "evidence": [
+            {
+              "line": 14,
+              "path": "crates/noa-app/src/app/commands.rs"
+            },
+            {
+              "line": 45,
+              "path": "crates/noa-app/src/commands/command.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present",
+          "variant": "OpenKappa"
+        },
+        "crate": {
+          "accepts_repo": false,
+          "binary": "kappa",
+          "evidence": [
+            {
+              "line": 2,
+              "path": "widgets/kappa/Cargo.toml"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "launch": {
+          "bundled": "Noa Kappa",
+          "const": "KAPPA",
+          "evidence": [
+            {
+              "line": 42,
+              "path": "crates/noa-app/src/helper_program.rs"
+            }
+          ],
+          "missing": [],
+          "repo_arg": false,
+          "state": "present"
+        },
+        "linux_package": {
+          "evidence": [
+            {
+              "line": 10,
+              "path": "scripts/package-linux.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Kappa",
+          "state": "present"
+        },
+        "macos_bundle": {
+          "evidence": [
+            {
+              "line": 33,
+              "path": "scripts/bundle-macos.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Kappa",
+          "state": "present"
+        },
+        "menu": {
+          "evidence": [
+            {
+              "line": 8,
+              "path": "crates/noa-app/src/macos_menu.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "palette": {
+          "evidence": [
+            {
+              "line": 8,
+              "path": "crates/noa-app/src/command_palette.rs"
+            },
+            {
+              "line": 20,
+              "path": "crates/noa-app/src/command_palette.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "verify": {
+          "check": "usage_check",
+          "evidence": [
+            {
+              "line": 9,
+              "path": "scripts/verify.sh"
+            },
+            {
+              "line": 26,
+              "path": "scripts/verify.sh"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        }
+      },
+      "widget": "kappa"
+    },
+    {
+      "intent": {
+        "evidence": [
+          {
+            "line": 28,
+            "path": "dev/scaffold/registry.json"
+          }
+        ],
+        "reason": null,
+        "ships": [
+          "linux",
+          "macos"
+        ]
+      },
+      "points": {
+        "command": {
+          "action": "nu.open",
+          "evidence": [
+            {
+              "line": 15,
+              "path": "crates/noa-app/src/app/commands.rs"
+            },
+            {
+              "line": 46,
+              "path": "crates/noa-app/src/commands/command.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present",
+          "variant": "OpenNu"
+        },
+        "crate": {
+          "accepts_repo": false,
+          "binary": "nu",
+          "evidence": [
+            {
+              "line": 2,
+              "path": "widgets/nu/Cargo.toml"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "launch": {
+          "bundled": "Noa Nu",
+          "const": "NU",
+          "evidence": [
+            {
+              "line": 54,
+              "path": "crates/noa-app/src/helper_program.rs"
+            }
+          ],
+          "missing": [],
+          "repo_arg": false,
+          "state": "present"
+        },
+        "linux_package": {
+          "evidence": [
+            {
+              "line": 12,
+              "path": "scripts/package-linux.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Nu",
+          "state": "present"
+        },
+        "macos_bundle": {
+          "evidence": [
+            {
+              "line": 35,
+              "path": "scripts/bundle-macos.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Nu",
+          "state": "present"
+        },
+        "menu": {
+          "evidence": [],
+          "missing": [],
+          "state": "absent"
+        },
+        "palette": {
+          "evidence": [],
+          "missing": [],
+          "state": "absent"
+        },
+        "verify": {
+          "check": "usage_check",
+          "evidence": [
+            {
+              "line": 11,
+              "path": "scripts/verify.sh"
+            },
+            {
+              "line": 28,
+              "path": "scripts/verify.sh"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        }
+      },
+      "widget": "nu"
+    },
+    {
+      "intent": {
+        "evidence": [
+          {
+            "line": 40,
+            "path": "dev/scaffold/registry.json"
+          }
+        ],
+        "reason": null,
+        "ships": [
+          "linux",
+          "macos"
+        ]
+      },
+      "points": {
+        "command": {
+          "action": "theta.open",
+          "evidence": [
+            {
+              "line": 13,
+              "path": "crates/noa-app/src/app/commands.rs"
+            },
+            {
+              "line": 44,
+              "path": "crates/noa-app/src/commands/command.rs"
+            }
+          ],
+          "missing": [
+            "menu-id-lookup"
+          ],
+          "state": "partial",
+          "variant": "OpenTheta"
+        },
+        "crate": {
+          "accepts_repo": false,
+          "binary": "theta",
+          "evidence": [
+            {
+              "line": 2,
+              "path": "widgets/theta/Cargo.toml"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "launch": {
+          "bundled": "Noa Theta",
+          "const": "THETA",
+          "evidence": [
+            {
+              "line": 36,
+              "path": "crates/noa-app/src/helper_program.rs"
+            }
+          ],
+          "missing": [],
+          "repo_arg": false,
+          "state": "present"
+        },
+        "linux_package": {
+          "evidence": [
+            {
+              "line": 9,
+              "path": "scripts/package-linux.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Theta",
+          "state": "present"
+        },
+        "macos_bundle": {
+          "evidence": [
+            {
+              "line": 32,
+              "path": "scripts/bundle-macos.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Theta",
+          "state": "present"
+        },
+        "menu": {
+          "evidence": [
+            {
+              "line": 7,
+              "path": "crates/noa-app/src/macos_menu.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "palette": {
+          "evidence": [
+            {
+              "line": 19,
+              "path": "crates/noa-app/src/command_palette.rs"
+            }
+          ],
+          "missing": [
+            "title"
+          ],
+          "state": "partial"
+        },
+        "verify": {
+          "check": "usage_check",
+          "evidence": [
+            {
+              "line": 8,
+              "path": "scripts/verify.sh"
+            },
+            {
+              "line": 25,
+              "path": "scripts/verify.sh"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        }
+      },
+      "widget": "theta"
+    },
+    {
+      "intent": {
+        "evidence": [
+          {
+            "line": 46,
+            "path": "dev/scaffold/registry.json"
+          }
+        ],
+        "reason": null,
+        "ships": [
+          "linux",
+          "macos"
+        ]
+      },
+      "points": {
+        "command": {
+          "action": null,
+          "evidence": [],
+          "missing": [],
+          "state": "absent",
+          "variant": null
+        },
+        "crate": {
+          "accepts_repo": false,
+          "binary": "xi",
+          "evidence": [
+            {
+              "line": 2,
+              "path": "widgets/xi/Cargo.toml"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "launch": {
+          "bundled": "Noa Xi",
+          "const": "XI",
+          "evidence": [
+            {
+              "line": 48,
+              "path": "crates/noa-app/src/helper_program.rs"
+            }
+          ],
+          "missing": [],
+          "repo_arg": false,
+          "state": "present"
+        },
+        "linux_package": {
+          "evidence": [
+            {
+              "line": 11,
+              "path": "scripts/package-linux.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Xi",
+          "state": "present"
+        },
+        "macos_bundle": {
+          "evidence": [
+            {
+              "line": 34,
+              "path": "scripts/bundle-macos.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Xi",
+          "state": "present"
+        },
+        "menu": {
+          "evidence": [],
+          "missing": [],
+          "state": "unknown"
+        },
+        "palette": {
+          "evidence": [],
+          "missing": [],
+          "state": "unknown"
+        },
+        "verify": {
+          "check": "usage_check",
+          "evidence": [
+            {
+              "line": 10,
+              "path": "scripts/verify.sh"
+            },
+            {
+              "line": 27,
+              "path": "scripts/verify.sh"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        }
+      },
+      "widget": "xi"
+    },
+    {
+      "intent": {
+        "evidence": [
+          {
+            "line": 52,
+            "path": "dev/scaffold/registry.json"
+          }
+        ],
+        "reason": null,
+        "ships": [
+          "linux",
+          "macos"
+        ]
+      },
+      "points": {
+        "command": {
+          "action": "zeta.open",
+          "evidence": [
+            {
+              "line": 12,
+              "path": "crates/noa-app/src/app/commands.rs"
+            },
+            {
+              "line": 43,
+              "path": "crates/noa-app/src/commands/command.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present",
+          "variant": "OpenZeta"
+        },
+        "crate": {
+          "accepts_repo": false,
+          "binary": "zeta",
+          "evidence": [
+            {
+              "line": 2,
+              "path": "widgets/zeta/Cargo.toml"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "launch": {
+          "bundled": "Noa Zeta",
+          "const": "ZETA",
+          "evidence": [
+            {
+              "line": 30,
+              "path": "crates/noa-app/src/helper_program.rs"
+            }
+          ],
+          "missing": [],
+          "repo_arg": false,
+          "state": "present"
+        },
+        "linux_package": {
+          "evidence": [
+            {
+              "line": 8,
+              "path": "scripts/package-linux.sh"
+            }
+          ],
+          "missing": [],
+          "name": "Noa Zeta",
+          "state": "present"
+        },
+        "macos_bundle": {
+          "evidence": [
+            {
+              "line": 31,
+              "path": "scripts/bundle-macos.sh"
+            }
+          ],
+          "missing": [
+            "sign"
+          ],
+          "name": "Noa Zeta",
+          "state": "partial"
+        },
+        "menu": {
+          "evidence": [
+            {
+              "line": 6,
+              "path": "crates/noa-app/src/macos_menu.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "palette": {
+          "evidence": [
+            {
+              "line": 7,
+              "path": "crates/noa-app/src/command_palette.rs"
+            },
+            {
+              "line": 18,
+              "path": "crates/noa-app/src/command_palette.rs"
+            }
+          ],
+          "missing": [],
+          "state": "present"
+        },
+        "verify": {
+          "check": "usage_check",
+          "evidence": [
+            {
+              "line": 7,
+              "path": "scripts/verify.sh"
+            },
+            {
+              "line": 24,
+              "path": "scripts/verify.sh"
+            }
+          ],
+          "missing": [
+            "widget-uses"
+          ],
+          "state": "partial"
+        }
+      },
+      "widget": "zeta"
+    }
+  ]
+}

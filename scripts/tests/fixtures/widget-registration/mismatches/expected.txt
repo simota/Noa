@@ -1,0 +1,21 @@
+Checked: registration consistency only. Not checked: the contents of built artifacts.
+sources: 28 ok, 0 unknown
+widgets: 9 (alpha, beta, delta, epsilon, kappa, nu, theta, xi, zeta)
+explained differences: 1
+  beta linux: os-difference — macOS 専用の想定。 (dev/scaffold/registry.json:10)
+unexplained differences: 14
+  beta linux: ship-unintended (dev/scaffold/registry.json:10, scripts/package-linux.sh:5)
+  delta crate: name-mismatch (widgets/delta/Cargo.toml:2)
+  delta linux_package: name-mismatch (crates/noa-app/src/helper_program.rs:18, scripts/package-linux.sh:6)
+  delta macos_bundle: name-mismatch (crates/noa-app/src/helper_program.rs:18, scripts/bundle-macos.sh:29)
+  epsilon launch: repo-arg-mismatch (crates/noa-app/src/helper_program.rs:57, widgets/epsilon/Cargo.toml:2, widgets/epsilon/src/main.rs:2)
+  kappa registry: no-intent (dev/scaffold/registry.json:3, widgets/kappa/Cargo.toml:2)
+  nu menu: missing-registration (crates/noa-app/src/macos_menu.rs:2, widgets/nu/Cargo.toml:2)
+  nu palette: missing-registration (crates/noa-app/src/command_palette.rs:1, widgets/nu/Cargo.toml:2)
+  omega registry: stale-intent (dev/scaffold/registry.json:34)
+  theta command: incomplete-registration (menu-id-lookup) (crates/noa-app/src/app/commands.rs:13, crates/noa-app/src/commands/command.rs:11, crates/noa-app/src/commands/command.rs:44)
+  theta palette: incomplete-registration (title) (crates/noa-app/src/command_palette.rs:1, crates/noa-app/src/command_palette.rs:19)
+  xi command: missing-registration (crates/noa-app/src/app/commands.rs:2, widgets/xi/Cargo.toml:2)
+  zeta macos_bundle: incomplete-registration (sign) (scripts/bundle-macos.sh:3, scripts/bundle-macos.sh:31)
+  zeta verify: incomplete-registration (widget-uses) (scripts/verify.sh:7, scripts/verify.sh:12, scripts/verify.sh:24)
+result: inconsistent

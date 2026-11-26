@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.19] - 2026-11-27
+
+A Linear-style planning workspace in Tasks, a scaffold widget that checks
+widget registration, a one-list Agent Dashboard, and reverification in
+Verify.
+
 ### Added
 
 - Tasks gains a personal workspace with a default List, navigation sidebar,
@@ -18,30 +24,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comments and properties with qualifiers and negation. Per-repository local
   metadata and view preferences persist with conflict detection; GitHub stays
   read-only. The existing Board, Timeline and Calendar remain views of source
-  state and execution history, without due-date scheduling.
+  state and execution history, without due-date scheduling. (#275)
 - Orchestration panes show a colored role strip with an Orchestrator or Board
   label, keeping the coordinator recognizable even after its last worker
   closes. The strip reserves space above the terminal instead of covering
-  its output.
+  its output. (#273)
 - The board gains a workflow view (`v`) of the actual delegation links from
   orchestrator to workers and their children, with state and progress counts
-  and the existing worker controls.
+  and the existing worker controls. (#273)
 - The board timeline gains a compact one-post-per-line view (`c`), a loaded
   post count and selection indicator, and one-step search and filter reset
-  (`F`). Switching density preserves the selected post and pending updates.
+  (`F`). Switching density preserves the selected post and pending
+  updates. (#273)
 - Verify gains result filters for unresolved required criteria, failed
   rulings, differing re-runs, blocked checks and untested criteria. A result
   opens its cited evidence and returns to the same filtered matrix. Older
-  rulings, progress details and secondary actions open on demand.
+  rulings, progress details and secondary actions open on demand. (#274)
 - Verify can reuse structured criteria when rechecking a changed target,
   preserving their ids, order, verification methods, priorities and sources.
   A fresh confirmation precedes verification; the report compares the two
   target versions and labels criteria as resolved, continuing, newly failing,
-  newly runnable or unconfirmed. Previous results do not count in the new run.
+  newly runnable or unconfirmed. Previous results do not count in the new
+  run. (#274)
 - Verify keeps execution settings behind a disclosure while automatic
   assignment stays visible, and switches its three panes to navigation at
   narrow widths down to 720 × 640. Stored images can be compared side by side
-  with zoom in a local browser page; native media cards remain placeholders.
+  with zoom in a local browser page; native media cards remain
+  placeholders. (#274)
+- Scaffold (`widgets/scaffold`): View → Scaffold and the palette's Open
+  Scaffold open a window that lists a repository's development assets and
+  the registration gaps found, each with `file:line` evidence, records
+  decisions and turns a gap into a local task for the Tasks widget. It never
+  runs code from the scanned repository. `scripts/bundle-macos.sh` ships it
+  as `Noa Scaffold`. (#271)
 
 ### Changed
 
@@ -57,23 +72,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   終了 never says 成功. The drawer leads with the reason and the actions and
   keeps the log and run info (model, effort, branch, cwd) collapsed;
   statistics, map and timeline open from 分析. The link state reads 同期済み
-  or 最後の受信から N秒. Saved version 1 preferences load into 現在.
+  or 最後の受信から N秒. Saved version 1 preferences load into 現在. (#276)
+- Review, Verify and Competition start views put the past-runs list beside
+  the form in two columns, as Discussion's does. (#269)
+- Discussion, Review and Competition put state, content and the next action
+  first: secondary details collapse, session controls gather in one Actions
+  panel, failures and pending decisions stay visible, and drafts, selections
+  and focus survive updates. Closed discussions and competitions hide the
+  composer. (#272)
 
 ### Fixed
 
 - Verify includes unsaved criterion edits when starting verification and
   persists the validated edits and freeze in one batch. Invalid edits keep
-  the confirmation open without partially changing the accepted criteria.
+  the confirmation open without partially changing the accepted criteria. (#274)
 - Verify labels a matching re-run as an exit-code match, makes clear that
   output content was not compared, and flags a missing stored re-run log.
   Clearing a known failed result requires stored evidence; an observation
-  alone cannot clear it.
-
-### Fixed
-
+  alone cannot clear it. (#274)
 - Tasks reloads previously opened GitHub issue bodies and comments when a
   refreshed listing reports a newer issue update, keeping unchanged details
-  cached and retaining retry behavior after a failed detail fetch.
+  cached and retaining retry behavior after a failed detail fetch. (#275)
 
 ## [0.9.18] - 2026-11-26
 

@@ -85,6 +85,12 @@ impl Parts {
     pub(super) fn note(&self) -> WidgetId {
         self.note
     }
+
+    /// Each verifier row's identity, in form order: its host widget, whose
+    /// id stays with the row while rows around it go and is never reused.
+    pub(super) fn row_ids(&self) -> Vec<WidgetId> {
+        self.panel.iter().map(|row| row.host).collect()
+    }
 }
 
 /// Which agents are installed, as far as the screen knows.

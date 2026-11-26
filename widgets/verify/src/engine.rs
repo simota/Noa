@@ -20,7 +20,7 @@ use crate::model::reduce::{self, ReduceError};
 use crate::model::rules;
 use crate::model::types::{
     AgentChoice, Author, Brief, BriefKind, CRITERIA_ROUND, CriteriaEdit, CriterionSource, Event,
-    EvidenceBody, EvidenceKey, FileFact, Isolation, JUDGE_ID, MAX_CAPTION, MAX_CRITERIA,
+    EvidenceBody, EvidenceKey, FileFact, Head, Isolation, JUDGE_ID, MAX_CAPTION, MAX_CRITERIA,
     MAX_CUSTOM_STRATEGY, MAX_MARKS, MAX_MAX_ROUNDS, MAX_PANEL, MAX_STATEMENT, MIN_PANEL, Message,
     Millis, MsgKind, PartId, Participant, Phase, Rebuild, Rerun, RerunRequest, Role, RoundKind,
     RoundNo, Session, SessionId, SpecFile, Stored, Strategy, StrategyChoice, Target, TargetKind,
@@ -375,6 +375,46 @@ pub fn user_criteria(lines: &[String]) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// `git diff --stat` of a diff `target`, for the auto-assign planner
+/// (`docs/specs/auto-assign.md` L1-3): base…head, or the work tree against
+/// the merge base, the base being the default one when none is given. Git
+/// runs as the capture runs it (`capture::git`: no `GIT_*` variable of the
+/// widget's, no filter driver of the settings, no external diff or text
+/// conversion), at the top of the work tree, the path filter read from
+/// there as the capture reads it. `None` when git fails or a ref would read
+/// as an option.
+pub fn diff_stat(target: &Target) -> Option<String> {
+    use crate::capture::{self, Drivers};
+    let plain = |name: &str| (!name.is_empty() && !name.starts_with('-')).then(|| name.to_owned());
+    let repo = capture::repo_root(&target.repo).ok()?;
+    let base = match target.base.as_deref().map(str::trim) {
+        Some(base) if !base.is_empty() => plain(base)?,
+        _ => plain(&capture::default_base(&repo)?)?,
+    };
+    let mut cmd = capture::git(&repo, &Drivers::of(&repo).ok()?);
+    cmd.args([
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--no-relative",
+        "--stat",
+    ]);
+    match &target.head {
+        Head::Worktree => cmd.args(["--merge-base", &base]),
+        Head::Ref(head) => cmd.arg(format!("{base}...{}", plain(head.trim())?)),
+    };
+    cmd.arg("--").args(&target.paths);
+    let out = cmd
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Whether `logged` and `want` name the same file: the same path, or the

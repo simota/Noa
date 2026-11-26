@@ -3385,3 +3385,144 @@ fn auto_a_stored_log_keeps_its_record_and_one_without_it_still_loads() {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
+#[test]
+fn auto_a_failed_or_cancelled_replan_keeps_the_fill_already_made() {
+    let (mut screen, link, planned, mut text, repo) = auto_ready("auto-replan", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    let (request, one) = answered(&planned, 0);
+    one.answer
+        .send(Ok(answer_for(&one, &request, ANSWER)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    let filled = start::read(&screen.tree, &screen.start);
+    let heading = "自動割り当て（claude (sonnet · medium) が決定）";
+    // codex is asked again and runs out of time: the rows the first fill
+    // made and its block stay, under the failure.
+    choose_planner(&mut screen, 1);
+    assert!(start_text(&screen).contains(heading));
+    let (_, second) = answered(&planned, 0);
+    second.answer.send(Err(PlanError::Timeout(180))).unwrap();
+    screen.poll_live(&mut text);
+    assert_eq!(start::read(&screen.tree, &screen.start), filled);
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains(
+            "自動割り当てに失敗しました: codex (gpt-6.2-sol · medium) が 180 秒以内に割り当てを返しませんでした"
+        ),
+        "{shown}"
+    );
+    assert!(shown.contains(heading), "{shown}");
+    assert!(shown.contains("判定役: codex (gpt-6.2-sol · high) — 判定は深い推論が要るため\n"));
+    // A third attempt, cancelled: the same.
+    choose_planner(&mut screen, 0);
+    press_button(&mut screen, &Action::AutoCancel);
+    assert!(start_text(&screen).contains(heading));
+    act(&mut screen, Action::Start);
+    let sent = commands(&link);
+    let [Command::Start { auto, .. }] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let record = auto.clone().expect("the fill made before is recorded");
+    assert_eq!(record.planner, "claude (sonnet · medium)");
+    let slots: Vec<&str> = record.picks.iter().map(|p| p.slot.as_str()).collect();
+    assert_eq!(slots, ["judge", "verifier-1", "verifier-2", "verifier-3"]);
+    assert!(record.overridden.is_empty());
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_a_changed_strategy_or_a_removed_row_is_a_change_of_that_row_only() {
+    let (mut screen, link, planned, mut text, repo) = auto_ready("auto-rows", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    let (request, one) = answered(&planned, 0);
+    // Verifiers 1 and 2 get the same agent, model and effort.
+    let alike = ANSWER.replace(
+        r#""agent":"agy","model":null,"effort":"medium""#,
+        r#""agent":"claude","model":"opus","effort":null"#,
+    );
+    one.answer
+        .send(Ok(answer_for(&one, &request, &alike)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    // Verifier 3's strategy goes from 回帰 to the next one: its reason
+    // was given for 回帰.
+    let strategy = screen.start.panel[2].strategy;
+    press_down(&mut screen, strategy, &mut text);
+    assert_ne!(
+        start::read(&screen.tree, &screen.start).panel[2].strategy,
+        StrategyChoice::Builtin(BuiltinStrategy::Regression)
+    );
+    screen.poll_live(&mut text);
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains(
+            "検証者 3: codex (gpt-6-luna · low) — 回帰の確認は定型的なため（手動で変更）"
+        ),
+        "{shown}"
+    );
+    // Verifier 1's row goes, and verifier 2's, alike, moves up into its
+    // place: it keeps its own pick and takes none of the removed row's.
+    act(&mut screen, Action::RemovePanelRow(0));
+    screen.poll_live(&mut text);
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains("検証者 1: claude (opus) — 仕様との突き合わせが得意なため（手動で変更）"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("検証者 2: claude (opus) — 反証は別系統のモデルが良いため\n"),
+        "{shown}"
+    );
+    act(&mut screen, Action::Start);
+    let sent = commands(&link);
+    let [Command::Start { auto, .. }] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let record = auto.clone().expect("the start carries the assignment");
+    let slots: Vec<&str> = record.picks.iter().map(|p| p.slot.as_str()).collect();
+    assert_eq!(slots, ["judge", "verifier-2"]);
+    assert_eq!(record.picks[1].reason, "反証は別系統のモデルが良いため");
+    assert_eq!(record.overridden, ["verifier-1", "verifier-3"]);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_opening_a_past_verification_while_deciding_stops_the_planner() {
+    let root = temp("auto-open-past");
+    let dir = stored_demo(&root);
+    let (mut screen, link, planned, mut text, repo) =
+        auto_ready("auto-open-past-repo", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    act(&mut screen, Action::OpenPast(dir));
+    assert!(screen.session.is_some(), "the stored verification is shown");
+    assert!(
+        planned.borrow()[0]
+            .cancel
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(!matches!(
+        screen.auto.state,
+        auto::AutoState::Running { .. }
+    ));
+    // What it says late is never read.
+    let (request, late) = answered(&planned, 0);
+    let _ = late.answer.send(Ok(answer_for(&late, &request, ANSWER)));
+    screen.poll_live(&mut text);
+    act(&mut screen, Action::NewVerification);
+    screen.poll_live(&mut text);
+    assert!(screen.auto.menu().is_some(), "the pull-down is back");
+    assert!(!start_text(&screen).contains("自動割り当て（"));
+    assert!(!start_text(&screen).contains("が割り当てを決めています"));
+    assert_eq!(
+        start::read(&screen.tree, &screen.start).judge,
+        start::Form::for_kinds(screen.start.kinds()).judge
+    );
+    assert!(
+        !commands(&link)
+            .iter()
+            .any(|c| matches!(c, Command::Start { .. }))
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(repo);
+}

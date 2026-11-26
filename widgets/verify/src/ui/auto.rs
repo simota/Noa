@@ -9,9 +9,7 @@
 //! back to a row, and the control and the assignment block in the start
 //! view.
 
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command as OsCommand, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::TryRecvError;
 
@@ -23,11 +21,10 @@ use verify::auto_assign::{
     self, Assignment, AutoRecord, Candidate, Job, Pick, PlanError, Planner, Planning, Request, Slot,
 };
 use verify::model::types::{
-    AgentChoice, AgentKind, AgentSetup, Head, Millis, StrategyChoice, Target, TargetKind,
-    VerifierChoice,
+    AgentChoice, AgentKind, AgentSetup, Head, Millis, StrategyChoice, TargetKind, VerifierChoice,
 };
 
-use super::start::{Detection, Form};
+use super::start::{Detection, Form, Parts};
 use super::{Action, caption, clear_children};
 use crate::installed::Installed;
 
@@ -58,14 +55,25 @@ pub(super) fn system_plan() -> Plan {
     Box::new(|job, wake| auto_assign::spawn(job, THREAD, wake))
 }
 
-/// The agent rows a planner was started on, to tell whether they changed
-/// before its answer came.
-type Rows = (AgentChoice, Vec<VerifierChoice>);
+/// The agent rows a planner was started on, each verifier row with its
+/// identity (`ids`, [`Parts::row_ids`]), to tell whether they changed
+/// before its answer came: a row removed and another added in its place
+/// is a change, whatever they hold.
+type Rows = (AgentChoice, Vec<(WidgetId, VerifierChoice)>);
 
-fn rows(form: &Form) -> Rows {
-    (form.judge.clone(), form.panel.clone())
+fn rows(form: &Form, ids: &[WidgetId]) -> Rows {
+    (
+        form.judge.clone(),
+        ids.iter()
+            .copied()
+            .zip(form.panel.iter().cloned())
+            .collect(),
+    )
 }
 
+/// The current attempt. The last fill put in the form is kept apart
+/// ([`Auto::filled`]): an attempt after it that fails or is cancelled
+/// leaves the form as that fill made it, so its record stays.
 pub(super) enum AutoState {
     Idle,
     /// A planner is deciding; `snapshot` is the rows it was started on.
@@ -76,13 +84,40 @@ pub(super) enum AutoState {
         planning: Planning,
         snapshot: Rows,
     },
-    /// The rows were filled from `assignment`, which arrived at `at`.
-    Filled {
-        assignment: Assignment,
-        at: Millis,
-    },
     /// The whole line the note shows (a failure, or a refused fill).
     Failed(String),
+}
+
+/// The last fill put in the form: `assignment`, which arrived at `at`, and
+/// the verifier rows it went into.
+struct Filled {
+    assignment: Assignment,
+    at: Millis,
+    /// Slot `verifier-i`'s row (entry i-1) by its identity, with the
+    /// strategy it had: a pick is matched to its row, not to the row at
+    /// its place, which another takes once a row above goes.
+    rows: Vec<(WidgetId, StrategyChoice)>,
+}
+
+impl Filled {
+    /// Whether `pick`'s row is still in the form (`form`, its verifier rows
+    /// identified by `ids`) as the fill left it: the same agent, model and
+    /// effort and, for a verifier, the same strategy, which the planner
+    /// was told and the reason rests on.
+    fn unchanged(&self, pick: &Pick, form: &Form, ids: &[WidgetId]) -> bool {
+        let Some(choice) = choice_of(pick) else {
+            return false;
+        };
+        if pick.slot == JUDGE_SLOT {
+            return form.judge == choice;
+        }
+        let Some((id, strategy)) = verifier_index(&pick.slot).and_then(|i| self.rows.get(i)) else {
+            return false;
+        };
+        ids.iter()
+            .zip(&form.panel)
+            .any(|(row, now)| row == id && now.agent == choice && now.strategy == *strategy)
+    }
 }
 
 /// One line of the note the auto-assign part writes.
@@ -102,6 +137,7 @@ enum Control {
 
 pub(super) struct Auto {
     pub(super) state: AutoState,
+    filled: Option<Filled>,
     plan: Plan,
     /// The pull-down while it is shown, and the planner of each item.
     menu: Option<(WidgetId, Vec<Planner>)>,
@@ -116,6 +152,7 @@ impl Auto {
     pub(super) fn new(plan: Plan) -> Self {
         Self {
             state: AutoState::Idle,
+            filled: None,
             plan,
             menu: None,
             cancel: None,
@@ -140,12 +177,14 @@ impl Auto {
         self.menu.as_ref()?.1.get(index).copied()
     }
 
-    /// Starts `planner` on `form`'s rows, the menus offering `kinds`; a
-    /// planner still deciding is cancelled first.
+    /// Starts `planner` on `form`'s rows (its verifier rows identified by
+    /// `ids`), the menus offering `kinds`; a planner still deciding is
+    /// cancelled first. The last fill stays until this one replaces it.
     pub(super) fn begin(
         &mut self,
         planner: Planner,
         form: &Form,
+        ids: &[WidgetId],
         kinds: &[AgentKind],
         wake: Box<dyn Fn() + Send>,
     ) {
@@ -154,7 +193,7 @@ impl Auto {
         self.state = AutoState::Running {
             planner,
             planning,
-            snapshot: rows(form),
+            snapshot: rows(form, ids),
         };
     }
 
@@ -170,12 +209,14 @@ impl Auto {
     pub(super) fn reset(&mut self) {
         self.cancel();
         self.state = AutoState::Idle;
+        self.filled = None;
     }
 
     /// Takes the planner's answer once it has come: the form to put in the
     /// start view when it is a valid assignment and the rows are still the
-    /// ones the planner was started on (`current`).
-    pub(super) fn poll(&mut self, current: &Form, now: Millis) -> Option<Form> {
+    /// ones the planner was started on (`current`, its verifier rows
+    /// identified by `ids`). A failure keeps the last fill.
+    pub(super) fn poll(&mut self, current: &Form, ids: &[WidgetId], now: Millis) -> Option<Form> {
         let AutoState::Running {
             planner,
             planning,
@@ -193,17 +234,22 @@ impl Auto {
             )),
         };
         let (state, filled) = match answer {
-            Ok(_) if rows(current) != *snapshot => (AutoState::Failed(CHANGED.to_owned()), None),
+            Ok(_) if rows(current, ids) != *snapshot => {
+                (AutoState::Failed(CHANGED.to_owned()), None)
+            }
             Ok(assignment) => {
                 let mut form = current.clone();
                 fill(&mut form, &assignment);
-                (
-                    AutoState::Filled {
-                        assignment,
-                        at: now,
-                    },
-                    Some(form),
-                )
+                self.filled = Some(Filled {
+                    assignment,
+                    at: now,
+                    rows: ids
+                        .iter()
+                        .copied()
+                        .zip(form.panel.iter().map(|row| row.strategy.clone()))
+                        .collect(),
+                });
+                (AutoState::Idle, Some(form))
             }
             Err(PlanError::Cancelled) => (AutoState::Idle, None),
             Err(why) => (AutoState::Failed(failure(&why.message(&label))), None),
@@ -212,31 +258,31 @@ impl Auto {
         filled
     }
 
-    /// What a start now records: the filled picks still as filled, and the
-    /// slots changed since. A planner still deciding is cancelled: the
-    /// start goes ahead with the rows as they are.
-    pub(super) fn record(&mut self, form: &Form) -> Option<AutoRecord> {
+    /// What a start now records: the last fill's picks still as filled,
+    /// and the slots changed since (`form`, its verifier rows identified by
+    /// `ids`). A planner still deciding is cancelled: the start goes ahead
+    /// with the rows as they are.
+    pub(super) fn record(&mut self, form: &Form, ids: &[WidgetId]) -> Option<AutoRecord> {
         self.cancel();
-        match &self.state {
-            AutoState::Filled { assignment, at } => {
-                AutoRecord::of(assignment, *at, |pick| unchanged(form, pick))
-            }
-            _ => None,
-        }
+        let filled = self.filled.as_ref()?;
+        AutoRecord::of(&filled.assignment, filled.at, |pick| {
+            filled.unchanged(pick, form, ids)
+        })
     }
 
-    /// Draws the control into `host` and the assignment block (or why the
-    /// control is off) into `note`, each only when it changed or its
-    /// widgets went with a rebuild of the note.
+    /// Draws the control into the agents' header of the start view
+    /// (`parts`) and the assignment block (or why the control is off) into
+    /// its note, each only when it changed or its widgets went with a
+    /// rebuild of the note.
     pub(super) fn show(
         &mut self,
         tree: &mut UiTree,
-        host: WidgetId,
-        note: WidgetId,
+        parts: &Parts,
         form: &Form,
         detection: &Detection,
         text: &mut TextStore,
     ) {
+        let (host, note) = (parts.auto_host, parts.note());
         let planners = planners(detection);
         let blocker = form.target().err();
         let control = match &self.state {
@@ -279,7 +325,7 @@ impl Auto {
             }
             self.shown_control = Some(control);
         }
-        let lines = self.note_lines(form, detection, &planners, blocker);
+        let lines = self.note_lines(form, &parts.row_ids(), detection, &planners, blocker);
         let note_gone = self.note.is_none_or(|id| !tree.contains(id));
         if self.shown_note.as_ref() == Some(&lines) && !note_gone {
             return;
@@ -315,33 +361,33 @@ impl Auto {
     fn note_lines(
         &self,
         form: &Form,
+        ids: &[WidgetId],
         detection: &Detection,
         planners: &[Planner],
         blocker: Option<String>,
     ) -> Vec<Line> {
         let mut lines = Vec::new();
-        match &self.state {
-            AutoState::Filled { assignment, .. } => {
-                lines.push(Line::Heading(format!(
-                    "自動割り当て（{} が決定）— 内容を確認して「{START_LABEL}」を押してください",
-                    assignment.planner
+        if let AutoState::Failed(why) = &self.state {
+            lines.push(Line::Text(why.clone()));
+        }
+        if let Some(filled) = &self.filled {
+            lines.push(Line::Heading(format!(
+                "自動割り当て（{} が決定）— 内容を確認して「{START_LABEL}」を押してください",
+                filled.assignment.planner
+            )));
+            for pick in &filled.assignment.picks {
+                let choice = choice_of(pick).map_or_else(|| pick.agent.clone(), |c| c.label());
+                let edited = if filled.unchanged(pick, form, ids) {
+                    ""
+                } else {
+                    "（手動で変更）"
+                };
+                lines.push(Line::Text(format!(
+                    "{}: {choice} — {}{edited}",
+                    slot_label(&pick.slot),
+                    pick.reason
                 )));
-                for pick in &assignment.picks {
-                    let choice = choice_of(pick).map_or_else(|| pick.agent.clone(), |c| c.label());
-                    let edited = if unchanged(form, pick) {
-                        ""
-                    } else {
-                        "（手動で変更）"
-                    };
-                    lines.push(Line::Text(format!(
-                        "{}: {choice} — {}{edited}",
-                        slot_label(&pick.slot),
-                        pick.reason
-                    )));
-                }
             }
-            AutoState::Failed(why) => lines.push(Line::Text(why.clone())),
-            AutoState::Idle | AutoState::Running { .. } => {}
         }
         let running = matches!(self.state, AutoState::Running { .. });
         match detection {
@@ -477,8 +523,8 @@ fn content(form: &Form) -> String {
     }
     if target.kind == TargetKind::Diff {
         out.push_str("\nDiff summary (git diff --stat):\n");
-        match diff_stat(&target) {
-            Some(stat) => out.push_str(&stat),
+        match verify::engine::diff_stat(&target) {
+            Some(stat) => out.push_str(&auto_assign::cap(&stat, STAT_MAX)),
             None => out.push_str("(diff summary unavailable)\n"),
         }
     }
@@ -492,46 +538,12 @@ fn content(form: &Form) -> String {
     out
 }
 
-/// A ref the person typed that git would not read as an option.
-fn plain_ref(name: &str) -> Option<&str> {
-    (!name.is_empty() && !name.starts_with('-')).then_some(name)
-}
-
-/// `git diff --stat` of the target, cut to [`STAT_MAX`]: base…head, or the
-/// work tree against the merge base. External diff drivers and textconv
-/// filters are off, as the repository's config may name commands.
-fn diff_stat(target: &Target) -> Option<String> {
-    let base = match &target.base {
-        Some(base) => base.clone(),
-        None => verify::capture::default_base(&target.repo)?,
-    };
-    let base = plain_ref(&base)?;
-    let mut cmd = OsCommand::new("git");
-    cmd.arg("-C").arg(&target.repo).args([
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-color",
-        "--stat",
-    ]);
-    match &target.head {
-        Head::Worktree => cmd.args(["--merge-base", base]),
-        Head::Ref(head) => cmd.arg(format!("{base}...{}", plain_ref(head)?)),
-    };
-    cmd.arg("--").args(&target.paths);
-    let out = cmd
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| auto_assign::cap(&String::from_utf8_lossy(&out.stdout), STAT_MAX))
-}
-
-/// The first [`SPEC_MAX`] bytes of the spec file `asked` (relative to the
-/// repository, or absolute inside it), when it is a regular file there: a
-/// link is not followed, so nothing outside the repository is sent.
+/// The first [`SPEC_MAX`] bytes of the spec file `asked`, taken as the
+/// start takes it (`capture::capture_spec`): relative to the top of the
+/// repository, or absolute inside it, a leading `./` (or any `.` part)
+/// dropped. It is opened through `fsx::open_read`, so a symbolic link
+/// anywhere on the way (the file, or a folder above it) is refused and
+/// nothing outside the repository is sent.
 fn spec_text(repo: &Path, asked: &str) -> Option<String> {
     let root = verify::capture::repo_root(repo).ok()?;
     let given = Path::new(asked.trim());
@@ -544,22 +556,19 @@ fn spec_text(repo: &Path, asked: &str) -> Option<String> {
     } else {
         given.to_owned()
     };
-    if relative
-        .components()
-        .any(|c| !matches!(c, Component::Normal(_)))
-    {
+    let mut rel = PathBuf::new();
+    for part in relative.components() {
+        match part {
+            Component::Normal(name) => rel.push(name),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    if rel.as_os_str().is_empty() {
         return None;
     }
-    let path = root.join(relative);
-    if !std::fs::symlink_metadata(&path).ok()?.is_file() {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(&path)
-        .ok()?
-        .take(verify::capture::MAX_SPEC_BYTES)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    let file = verify::fsx::open_read(&root, &root.join(rel)).ok()?;
+    let (bytes, _) = verify::fsx::read_capped(file, verify::capture::MAX_SPEC_BYTES).ok()?;
     Some(auto_assign::cap(&String::from_utf8_lossy(&bytes), SPEC_MAX))
 }
 
@@ -616,17 +625,17 @@ fn choice_of(pick: &Pick) -> Option<AgentChoice> {
     })
 }
 
-/// The row of `form` that `slot` names.
-fn row_of<'a>(form: &'a Form, slot: &str) -> Option<&'a AgentChoice> {
-    if slot == JUDGE_SLOT {
-        return Some(&form.judge);
-    }
-    let n: usize = slot.strip_prefix("verifier-")?.parse().ok()?;
-    form.panel.get(n.checked_sub(1)?).map(|row| &row.agent)
+/// The verifier row (from 0) that slot `verifier-i` names in the request.
+fn verifier_index(slot: &str) -> Option<usize> {
+    slot.strip_prefix("verifier-")?
+        .parse::<usize>()
+        .ok()?
+        .checked_sub(1)
 }
 
 /// Puts each pick into its row of `form`: the agent, model and effort only
-/// (the strategies and the row count stay, D2).
+/// (the strategies and the row count stay, D2). The rows are those the
+/// planner was asked about, in its order (the answer is put in only then).
 pub(super) fn fill(form: &mut Form, assignment: &Assignment) {
     for pick in &assignment.picks {
         let Some(choice) = choice_of(pick) else {
@@ -634,27 +643,82 @@ pub(super) fn fill(form: &mut Form, assignment: &Assignment) {
         };
         if pick.slot == JUDGE_SLOT {
             form.judge = choice;
-        } else if let Some(row) = pick
-            .slot
-            .strip_prefix("verifier-")
-            .and_then(|n| n.parse::<usize>().ok())
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|i| form.panel.get_mut(i))
-        {
+        } else if let Some(row) = verifier_index(&pick.slot).and_then(|i| form.panel.get_mut(i)) {
             row.agent = choice;
         }
     }
 }
 
-/// Whether `pick`'s row in `form` is still as the pick filled it.
-pub(super) fn unchanged(form: &Form, pick: &Pick) -> bool {
-    row_of(form, &pick.slot).is_some_and(|row| Some(row) == choice_of(pick).as_ref())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verify::model::types::BuiltinStrategy;
+    use std::process::{Command as OsCommand, Stdio};
+    use verify::model::types::{BuiltinStrategy, Target};
+
+    /// Git in `dir`, none of the person's hooks or signing settings in the
+    /// way; `false` when it fails (or git is not there).
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        OsCommand::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// A new repository in a fresh temporary folder `name`, holding
+    /// `files` in its one commit; `None` (the test skips) without git.
+    fn repo_with(name: &str, files: &[(&str, &str)]) -> Option<PathBuf> {
+        let repo =
+            std::env::temp_dir().join(format!("noa-verify-auto-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        for (path, body) in files {
+            let path = repo.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let made = git(&repo, &["init", "-q"])
+            && git(&repo, &["add", "-A"])
+            && git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        if !made {
+            eprintln!("skipped: git is not available");
+            return None;
+        }
+        Some(repo)
+    }
+
+    /// The form of a diff target in `dir`: its work tree against the last
+    /// commit.
+    fn startable(dir: &Path) -> Form {
+        Form {
+            kind: TargetKind::Diff,
+            repo: dir.display().to_string(),
+            base: "HEAD".into(),
+            ..Form::default()
+        }
+    }
+
+    /// A diff target: the work tree of `repo` against its last commit.
+    fn worktree_target(repo: PathBuf, paths: &[&str]) -> Target {
+        Target {
+            kind: TargetKind::Diff,
+            repo,
+            base: Some("HEAD".into()),
+            head: Head::Worktree,
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            spec: None,
+        }
+    }
 
     fn pick(slot: &str, agent: &str, model: Option<&str>, effort: Option<&str>) -> Pick {
         Pick {
@@ -707,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fill_sets_agents_only_and_unchanged_compares_each_row() {
+    fn a_fill_sets_agents_only_and_each_pick_is_matched_to_its_own_row() {
         let mut form = Form::default();
         let strategies: Vec<StrategyChoice> =
             form.panel.iter().map(|r| r.strategy.clone()).collect();
@@ -716,7 +780,7 @@ mod tests {
             picks: vec![
                 pick("judge", "codex", Some("gpt-6.2-sol"), Some("high")),
                 pick("verifier-1", "agy", None, None),
-                pick("verifier-2", "claude", Some("opus"), None),
+                pick("verifier-2", "agy", None, None),
                 pick("verifier-3", "codex", None, Some("low")),
             ],
         };
@@ -730,10 +794,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             strategies
         );
-        assert!(assignment.picks.iter().all(|p| unchanged(&form, p)));
-        form.panel[1].agent.setup.effort = Some("max".into());
-        assert!(!unchanged(&form, &assignment.picks[2]));
-        assert!(!unchanged(&form, &pick("verifier-9", "claude", None, None)));
+        let mut tree = UiTree::new();
+        let root = tree.insert(None, Container::column());
+        let mut ids: Vec<WidgetId> = (0..3)
+            .map(|_| tree.insert(Some(root), Container::row()))
+            .collect();
+        let filled = Filled {
+            rows: ids.iter().copied().zip(strategies).collect(),
+            assignment,
+            at: 1,
+        };
+        let picks = &filled.assignment.picks;
+        assert!(picks.iter().all(|p| filled.unchanged(p, &form, &ids)));
+        assert!(!filled.unchanged(&pick("verifier-9", "claude", None, None), &form, &ids));
+        // A changed effort or strategy is a change of that row only.
+        let mut edited = form.clone();
+        edited.panel[2].agent.setup.effort = Some("max".into());
+        edited.panel[1].strategy = StrategyChoice::Builtin(BuiltinStrategy::Regression);
+        let still: Vec<bool> = picks
+            .iter()
+            .map(|p| filled.unchanged(p, &edited, &ids))
+            .collect();
+        assert_eq!(still, [true, true, false, false]);
+        // Verifier 1's row goes: verifier 2's row, as alike as it was, moves
+        // up into its place, and neither takes the other's pick.
+        form.panel.remove(0);
+        ids.remove(0);
+        let still: Vec<bool> = picks
+            .iter()
+            .map(|p| filled.unchanged(p, &form, &ids))
+            .collect();
+        assert_eq!(still, [true, false, true, true]);
     }
 
     #[test]
@@ -751,19 +842,10 @@ mod tests {
 
     #[test]
     fn the_spec_file_is_read_only_inside_the_repository() {
-        let repo =
-            std::env::temp_dir().join(format!("noa-verify-auto-spec-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&repo);
-        std::fs::create_dir_all(repo.join("docs")).unwrap();
-        let git = OsCommand::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["init", "-q"])
-            .status();
-        if !git.is_ok_and(|s| s.success()) {
-            eprintln!("skipped: git is not available");
+        let Some(repo) = repo_with("spec", &[]) else {
             return;
-        }
+        };
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
         std::fs::write(repo.join("docs/spec.md"), "x".repeat(SPEC_MAX + 10)).unwrap();
         let spec = spec_text(&repo, "docs/spec.md").unwrap();
         assert!(spec.starts_with(&"x".repeat(SPEC_MAX)));
@@ -772,6 +854,115 @@ mod tests {
         assert!(spec_text(&repo, "/etc/hosts").is_none());
         std::os::unix::fs::symlink("/etc/hosts", repo.join("docs/link.md")).unwrap();
         assert!(spec_text(&repo, "docs/link.md").is_none());
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn a_spec_reached_through_a_linked_folder_is_not_sent() {
+        let Some(repo) = repo_with("spec-linked", &[]) else {
+            return;
+        };
+        // `docs` in the repository is a link to a folder outside it.
+        let outside = repo.with_extension("outside");
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("spec.md"), "not the repository's").unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("docs")).unwrap();
+        assert!(spec_text(&repo, "docs/spec.md").is_none());
+        assert!(spec_text(&repo, "./docs/spec.md").is_none());
+        let absolute = repo.join("docs/spec.md").display().to_string();
+        assert!(spec_text(&repo, &absolute).is_none());
+        let form = Form {
+            spec: "docs/spec.md".into(),
+            ..startable(&repo)
+        };
+        let text = content(&form);
+        assert!(!text.contains("not the repository's"), "{text}");
+        assert!(
+            text.contains("Spec file docs/spec.md:\n(not readable)"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn a_spec_path_may_start_with_dot_slash_as_the_start_takes_it() {
+        let Some(repo) = repo_with("spec-dot", &[("docs/spec.md", "# 仕様\n")]) else {
+            return;
+        };
+        assert_eq!(
+            spec_text(&repo, "./docs/spec.md").as_deref(),
+            Some("# 仕様\n")
+        );
+        assert_eq!(
+            spec_text(&repo, "docs/./spec.md").as_deref(),
+            Some("# 仕様\n")
+        );
+        assert!(spec_text(&repo, "./").is_none());
+        // Relative to the top, whichever folder of the work tree is given.
+        assert_eq!(
+            spec_text(&repo.join("docs"), "./docs/spec.md").as_deref(),
+            Some("# 仕様\n")
+        );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn the_diff_summary_runs_no_filter_driver_of_the_settings() {
+        let files = [
+            ("a.txt", "one\n"),
+            (".gitattributes", "a.txt filter=probe\n"),
+        ];
+        let Some(repo) = repo_with("stat-filter", &files) else {
+            return;
+        };
+        // A clean filter that leaves a mark when git runs it on a.txt.
+        let marker = repo.with_extension("ran");
+        let _ = std::fs::remove_file(&marker);
+        let clean = format!("touch '{}'; cat", marker.display());
+        assert!(git(&repo, &["config", "filter.probe.clean", &clean]));
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        let stat = verify::engine::diff_stat(&worktree_target(repo.clone(), &[])).unwrap();
+        assert!(stat.contains("a.txt"), "{stat}");
+        assert!(stat.contains("1 file changed, 1 insertion(+)"), "{stat}");
+        assert!(!marker.exists(), "the summary ran the clean filter");
+        // The probe is live: git as the person runs it does run the filter.
+        let plain = OsCommand::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["diff", "--stat", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(plain.status.success());
+        assert!(marker.exists(), "the probe filter never ran");
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn the_diff_summary_reads_the_filter_from_the_top_of_the_repository() {
+        let files = [("sub/a.txt", "one\n"), ("b.txt", "b\n")];
+        let Some(repo) = repo_with("stat-sub", &files) else {
+            return;
+        };
+        std::fs::write(repo.join("sub/a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b\nc\n").unwrap();
+        // The form names a folder below the top; the filter is the top's.
+        let target = worktree_target(repo.join("sub"), &["sub/a.txt"]);
+        let stat = verify::engine::diff_stat(&target).unwrap();
+        assert!(stat.contains("sub/a.txt"), "{stat}");
+        assert!(!stat.contains("b.txt"), "{stat}");
+        assert!(stat.contains("1 file changed, 1 insertion(+)"), "{stat}");
+        let form = Form {
+            filter: "sub/a.txt".into(),
+            ..startable(&repo.join("sub"))
+        };
+        let text = content(&form);
+        assert!(
+            text.contains("Diff summary (git diff --stat):\n sub/a.txt"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(repo);
     }
 }

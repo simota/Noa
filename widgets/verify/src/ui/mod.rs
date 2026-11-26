@@ -685,8 +685,11 @@ impl Verify {
     }
 
     /// Leaves whatever verification is on screen: its runner stops (an
-    /// unfinished one stays resumable from the list).
+    /// unfinished one stays resumable from the list). A planner deciding
+    /// the start view's rows stops too: the view it would fill, and its
+    /// 中止, go from the screen.
     fn leave(&mut self) {
+        self.auto.cancel();
         if let Source::Live(channel) = &self.source {
             channel.leave();
             if !self.read_only && self.session.as_ref().is_some_and(|s| !s.closed) {
@@ -1173,9 +1176,8 @@ impl Verify {
     /// now (nothing is redrawn when nothing changed).
     fn show_auto(&mut self, text: &mut TextStore) {
         let form = start::read(&self.tree, &self.start);
-        let (host, note) = (self.start.auto_host, self.start.note());
         self.auto
-            .show(&mut self.tree, host, note, &form, &self.detection, text);
+            .show(&mut self.tree, &self.start, &form, &self.detection, text);
     }
 
     /// Takes the planner's answer once it has come (the rows are filled
@@ -1187,7 +1189,8 @@ impl Verify {
         }
         let form = start::read(&self.tree, &self.start);
         let was_running = matches!(self.auto.state, auto::AutoState::Running { .. });
-        if let Some(filled) = self.auto.poll(&form, system_now()) {
+        let ids = self.start.row_ids();
+        if let Some(filled) = self.auto.poll(&form, &ids, system_now()) {
             let rows: Vec<_> = filled.panel.iter().map(|row| row.agent.clone()).collect();
             start::set_agents(&mut self.tree, &mut self.start, &filled.judge, &rows, text);
         }
@@ -1562,8 +1565,13 @@ impl Verify {
                 };
                 let form = start::read(&self.tree, &self.start);
                 let wake = Arc::clone(&self.wake);
-                self.auto
-                    .begin(planner, &form, self.start.kinds(), Box::new(move || wake()));
+                self.auto.begin(
+                    planner,
+                    &form,
+                    &self.start.row_ids(),
+                    self.start.kinds(),
+                    Box::new(move || wake()),
+                );
                 self.rebuild(text);
             }
             Action::AutoCancel => {
@@ -1958,7 +1966,7 @@ impl Verify {
         }
         // A planner still deciding stops: the rows start as they are.
         let was_planning = matches!(self.auto.state, auto::AutoState::Running { .. });
-        let auto = self.auto.record(&form);
+        let auto = self.auto.record(&form, &self.start.row_ids());
         self.refusal = None;
         self.starting = true;
         start::rebuild_note(

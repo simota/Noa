@@ -110,6 +110,7 @@ pub enum Update {
     Session {
         session: Arc<Session>,
         artifact_root: PathBuf,
+        log_dir: PathBuf,
     },
     Link(Link),
     Notice(String),
@@ -488,6 +489,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         self.emit(Update::Session {
             session: Arc::new(self.engine.session().clone()),
             artifact_root: self.engine.reply_dir(),
+            log_dir: self.store.dir().to_owned(),
         });
     }
 

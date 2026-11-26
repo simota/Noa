@@ -72,6 +72,7 @@ pub enum Action {
     },
     Send,
     Retry,
+    RetryTimeline,
     Close,
     AddPanelRow,
     RemovePanelRow(usize),
@@ -127,6 +128,7 @@ pub struct Competition {
     tree: UiTree,
     source: Source,
     link: Link,
+    timeline_state: Option<crate::live::timeline::Status>,
     session: Option<Arc<Session>>,
     artifact_root: Option<PathBuf>,
     tab: CenterTab,
@@ -342,6 +344,7 @@ impl Competition {
             detection: start::Detection::all_installed(),
             installed: None,
             built: None,
+            timeline_state: None,
             start,
             board,
             left_host,
@@ -472,7 +475,14 @@ impl Competition {
     fn show_stored(&mut self, dir: &Path, text: &mut TextStore) -> Result<(), String> {
         let (session, root) = self.load_stored(dir)?;
         self.leave();
-        self.session = Some(Arc::new(session));
+        let session = Arc::new(session);
+        if let Source::Live(ch) = &self.source
+            && let Some(timeline) = &ch.timeline
+        {
+            timeline.recover(&session, dir);
+        }
+        self.timeline_state = None;
+        self.session = Some(session);
         self.artifact_root = root;
         self.read_only = true;
         self.stored_dir = Some(dir.to_owned());
@@ -640,6 +650,44 @@ impl Competition {
         }
 
         if let Some(session) = &self.session {
+            if let Some(status) = &self.timeline_state {
+                use crate::live::timeline::Status;
+                use noa_ipc::timeline_outbox::PublishState;
+                match status {
+                    Status::Waiting { why } => {
+                        caption(
+                            &mut self.tree,
+                            self.status_leading,
+                            "タイムライン: 投稿待ち",
+                        );
+                        caption(&mut self.tree, self.status_leading, why.clone());
+                    }
+                    Status::Publish(state) => {
+                        let label = crate::live::timeline::label(state);
+                        match state {
+                            PublishState::Failed { message, .. } => {
+                                let button = self.tree.insert(
+                                    Some(self.status_leading),
+                                    Button::new(label)
+                                        .tooltip(message.clone())
+                                        .control_size(ControlSize::Small),
+                                );
+                                self.actions.push((button, Action::RetryTimeline));
+                            }
+                            PublishState::Published { post_id, .. } => {
+                                caption(
+                                    &mut self.tree,
+                                    self.status_leading,
+                                    format!("{label} ({post_id})"),
+                                );
+                            }
+                            PublishState::Pending => {
+                                caption(&mut self.tree, self.status_leading, label);
+                            }
+                        }
+                    }
+                }
+            }
             let phase_text = if session.closed {
                 "終了".to_owned()
             } else if let Some(r) = session.current_round() {
@@ -858,6 +906,14 @@ impl Competition {
     }
 
     fn rebuild_if_changed(&mut self, text: &mut TextStore) {
+        let next_state = match (&self.source, &self.session) {
+            (Source::Live(ch), Some(s)) => ch.timeline.as_ref().and_then(|t| t.status(s)),
+            _ => None,
+        };
+        if self.timeline_state != next_state {
+            self.timeline_state = next_state;
+            self.built = None;
+        }
         let next = self.built_key();
         if let Some(prev) = &self.built {
             if prev == &next {
@@ -1025,6 +1081,17 @@ impl Competition {
                 self.pending_intervention = Some(body.clone());
                 self.send_cmd(Command::Intervene { to, body });
             }
+            Action::RetryTimeline => {
+                if let (Source::Live(ch), Some(s)) = (&self.source, &self.session)
+                    && let Some(timeline) = &ch.timeline
+                {
+                    if let Some(dir) = self.stored_dir.as_deref() {
+                        timeline.recover(s, dir);
+                    } else {
+                        timeline.retry(s);
+                    }
+                }
+            }
             Action::Retry => self.send_cmd(Command::Retry),
             Action::Close => self.send_cmd(Command::Close),
             Action::AddPanelRow => {
@@ -1101,6 +1168,64 @@ impl Competition {
             },
             Action::ExtendPast(dir, by) => self.extend_stored(dir, by, text),
             Action::ClosePanes => self.send_cmd(Command::ClosePanes),
+        }
+    }
+}
+
+#[cfg(test)]
+mod timeline_header_tests {
+    use super::*;
+    use crate::live::timeline::{NOT_REGISTERED, Status};
+    use noa_ipc::timeline::Seq;
+    use noa_ipc::timeline_outbox::PublishState;
+
+    #[test]
+    fn ac5_state_visible() {
+        let mut screen = Competition::demo();
+        let mut text = TextStore::new(Default::default());
+        for (state, expected) in [
+            (
+                Status::Publish(PublishState::Pending),
+                "タイムライン: 投稿待ち",
+            ),
+            (
+                Status::Waiting {
+                    why: NOT_REGISTERED.into(),
+                },
+                NOT_REGISTERED,
+            ),
+            (
+                Status::Publish(PublishState::Published {
+                    post_id: "po-001".into(),
+                    seq: Seq(7),
+                }),
+                "タイムライン: 投稿済み #7 (po-001)",
+            ),
+            (
+                Status::Publish(PublishState::Failed {
+                    kind: None,
+                    message: "offline".into(),
+                }),
+                "タイムライン: 投稿失敗（再試行）",
+            ),
+        ] {
+            screen.timeline_state = Some(state);
+            screen.rebuild(&mut text);
+            let text_visible = screen
+                .tree
+                .children(screen.status_leading)
+                .iter()
+                .any(|&w| {
+                    screen
+                        .tree
+                        .get::<Label>(w)
+                        .is_some_and(|l| l.text() == expected)
+                        || screen.tree.get::<Button>(w).is_some_and(|b| {
+                            b.label() == expected
+                                && screen.actions.contains(&(w, Action::RetryTimeline))
+                        })
+                });
+            assert!(text_visible, "{expected}");
         }
     }
 }

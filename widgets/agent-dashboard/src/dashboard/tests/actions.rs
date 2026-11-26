@@ -31,7 +31,7 @@ fn structured_filter_supports_qualifiers_and_negation() {
     assert_eq!(matching("state:input"), set(&[16]));
     assert_eq!(matching("state:error"), set(&[19]));
     assert_eq!(matching("state:quiet"), set(&[13]));
-    assert_eq!(matching("state:waiting"), set(&[13, 14, 15, 16, 19]));
+    assert_eq!(matching("state:waiting"), set(&[14, 15, 16, 19]));
 
     assert_eq!(matching("need:approval"), set(&[14, 15]));
     assert_eq!(matching("need:承認"), set(&[14, 15]));

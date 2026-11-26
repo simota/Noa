@@ -114,6 +114,91 @@ impl Tier {
     }
 }
 
+/// What a row says a worker is doing (its 状態). No word for success
+/// exists here: a finished worker, open or closed, has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the worker list (dashboard-worker-list U3) shows it"
+)]
+pub enum Status {
+    Approval,
+    Input,
+    Failed,
+    Running,
+    Ended,
+}
+
+#[allow(
+    dead_code,
+    reason = "the worker list (dashboard-worker-list U3) shows it"
+)]
+impl Status {
+    pub fn title(self) -> &'static str {
+        match self {
+            Status::Approval => "承認待ち",
+            Status::Input => "入力待ち",
+            Status::Failed => "失敗",
+            Status::Running => "実行中",
+            Status::Ended => "終了",
+        }
+    }
+
+    /// The list's order: an approval, an input, a failure, then what runs,
+    /// then what has ended.
+    pub fn rank(self) -> u8 {
+        match self {
+            Status::Approval => 0,
+            Status::Input => 1,
+            Status::Failed => 2,
+            Status::Running => 3,
+            Status::Ended => 4,
+        }
+    }
+}
+
+/// Which list a worker is in: 現在 and 終了 split every worker between
+/// them, and 要対応 is the part of 現在 that waits on a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the worker list (dashboard-worker-list U3) switches it"
+)]
+pub enum Scope {
+    Current,
+    Attention,
+    Ended,
+}
+
+#[allow(
+    dead_code,
+    reason = "the worker list (dashboard-worker-list U3) switches it"
+)]
+impl Scope {
+    pub const ALL: [Scope; 3] = [Scope::Current, Scope::Attention, Scope::Ended];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Scope::Current => "現在",
+            Scope::Attention => "要対応",
+            Scope::Ended => "終了",
+        }
+    }
+
+    /// Its name in the saved view.
+    pub fn name(self) -> &'static str {
+        match self {
+            Scope::Current => "current",
+            Scope::Attention => "attention",
+            Scope::Ended => "ended",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Scope::ALL.into_iter().find(|scope| scope.name() == name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Worker {
     /// The pane id: what the dashboard keys a worker by.
@@ -175,6 +260,40 @@ impl Worker {
             State::Running if self.quiet => Some(Need::Quiet),
             State::Running | State::Finished if self.attention => Some(Need::Notice),
             State::Running | State::Finished => None,
+        }
+    }
+
+    /// The one definition of 要対応: its pane is open and it waits on an
+    /// approval or an input, or it failed. A notice is not, nor is a quiet
+    /// worker: both still run or have ended on their own.
+    pub fn needs_attention(&self) -> bool {
+        !self.is_closed() && matches!(self.state, State::Permission | State::Input | State::Error)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the worker list (dashboard-worker-list U3) shows it"
+    )]
+    pub fn status(&self) -> Status {
+        match self.state {
+            State::Permission if !self.is_closed() => Status::Approval,
+            State::Input if !self.is_closed() => Status::Input,
+            State::Error => Status::Failed,
+            State::Running if !self.is_closed() => Status::Running,
+            _ => Status::Ended,
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the worker list (dashboard-worker-list U3) filters by it"
+    )]
+    pub fn in_scope(&self, scope: Scope) -> bool {
+        let current = !self.is_closed() && self.state != State::Finished;
+        match scope {
+            Scope::Current => current,
+            Scope::Attention => self.needs_attention(),
+            Scope::Ended => !current,
         }
     }
 
@@ -290,6 +409,28 @@ impl Orchestrator {
 impl Fleet {
     pub fn worker(&self, pane: u64) -> Option<&Worker> {
         self.workers.iter().find(|w| w.pane == pane)
+    }
+
+    /// The worker's parent as a row and the drawer name it: the parent
+    /// worker's label (else its pane), なし for an orchestrator itself or a
+    /// worker started alone, 不明 when unknown, else the orchestrator.
+    #[allow(
+        dead_code,
+        reason = "the worker list and drawer (dashboard-worker-list U3, U4) show it"
+    )]
+    pub fn parent_name(&self, worker: &Worker) -> String {
+        match worker.parent {
+            Some(pane) => self
+                .worker(pane)
+                .map_or_else(|| format!("ペイン {pane}"), |w| one_line(&w.label)),
+            None if worker.orchestrator_pane == Some(worker.pane)
+                || worker.orchestrator == crate::live::ALONE =>
+            {
+                "なし".to_owned()
+            }
+            None if worker.orchestrator.is_empty() => "不明".to_owned(),
+            None => one_line(&worker.orchestrator),
+        }
     }
 
     pub fn same_structure(&self, other: &Fleet) -> bool {
@@ -854,5 +995,162 @@ mod tests {
         worker.state = State::Running;
         worker.quiet = true;
         assert_eq!(worker.need(), Some(Need::Quiet));
+    }
+
+    /// A canned worker in `state`, its pane open unless `closed`.
+    fn worker_in(state: State, closed: bool) -> Worker {
+        Worker {
+            state,
+            quiet: false,
+            attention: false,
+            closed_pane: closed.then_some(7),
+            ..canned().workers.remove(0)
+        }
+    }
+
+    /// (status, 現在, 要対応, 終了)
+    fn row(worker: &Worker) -> (Status, bool, bool, bool) {
+        (
+            worker.status(),
+            worker.in_scope(Scope::Current),
+            worker.in_scope(Scope::Attention),
+            worker.in_scope(Scope::Ended),
+        )
+    }
+
+    #[test]
+    fn open_waiting_workers_need_attention() {
+        let approval = worker_in(State::Permission, false);
+        assert_eq!(row(&approval), (Status::Approval, true, true, false));
+        assert!(approval.needs_attention());
+        let input = worker_in(State::Input, false);
+        assert_eq!(row(&input), (Status::Input, true, true, false));
+        assert!(input.needs_attention());
+        let failed = worker_in(State::Error, false);
+        assert_eq!(row(&failed), (Status::Failed, true, true, false));
+        assert!(failed.needs_attention());
+    }
+
+    #[test]
+    fn a_running_worker_is_current_quiet_or_not() {
+        let running = worker_in(State::Running, false);
+        assert_eq!(row(&running), (Status::Running, true, false, false));
+        let quiet = Worker {
+            quiet: true,
+            ..running
+        };
+        assert_eq!(quiet.need(), Some(Need::Quiet));
+        assert!(!quiet.needs_attention());
+        assert_eq!(row(&quiet), (Status::Running, true, false, false));
+    }
+
+    #[test]
+    fn a_notice_never_needs_attention() {
+        for (state, expected) in [
+            (State::Running, (Status::Running, true, false, false)),
+            (State::Finished, (Status::Ended, false, false, true)),
+        ] {
+            let notice = Worker {
+                attention: true,
+                ..worker_in(state, false)
+            };
+            assert_eq!(notice.need(), Some(Need::Notice));
+            assert!(!notice.needs_attention(), "{state:?}");
+            assert_eq!(row(&notice), expected, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_finished_or_closed_worker_has_ended() {
+        let finished = worker_in(State::Finished, false);
+        assert_eq!(row(&finished), (Status::Ended, false, false, true));
+        let closed_failed = worker_in(State::Error, true);
+        assert!(!closed_failed.needs_attention());
+        assert_eq!(row(&closed_failed), (Status::Failed, false, false, true));
+        let closed_finished = worker_in(State::Finished, true);
+        assert!(!closed_finished.needs_attention());
+        assert_eq!(row(&closed_finished), (Status::Ended, false, false, true));
+    }
+
+    #[test]
+    fn status_words_never_say_success() {
+        let titles = [
+            Status::Approval,
+            Status::Input,
+            Status::Failed,
+            Status::Running,
+            Status::Ended,
+        ]
+        .map(|status| (status.rank(), status.title()));
+        assert_eq!(
+            titles,
+            [
+                (0, "承認待ち"),
+                (1, "入力待ち"),
+                (2, "失敗"),
+                (3, "実行中"),
+                (4, "終了")
+            ]
+        );
+        for (_, title) in titles {
+            assert!(
+                !title.contains("成功") && !title.contains("完了"),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_names_round_trip() {
+        for scope in Scope::ALL {
+            assert_eq!(Scope::parse(scope.name()), Some(scope));
+        }
+        assert_eq!(Scope::ALL.map(Scope::title), ["現在", "要対応", "終了"]);
+        assert_eq!(Scope::parse("waiting"), None);
+    }
+
+    #[test]
+    fn attention_is_within_current_and_current_and_ended_split_every_worker() {
+        let mut fleet = canned_with_closed();
+        // Cover what the canned fleet lacks: notices and a closed failure.
+        fleet.workers[0].attention = true;
+        fleet.workers[7].attention = true;
+        fleet.workers.last_mut().unwrap().state = State::Error;
+        for worker in &fleet.workers {
+            let current = worker.in_scope(Scope::Current);
+            let ended = worker.in_scope(Scope::Ended);
+            assert!(current != ended, "{}: {current} {ended}", worker.label);
+            if worker.in_scope(Scope::Attention) {
+                assert!(current, "{}", worker.label);
+            }
+            assert_eq!(worker.in_scope(Scope::Attention), worker.needs_attention());
+        }
+        let attention: Vec<u64> = fleet
+            .workers
+            .iter()
+            .filter(|w| w.needs_attention())
+            .map(|w| w.pane)
+            .collect();
+        assert_eq!(attention, [14, 15, 16, 19]);
+    }
+
+    #[test]
+    fn parent_name_says_who_started_the_worker() {
+        let fleet = canned_with_closed();
+        let named = |pane: u64| fleet.parent_name(fleet.worker(pane).unwrap());
+        assert_eq!(named(14), "api-refactor");
+        assert_eq!(named(11), "release-0.9.7");
+        let mut orphan = fleet.worker(14).unwrap().clone();
+        orphan.parent = Some(99);
+        assert_eq!(fleet.parent_name(&orphan), "ペイン 99");
+        orphan.parent = None;
+        orphan.orchestrator = crate::live::ALONE.into();
+        assert_eq!(fleet.parent_name(&orphan), "なし");
+        orphan.orchestrator = "release-0.9.7".into();
+        orphan.orchestrator_pane = Some(orphan.pane);
+        assert_eq!(fleet.parent_name(&orphan), "なし");
+        orphan.orchestrator_pane = None;
+        orphan.orchestrator = String::new();
+        assert_eq!(fleet.parent_name(&orphan), "不明");
     }
 }

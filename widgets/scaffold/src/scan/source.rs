@@ -356,9 +356,14 @@ pub mod pat {
         (rest == format!("=widgets/{widget}/Cargo.toml")).then_some(var)
     }
 
-    /// `^\s*run (\S+) (widget_check|usage_check) "\$X"\s*$`: the check.
+    /// `^\s*(?:in_part (?:core|widgets) && )?run (\S+) (widget_check|usage_check) "\$X"\s*$`: the check.
     pub fn full_run<'a>(line: &'a str, var: &str) -> Option<&'a str> {
-        let rest = trim_ws_start(line).strip_prefix("run ")?;
+        let line = trim_ws_start(line);
+        let line = line
+            .strip_prefix("in_part core && ")
+            .or_else(|| line.strip_prefix("in_part widgets && "))
+            .unwrap_or(line);
+        let rest = line.strip_prefix("run ")?;
         let (_, rest) = run1(rest, |c| !c.is_whitespace())?;
         check_of(rest.strip_prefix(' ')?, var)
     }

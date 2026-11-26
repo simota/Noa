@@ -10,8 +10,8 @@ usage_check() {
 }
 
 if [ "$full" = 1 ]; then
-  run alpha widget_check "$alp"
-  run beta usage_check "$bet"
+  in_part core && run alpha widget_check "$alp"
+  in_part widgets && run beta usage_check "$bet"
 elif [ "${#changed[@]}" -gt 0 ]; then
   for path in "${changed[@]}"; do
     case $path in widgets/alpha/*) alpc=1 ;; esac

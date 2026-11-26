@@ -38,7 +38,7 @@ There is no Linux menu: on Linux a widget opens from the command palette. `menu`
 2. Add the `HelperProgram` const in `helper_program.rs` (`crate_name` is the directory name, `bundled` is `Noa <Title>`), and its `launch_args` clause if it takes `--repo=`.
 3. Add the `AppCommand` variant and follow the compiler: the dispatch in `app/commands.rs`, the menu id const with `menu_id` / `from_menu_id`, the action name `<name>.open` with `fixed_action_name` / `from_action_name`, the palette title, description, category and entry, the command scopes. Add the View menu item in `macos_menu.rs`.
 4. Add the tests of point 13: the dev-build-dirs and the helper lookup tests in `helper_program.rs`, `commands/tests.rs` (addressable by action and menu id), the palette tests.
-5. `scripts/verify.sh`: the manifest variable, the `run` line in `--full`, the changed-path `case`, the `widget_uses` block and the changed-run line. Use `usage_check` if the widget's tests do not depend on macOS font widths, else `widget_check`.
+5. `scripts/verify.sh`: the manifest variable, the `in_part widgets && run` line in `--full` (or `in_part core` for a widget assigned to the core CI job), the changed-path `case`, the `widget_uses` block and the changed-run line. Use `usage_check` if the widget's tests do not depend on macOS font widths, else `widget_check`.
 6. `scripts/bundle-macos.sh`: the name in the `for widget in` list, the `<NAME>_BIN` variable, the `-x` check, the `cp` into `Contents/Helpers/<bundled>`, the `codesign` line.
 7. `scripts/package-linux.sh`: a `"<name>:<bundled>"` line in `WIDGETS=(`, **if** the widget ships on Linux.
 8. Register the decision in `dev/scaffold/registry.json` (below).
@@ -79,7 +79,7 @@ Exit 2 never means "fine". When a source changed shape on purpose, update the ru
 
 ## 5. `scripts/verify.sh`
 
-`scripts/verify.sh` runs `registration` (the checker) in both modes, and `registration-test` (the unittest below) in `--full` and whenever the checker, `scripts/tests/` or a fixture changed:
+`scripts/verify.sh` runs `registration` (the checker) on every invocation, including both macOS CI parts, and `registration-test` (the unittest below) in `--full` (the core part when split) and whenever the checker, `scripts/tests/` or a fixture changed:
 
 ```sh
 python3 -I -B -m unittest discover -s scripts/tests -p 'test_check_widget_registration.py'

@@ -509,7 +509,7 @@ def verify_point(widget, verify):
     check = None
     if var is not None:
         for number, line in enumerate(verify.lines, 1):
-            match = re.match(r'^\s*run (\S+) (widget_check|usage_check) "\$%s"\s*$' % re.escape(var), line)
+            match = re.match(r'^\s*(?:in_part (?:core|widgets) && )?run (\S+) (widget_check|usage_check) "\$%s"\s*$' % re.escape(var), line)
             if match:
                 check = match.group(2)
                 evidence.append((verify.path, number))

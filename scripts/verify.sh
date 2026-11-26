@@ -2,6 +2,9 @@
 # One command for a person, an agent and CI.
 #   scripts/verify.sh          the checks that reach what changed since main
 #   scripts/verify.sh --full   every check, as CI runs it
+#   scripts/verify.sh --full --part core|widgets
+#                              one of two halves of --full, which CI's macOS
+#                              jobs run side by side; together they are --full
 # Each check's output is in .verify/<check>.log, its time in .verify/timings.
 # Exits 1 and names every check that failed.
 #
@@ -94,14 +97,26 @@ widget_uses() {
     awk '/ \(\// {print $1}' | sort -u
 }
 
-full=0 changed=(); [ "${1:-}" = "--full" ] && full=1
+full=0 part= changed=(); [ "${1:-}" = "--full" ] && full=1
+if [ "$full" = 1 ] && [ "${2:-}" = --part ]; then
+  part=${3:-}
+  case $part in
+    core | widgets) ;;
+    *) echo "verify: --part takes core or widgets" >&2; exit 2 ;;
+  esac
+fi
+# A check of --full belongs to one part; without --part every part runs.
+# Registration is the cheap exception: it runs on every invocation.
+# The parts are balanced on CI's macOS times, which is why the dashboard,
+# the slowest widget, sits in core.
+in_part() { [ -z "$part" ] || [ "$part" = "$1" ]; }
 [ "$full" = 0 ] && while IFS= read -r path; do
   if [ ! -e "$path" ] || [[ $path =~ $widens ]]; then echo "verify: $path widens the change"; full=1; break; fi
   changed+=("$path")
 done < <({ git diff --name-only "${VERIFY_BASE:-$(git merge-base HEAD main)}" --; git ls-files --others --exclude-standard; } | sort -u)
 
-run format cargo fmt --all -- --check
-run boundaries boundaries
+in_part core && run format cargo fmt --all -- --check
+in_part core && run boundaries boundaries
 # Every widget is registered wherever dev/scaffold/registry.json says it should be.
 run registration python3 -I -B scripts/check-widget-registration.py
 
@@ -109,23 +124,23 @@ if [ "$full" = 1 ]; then
   # CI gates clippy on Linux only: on macOS, Linux-only code is dead and
   # `-D warnings` fails on it.
   # #TODO(agent): OUT-OF-SCOPE — macOS clippy -D warnings is red on main (8 dead_code errors in noa-app linux_tabs.rs, quick_terminal.rs, text_panel.rs); gate it here once fixed.
-  [ "$os" = Linux ] && run clippy cargo clippy --workspace --all-targets --locked -- -D warnings
-  run build cargo build --workspace --locked
-  run test cargo test --workspace --locked
-  run dashboard widget_check "$dashboard"
-  run browser widget_check "$browser"
-  run discussion widget_check "$discussion"
-  run competition widget_check "$competition"
-  run review widget_check "$review"
-  run verify widget_check "$verify"
-  run tasks usage_check "$tasks"
-  run scaffold usage_check "$scaffold"
-  run usage usage_check "$usage"
-  run hook-test python3 -I -B scripts/test_noa_agent_hook.py
-  run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
-  run registration-test python3 -I -B -m unittest discover -s scripts/tests -p 'test_check_widget_registration.py'
+  [ "$os" = Linux ] && in_part core && run clippy cargo clippy --workspace --all-targets --locked -- -D warnings
+  in_part core && run build cargo build --workspace --locked
+  in_part core && run test cargo test --workspace --locked
+  in_part core && run dashboard widget_check "$dashboard"
+  in_part widgets && run browser widget_check "$browser"
+  in_part widgets && run discussion widget_check "$discussion"
+  in_part widgets && run competition widget_check "$competition"
+  in_part widgets && run review widget_check "$review"
+  in_part widgets && run verify widget_check "$verify"
+  in_part widgets && run tasks usage_check "$tasks"
+  in_part widgets && run scaffold usage_check "$scaffold"
+  in_part widgets && run usage usage_check "$usage"
+  in_part core && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
+  in_part core && run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
+  in_part core && run registration-test python3 -I -B -m unittest discover -s scripts/tests -p 'test_check_widget_registration.py'
   if [ "$os" = Linux ]; then
-    run desktop-files sh -c 'desktop-file-validate dist/linux/com.simota.noa.desktop &&
+    in_part core && run desktop-files sh -c 'desktop-file-validate dist/linux/com.simota.noa.desktop &&
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
 elif [ "${#changed[@]}" -gt 0 ]; then
@@ -228,10 +243,11 @@ elif [ "${#changed[@]}" -gt 0 ]; then
 fi
 
 summary="verify: ok"; [ "${#failed[@]}" -gt 0 ] && summary="verify: FAILED: ${failed[*]}"
-[ "$full" = 1 ] && [ -z "$(git status --porcelain)" ] && echo "$summary" >".verify/baseline-$(git rev-parse HEAD)"
+[ "$full" = 1 ] && [ -z "$part" ] && [ -z "$(git status --porcelain)" ] && echo "$summary" >".verify/baseline-$(git rev-parse HEAD)"
 not_covered="GUI behaviour and visual parity (by hand), GPU tests when no adapter is present (they skip)"
 [ "$os" = Linux ] || not_covered="clippy and desktop-file validation (Linux only, as in CI), $not_covered"
 [ "$os" = Darwin ] || not_covered="the dashboard's tests (macOS only; it is built), $not_covered"
+[ -n "$part" ] && not_covered="the checks outside --part $part, $not_covered"
 echo "not covered: $not_covered"
 echo "$summary"
 [ "${#failed[@]}" -eq 0 ]

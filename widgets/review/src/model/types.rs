@@ -560,6 +560,10 @@ pub struct TargetManifest {
     pub diff_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_digest: Option<u64>,
+    /// A git work-tree target held changes not in `head_sha` when it was
+    /// taken (read with the snapshot, not afterwards).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uncommitted: bool,
     pub captured_at: Millis,
 }
 

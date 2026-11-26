@@ -1,13 +1,16 @@
-//! The detail pane beside the columns: the task's body (an issue's body
-//! and comments), its runs newest first with each one's agent, age and
-//! report, and the buttons for what can be done with them.
+//! The detail pane beside the columns: the task's 関連成果 (its runs,
+//! change versions, reviews, verifications and PRs,
+//! `docs/specs/task-links.md` L1-6), its body (an issue's body and
+//! comments), its runs newest first with each one's agent, age and report,
+//! and the buttons for what can be done with them.
 //!
 //! The screen sends a button's `Intent` when it is pressed, except
-//! `Intent::Edit` and `Intent::Run`, which open the 編集 / 実行 form filled
-//! from the task instead (their fields are the form's to choose).
+//! `Intent::Edit`, `Intent::Run` and `Intent::AddLink`, which open the 編集
+//! / 実行 / 関連を追加 form filled from the task instead (their fields are
+//! the form's to choose).
 
-use noa_gpui_core::style::FlexDirection;
-use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, ScrollView, Tag};
+use noa_gpui_core::style::{AlignItems, FlexDirection, auto, length};
+use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, ScrollView, Tag, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Color;
 
@@ -16,7 +19,9 @@ use tasks::model::types::{
     AgentKind, AgentState, GhFailure, Isolation, IssueDetail, Liveness, Millis, ResultFact,
     RunView, State, Task, TaskRef,
 };
+use tasks::related::{self, Related};
 use tasks::runs;
+use tasks::task_links::SessionKind;
 
 use super::Intent;
 use super::columns::age;
@@ -27,14 +32,15 @@ const PROBLEM: Color = Color::hex(0xff9f0a);
 
 /// Fills `host` with `task`'s detail; `runs` are the task's, newest first;
 /// `detail` is an issue's loaded body and comments (`None` until it
-/// loads, and for a local task). The buttons it made, each with what a
-/// click does.
+/// loads, and for a local task); `related` its 関連成果 (`None`: nothing
+/// linked). The buttons it made, each with what a click does.
 pub(super) fn insert(
     tree: &mut UiTree,
     host: WidgetId,
     task: &Task,
     runs: &[&RunView],
     detail: Option<&Result<IssueDetail, GhFailure>>,
+    related: Option<&Related>,
     now: Millis,
 ) -> Vec<(WidgetId, Intent)> {
     let mut actions = Vec::new();
@@ -148,6 +154,16 @@ pub(super) fn insert(
         }
     }
 
+    let none = Related::default();
+    insert_related(
+        tree,
+        pane,
+        &task.r#ref,
+        related.unwrap_or(&none),
+        runs,
+        &mut actions,
+    );
+
     heading(tree, pane, "本文");
     match (&task.r#ref, detail) {
         (TaskRef::GitHub { .. }, Some(Ok(detail))) => {
@@ -191,6 +207,215 @@ pub(super) fn insert(
         insert_run(tree, pane, run, now, &mut actions);
     }
     actions
+}
+
+/// One line of 関連成果: its text and its buttons.
+struct Line {
+    text: String,
+    buttons: Vec<(&'static str, Intent)>,
+}
+
+impl Line {
+    fn plain(text: String) -> Line {
+        Line {
+            text,
+            buttons: Vec::new(),
+        }
+    }
+}
+
+/// The 関連成果 section (L1-6): one group per kind (実行, 変更, レビュー,
+/// 検証, PR) that has lines, its tag first; newest first inside a kind
+/// (versions: current first), a 未登録 line last in its kind; then 関連を
+/// 追加.
+fn insert_related(
+    tree: &mut UiTree,
+    pane: WidgetId,
+    task: &TaskRef,
+    related: &Related,
+    runs: &[&RunView],
+    actions: &mut Vec<(WidgetId, Intent)>,
+) {
+    heading(tree, pane, "関連成果");
+    let mut groups: Vec<(&str, Tone, Vec<Line>)> = Vec::new();
+
+    let lines = related
+        .runs
+        .iter()
+        .map(|id| match runs.iter().find(|v| &v.run.run == id) {
+            Some(view) => {
+                let mut buttons = Vec::new();
+                if matches!(view.liveness, Liveness::Alive { .. }) {
+                    buttons.push(("ペインを開く", Intent::OpenPane(id.clone())));
+                }
+                buttons.push(("worktree の場所を開く", Intent::OpenWorktree(id.clone())));
+                Line {
+                    text: format!(
+                        "{id} · {} · {}",
+                        view.run.agent.command(),
+                        liveness(&view.liveness)
+                    ),
+                    buttons,
+                }
+            }
+            None => Line::plain(id.to_string()),
+        })
+        .collect();
+    groups.push(("実行", Tone::Accent, lines));
+
+    let current = related.current().map(|v| v.no);
+    // The current version first, then the others newest first.
+    let mut versions: Vec<_> = related.versions.iter().collect();
+    versions.sort_by_key(|v| (Some(v.no) != current, std::cmp::Reverse(v.no)));
+    let lines = versions
+        .into_iter()
+        .map(|v| {
+            let place = runs
+                .iter()
+                .find(|view| view.run.run == v.run)
+                .map(|view| {
+                    view.run
+                        .branch
+                        .clone()
+                        .unwrap_or_else(|| "この作業ツリー".to_owned())
+                })
+                .unwrap_or_else(|| v.run.to_string());
+            let mark = if Some(v.no) == current {
+                "（現在）"
+            } else {
+                ""
+            };
+            let short: String = v.commit.chars().take(7).collect();
+            Line::plain(format!("v{}{mark} {short} · {place}", v.no))
+        })
+        .collect();
+    groups.push(("変更", Tone::Neutral, lines));
+
+    for (kind, tag, tone) in [
+        (SessionKind::Review, "レビュー", Tone::Warning),
+        (SessionKind::Verify, "検証", Tone::Success),
+    ] {
+        let mut lines: Vec<Line> = related
+            .checked(kind)
+            .iter()
+            .rev()
+            .map(|c| Line {
+                text: format!(
+                    "{} · {} · {}",
+                    c.session,
+                    related::version_text(&c.target),
+                    related::outcome_label(kind, &c.outcome)
+                ),
+                buttons: vec![
+                    (
+                        "開く",
+                        Intent::OpenSession {
+                            kind,
+                            session: c.session.clone(),
+                        },
+                    ),
+                    (
+                        "外す",
+                        Intent::RemoveLink {
+                            task: task.clone(),
+                            id: c.session.clone(),
+                        },
+                    ),
+                ],
+            })
+            .collect();
+        if let Some(no) = current
+            && !related.registered(kind)
+        {
+            lines.push(Line::plain(format!("{tag} v{no} 未登録")));
+        }
+        groups.push((tag, tone, lines));
+    }
+
+    let lines = related
+        .prs
+        .iter()
+        .rev()
+        .map(|pr| Line {
+            text: match pr.number {
+                Some(n) => format!("#{n} {}", pr.url),
+                None => pr.url.clone(),
+            },
+            buttons: vec![
+                ("開く", Intent::OpenUrl(pr.url.clone())),
+                (
+                    "外す",
+                    Intent::RemoveLink {
+                        task: task.clone(),
+                        id: pr.id.clone(),
+                    },
+                ),
+            ],
+        })
+        .collect();
+    groups.push(("PR", Tone::Neutral, lines));
+
+    groups.retain(|(_, _, lines)| !lines.is_empty());
+    if groups.is_empty() {
+        muted(tree, pane, "まだ関連する成果はありません");
+    }
+    for (tag, tone, lines) in groups {
+        let group = tree.insert(
+            Some(pane),
+            Container::new(Style {
+                align_items: AlignItems::START,
+                ..style::row(8.0)
+            }),
+        );
+        let slot = tree.insert(
+            Some(group),
+            Container::new(Style {
+                flex_shrink: 0.0,
+                size: noa_gpui_core::style::Size {
+                    width: length(64.0),
+                    height: auto(),
+                },
+                ..Default::default()
+            }),
+        );
+        tree.insert(Some(slot), Tag::new(tag).tone(tone));
+        let items = tree.insert(
+            Some(group),
+            Container::new(Style {
+                gap: gap(4.0),
+                ..style::fill()
+            }),
+        );
+        for line in lines {
+            tree.insert(
+                Some(items),
+                Label::new(line.text).font_size(12.0).wrap(true),
+            );
+            if line.buttons.is_empty() {
+                continue;
+            }
+            let buttons = tree.insert(Some(items), Container::wrapping_row(6.0, 6.0));
+            for (label, intent) in line.buttons {
+                let id = tree.insert(
+                    Some(buttons),
+                    Button::new(label).control_size(ControlSize::Small),
+                );
+                actions.push((id, intent));
+            }
+        }
+    }
+    let add = tree.insert(Some(pane), Container::wrapping_row(6.0, 6.0));
+    let id = tree.insert(
+        Some(add),
+        Button::new("関連を追加 (A)").control_size(ControlSize::Small),
+    );
+    actions.push((
+        id,
+        Intent::AddLink {
+            task: task.clone(),
+            input: String::new(),
+        },
+    ));
 }
 
 /// One run: agent, age and state; its branch or work tree; its buttons;
@@ -331,6 +556,7 @@ mod tests {
     use noa_gpui_text::TextStore;
 
     use tasks::model::types::{Report, RunId};
+    use tasks::related::Related;
 
     use super::super::{Feed, Tasks, View};
     use super::*;
@@ -633,5 +859,290 @@ mod tests {
             "{got:?}"
         );
         at(&shown(&screen), "読めません");
+    }
+
+    // ------------------------------------------------------------ 関連成果
+
+    /// A feed with 関連成果, recording what is sent.
+    struct Linked {
+        view: Option<View>,
+        related: std::collections::BTreeMap<TaskRef, Related>,
+        sent: Rc<RefCell<Vec<Intent>>>,
+    }
+
+    impl Feed for Linked {
+        fn poll(&mut self) -> Option<View> {
+            self.view.take()
+        }
+
+        fn act(&mut self, intent: Intent) {
+            self.sent.borrow_mut().push(intent);
+        }
+
+        fn related(&self) -> Option<&std::collections::BTreeMap<TaskRef, Related>> {
+            Some(&self.related)
+        }
+    }
+
+    /// The demo View and its 関連成果 from `events` (the demo's link log
+    /// when `None`), with t-3's detail open.
+    fn linked_screen(
+        events: Option<Vec<tasks::task_links::LinkEvent>>,
+    ) -> (Tasks, Rc<RefCell<Vec<Intent>>>, TextStore, Related) {
+        let view = demo::view();
+        let events = events.unwrap_or_else(|| demo::link_events(&view));
+        let runs: Vec<_> = view.runs.iter().map(|v| v.run.clone()).collect();
+        let related = related::fold(&runs, &events);
+        let t3 = related[&TaskRef::Local(demo::LINKED_TASK.into())].clone();
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let mut screen = Tasks::new(Box::new(Linked {
+            view: Some(view),
+            related,
+            sent: sent.clone(),
+        }));
+        let mut text = TextStore::new(Default::default());
+        screen.prepare(window(), &mut text);
+        assert!(screen.select(demo::LINKED_TASK, &mut text));
+        screen.prepare(window(), &mut text);
+        (screen, sent, text, t3)
+    }
+
+    /// Where `what` is, exactly, in `list` from `from` on.
+    fn exact(list: &[String], what: &str, from: usize) -> usize {
+        list.iter()
+            .skip(from)
+            .position(|t| t == what)
+            .map(|i| i + from)
+            .unwrap_or_else(|| panic!("no {what:?} after {from} in {list:?}"))
+    }
+
+    fn click_intent(screen: &mut Tasks, text: &mut TextStore, intent: &Intent) {
+        let id = screen
+            .detail_actions
+            .iter()
+            .find(|(_, i)| i == intent)
+            .map(|(id, _)| *id)
+            .unwrap_or_else(|| panic!("no button for {intent:?}"));
+        screen.tree.set_focus(Some(id));
+        screen.dispatch(
+            Event::KeyDown {
+                key: Key::Space,
+                modifiers: Modifiers::default(),
+            },
+            text,
+        );
+        screen.prepare(window(), text);
+    }
+
+    #[test]
+    fn links_ac1_the_related_section_lists_each_kind_in_order_with_its_buttons() {
+        let (mut screen, log, mut text, t3) = linked_screen(None);
+        let task = TaskRef::Local(demo::LINKED_TASK.into());
+        let run = t3.runs[0].clone();
+        let review = t3.reviews[0].session.clone();
+        let verify = t3.verifications[0].session.clone();
+        let pr = t3.prs[0].clone();
+        let list = shown(&screen);
+        // After the task's buttons, before 本文.
+        let heading = exact(&list, "関連成果", 0);
+        assert!(exact(&list, "編集", 0) < heading);
+        let body = exact(&list, "本文", heading);
+        let tags: Vec<usize> = ["実行", "変更", "レビュー", "検証", "PR"]
+            .iter()
+            .map(|tag| exact(&list, tag, heading))
+            .collect();
+        assert!(tags.windows(2).all(|w| w[0] < w[1]), "{tags:?} in {list:?}");
+        assert!(*tags.last().unwrap() < body);
+        let branch = format!("task-{run}");
+        let rows = [
+            format!("{run} · claude · 終了"),
+            format!("v2（現在） 1a2b3c4 · {branch}"),
+            format!("v1 9f8e7d6 · {branch}"),
+            format!("{review} · v2 · 承認"),
+            format!("{verify} · v1 · 合格"),
+            "検証 v2 未登録".to_owned(),
+            format!("#45 {}", pr.url),
+            "関連を追加 (A)".to_owned(),
+        ];
+        let mut last = heading;
+        for row in &rows {
+            let i = exact(&list, row, last);
+            assert!(i < body, "{row:?} after 本文");
+            last = i;
+        }
+        // Each item once.
+        for row in &rows {
+            assert_eq!(list.iter().filter(|t| *t == row).count(), 1, "{row:?}");
+        }
+        // A run that is not live has no ペインを開く among them.
+        assert!(!list[heading..body].contains(&"ペインを開く".to_owned()));
+
+        for intent in [
+            Intent::OpenWorktree(run.clone()),
+            Intent::OpenSession {
+                kind: SessionKind::Review,
+                session: review.clone(),
+            },
+            Intent::RemoveLink {
+                task: task.clone(),
+                id: review.clone(),
+            },
+            Intent::OpenSession {
+                kind: SessionKind::Verify,
+                session: verify.clone(),
+            },
+            Intent::RemoveLink {
+                task: task.clone(),
+                id: verify,
+            },
+            Intent::OpenUrl(pr.url.clone()),
+            Intent::RemoveLink {
+                task: task.clone(),
+                id: pr.id.clone(),
+            },
+        ] {
+            click_intent(&mut screen, &mut text, &intent);
+            assert_eq!(sent(&log), [intent]);
+        }
+        // 関連を追加 opens its form instead of sending.
+        click_intent(
+            &mut screen,
+            &mut text,
+            &Intent::AddLink {
+                task,
+                input: String::new(),
+            },
+        );
+        assert!(screen.form.is_some());
+        assert!(sent(&log).is_empty());
+    }
+
+    #[test]
+    fn links_ac1_a_live_run_offers_its_pane_and_a_task_with_nothing_says_so() {
+        let view = view();
+        let (mut screen, _, mut text) = screen_on(view);
+        // A feed without links: every detail has the empty section.
+        assert!(screen.select("t-1", &mut text));
+        let list = shown(&screen);
+        let heading = exact(&list, "関連成果", 0);
+        assert_eq!(list[heading + 1], "まだ関連する成果はありません");
+        assert_eq!(list[heading + 2], "関連を追加 (A)");
+
+        let mut view = demo::view();
+        view.runs
+            .retain(|r| r.run.task == TaskRef::Local("t-2".into()));
+        let runs: Vec<_> = view.runs.iter().map(|v| v.run.clone()).collect();
+        let related = related::fold(&runs, &[]);
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let mut screen = Tasks::new(Box::new(Linked {
+            view: Some(view),
+            related,
+            sent,
+        }));
+        let mut text = TextStore::new(Default::default());
+        assert!(screen.select("t-2", &mut text));
+        let list = shown(&screen);
+        let heading = exact(&list, "関連成果", 0);
+        let run = exact(&list, "実行", heading);
+        assert!(list[run + 1].ends_with(" · claude · 実行中"), "{list:?}");
+        assert_eq!(list[run + 2], "ペインを開く");
+        assert_eq!(list[run + 3], "worktree の場所を開く");
+        // No version yet: no 未登録 line.
+        assert!(!list.iter().any(|t| t.contains("未登録")), "{list:?}");
+    }
+
+    #[test]
+    fn links_ac4_current_v2_review_v2_verify_v1() {
+        let (screen, _, _, t3) = linked_screen(None);
+        assert_eq!(t3.current().map(|v| v.no), Some(2));
+        assert!(t3.registered(SessionKind::Review));
+        assert!(!t3.registered(SessionKind::Verify));
+        let list = shown(&screen);
+        let review = &t3.reviews[0].session;
+        let verify = &t3.verifications[0].session;
+        assert!(
+            list.iter().any(|t| t.starts_with("v2（現在） ")),
+            "{list:?}"
+        );
+        assert!(list.contains(&format!("{review} · v2 · 承認")), "{list:?}");
+        assert!(list.contains(&format!("{verify} · v1 · 合格")), "{list:?}");
+        assert!(list.contains(&"検証 v2 未登録".to_owned()), "{list:?}");
+        assert!(!list.contains(&"レビュー v2 未登録".to_owned()), "{list:?}");
+    }
+
+    /// The current version is listed first even when the head went back
+    /// to an earlier one (L1-6: versions, current first).
+    #[test]
+    fn links_ac4_a_head_back_on_v1_lists_v1_first() {
+        use tasks::task_links::LinkEvent;
+        let view = demo::view();
+        let mut events = demo::link_events(&view);
+        let (run, v1) = events
+            .iter()
+            .find_map(|e| match e {
+                LinkEvent::ChangeSeen { run, commit, .. } => Some((run.clone(), commit.clone())),
+                _ => None,
+            })
+            .unwrap();
+        events.push(LinkEvent::ChangeSeen {
+            run,
+            commit: v1,
+            at: Millis::MAX,
+        });
+        let (screen, _, _, t3) = linked_screen(Some(events));
+        assert_eq!(t3.current().map(|v| v.no), Some(1));
+        let list = shown(&screen);
+        let first = list.iter().position(|t| t.starts_with("v1")).unwrap();
+        let second = list.iter().position(|t| t.starts_with("v2")).unwrap();
+        assert!(list[first].starts_with("v1（現在） "), "{list:?}");
+        assert!(first < second, "{list:?}");
+    }
+
+    #[test]
+    fn links_ac4_an_uncommitted_target_leaves_v2_unregistered_and_a_base_target_is_at_start() {
+        use tasks::task_links::LinkEvent;
+        let view = demo::view();
+        let mut events = demo::link_events(&view);
+        let base = events
+            .iter()
+            .find_map(|e| match e {
+                LinkEvent::ChangeBase { commit, .. } => Some(commit.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let v2 = format!("{:0<40}", "1a2b3c4");
+        for event in &mut events {
+            if let LinkEvent::SessionLinked {
+                kind,
+                commit,
+                uncommitted,
+                ..
+            } = event
+            {
+                match kind {
+                    // The verification checked v2 with uncommitted changes.
+                    SessionKind::Verify => {
+                        *commit = Some(v2.clone());
+                        *uncommitted = true;
+                    }
+                    // The review checked the commit the run started from.
+                    SessionKind::Review => *commit = Some(base.clone()),
+                }
+            }
+        }
+        let (screen, _, _, t3) = linked_screen(Some(events));
+        let list = shown(&screen);
+        let review = &t3.reviews[0].session;
+        let verify = &t3.verifications[0].session;
+        assert!(
+            list.contains(&format!("{verify} · v2+未コミット · 合格")),
+            "{list:?}"
+        );
+        assert!(
+            list.contains(&format!("{review} · 着手時点 · 承認")),
+            "{list:?}"
+        );
+        assert!(list.contains(&"検証 v2 未登録".to_owned()), "{list:?}");
+        assert!(list.contains(&"レビュー v2 未登録".to_owned()), "{list:?}");
     }
 }

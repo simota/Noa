@@ -7,13 +7,19 @@
 //! `noa.listPanels` and the runs' result files at most every `POLL_MS`, and
 //! sends what it sees. The GitHub source ([`IssueFeed`]) runs `gh` on its
 //! own threads and never blocks, so the UI thread asks it directly.
+//!
+//! The worker also keeps the task links (`docs/specs/task-links.md`): it
+//! names the repository in the link log, records each run's head as it
+//! moves (the change poll, every `CHANGE_POLL_MS`), writes the links the
+//! person adds or removes, and folds the log into each task's 関連成果.
 
 pub mod ipc;
 pub mod start;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::marker::PhantomData;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,6 +30,9 @@ use tasks::model::types::{
     AgentKind, Liveness, Millis, POLL_MS, PaneFact, Report, ResultFact, Run, RunEvent, RunId,
     RunView, State, Task, TaskRef,
 };
+use tasks::related::{self, LinkScan, Related};
+use tasks::sibling::{self, Launcher};
+use tasks::task_links::{self, CHANGE_POLL_MS, LinkEvent, SessionKind, TaskKey};
 use tasks::{code, runs, store, worktree};
 
 use crate::installed::{self, Installed};
@@ -56,8 +65,21 @@ enum Job {
     ClosePane(RunId),
     OpenWorktree(RunId),
     Open(String),
-    /// Read the code's markers again now (再取得).
+    /// Read the code's markers again now, and look for moved heads (再取得).
     ScanCode,
+    OpenSession {
+        kind: SessionKind,
+        session: String,
+    },
+    /// A PR's URL, parsed already.
+    AddLink {
+        task: TaskRef,
+        url: String,
+    },
+    RemoveLink {
+        task: TaskRef,
+        id: String,
+    },
 }
 
 /// What the worker sends back.
@@ -65,6 +87,7 @@ enum Up {
     Seen {
         tasks: Vec<Task>,
         runs: Vec<RunView>,
+        related: BTreeMap<TaskRef, Related>,
     },
     Notice(String),
 }
@@ -78,6 +101,9 @@ pub struct LiveFeed<C> {
     ups: Receiver<Up>,
     tasks: Vec<Task>,
     runs: Vec<RunView>,
+    related: BTreeMap<TaskRef, Related>,
+    /// `related` changed since the last View handed out.
+    related_new: bool,
     notice: Option<String>,
     agents: Option<Vec<AgentKind>>,
     installed: Option<Receiver<Installed>>,
@@ -136,6 +162,7 @@ impl LiveFeed<IpcConnect> {
             Box::new(issues),
             IpcConnect,
             Box::new(system_open),
+            Box::new(sibling::System),
             Arc::new(system_now),
             wake.clone(),
         );
@@ -145,19 +172,24 @@ impl LiveFeed<IpcConnect> {
 }
 
 impl<C: Connect + Send + 'static> LiveFeed<C> {
-    /// `opener` opens a URL or a directory (`open` / `xdg-open` in `start`).
+    /// `opener` opens a URL or a directory (`open` / `xdg-open` in
+    /// `start`); `launcher` starts Review or Verify on a linked session
+    /// (`sibling::System` in `start`).
+    #[allow(clippy::too_many_arguments)]
     pub fn with(
         repo: PathBuf,
         root: PathBuf,
         issues: Box<dyn IssueFeed>,
         connect: C,
         opener: Box<dyn FnMut(&str) + Send>,
+        launcher: Box<dyn Launcher + Send>,
         clock: Arc<dyn Fn() -> Millis + Send + Sync>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
         let (jobs, job_rx) = mpsc::channel();
         let (up_tx, ups) = mpsc::channel();
         let log = store::runs_log(&root, &store::repo_key(&repo));
+        let links = start::links_of(&log);
         let (worker_repo, worker_clock, worker_wake) = (repo.clone(), clock.clone(), wake.clone());
         // Built on its thread: a connection need not be `Send`.
         let spawned = std::thread::Builder::new()
@@ -166,7 +198,18 @@ impl<C: Connect + Send + 'static> LiveFeed<C> {
                 Worker {
                     scan: Scan::new(worker_repo.clone()),
                     repo: worker_repo,
+                    root,
                     log,
+                    link_scan: LinkScan::new(links.clone()),
+                    links,
+                    events: Vec::new(),
+                    related: BTreeMap::new(),
+                    fold_stale: true,
+                    change_at: None,
+                    here_live: HashSet::new(),
+                    here_done: HashSet::new(),
+                    link_failure: None,
+                    launcher,
                     connect,
                     conn: None,
                     board: None,
@@ -201,6 +244,8 @@ impl<C: Connect + Send + 'static> LiveFeed<C> {
             ups,
             tasks: Vec::new(),
             runs: Vec::new(),
+            related: BTreeMap::new(),
+            related_new: false,
             notice,
             agents: None,
             installed: None,
@@ -271,9 +316,17 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
     fn poll(&mut self) -> Option<View> {
         while let Ok(up) = self.ups.try_recv() {
             match up {
-                Up::Seen { tasks, runs } => {
+                Up::Seen {
+                    tasks,
+                    runs,
+                    related,
+                } => {
                     self.tasks = tasks;
                     self.runs = runs;
+                    if related != self.related {
+                        self.related = related;
+                        self.related_new = true;
+                    }
                 }
                 Up::Notice(notice) => self.notice = Some(notice),
             }
@@ -302,15 +355,21 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
             notice: self.notice.clone(),
             now: (self.clock)(),
         };
-        if self
-            .shown
-            .as_ref()
-            .is_some_and(|shown| same_view(shown, &view))
+        let related_new = std::mem::replace(&mut self.related_new, false);
+        if !related_new
+            && self
+                .shown
+                .as_ref()
+                .is_some_and(|shown| same_view(shown, &view))
         {
             return None;
         }
         self.shown = Some(view.clone());
         Some(view)
+    }
+
+    fn related(&self) -> Option<&BTreeMap<TaskRef, Related>> {
+        Some(&self.related)
     }
 
     fn act(&mut self, intent: Intent) {
@@ -369,6 +428,15 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
                 self.send(Job::ScanCode);
             }
             Intent::LoadDetail(number) => self.issues.load_detail(number),
+            Intent::OpenSession { kind, session } => self.send(Job::OpenSession { kind, session }),
+            Intent::AddLink { task, input } => {
+                let gh = self.issues.view();
+                match related::parse_pr(&input, gh.repo.as_deref()) {
+                    Ok(url) => self.send(Job::AddLink { task, url }),
+                    Err(why) => self.say(why),
+                }
+            }
+            Intent::RemoveLink { task, id } => self.send(Job::RemoveLink { task, id }),
         }
     }
 }
@@ -376,7 +444,27 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
 /// The worker thread's state: everything that reads files or talks to Noa.
 struct Worker<C: Connect> {
     repo: PathBuf,
+    /// The data root (`<data dir>/noa/tasks`): sessions are beside it.
+    root: PathBuf,
     log: PathBuf,
+    /// The link log of this repository's key dir, and its events as last
+    /// read.
+    links: PathBuf,
+    link_scan: LinkScan,
+    events: Vec<LinkEvent>,
+    /// `events` folded over `runs`, again when either changed
+    /// (`fold_stale`).
+    related: BTreeMap<TaskRef, Related>,
+    fold_stale: bool,
+    /// When the change poll last ran.
+    change_at: Option<Millis>,
+    /// この作業ツリー runs seen live, and those looked at once more since
+    /// they ended.
+    here_live: HashSet<RunId>,
+    here_done: HashSet<RunId>,
+    /// Why the change poll last failed, said once until it changes.
+    link_failure: Option<String>,
+    launcher: Box<dyn Launcher + Send>,
     scan: Scan,
     connect: C,
     conn: Option<C::Conn>,
@@ -408,7 +496,97 @@ struct Worker<C: Connect> {
     clock: Arc<dyn Fn() -> Millis + Send + Sync>,
     wake: Arc<dyn Fn() + Send + Sync>,
     up: Sender<Up>,
-    sent: Option<(Vec<Task>, Vec<RunView>)>,
+    sent: Option<Seen>,
+}
+
+/// What the worker last sent.
+type Seen = (Vec<Task>, Vec<RunView>, BTreeMap<TaskRef, Related>);
+
+/// The `TaskKey` the link log names `task` by.
+fn task_key(task: &TaskRef) -> TaskKey {
+    TaskKey(serde_json::to_value(task).expect("a task ref is JSON"))
+}
+
+/// The commit each run's head was last recorded at in `events`, as
+/// `related::fold` takes the head: its last `ChangeSeen`, or a commit one of
+/// its sessions named first (a new version of the run's task), else its
+/// first `ChangeBase`.
+fn recorded_heads<'a>(runs: &[Run], events: &'a [LinkEvent]) -> HashMap<&'a str, &'a str> {
+    let task_of: HashMap<&str, &TaskRef> = runs.iter().map(|r| (r.run.as_str(), &r.task)).collect();
+    let mut bases: HashMap<&str, &str> = HashMap::new();
+    for event in events {
+        if let LinkEvent::ChangeBase { run, commit, .. } = event {
+            bases.entry(run.as_str()).or_insert(commit.as_str());
+        }
+    }
+    let mut heads: HashMap<&str, &str> = bases.clone();
+    let mut named: HashSet<(&TaskRef, &str)> = HashSet::new();
+    let mut sessions: HashSet<(SessionKind, &str)> = HashSet::new();
+    for event in events {
+        match event {
+            LinkEvent::ChangeSeen { run, commit, .. } => {
+                heads.insert(run.as_str(), commit.as_str());
+                if let Some(task) = task_of.get(run.as_str())
+                    && bases.get(run.as_str()) != Some(&commit.as_str())
+                {
+                    named.insert((task, commit.as_str()));
+                }
+            }
+            LinkEvent::SessionLinked {
+                kind,
+                session,
+                run,
+                commit: Some(commit),
+                ..
+            } => {
+                if !sessions.insert((*kind, session.as_str())) {
+                    continue;
+                }
+                let Some(task) = task_of.get(run.as_str()) else {
+                    continue;
+                };
+                if bases.get(run.as_str()) != Some(&commit.as_str())
+                    && named.insert((task, commit.as_str()))
+                {
+                    heads.insert(run.as_str(), commit.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+    heads
+}
+
+/// The head of every `task-run-*` branch of `repo`, by branch name: one
+/// `git for-each-ref`, read from the repository (not a worktree), so a
+/// removed worktree's branch is still read.
+fn run_branch_heads(repo: &Path) -> Result<HashMap<String, String>, String> {
+    let out = start::git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:lstrip=2)%00%(objectname)",
+            "refs/heads/task-run-*",
+        ],
+    )?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .filter_map(|line| line.split_once('\0'))
+        .map(|(name, sha)| (name.to_owned(), sha.trim().to_owned()))
+        .collect())
+}
+
+/// The commit `branch` of `repo` was created at: the oldest entry of its
+/// reflog ("branch: Created from HEAD"), if git kept one.
+fn branch_origin(repo: &Path, branch: &str) -> Option<String> {
+    let name = format!("refs/heads/{branch}");
+    let out = start::git(repo, &["reflog", "show", "--format=%H", &name, "--"]).ok()?;
+    let oldest = String::from_utf8_lossy(&out)
+        .lines()
+        .last()?
+        .trim()
+        .to_owned();
+    (!oldest.is_empty()).then_some(oldest)
 }
 
 /// Whether `last` is at least `POLL_MS` before `now` (or never).
@@ -419,6 +597,7 @@ fn due(last: Option<Millis>, now: Millis) -> bool {
 impl<C: Connect> Worker<C> {
     fn run(mut self, jobs: Receiver<Job>) {
         self.reload_runs();
+        self.name_repo();
         loop {
             self.look();
             self.publish();
@@ -440,6 +619,226 @@ impl<C: Connect> Worker<C> {
             Ok(runs) => self.runs = runs,
             Err(e) => self.say(format!("実行の記録を読めません: {e}")),
         }
+        self.fold_stale = true;
+    }
+
+    /// `Repo` in the link log, unless its last `Repo` names this
+    /// repository already (L1-1).
+    fn name_repo(&mut self) {
+        let named = task_links::read(&self.links).map(|events| {
+            events.iter().rev().find_map(|event| match event {
+                LinkEvent::Repo { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+        });
+        let written = match named {
+            Ok(Some(path)) if path == self.repo => return,
+            Ok(_) => self.append_link(&LinkEvent::Repo {
+                path: self.repo.clone(),
+                at: (self.clock)(),
+            }),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(why) = written {
+            self.say(format!("関連の記録に書けません: {why}"));
+        }
+    }
+
+    /// Appends to the link log and reads it again at the next look.
+    fn append_link(&mut self, event: &LinkEvent) -> Result<(), String> {
+        let written = task_links::append(&self.links, event).map_err(|e| e.to_string());
+        self.link_scan = LinkScan::new(self.links.clone());
+        written
+    }
+
+    /// The change poll (L1-3): each run's head, recorded as `ChangeSeen`
+    /// when it differs from the commit last recorded for it. Runs on a
+    /// branch are read from their `task-run-…` ref; この作業ツリー runs
+    /// from the repository's `HEAD` while live and once after they end.
+    fn poll_changes(&mut self, now: Millis) {
+        let events = match task_links::read(&self.links) {
+            Ok(events) => events,
+            Err(e) => return self.change_failed(format!("関連の記録を読めません: {e}")),
+        };
+        let recorded: HashMap<String, String> = recorded_heads(&self.runs, &events)
+            .into_iter()
+            .map(|(run, commit)| (run.to_owned(), commit.to_owned()))
+            .collect();
+        let based: HashSet<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                LinkEvent::ChangeBase { run, .. } => Some(run.clone()),
+                _ => None,
+            })
+            .collect();
+        // Each run's head, with its branch when it has one.
+        let mut heads: Vec<(RunId, Option<String>, Result<String, String>)> = Vec::new();
+        let mut failure = None;
+        if self.runs.iter().any(|r| r.branch.is_some()) {
+            match run_branch_heads(&self.repo) {
+                Ok(branches) => {
+                    for run in &self.runs {
+                        // A deleted branch adds nothing; its versions stay.
+                        if let Some((branch, sha)) = run
+                            .branch
+                            .as_ref()
+                            .and_then(|b| Some((b, branches.get(b)?)))
+                        {
+                            heads.push((run.run.clone(), Some(branch.clone()), Ok(sha.clone())));
+                        }
+                    }
+                }
+                Err(why) => failure = Some(format!("変更を確かめられません: {why}")),
+            }
+        }
+        for view in self.views(now) {
+            let run = view.run;
+            if run.branch.is_some() {
+                continue;
+            }
+            let look = match view.liveness {
+                Liveness::Starting | Liveness::Alive { .. } => {
+                    self.here_live.insert(run.run.clone());
+                    true
+                }
+                // Marked done below only once read and written.
+                Liveness::Gone => {
+                    self.here_live.contains(&run.run) && !self.here_done.contains(&run.run)
+                }
+            };
+            if look {
+                heads.push((run.run.clone(), None, start::head_of(&run.workdir)));
+            }
+        }
+        let ended: HashSet<RunId> = self
+            .views(now)
+            .into_iter()
+            .filter(|view| view.run.branch.is_none() && view.liveness == Liveness::Gone)
+            .map(|view| view.run.run)
+            .collect();
+        for (run, branch, head) in heads {
+            let last_read = ended.contains(&run);
+            let commit = match head {
+                Ok(commit) => commit,
+                Err(why) => {
+                    failure = Some(format!("変更を確かめられません: {why}"));
+                    continue;
+                }
+            };
+            if commit.is_empty() {
+                if last_read {
+                    self.here_done.insert(run);
+                }
+                continue;
+            }
+            let mut last = recorded.get(run.as_str()).cloned();
+            if !based.contains(run.as_str()) {
+                // A run started before the link log (or whose base could
+                // not be written): its base is where its branch was created,
+                // else the head seen now, never a version.
+                let base = branch
+                    .as_deref()
+                    .and_then(|b| branch_origin(&self.repo, b))
+                    .unwrap_or_else(|| commit.clone());
+                let event = LinkEvent::ChangeBase {
+                    run: run.to_string(),
+                    commit: base.clone(),
+                    at: now,
+                };
+                if let Err(why) = self.append_link(&event) {
+                    failure = Some(format!("関連の記録に書けません: {why}"));
+                    continue;
+                }
+                last.get_or_insert(base);
+            }
+            if last.as_ref() != Some(&commit) {
+                let seen = LinkEvent::ChangeSeen {
+                    run: run.to_string(),
+                    commit,
+                    at: now,
+                };
+                if let Err(why) = self.append_link(&seen) {
+                    failure = Some(format!("関連の記録に書けません: {why}"));
+                    continue;
+                }
+            }
+            if last_read {
+                self.here_done.insert(run);
+            }
+        }
+        match failure {
+            Some(why) => self.change_failed(why),
+            None => self.link_failure = None,
+        }
+    }
+
+    fn change_failed(&mut self, why: String) {
+        if self.link_failure.as_ref() != Some(&why) {
+            self.say(why.clone());
+            self.link_failure = Some(why);
+        }
+    }
+
+    /// The task's links as the log says now (read again: another window
+    /// may have written since the last look).
+    fn related_now(&mut self, task: &TaskRef) -> Result<(Vec<LinkEvent>, Related), String> {
+        let events =
+            task_links::read(&self.links).map_err(|e| format!("関連の記録を読めません: {e}"))?;
+        let related = related::fold(&self.runs, &events)
+            .remove(task)
+            .unwrap_or_default();
+        Ok((events, related))
+    }
+
+    fn add_link(&mut self, task: &TaskRef, url: &str) -> Result<String, String> {
+        let (events, related) = self.related_now(task)?;
+        if related.prs.iter().any(|pr| pr.url == url) {
+            return Err("この PR はもう関連づいています".to_owned());
+        }
+        let now = (self.clock)();
+        self.append_link(&LinkEvent::PrLinked {
+            id: task_links::new_pr_id(now, &events),
+            task: task_key(task),
+            url: url.to_owned(),
+            at: now,
+        })
+        .map_err(|why| format!("関連の記録に書けません: {why}"))?;
+        Ok(format!("{url} を関連づけました"))
+    }
+
+    fn remove_link(&mut self, task: &TaskRef, id: &str) -> Result<String, String> {
+        let (_, related) = self.related_now(task)?;
+        let linked = related.prs.iter().any(|pr| pr.id == id)
+            || related
+                .reviews
+                .iter()
+                .chain(&related.verifications)
+                .any(|c| c.session == id);
+        if !linked {
+            return Err(format!("{id} はこのタスクに関連づいていません"));
+        }
+        self.append_link(&LinkEvent::LinkRemoved {
+            task: task_key(task),
+            id: id.to_owned(),
+            at: (self.clock)(),
+        })
+        .map_err(|why| format!("関連の記録に書けません: {why}"))?;
+        Ok(format!("{id} の関連を外しました"))
+    }
+
+    /// Review's or Verify's own window on a stored session
+    /// (`--session=<its folder>`).
+    fn open_session(&mut self, kind: SessionKind, session: &str) -> Result<String, String> {
+        let store = task_links::session_store(&self.root, kind, session)
+            .ok_or_else(|| format!("{session} の記録が見つかりません"))?;
+        let helper = match kind {
+            SessionKind::Review => sibling::REVIEW,
+            SessionKind::Verify => sibling::VERIFY,
+        };
+        let mut arg = OsString::from("--session=");
+        arg.push(&store);
+        self.launcher.launch(helper, vec![arg])?;
+        Ok(format!("{session} を開きました"))
     }
 
     /// The link to Noa, connecting when there is none.
@@ -492,6 +891,17 @@ impl<C: Connect> Worker<C> {
             self.panes_at = Some(now);
             self.list_panes();
         }
+        if self
+            .change_at
+            .is_none_or(|at| now.saturating_sub(at) >= CHANGE_POLL_MS)
+        {
+            self.change_at = Some(now);
+            self.poll_changes(now);
+        }
+        if let Some(events) = self.link_scan.poll(now) {
+            self.events = events;
+            self.fold_stale = true;
+        }
         if due(self.results_at, now) {
             self.results_at = Some(now);
             // Runs another window started (or closed) show here too.
@@ -517,6 +927,23 @@ impl<C: Connect> Worker<C> {
                 self.results.insert(run.run.clone(), (fact, report));
             }
         }
+        self.note_here_live(now);
+    }
+
+    /// Notes the この作業ツリー runs live now, at every look and not only at
+    /// the change poll, so one that ends between two polls still gets its
+    /// last head read once (L1-3).
+    fn note_here_live(&mut self, now: Millis) {
+        let live: Vec<RunId> = self
+            .views(now)
+            .into_iter()
+            .filter(|view| {
+                view.run.branch.is_none()
+                    && matches!(view.liveness, Liveness::Starting | Liveness::Alive { .. })
+            })
+            .map(|view| view.run.run)
+            .collect();
+        self.here_live.extend(live);
     }
 
     /// `noa.listPanels`; a failure keeps the panes last seen, so a lost
@@ -632,13 +1059,17 @@ impl<C: Connect> Worker<C> {
             .chain(&gone)
             .cloned()
             .collect();
-        let seen = (tasks, self.views((self.clock)()));
+        if std::mem::replace(&mut self.fold_stale, false) {
+            self.related = related::fold(&self.runs, &self.events);
+        }
+        let seen = (tasks, self.views((self.clock)()), self.related.clone());
         if self.sent.as_ref() == Some(&seen) {
             return;
         }
         let _ = self.up.send(Up::Seen {
             tasks: seen.0.clone(),
             runs: seen.1.clone(),
+            related: seen.2.clone(),
         });
         self.sent = Some(seen);
         (self.wake)();
@@ -655,6 +1086,7 @@ impl<C: Connect> Worker<C> {
         let outcome = match job {
             Job::ScanCode => {
                 self.code_at = None;
+                self.change_at = None;
                 return;
             }
             Job::Create(file) => self.create(file),
@@ -674,6 +1106,10 @@ impl<C: Connect> Worker<C> {
             Job::OpenPane(run) => self.open_pane(&run),
             Job::ClosePane(run) => self.close_pane(&run),
             Job::OpenWorktree(run) => match self.runs.iter().find(|r| r.run == run) {
+                Some(found) if !found.workdir.exists() => Err(format!(
+                    "{} はもうありません（worktree は削除済み）",
+                    found.workdir.display()
+                )),
                 Some(found) => {
                     let dir = found.workdir.display().to_string();
                     (self.opener)(&dir);
@@ -685,6 +1121,9 @@ impl<C: Connect> Worker<C> {
                 (self.opener)(&url);
                 Ok(format!("{url} を開きました"))
             }
+            Job::OpenSession { kind, session } => self.open_session(kind, &session),
+            Job::AddLink { task, url } => self.add_link(&task, &url),
+            Job::RemoveLink { task, id } => self.remove_link(&task, &id),
         };
         // What the intent changed is shown before what is said about it.
         self.look_now();
@@ -755,12 +1194,18 @@ impl<C: Connect> Worker<C> {
         let started = start::start(conn, &mut board, &log, req, now);
         self.board = board;
         self.reload_runs();
-        started.map(|run| {
-            format!(
+        // Its base is in the link log now.
+        self.link_scan = LinkScan::new(self.links.clone());
+        started.map(|(run, base)| {
+            let started = format!(
                 "{} を {} で始めました（{run}）",
                 req.task.title,
                 req.agent.command()
-            )
+            );
+            match base {
+                Some(why) => format!("{started}。着手時点を記録できません: {why}"),
+                None => started,
+            }
         })
     }
 
@@ -1054,10 +1499,14 @@ mod tests {
     struct Rig {
         _tmp: Temp,
         repo: PathBuf,
+        /// The data root (`<data dir>/noa/tasks`).
+        root: PathBuf,
         log: PathBuf,
         noa: FakeNoa,
         clock: Arc<AtomicU64>,
         opened: Arc<Mutex<Vec<String>>>,
+        /// What the launcher was asked to start.
+        launched: Launched,
         asked: Arc<Mutex<Vec<String>>>,
         /// The thread of each wake.
         wakes: Arc<Mutex<Vec<std::thread::ThreadId>>>,
@@ -1069,6 +1518,25 @@ mod tests {
     /// A feed on a fresh repository; `before` runs on the data root and
     /// the fake Noa before the feed starts.
     fn rig(name: &str, before: impl FnOnce(&Path, &Path, &FakeNoa)) -> Rig {
+        rig_with(name, before, false)
+    }
+
+    /// Which widgets a launcher started, with their arguments.
+    type Launched = Arc<Mutex<Vec<(sibling::Helper, Vec<OsString>)>>>;
+
+    /// A launcher that records what it is asked and starts nothing.
+    struct Recording(Launched);
+
+    impl Launcher for Recording {
+        fn launch(&mut self, helper: sibling::Helper, args: Vec<OsString>) -> Result<(), String> {
+            self.0.lock().unwrap().push((helper, args));
+            Ok(())
+        }
+    }
+
+    /// [`rig`]; with `record`, its launcher records (else it is
+    /// `sibling::Offline`).
+    fn rig_with(name: &str, before: impl FnOnce(&Path, &Path, &FakeNoa), record: bool) -> Rig {
         let tmp = Temp::new(name);
         let repo = tmp.0.join("app");
         repo_at(&repo);
@@ -1080,26 +1548,35 @@ mod tests {
         let opened = Arc::new(Mutex::new(Vec::new()));
         let asked = Arc::new(Mutex::new(Vec::new()));
         let wakes = Arc::new(Mutex::new(Vec::new()));
+        let launched: Launched = Arc::default();
+        let launcher: Box<dyn Launcher + Send> = if record {
+            Box::new(Recording(launched.clone()))
+        } else {
+            Box::new(sibling::Offline("テストでは起動しません"))
+        };
         let (c, o, w) = (clock.clone(), opened.clone(), wakes.clone());
         let feed = LiveFeed::with(
             repo.clone(),
-            root,
+            root.clone(),
             Box::new(Issues {
                 view: GitHubView::default(),
                 asked: asked.clone(),
             }),
             noa.clone(),
             Box::new(move |target: &str| o.lock().unwrap().push(target.to_owned())),
+            launcher,
             Arc::new(move || c.load(Ordering::SeqCst)),
             Arc::new(move || w.lock().unwrap().push(std::thread::current().id())),
         );
         Rig {
             _tmp: tmp,
             repo,
+            root,
             log,
             noa,
             clock,
             opened,
+            launched,
             asked,
             wakes,
             feed,
@@ -1156,6 +1633,7 @@ mod tests {
             }),
             rig.noa.clone(),
             Box::new(|_: &str| {}),
+            Box::new(sibling::Offline("テストでは起動しません")),
             Arc::new(move || c.load(Ordering::SeqCst) + 7),
             Arc::new(|| {}),
         )
@@ -1889,5 +2367,760 @@ mod tests {
             fs::read_to_string(local::tasks_dir(&rig.repo).join("t-1.md")).unwrap(),
             "---\ntitle: new\nstate: closed\nlabels: a, b\nowner: me\n---\nnew body\n"
         );
+    }
+
+    // ------------------------------------------------------------ task links
+
+    impl Rig {
+        /// Polls until `done` holds of `task`'s 関連成果 (10 s at most).
+        fn until_related(
+            &mut self,
+            task: &TaskRef,
+            what: &str,
+            done: impl Fn(&Related) -> bool,
+        ) -> Related {
+            until_related_on(&mut self.feed, task, what, done)
+        }
+
+        /// Waits until every job sent so far is done and the worker has
+        /// looked once more since: an opened URL's notice is the barrier.
+        fn settle(&mut self) {
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let mark = format!("barrier-{}", SEQ.fetch_add(1, Ordering::Relaxed));
+            self.feed.act(Intent::OpenUrl(mark.clone()));
+            self.until("the barrier", |v| {
+                v.notice.as_deref().is_some_and(|n| n.contains(&mark))
+            });
+        }
+
+        fn links(&self) -> Vec<LinkEvent> {
+            task_links::read(&start::links_of(&self.log)).unwrap()
+        }
+
+        /// The ChangeSeen lines of the link log, as (run, commit).
+        fn seen(&self) -> Vec<(String, String)> {
+            self.links()
+                .into_iter()
+                .filter_map(|e| match e {
+                    LinkEvent::ChangeSeen { run, commit, .. } => Some((run, commit)),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn until_related_on(
+        feed: &mut LiveFeed<FakeNoa>,
+        task: &TaskRef,
+        what: &str,
+        done: impl Fn(&Related) -> bool,
+    ) -> Related {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let _ = feed.poll();
+            let related = feed
+                .related()
+                .and_then(|all| all.get(task))
+                .cloned()
+                .unwrap_or_default();
+            if done(&related) {
+                return related;
+            }
+            assert!(Instant::now() < deadline, "{what}: {related:#?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `git -C dir <args>` that must succeed; its output, trimmed.
+    fn git_ok(dir: &Path, args: &[&str]) -> String {
+        let out = start::git(dir, args).unwrap_or_else(|why| panic!("git {args:?}: {why}"));
+        String::from_utf8_lossy(&out).trim().to_owned()
+    }
+
+    /// An empty commit on `dir`'s checkout; its SHA.
+    fn commit_in(dir: &Path, message: &str) -> String {
+        git_ok(
+            dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                message,
+            ],
+        );
+        start::head_of(dir).unwrap()
+    }
+
+    /// A commit on top of `parent` in `repo`, without a checkout; its SHA.
+    fn commit_on(repo: &Path, parent: &str, message: &str) -> String {
+        let tree = format!("{parent}^{{tree}}");
+        git_ok(
+            repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit-tree",
+                &tree,
+                "-p",
+                parent,
+                "-m",
+                message,
+            ],
+        )
+    }
+
+    fn local_ref(id: &str) -> TaskRef {
+        TaskRef::Local(id.into())
+    }
+
+    /// Logs a run of `task` that started and ended before the window opened.
+    fn logged_run(
+        log: &Path,
+        run: &str,
+        task: &TaskRef,
+        branch: Option<&str>,
+        workdir: &Path,
+        at: Millis,
+    ) {
+        runs::append(
+            log,
+            &RunEvent::RunStarted {
+                run: RunId::new(run),
+                task: task.clone(),
+                agent: AgentKind::Claude,
+                workdir: workdir.to_path_buf(),
+                branch: branch.map(str::to_owned),
+                label: runs::label(&RunId::new(run)),
+                at,
+            },
+        )
+        .unwrap();
+        runs::append(
+            log,
+            &RunEvent::RunClosed {
+                run: RunId::new(run),
+                at: at + 1,
+            },
+        )
+        .unwrap();
+    }
+
+    /// Starts a run of t-1 (written by `rig`'s `before`) and waits until it
+    /// is 実行中; the run.
+    fn run_t1(rig: &mut Rig, isolation: Isolation) -> Run {
+        let t = local_ref("t-1");
+        rig.until("the task", |v| v.tasks.iter().any(|x| x.r#ref == t));
+        rig.feed.act(Intent::Run {
+            task: t.clone(),
+            agent: AgentKind::Claude,
+            isolation,
+        });
+        let view = rig.until("実行中", |v| col(v, &t) == Some(Column::Running));
+        view.runs[0].run.clone()
+    }
+
+    /// AC-2: the 関連成果 of a task whose run committed twice and was
+    /// reviewed read back the same in a new window after the run's pane is
+    /// closed and its worktree removed: the link log names runs, commits
+    /// and sessions, nothing in the work tree.
+    #[test]
+    fn links_ac2_related_items_survive_closing_the_pane_and_removing_the_worktree() {
+        let mut rig = rig("links-ac2", |repo, _, _| write_task(repo, "t-1", "one"));
+        let t = local_ref("t-1");
+        let run = run_t1(&mut rig, Isolation::Worktree);
+        commit_in(&run.workdir, "one");
+        rig.feed.act(Intent::Refresh);
+        rig.until_related(&t, "v1", |r| r.versions.len() == 1);
+        let head = commit_in(&run.workdir, "two");
+        rig.feed.act(Intent::Refresh);
+        rig.until_related(&t, "v2", |r| r.versions.len() == 2);
+        // A review of the worktree, linked as Review links it.
+        let target = task_links::Target {
+            toplevel: run.workdir.clone(),
+            head_ref: None,
+            head_sha: Some(head.clone()),
+        };
+        let matched = task_links::match_run(&rig.root, &target).expect("the run matches");
+        assert_eq!(matched.by, task_links::MatchedBy::Worktree);
+        task_links::link_session(
+            &matched,
+            SessionKind::Review,
+            "rev-1",
+            Some(&head),
+            false,
+            START,
+        )
+        .unwrap();
+        let origin = task_links::find_origin(&rig.root, SessionKind::Review, "rev-1").unwrap();
+        task_links::record_outcome(
+            &origin,
+            SessionKind::Review,
+            "rev-1",
+            Some("approve"),
+            true,
+            START,
+        )
+        .unwrap();
+        rig.tick();
+        let before = rig.until_related(&t, "the review", |r| {
+            r.reviews.len() == 1
+                && r.reviews[0].outcome == related::Outcome::Decided("approve".into())
+        });
+        assert_eq!(before.runs, std::slice::from_ref(&run.run));
+        assert_eq!(
+            before.reviews[0].target,
+            related::TargetVersion::Version {
+                no: 2,
+                uncommitted: false
+            }
+        );
+
+        rig.feed.act(Intent::ClosePane(run.run.clone()));
+        rig.until("closed", |v| v.runs.iter().all(|r| r.run.closed.is_some()));
+        git_ok(
+            &rig.repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                run.workdir.to_str().unwrap(),
+            ],
+        );
+        assert!(!run.workdir.exists());
+        let mut again = second_window(&rig);
+        let after = until_related_on(&mut again, &t, "the same items in a new window", |r| {
+            *r == before
+        });
+        assert_eq!(after, before);
+    }
+
+    /// AC-3 (Tasks): a run's start is still logged by `RunStarted` alone in
+    /// the run log; its base is the worktree's HEAD; each commit on its
+    /// branch is one ChangeSeen, an unmoved head none, and a deleted
+    /// branch adds nothing and keeps the versions.
+    #[test]
+    fn links_ac3_a_worktree_runs_base_and_each_new_head_are_recorded_once() {
+        let mut rig = rig("links-ac3-wt", |repo, _, _| write_task(repo, "t-1", "one"));
+        let t = local_ref("t-1");
+        let base = start::head_of(&rig.repo).unwrap();
+        let run = run_t1(&mut rig, Isolation::Worktree);
+        let branch = run.branch.clone().unwrap();
+        // The run log holds run events only: its format is unchanged.
+        let text = fs::read_to_string(&rig.log).unwrap();
+        for line in text.lines() {
+            let event: RunEvent =
+                serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+            assert_eq!(serde_json::to_string(&event).unwrap(), line);
+        }
+        assert!(text.contains(r#""event":"RunStarted""#));
+        let links = rig.links();
+        assert_eq!(
+            links[0],
+            LinkEvent::Repo {
+                path: rig.repo.clone(),
+                at: START
+            }
+        );
+        assert!(
+            links.contains(&LinkEvent::ChangeBase {
+                run: run.run.to_string(),
+                commit: base.clone(),
+                at: START
+            }),
+            "{links:?}"
+        );
+        assert!(rig.seen().is_empty(), "an unmoved head is no version");
+
+        let c1 = commit_in(&run.workdir, "one");
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen(), [(run.run.to_string(), c1.clone())]);
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen().len(), 1, "nothing on an unmoved head");
+
+        git_ok(
+            &rig.repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                run.workdir.to_str().unwrap(),
+            ],
+        );
+        git_ok(&rig.repo, &["branch", "-D", &branch]);
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen().len(), 1, "a deleted branch adds nothing");
+        let related = rig.until_related(&t, "v1 kept", |r| r.versions.len() == 1);
+        assert_eq!(related.versions[0].commit, c1);
+        // A second window adds no Repo line of its own for the same path.
+        let mut other = second_window(&rig);
+        until_related_on(&mut other, &t, "v1", |r| r.versions.len() == 1);
+        let repos = rig
+            .links()
+            .iter()
+            .filter(|e| matches!(e, LinkEvent::Repo { .. }))
+            .count();
+        assert_eq!(repos, 1);
+    }
+
+    /// AC-3 (Tasks): an この作業ツリー run's head is the repository's,
+    /// recorded while the run is live and once more after it ends, never
+    /// again.
+    #[test]
+    fn links_ac3_a_here_run_is_recorded_while_live_and_once_after() {
+        let mut rig = rig("links-ac3-here", |repo, _, _| {
+            write_task(repo, "t-1", "one")
+        });
+        let run = run_t1(&mut rig, Isolation::Here);
+        assert_eq!(run.branch, None);
+        let c1 = commit_in(&rig.repo, "one");
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen(), [(run.run.to_string(), c1)]);
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen().len(), 1, "nothing on an unmoved head");
+        rig.feed.act(Intent::ClosePane(run.run.clone()));
+        rig.until("closed", |v| v.runs.iter().all(|r| r.run.closed.is_some()));
+        let c2 = commit_in(&rig.repo, "two");
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen().last(), Some(&(run.run.to_string(), c2)));
+        assert_eq!(rig.seen().len(), 2, "once after it ended");
+        commit_in(&rig.repo, "three");
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen().len(), 2, "not after that");
+    }
+
+    /// AC-3 (Tasks): an この作業ツリー run that commits and ends before any
+    /// change poll saw it live still gets its last head once it is gone.
+    #[test]
+    fn links_ac3_a_here_run_ended_before_a_change_poll_is_recorded_once() {
+        let mut rig = rig("links-ac3-here-short", |repo, _, _| {
+            write_task(repo, "t-1", "one")
+        });
+        let run = run_t1(&mut rig, Isolation::Here);
+        let c1 = commit_in(&rig.repo, "one");
+        rig.feed.act(Intent::ClosePane(run.run.clone()));
+        rig.until("closed", |v| v.runs.iter().all(|r| r.run.closed.is_some()));
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen(), [(run.run.to_string(), c1)]);
+        commit_in(&rig.repo, "two");
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen().len(), 1, "not after that");
+    }
+
+    /// AC-3 (Tasks): a last read of an ended この作業ツリー run that could
+    /// not be written is tried again at the next poll, once.
+    #[test]
+    fn links_ac3_a_here_runs_last_head_is_retried_after_a_failed_write() {
+        let mut rig = rig("links-ac3-here-retry", |repo, _, _| {
+            write_task(repo, "t-1", "one")
+        });
+        let run = run_t1(&mut rig, Isolation::Here);
+        let c1 = commit_in(&rig.repo, "one");
+        rig.feed.act(Intent::ClosePane(run.run.clone()));
+        rig.until("closed", |v| v.runs.iter().all(|r| r.run.closed.is_some()));
+        let mut lock = start::links_of(&rig.log).into_os_string();
+        lock.push(".lock");
+        let lock = PathBuf::from(lock);
+        let _ = fs::remove_file(&lock);
+        std::os::unix::fs::symlink(rig.root.join("elsewhere"), &lock).unwrap();
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        fs::remove_file(&lock).unwrap();
+        assert!(rig.seen().is_empty(), "the write failed");
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen(), [(run.run.to_string(), c1)]);
+        commit_in(&rig.repo, "two");
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        assert_eq!(rig.seen().len(), 1, "not after that");
+    }
+
+    /// AC-4 (Tasks): a commit a session named first is the head the poll
+    /// compares with, so a reset back to the earlier version is seen.
+    #[test]
+    fn links_ac4_a_reset_from_a_version_a_session_named_first_is_seen() {
+        let mut rig = rig("links-ac4-reset", |repo, _, _| {
+            write_task(repo, "t-1", "one")
+        });
+        let t = local_ref("t-1");
+        let run = run_t1(&mut rig, Isolation::Worktree);
+        let a = commit_in(&run.workdir, "one");
+        rig.feed.act(Intent::Refresh);
+        rig.until_related(&t, "v1", |r| r.versions.len() == 1);
+        let b = commit_in(&run.workdir, "two");
+        let target = task_links::Target {
+            toplevel: run.workdir.clone(),
+            head_ref: None,
+            head_sha: Some(b.clone()),
+        };
+        let matched = task_links::match_run(&rig.root, &target).expect("the run matches");
+        task_links::link_session(
+            &matched,
+            SessionKind::Review,
+            "rev-1",
+            Some(&b),
+            false,
+            START,
+        )
+        .unwrap();
+        git_ok(&run.workdir, &["reset", "-q", "--hard", &a]);
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        rig.tick();
+        let r = rig.until_related(&t, "the review", |r| r.reviews.len() == 1);
+        assert_eq!(
+            r.current().map(|v| v.commit.as_str()),
+            Some(a.as_str()),
+            "{r:#?}"
+        );
+    }
+
+    /// A run started before the link log (a `RunStarted`, no `ChangeBase`):
+    /// the first poll records its base, not a version. Its base is where
+    /// its branch was created, so a branch still there shows no version and
+    /// one that moved before the upgrade shows its head as v1; the next
+    /// commit after that is the next version.
+    #[test]
+    fn links_ac3_a_run_from_before_the_link_log_gets_a_base_not_a_version() {
+        let mut rig = rig("links-ac3-old", |repo, log, _| {
+            let base = start::head_of(repo).unwrap();
+            git_ok(repo, &["branch", "task-run-1", &base]);
+            git_ok(repo, &["branch", "task-run-2", &base]);
+            let moved = commit_on(repo, &base, "before the upgrade");
+            git_ok(repo, &["update-ref", "refs/heads/task-run-2", &moved]);
+            for (run, task, at) in [("run-1", "t-1", START - 100), ("run-2", "t-2", START - 50)] {
+                let workdir = repo.with_file_name(format!("gone-{run}"));
+                let branch = format!("task-{run}");
+                logged_run(log, run, &local_ref(task), Some(&branch), &workdir, at);
+            }
+        });
+        let (t1, t2) = (local_ref("t-1"), local_ref("t-2"));
+        let base = start::head_of(&rig.repo).unwrap();
+        let moved = git_ok(&rig.repo, &["rev-parse", "refs/heads/task-run-2"]);
+        rig.settle();
+        rig.feed.act(Intent::Refresh);
+        rig.settle();
+        let bases: Vec<(String, String)> = rig
+            .links()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::ChangeBase { run, commit, .. } => Some((run, commit)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            bases,
+            [
+                ("run-1".to_owned(), base.clone()),
+                ("run-2".to_owned(), base.clone())
+            ]
+        );
+        assert_eq!(rig.seen(), [("run-2".to_owned(), moved.clone())]);
+        let r1 = rig.until_related(&t1, "run-1", |r| r.runs.len() == 1);
+        assert!(r1.versions.is_empty(), "{r1:#?}");
+        let r2 = rig.until_related(&t2, "v1", |r| r.versions.len() == 1);
+        assert_eq!(
+            (r2.versions[0].no, r2.versions[0].commit.as_str()),
+            (1, moved.as_str())
+        );
+
+        let c1 = commit_on(&rig.repo, &base, "one");
+        git_ok(&rig.repo, &["update-ref", "refs/heads/task-run-1", &c1]);
+        rig.feed.act(Intent::Refresh);
+        let r1 = rig.until_related(&t1, "v1", |r| r.versions.len() == 1);
+        assert_eq!(
+            (r1.versions[0].no, r1.versions[0].commit.as_str()),
+            (1, c1.as_str())
+        );
+        assert_eq!(
+            rig.links()
+                .iter()
+                .filter(|e| matches!(e, LinkEvent::ChangeBase { .. }))
+                .count(),
+            2,
+            "a base is recorded once"
+        );
+    }
+
+    /// AC-5 (Tasks): 開く on a review or a verification starts Review or
+    /// Verify on the stored session; a PR's 開く and worktree の場所を開く go
+    /// to the opener, ペインを開く to Noa; a removed worktree is said to be
+    /// gone instead of opened.
+    #[test]
+    fn links_ac5_open_buttons_reach_the_launcher_the_opener_and_noa() {
+        let mut rig = rig_with(
+            "links-ac5",
+            |repo, _, _| write_task(repo, "t-1", "one"),
+            true,
+        );
+        let data = rig.root.parent().unwrap().to_path_buf();
+        for (dir, id) in [("reviews", "rev-1"), ("verifications", "ver-1")] {
+            fs::create_dir_all(data.join(dir).join(id)).unwrap();
+            fs::write(data.join(dir).join(id).join("events.jsonl"), "").unwrap();
+        }
+        let run = run_t1(&mut rig, Isolation::Worktree);
+
+        rig.feed.act(Intent::OpenSession {
+            kind: SessionKind::Review,
+            session: "rev-1".into(),
+        });
+        rig.until("opened", |v| {
+            v.notice.as_deref() == Some("rev-1 を開きました")
+        });
+        rig.feed.act(Intent::OpenSession {
+            kind: SessionKind::Verify,
+            session: "ver-1".into(),
+        });
+        rig.until("opened", |v| {
+            v.notice.as_deref() == Some("ver-1 を開きました")
+        });
+        let session = |dir: &str, id: &str| {
+            let mut arg = OsString::from("--session=");
+            arg.push(data.join(dir).join(id));
+            vec![arg]
+        };
+        assert_eq!(
+            *rig.launched.lock().unwrap(),
+            [
+                (sibling::REVIEW, session("reviews", "rev-1")),
+                (sibling::VERIFY, session("verifications", "ver-1")),
+            ]
+        );
+        // A session with no stored folder (or a bad id) starts nothing.
+        for bad in ["rev-none", "../rev-1"] {
+            rig.feed.act(Intent::OpenSession {
+                kind: SessionKind::Review,
+                session: bad.into(),
+            });
+            rig.until("refused", |v| {
+                v.notice.as_deref() == Some(&format!("{bad} の記録が見つかりません"))
+            });
+        }
+        assert_eq!(rig.launched.lock().unwrap().len(), 2);
+
+        let url = "https://github.com/o/n/pull/45";
+        rig.feed.act(Intent::OpenUrl(url.into()));
+        rig.feed.act(Intent::OpenPane(run.run.clone()));
+        rig.until("focused", |v| {
+            v.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("ペインを開きました"))
+        });
+        assert_eq!(rig.noa.with(|s| s.focused.clone()).len(), 1);
+        rig.feed.act(Intent::OpenWorktree(run.run.clone()));
+        rig.settle();
+        let workdir = run.workdir.display().to_string();
+        {
+            let opened = rig.opened.lock().unwrap();
+            assert!(opened.contains(&url.to_owned()), "{opened:?}");
+            assert!(opened.contains(&workdir), "{opened:?}");
+        }
+        git_ok(&rig.repo, &["worktree", "remove", "--force", &workdir]);
+        let before = rig
+            .opened
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| **o == workdir)
+            .count();
+        rig.feed.act(Intent::OpenWorktree(run.run.clone()));
+        let gone = format!("{workdir} はもうありません（worktree は削除済み）");
+        rig.until("gone", |v| v.notice.as_deref() == Some(gone.as_str()));
+        let after = rig
+            .opened
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| **o == workdir)
+            .count();
+        assert_eq!(after, before, "a removed worktree is not opened");
+    }
+
+    /// AC-6: 関連を追加 writes PrLinked and the PR shows; the same URL on the
+    /// task again and a number without a known repository are refused;
+    /// 外す writes LinkRemoved and the PR, or an automatic review link, is
+    /// gone, also in a new window; a removed PR added again shows once.
+    #[test]
+    fn links_ac6_add_and_remove_links_are_written_to_the_log() {
+        let mut rig = rig("links-ac6", |repo, log, _| {
+            write_task(repo, "t-1", "one");
+            logged_run(log, "run-1", &local_ref("t-1"), None, repo, START - 10);
+            task_links::append(
+                &start::links_of(log),
+                &LinkEvent::SessionLinked {
+                    kind: SessionKind::Review,
+                    session: "rev-1".into(),
+                    task: task_key(&local_ref("t-1")),
+                    run: "run-1".into(),
+                    commit: None,
+                    uncommitted: false,
+                    by: task_links::MatchedBy::Commit,
+                    at: START - 5,
+                },
+            )
+            .unwrap();
+        });
+        let t = local_ref("t-1");
+        rig.until_related(&t, "the review", |r| r.reviews.len() == 1);
+
+        rig.feed.act(Intent::AddLink {
+            task: t.clone(),
+            input: "#45".into(),
+        });
+        rig.until("refused", |v| {
+            v.notice.as_deref() == Some("GitHub のリポジトリがわからないため番号では追加できません")
+        });
+        let url = "https://github.com/o/n/pull/45";
+        rig.feed.act(Intent::AddLink {
+            task: t.clone(),
+            input: format!("{url}/files"),
+        });
+        let related = rig.until_related(&t, "the PR", |r| r.prs.len() == 1);
+        assert_eq!(related.prs[0].url, url);
+        assert_eq!(related.prs[0].number, Some(45));
+        let id = related.prs[0].id.clone();
+        assert!(rig.links().contains(&LinkEvent::PrLinked {
+            id: id.clone(),
+            task: task_key(&t),
+            url: url.into(),
+            at: START
+        }));
+        rig.feed.act(Intent::AddLink {
+            task: t.clone(),
+            input: url.into(),
+        });
+        rig.until("refused", |v| {
+            v.notice.as_deref() == Some("この PR はもう関連づいています")
+        });
+        rig.feed.act(Intent::AddLink {
+            task: t.clone(),
+            input: "https://github.com/o/n/issues/45".into(),
+        });
+        rig.until("refused", |v| {
+            v.notice
+                .as_deref()
+                .is_some_and(|n| n.starts_with("PR の URL"))
+        });
+        assert_eq!(rig.until_related(&t, "one PR", |_| true).prs.len(), 1);
+
+        rig.feed.act(Intent::RemoveLink {
+            task: t.clone(),
+            id: id.clone(),
+        });
+        rig.until_related(&t, "the PR gone", |r| r.prs.is_empty());
+        rig.feed.act(Intent::RemoveLink {
+            task: t.clone(),
+            id: "rev-1".into(),
+        });
+        rig.until_related(&t, "the review gone", |r| r.reviews.is_empty());
+        assert!(rig.links().contains(&LinkEvent::LinkRemoved {
+            task: task_key(&t),
+            id: "rev-1".into(),
+            at: START
+        }));
+        let mut other = second_window(&rig);
+        until_related_on(&mut other, &t, "gone after a reload", |r| {
+            r.prs.is_empty() && r.reviews.is_empty() && r.runs.len() == 1
+        });
+
+        rig.feed.act(Intent::AddLink {
+            task: t.clone(),
+            input: url.into(),
+        });
+        let related = rig.until_related(&t, "the PR again", |r| r.prs.len() == 1);
+        assert_ne!(related.prs[0].id, id, "a new id");
+        rig.settle();
+        assert_eq!(rig.until_related(&t, "once", |_| true).prs.len(), 1);
+    }
+
+    /// AC-7: a task with two runs (two branches, three commits) lists both
+    /// runs and v1…v3 across them; one PR on t-1 and #12 shows on both, and
+    /// removing it from t-1 keeps it on #12.
+    #[test]
+    fn links_ac7_two_runs_share_the_versions_and_one_pr_shows_on_two_tasks() {
+        let mut rig = rig("links-ac7", |repo, log, _| {
+            let t = local_ref("t-1");
+            let base = start::head_of(repo).unwrap();
+            for (run, at) in [("run-1", START - 100), ("run-2", START - 50)] {
+                let workdir = repo.with_file_name(format!("gone-{run}"));
+                logged_run(log, run, &t, Some(&format!("task-{run}")), &workdir, at);
+                task_links::append(
+                    &start::links_of(log),
+                    &LinkEvent::ChangeBase {
+                        run: run.into(),
+                        commit: base.clone(),
+                        at,
+                    },
+                )
+                .unwrap();
+            }
+        });
+        let t = local_ref("t-1");
+        let base = start::head_of(&rig.repo).unwrap();
+        let c1 = commit_on(&rig.repo, &base, "one");
+        git_ok(&rig.repo, &["update-ref", "refs/heads/task-run-1", &c1]);
+        rig.feed.act(Intent::Refresh);
+        rig.until_related(&t, "v1", |r| r.versions.len() == 1);
+        let c2 = commit_on(&rig.repo, &c1, "two");
+        git_ok(&rig.repo, &["update-ref", "refs/heads/task-run-1", &c2]);
+        rig.feed.act(Intent::Refresh);
+        rig.until_related(&t, "v2", |r| r.versions.len() == 2);
+        let c3 = commit_on(&rig.repo, &c2, "three");
+        git_ok(&rig.repo, &["update-ref", "refs/heads/task-run-2", &c3]);
+        rig.feed.act(Intent::Refresh);
+        let related = rig.until_related(&t, "v3", |r| r.versions.len() == 3);
+        assert_eq!(related.runs, [RunId::new("run-2"), RunId::new("run-1")]);
+        let versions: Vec<(u32, &str, &str)> = related
+            .versions
+            .iter()
+            .map(|v| (v.no, v.commit.as_str(), v.run.as_str()))
+            .collect();
+        assert_eq!(
+            versions,
+            [
+                (1, c1.as_str(), "run-1"),
+                (2, c2.as_str(), "run-1"),
+                (3, c3.as_str(), "run-2")
+            ]
+        );
+
+        let issue = TaskRef::GitHub {
+            repo: "o/n".into(),
+            number: 12,
+        };
+        let url = "https://github.com/o/n/pull/45";
+        for task in [&t, &issue] {
+            rig.feed.act(Intent::AddLink {
+                task: task.clone(),
+                input: url.into(),
+            });
+            rig.until_related(task, "the PR", |r| r.prs.len() == 1);
+        }
+        let id = rig.until_related(&t, "the PR", |r| r.prs.len() == 1).prs[0]
+            .id
+            .clone();
+        rig.feed.act(Intent::RemoveLink {
+            task: t.clone(),
+            id,
+        });
+        rig.until_related(&t, "gone from t-1", |r| r.prs.is_empty());
+        let kept = rig.until_related(&issue, "kept on #12", |r| r.prs.len() == 1);
+        assert_eq!(kept.prs[0].url, url);
     }
 }

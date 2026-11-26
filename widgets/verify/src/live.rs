@@ -14,6 +14,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use verify::model::types::{
     AgentChoice, CriteriaEdit, Isolation, Mark, PartId, RoundNo, Session, Target, VerifierChoice,
 };
+use verify::sibling::{self, Launcher};
+use verify::task_links::{self, Origin};
 
 use crate::session::fix::{self, FixRequest};
 use crate::session::ipc::IpcConnect;
@@ -134,7 +136,14 @@ pub enum Command {
     /// Starts an agent on fixing failed criteria and defects of the
     /// verification on screen, in a new tab of its own.
     RequestFix(Box<FixRequest>),
+    /// 元のタスクを開く: starts Tasks on the task `origin` names
+    /// (`docs/specs/task-links.md` L1-7).
+    OpenTasks(Box<Origin>),
 }
+
+/// The task a verification is linked to, in the [`Channel::generation`]
+/// of the command that started its runner.
+pub type OriginOf = (u64, Option<Origin>);
 
 /// A notice for the screen, in the [`Channel::generation`] of the command
 /// (and so of the verification) it is about.
@@ -160,6 +169,8 @@ pub struct Channel {
     pub versions: Receiver<(u64, String)>,
     /// Answers to [`Command::ProbePanes`].
     pub panes: Receiver<OpenPanes>,
+    /// The task each runner's verification is linked to, once it is open.
+    pub origins: Receiver<OriginOf>,
     commands: Sender<(u64, Command)>,
     generation: Arc<AtomicU64>,
 }
@@ -201,6 +212,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
     let (released_tx, released) = mpsc::channel();
     let (version_tx, versions) = mpsc::channel();
     let (panes_tx, panes) = mpsc::channel();
+    let (origin_tx, origins) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let told = Arc::clone(&wake);
@@ -246,8 +258,10 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
                     released: released_tx,
                     versions: version_tx,
                     panes: panes_tx,
+                    origins: origin_tx,
                     wake,
                 },
+                Box::new(sibling::System),
             )
         })
         .expect("spawn verify-commands thread");
@@ -257,6 +271,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
         released,
         versions,
         panes,
+        origins,
         commands,
         generation,
     }
@@ -272,6 +287,7 @@ struct Outlets {
     /// the number of that connection's hello.
     versions: Sender<(u64, String)>,
     panes: Sender<OpenPanes>,
+    origins: Sender<OriginOf>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -300,10 +316,15 @@ impl Outlets {
     }
 }
 
-fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
+fn run_commands(
+    commands: Receiver<(u64, Command)>,
+    outlets: Outlets,
+    launcher: Box<dyn Launcher + Send>,
+) {
     let mut dispatch = Dispatch {
         handle: None,
         outlets,
+        launcher,
     };
     for (generation, cmd) in commands {
         dispatch.handle(generation, cmd);
@@ -326,6 +347,8 @@ struct Held {
 struct Dispatch {
     handle: Option<Held>,
     outlets: Outlets,
+    /// What starts Tasks for 元のタスクを開く.
+    launcher: Box<dyn Launcher + Send>,
 }
 
 impl Dispatch {
@@ -352,6 +375,15 @@ impl Dispatch {
                     }
                     Some(text)
                 });
+                return;
+            }
+            // Needs no runner: the stored view has its origin too.
+            (Command::OpenTasks(origin), _) => {
+                let opened = task_links::tasks_args(&origin)
+                    .and_then(|args| self.launcher.launch(sibling::TASKS, args));
+                if let Err(why) = opened {
+                    outlets.notify(generation, why);
+                }
                 return;
             }
             (Command::ProbePanes { dir }, _) => {
@@ -510,6 +542,7 @@ fn forwarded(cmd: Command) -> Option<Action> {
         | Command::ProbePanes { .. }
         | Command::RemoveWorktrees { .. }
         | Command::RequestFix(_)
+        | Command::OpenTasks(_)
         | Command::Leave => return None,
     })
 }
@@ -527,6 +560,7 @@ fn forward_updates(
         notices,
         released,
         versions,
+        origins,
         wake,
         ..
     } = outlets;
@@ -575,6 +609,7 @@ fn forward_updates(
                 let _ = versions.send((seq, version));
                 true
             }
+            Update::Origin(origin) => origins.send((generation, origin)).is_ok(),
             Update::Ended(Ok(())) => break,
             Update::Ended(Err(why)) => {
                 ended.store(true, Ordering::Release);
@@ -609,6 +644,7 @@ pub struct FakeLink {
     pub released: Sender<()>,
     pub versions: Sender<(u64, String)>,
     pub panes: Sender<OpenPanes>,
+    pub origins: Sender<OriginOf>,
     pub commands: Receiver<(u64, Command)>,
 }
 
@@ -621,6 +657,7 @@ impl Channel {
         let (released_tx, released) = mpsc::channel();
         let (version_tx, versions) = mpsc::channel();
         let (panes_tx, panes) = mpsc::channel();
+        let (origin_tx, origins) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let channel = Channel {
             snapshots,
@@ -628,6 +665,7 @@ impl Channel {
             released,
             versions,
             panes,
+            origins,
             commands,
             generation: Arc::new(AtomicU64::new(0)),
         };
@@ -637,6 +675,7 @@ impl Channel {
             released: released_tx,
             versions: version_tx,
             panes: panes_tx,
+            origins: origin_tx,
             commands: command_rx,
         };
         (channel, link)
@@ -673,6 +712,7 @@ mod tests {
             released,
             versions: mpsc::channel().0,
             panes,
+            origins: mpsc::channel().0,
             wake: Arc::new(|| {}),
         };
         let ends = Ends {
@@ -799,7 +839,7 @@ mod tests {
             ))
             .unwrap();
         drop(commands);
-        run_commands(command_rx, outlets);
+        run_commands(command_rx, outlets, Box::new(sibling::Offline("offline")));
         let (generation, notice) = ends.notices.recv_timeout(WAIT).unwrap();
         assert_eq!(generation, 2);
         assert!(notice.contains("を開けません"), "{notice}");
@@ -822,7 +862,7 @@ mod tests {
             ))
             .unwrap();
         drop(commands);
-        run_commands(command_rx, outlets);
+        run_commands(command_rx, outlets, Box::new(sibling::Offline("offline")));
         let (generation, notice) = ends.notices.recv_timeout(WAIT).unwrap();
         assert_eq!(generation, 0);
         assert!(notice.contains("続けられません"), "{notice}");
@@ -843,6 +883,7 @@ mod tests {
                 dir: Some(dir.to_owned()),
             }),
             outlets,
+            launcher: Box::new(sibling::Offline("offline")),
         };
         (dispatch, ends, action_rx)
     }
@@ -878,6 +919,7 @@ mod tests {
         let mut dispatch = Dispatch {
             handle: None,
             outlets,
+            launcher: Box::new(sibling::Offline("offline")),
         };
         dispatch.handle(
             3,
@@ -898,6 +940,7 @@ mod tests {
         let mut dispatch = Dispatch {
             handle: None,
             outlets,
+            launcher: Box::new(sibling::Offline("offline")),
         };
         dispatch.handle(
             5,
@@ -921,5 +964,69 @@ mod tests {
         );
         assert_eq!(ends.panes.try_recv(), Err(mpsc::TryRecvError::Empty));
         assert!(dispatch.handle.is_none(), "a runner was started");
+    }
+
+    /// What [`Recording`] was asked to start, in order.
+    type Launched = Arc<std::sync::Mutex<Vec<(sibling::Helper, Vec<std::ffi::OsString>)>>>;
+
+    /// A launcher that records what it was asked to start.
+    struct Recording(Launched);
+
+    impl Launcher for Recording {
+        fn launch(
+            &mut self,
+            helper: sibling::Helper,
+            args: Vec<std::ffi::OsString>,
+        ) -> Result<(), String> {
+            self.0.lock().unwrap().push((helper, args));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn links_ac5_open_tasks_launches_tasks_on_the_origins_repo_and_task() {
+        let repo = missing("links-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let (outlets, ends) = outlets();
+        let launched = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut dispatch = Dispatch {
+            handle: None,
+            outlets,
+            launcher: Box::new(Recording(Arc::clone(&launched))),
+        };
+        let origin = Origin {
+            key_dir: repo.join("key"),
+            tasks_repo: Some(repo.clone()),
+            task: task_links::TaskKey(serde_json::json!({"github": {"repo": "o/n", "number": 12}})),
+            run: "run-1".into(),
+        };
+        dispatch.handle(1, Command::OpenTasks(Box::new(origin.clone())));
+        let mut repo_arg = std::ffi::OsString::from("--repo=");
+        repo_arg.push(&repo);
+        assert_eq!(
+            *launched.lock().unwrap(),
+            [(sibling::TASKS, vec![repo_arg, "--select=#12".into()])]
+        );
+        assert_eq!(
+            ends.notices.recv_timeout(QUIET),
+            Err(RecvTimeoutError::Timeout)
+        );
+        // No repository known: nothing starts, the notice says why.
+        let unknown = Origin {
+            tasks_repo: None,
+            ..origin.clone()
+        };
+        dispatch.handle(1, Command::OpenTasks(Box::new(unknown)));
+        assert_eq!(launched.lock().unwrap().len(), 1);
+        let (generation, notice) = ends.notices.recv_timeout(WAIT).unwrap();
+        assert_eq!(generation, 1);
+        assert_eq!(notice, "タスクのリポジトリがわかりません");
+        // A launcher that fails says so.
+        dispatch.launcher = Box::new(sibling::Offline("Tasks が見つかりません"));
+        dispatch.handle(1, Command::OpenTasks(Box::new(origin)));
+        let (_, notice) = ends.notices.recv_timeout(WAIT).unwrap();
+        assert_eq!(notice, "Tasks が見つかりません");
+        assert!(dispatch.handle.is_none(), "a runner was started");
+        let _ = std::fs::remove_dir_all(repo);
     }
 }

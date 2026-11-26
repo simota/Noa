@@ -1,6 +1,8 @@
 //! The canned data of `--demo` (and `--snapshot`): a repository with
 //! cards in every column, local tasks `t-1`… and issues `#12`…, a local
-//! file that does not parse, and runs with reports. Nothing is read,
+//! file that does not parse, and runs with reports; `t-3`'s 関連成果
+//! show the task-links picture (v2 current, a review approved on v2, a
+//! verification passed on v1, 検証 v2 未登録, a PR). Nothing is read,
 //! started or written.
 
 use std::collections::BTreeMap;
@@ -10,6 +12,8 @@ use tasks::model::types::{
     AgentKind, AgentState, Comment, GitHubView, IssueDetail, Liveness, Millis, Report, ResultFact,
     Run, RunId, RunView, State, Task, TaskRef,
 };
+use tasks::related::{self, Related};
+use tasks::task_links::{LinkEvent, MatchedBy, SessionKind, TaskKey};
 
 use crate::ui::{Feed, Intent, View};
 
@@ -271,17 +275,98 @@ pub fn view() -> View {
     }
 }
 
+/// The task whose 関連成果 the demo fills.
+pub const LINKED_TASK: &str = "t-3";
+
+/// The demo's link log: `t-3`'s run started at c0, committed c1 (v1),
+/// verified (合格) on v1, committed c2 (v2), reviewed (承認) on v2, and a
+/// PR linked by hand.
+pub fn link_events(view: &View) -> Vec<LinkEvent> {
+    let task = TaskRef::Local(LINKED_TASK.into());
+    let run = view
+        .runs
+        .iter()
+        .find(|v| v.run.task == task)
+        .expect("the demo runs t-3")
+        .run
+        .clone();
+    let key = TaskKey(serde_json::to_value(&task).expect("a task ref is JSON"));
+    let id = run.run.to_string();
+    let at = |min: Millis| run.started + min * MIN;
+    let commit = |seed: &str| format!("{seed:0<40}");
+    let linked = |kind, session: &str, c: &str, min| LinkEvent::SessionLinked {
+        kind,
+        session: session.to_owned(),
+        task: key.clone(),
+        run: id.clone(),
+        commit: Some(commit(c)),
+        uncommitted: false,
+        by: MatchedBy::Worktree,
+        at: at(min),
+    };
+    let decided = |kind, session: &str, decision: &str, min| LinkEvent::SessionOutcome {
+        kind,
+        session: session.to_owned(),
+        decision: Some(decision.to_owned()),
+        closed: true,
+        at: at(min),
+    };
+    let ver = format!("ver-{}", at(6));
+    let rev = format!("rev-{}", at(14));
+    vec![
+        LinkEvent::Repo {
+            path: view.repo.clone(),
+            at: at(0),
+        },
+        LinkEvent::ChangeBase {
+            run: id.clone(),
+            commit: commit("c0ffee0"),
+            at: at(0),
+        },
+        LinkEvent::ChangeSeen {
+            run: id.clone(),
+            commit: commit("9f8e7d6"),
+            at: at(5),
+        },
+        linked(SessionKind::Verify, &ver, "9f8e7d6", 6),
+        decided(SessionKind::Verify, &ver, "pass", 9),
+        LinkEvent::ChangeSeen {
+            run: id.clone(),
+            commit: commit("1a2b3c4"),
+            at: at(12),
+        },
+        linked(SessionKind::Review, &rev, "1a2b3c4", 14),
+        decided(SessionKind::Review, &rev, "approve", 18),
+        LinkEvent::PrLinked {
+            id: format!("pr-{}", at(19)),
+            task: key.clone(),
+            url: format!("https://github.com/{REPO}/pull/45"),
+            at: at(19),
+        },
+    ]
+}
+
+/// Each task's 関連成果 in the demo: [`link_events`] folded over the
+/// demo's runs.
+pub fn related_of(view: &View) -> BTreeMap<TaskRef, Related> {
+    let runs: Vec<Run> = view.runs.iter().map(|v| v.run.clone()).collect();
+    related::fold(&runs, &link_events(view))
+}
+
 /// The demo's [`Feed`]: [`view`], with 完了にする / 再開 applied in memory
 /// and every other intent answered with a notice.
 pub struct DemoFeed {
     view: View,
+    related: BTreeMap<TaskRef, Related>,
     changed: bool,
 }
 
 impl Default for DemoFeed {
     fn default() -> Self {
+        let view = view();
         DemoFeed {
-            view: view(),
+            related: related_of(&view),
+            view,
             changed: true,
         }
     }
@@ -312,5 +397,9 @@ impl Feed for DemoFeed {
         };
         self.view.notice = Some(notice);
         self.changed = true;
+    }
+
+    fn related(&self) -> Option<&BTreeMap<TaskRef, Related>> {
+        Some(&self.related)
     }
 }

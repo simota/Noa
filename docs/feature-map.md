@@ -38,3 +38,4 @@ related packages for a change on its own; these are for a tighter loop.
 | Quick Terminal | `crates/noa-app/src/app/quick_terminal.rs` | inline | `cargo test -p noa-app quick_terminal` |
 | Ghostty parity fixtures | `tests/parity/src/`, `tests/parity/fixtures/` | `tests/parity/tests/` | `cargo test -p noa-parity` |
 | Agent status hook | `scripts/noa-agent-hook.py` | `scripts/test_noa_agent_hook.py` | `python3 -I -B scripts/test_noa_agent_hook.py` |
+| Task links (task → runs, versions, Review / Verify sessions, PRs) | `widgets/tasks/src/task_links.rs` (byte-identical in `widgets/review/src/`, `widgets/verify/src/`), `widgets/tasks/src/sibling.rs` (same), `widgets/tasks/src/related.rs` | inline | `cargo test --locked --offline links_` in `widgets/tasks`, `widgets/review` or `widgets/verify` |

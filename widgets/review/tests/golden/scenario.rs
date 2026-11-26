@@ -63,6 +63,7 @@ fn manifest() -> TargetManifest {
         }],
         diff_bytes: 4_000,
         diff_digest: Some(11),
+        uncommitted: false,
         captured_at: 1_000,
     }
 }

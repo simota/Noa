@@ -51,6 +51,7 @@ use verify::model::types::{
     PartId, Rerun, RoundNo, RulingKind, Session, Severity, Stored, WorktreeState,
 };
 use verify::store::{self, Listed};
+use verify::task_links::{self, Origin, SessionKind};
 
 use crate::installed::Installed;
 use crate::live::{Attachment, Channel, Command, Link, Snapshot};
@@ -148,6 +149,8 @@ pub enum Action {
         agent: AgentKind,
         scope: FixScope,
     },
+    /// 元のタスクを開く: Tasks on the task the verification is linked to.
+    OpenOrigin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,6 +282,12 @@ pub struct Verify {
     /// How many panes Noa says the stored verification on screen still has
     /// open (its folder, the count), once asked.
     stored_panes: Option<(PathBuf, usize)>,
+    /// The task the verification on screen is linked to
+    /// (`docs/specs/task-links.md` L1-7): from its runner, or found in the
+    /// link log for a stored one.
+    origin: Option<Origin>,
+    /// Where the link logs are (`task_links::default_root`).
+    tasks_root: Option<PathBuf>,
     built: Option<BuiltKey>,
     detection: start::Detection,
     installed: Option<Receiver<Installed>>,
@@ -514,6 +523,8 @@ impl Verify {
             close_alert: None,
             panes_alert: None,
             stored_panes: None,
+            origin: None,
+            tasks_root: task_links::default_root(),
             built: None,
             detection: start::Detection::all_installed(),
             installed: None,
@@ -673,6 +684,7 @@ impl Verify {
         self.read_only = false;
         self.stored_dir = None;
         self.stored_panes = None;
+        self.origin = None;
         self.extending = false;
         self.tab = CenterTab::Criteria;
         self.defect_filters = defects::Filters::default();
@@ -701,6 +713,9 @@ impl Verify {
             self.session_dir = Some(dir.to_owned());
         }
         let closed = session.closed;
+        self.origin = self.tasks_root.as_deref().and_then(|root| {
+            task_links::find_origin(root, SessionKind::Verify, session.id.as_str())
+        });
         self.session = Some(Arc::new(session));
         self.read_only = true;
         self.stored_dir = Some(dir.to_owned());
@@ -1149,14 +1164,17 @@ impl Verify {
         let mut released = false;
         if let Source::Live(channel) = &self.source {
             let current = channel.generation();
-            while let Ok(snapshot) = channel.snapshots.try_recv() {
-                if snapshot.generation >= current {
-                    latest = Some(snapshot);
-                }
-            }
+            // Notices first: a runner's forwarder sends its session snapshot
+            // before any notice after it, so every snapshot sent before a
+            // notice read here is read below too.
             while let Ok((generation, notice)) = channel.notices.try_recv() {
                 if generation >= current {
                     notices.push(notice);
+                }
+            }
+            while let Ok(snapshot) = channel.snapshots.try_recv() {
+                if snapshot.generation >= current {
+                    latest = Some(snapshot);
                 }
             }
             while channel.released.try_recv().is_ok() {
@@ -1172,6 +1190,12 @@ impl Verify {
                 }
                 self.built = None;
             }
+            while let Ok((generation, origin)) = channel.origins.try_recv() {
+                if generation >= current {
+                    self.origin = origin;
+                    self.built = None;
+                }
+            }
             while let Ok(answer) = channel.panes.try_recv() {
                 if answer.generation >= current && self.stored_dir.as_ref() == Some(&answer.dir) {
                     self.stored_panes = Some((answer.dir, answer.count));
@@ -1179,7 +1203,12 @@ impl Verify {
                 }
             }
         }
-        let refused_start = self.starting && self.session.is_none() && !notices.is_empty();
+        // A notice refuses the start only while no verification has come
+        // up: one after a successful open (the link log could not be
+        // written, L1-4) is an ordinary notice.
+        let opened = latest.as_ref().is_some_and(|s| s.session.is_some());
+        let refused_start =
+            self.starting && self.session.is_none() && !opened && !notices.is_empty();
         for notice in &notices {
             self.toast(notice.clone());
         }
@@ -1758,6 +1787,11 @@ impl Verify {
                         .open(&mut self.tree),
                 );
             }
+            Action::OpenOrigin => {
+                if let Some(origin) = self.origin.clone() {
+                    self.send_cmd(Command::OpenTasks(Box::new(origin)));
+                }
+            }
             Action::FocusPane(part) => self.send_cmd(Command::Focus { part }),
             Action::SetHold(hold) => self.send_cmd(Command::SetHold { hold }),
             Action::Continue => self.send_cmd(Command::Continue),
@@ -2329,4 +2363,137 @@ pub(super) fn card(tree: &mut UiTree, parent: WidgetId, accent: bool) -> WidgetI
             )
             .radius(8.0),
     )
+}
+
+/// 元のタスクを開く (`docs/specs/task-links.md` L1-7, U4).
+#[cfg(test)]
+mod links_tests {
+    use super::*;
+    use crate::live::FakeLink;
+    use verify::model::types::AgentKind;
+    use verify::task_links::TaskKey;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("noa-verify-ui-links-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn installed() -> Receiver<Installed> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Installed::Found(AgentKind::ALL.to_vec())).unwrap();
+        rx
+    }
+
+    fn origin(repo: &Path) -> Origin {
+        Origin {
+            key_dir: repo.join("key"),
+            tasks_repo: Some(repo.to_owned()),
+            task: TaskKey(serde_json::json!({"github": {"repo": "o/n", "number": 12}})),
+            run: "run-1".into(),
+        }
+    }
+
+    /// A live screen running the demo's verification, as its runner sends it.
+    fn running() -> (Verify, FakeLink, TextStore) {
+        let (channel, link) = Channel::fake();
+        let mut screen = Verify::live(channel, installed());
+        let mut text = TextStore::new(Default::default());
+        link.snapshots
+            .send(Snapshot {
+                link: Link::Live,
+                session: Some(Arc::new(crate::demo::session())),
+                reply_root: None,
+                session_dir: None,
+                generation: 0,
+            })
+            .unwrap();
+        screen.woken(&mut text);
+        (screen, link, text)
+    }
+
+    #[test]
+    fn links_ac5_the_button_is_there_only_with_an_origin_and_asks_for_its_task() {
+        let repo = scratch("live");
+        let (mut screen, link, mut text) = running();
+        assert!(!screen.offered().contains(&Action::OpenOrigin));
+        link.origins.send((0, Some(origin(&repo)))).unwrap();
+        screen.woken(&mut text);
+        assert!(screen.offered().contains(&Action::OpenOrigin));
+        screen.handle_action(Action::OpenOrigin, &mut text);
+        let asked: Vec<Command> = link.commands.try_iter().map(|(_, c)| c).collect();
+        assert_eq!(asked, [Command::OpenTasks(Box::new(origin(&repo)))]);
+        // A runner whose verification has none takes it away.
+        link.origins.send((0, None)).unwrap();
+        screen.woken(&mut text);
+        assert!(!screen.offered().contains(&Action::OpenOrigin));
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn links_ac5_a_stored_verification_finds_its_origin_in_the_link_log() {
+        let root = scratch("stored");
+        let dir = root.join("verifications").join(crate::demo::DONE_ID);
+        let log = crate::demo::log();
+        let mut store = store::Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+        drop(store);
+        let tasks = root.join("tasks");
+        let key_dir = tasks.join("key-1");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let links = task_links::links_log(&key_dir);
+        task_links::append(
+            &links,
+            &task_links::LinkEvent::Repo {
+                path: repo.clone(),
+                at: 1,
+            },
+        )
+        .unwrap();
+        let open = |tasks_root: Option<PathBuf>| {
+            let (channel, link) = Channel::fake();
+            let mut screen = Verify::live(channel, installed());
+            screen.viewer = true;
+            screen.tasks_root = tasks_root;
+            let mut text = TextStore::new(Default::default());
+            screen.show_stored(&dir, &mut text).unwrap();
+            (screen, link, text)
+        };
+        // Not linked: no button.
+        let (screen, _link, _text) = open(Some(tasks.clone()));
+        assert!(!screen.offered().contains(&Action::OpenOrigin));
+        task_links::append(
+            &links,
+            &task_links::LinkEvent::SessionLinked {
+                kind: SessionKind::Verify,
+                session: crate::demo::DONE_ID.into(),
+                task: origin(&repo).task,
+                run: "run-1".into(),
+                commit: None,
+                uncommitted: false,
+                by: task_links::MatchedBy::Branch,
+                at: 2,
+            },
+        )
+        .unwrap();
+        // The `--session` window's read-only view offers it.
+        let (mut screen, link, mut text) = open(Some(tasks.clone()));
+        assert!(screen.offered().contains(&Action::OpenOrigin));
+        screen.handle_action(Action::OpenOrigin, &mut text);
+        let asked: Vec<Command> = link
+            .commands
+            .try_iter()
+            .map(|(_, c)| c)
+            .filter(|c| *c != Command::Leave)
+            .collect();
+        let expected = Origin {
+            key_dir: key_dir.clone(),
+            ..origin(&repo)
+        };
+        assert_eq!(asked, [Command::OpenTasks(Box::new(expected))]);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

@@ -24,6 +24,181 @@ mod tests {
 }
 
 #[cfg(test)]
+mod timeline {
+    use super::*;
+
+    /// The header's tags and labels, in order.
+    fn header_texts(screen: &Review) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![screen.header_host];
+        while let Some(id) = stack.pop() {
+            if let Some(tag) = screen.tree.get::<noa_gpui_core::widgets::Tag>(id) {
+                out.push(tag.text().to_owned());
+            } else if let Some(label) = screen.tree.get::<Label>(id) {
+                out.push(label.text().to_owned());
+            }
+            stack.extend(screen.tree.children(id).iter().rev());
+        }
+        out
+    }
+
+    fn offers_retry(screen: &Review) -> bool {
+        screen
+            .actions
+            .iter()
+            .any(|(_, a)| *a == Action::RetryTimeline)
+    }
+
+    /// The header's texts from the timeline label on: the label and what
+    /// goes with it.
+    fn timeline_texts(screen: &Review) -> Vec<String> {
+        let texts = header_texts(screen);
+        let at = texts.iter().position(|t| t.starts_with("タイムライン"));
+        at.map_or_else(Vec::new, |at| texts[at..].iter().take(2).cloned().collect())
+    }
+
+    #[test]
+    fn ac5_state_visible_in_the_header() {
+        let cases: [(Status, &[&str], bool); 5] = [
+            (Status::Pending, &["タイムライン: 投稿待ち"], false),
+            (
+                Status::Waiting {
+                    why: "ボードに登録されていないため送れません".into(),
+                },
+                &[
+                    "タイムライン: 投稿待ち",
+                    "ボードに登録されていないため送れません",
+                ],
+                false,
+            ),
+            (
+                Status::Published {
+                    seq: 12,
+                    post_id: "po-000000000000000c".into(),
+                },
+                &["タイムライン: 投稿済み #12", "postId po-000000000000000c"],
+                false,
+            ),
+            (
+                Status::Failed {
+                    message: "busy".into(),
+                },
+                &["タイムライン: 投稿失敗（再試行）", "busy"],
+                true,
+            ),
+            (Status::Idle, &[], false),
+        ];
+        for (status, texts, retry) in cases {
+            let screen = Review::of_snapshot(Snapshot {
+                link: Link::Live,
+                session: Some(Arc::new(crate::demo::session())),
+                reply_root: None,
+                session_dir: None,
+                origin: None,
+                timeline: status.clone(),
+                generation: 0,
+            });
+            let shown = timeline_texts(&screen);
+            let shown: Vec<&str> = shown.iter().map(String::as_str).take(texts.len()).collect();
+            assert_eq!(shown, texts, "{status:?}: {:?}", header_texts(&screen));
+            if texts.is_empty() {
+                assert!(timeline_texts(&screen).is_empty());
+            }
+            assert_eq!(offers_retry(&screen), retry, "{status:?}");
+        }
+    }
+
+    /// A finished review opened from the list has no runner: it asks
+    /// where its posts stand, shows the answer with 再試行 while they are
+    /// not published, and 再試行 asks for that review's posts to be sent.
+    /// What the review shown before had is not carried over.
+    #[test]
+    fn ac5_a_stored_review_shows_its_post_state_and_retries_it() {
+        let mut text = TextStore::new(Default::default());
+        let dir =
+            std::env::temp_dir().join(format!("noa-review-stored-timeline-{}", std::process::id()));
+        let review_dir = dir.join("reviews").join("rev-1");
+        let batches = crate::demo::log();
+        let mut store = store::Store::create(&review_dir, &batches[0]).unwrap();
+        store.append_all(&batches[1..]).unwrap();
+        drop(store);
+        let (channel, link) = Channel::fake();
+        let mut screen = Review::live(channel, std::sync::mpsc::channel().1);
+        // What the review on screen before showed.
+        screen.timeline = Status::Published {
+            seq: 3,
+            post_id: "po-0000000000000003".into(),
+        };
+        screen.show_stored_at(&review_dir, &mut text, None).unwrap();
+        assert!(screen.read_only);
+        assert!(timeline_texts(&screen).is_empty(), "nothing carried over");
+        let asked: Vec<_> = link.commands.try_iter().collect();
+        let (generation, _) = asked
+            .iter()
+            .find(|(_, c)| matches!(c, Command::StoredTimeline { .. }))
+            .cloned()
+            .expect("asked where its posts stand");
+        assert!(asked.iter().any(|(_, c)| *c
+            == Command::StoredTimeline {
+                dir: review_dir.clone(),
+                resend: false,
+            }));
+
+        // An answer about the review shown before is not this one's.
+        link.timelines
+            .send((generation - 1, Status::Pending))
+            .unwrap();
+        link.timelines
+            .send((
+                generation,
+                Status::Failed {
+                    message: "タイムラインが応答しません".into(),
+                },
+            ))
+            .unwrap();
+        screen.woken(&mut text);
+        assert_eq!(
+            timeline_texts(&screen),
+            [
+                "タイムライン: 投稿失敗（再試行）",
+                "タイムラインが応答しません"
+            ]
+        );
+        assert!(offers_retry(&screen));
+        screen.handle_action(Action::RetryTimeline, &mut text);
+        assert_eq!(
+            link.commands.try_iter().map(|(_, c)| c).collect::<Vec<_>>(),
+            [Command::StoredTimeline {
+                dir: review_dir.clone(),
+                resend: true,
+            }]
+        );
+
+        // Staged and never answered: no runner sends it, so 再試行 does.
+        link.timelines.send((generation, Status::Pending)).unwrap();
+        screen.woken(&mut text);
+        assert_eq!(timeline_texts(&screen)[0], "タイムライン: 投稿待ち");
+        assert!(offers_retry(&screen));
+        link.timelines
+            .send((
+                generation,
+                Status::Published {
+                    seq: 9,
+                    post_id: "po-0000000000000009".into(),
+                },
+            ))
+            .unwrap();
+        screen.woken(&mut text);
+        assert_eq!(
+            timeline_texts(&screen),
+            ["タイムライン: 投稿済み #9", "postId po-0000000000000009"]
+        );
+        assert!(!offers_retry(&screen));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod links_tests {
     use super::*;
     use std::ffi::OsString;
@@ -91,6 +266,7 @@ mod links_tests {
             reply_root: None,
             session_dir: Some(review_dir.clone()),
             origin,
+            timeline: Status::Idle,
             generation: 0,
         };
         assert!(origin_button(&Review::of_snapshot(snapshot(None))).is_none());
@@ -200,6 +376,7 @@ use review::model::types::{
 };
 use review::store::{self, Listed};
 use review::task_links::{self, Origin, SessionKind};
+use review::timeline::Status;
 
 use crate::installed::Installed;
 use crate::live::{Channel, Command, Link, Snapshot};
@@ -257,6 +434,8 @@ pub enum Action {
     SaveReport,
     Send,
     Retry,
+    /// Sends the review's unpublished timeline posts again.
+    RetryTimeline,
     Close,
     NewReview,
     FocusPane(PartId),
@@ -378,6 +557,8 @@ pub struct Review {
     /// The session's store directory.
     session_dir: Option<PathBuf>,
     origin: Option<Origin>,
+    /// Where the review's Board Timeline posts stand.
+    timeline: Status,
     tab: CenterTab,
     filters: Filters,
     selected: Option<String>,
@@ -470,6 +651,7 @@ impl Review {
         screen.reply_root = snapshot.reply_root;
         screen.session_dir = snapshot.session_dir;
         screen.origin = snapshot.origin;
+        screen.timeline = snapshot.timeline;
         screen.rebuild(&mut TextStore::new(Default::default()));
         screen
     }
@@ -602,6 +784,7 @@ impl Review {
             reply_root: None,
             session_dir: None,
             origin: None,
+            timeline: Status::Idle,
             tab: CenterTab::Findings,
             filters: Filters::default(),
             selected: None,
@@ -766,6 +949,7 @@ impl Review {
         self.reply_root = None;
         self.session_dir = None;
         self.origin = None;
+        self.timeline = Status::Idle;
         self.read_only = false;
         self.stored_dir = None;
         self.extending = false;
@@ -810,6 +994,13 @@ impl Review {
         self.busy_checked = Some(std::time::Instant::now());
         self.report_stale = !matches!(self.source, Source::Demo)
             && store::report_is_stale(dir, self.session.as_deref().expect("just set"));
+        // A stored review has no runner to say where its posts stand.
+        if let Source::Live(channel) = &self.source {
+            channel.send(Command::StoredTimeline {
+                dir: dir.to_owned(),
+                resend: false,
+            });
+        }
         self.rebuild(text);
         Ok(())
     }
@@ -895,6 +1086,39 @@ impl Review {
             tag(&mut self.tree, row, "判定なし", Tone::Neutral);
         }
         let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+        if let Some(label) = self.timeline.label() {
+            let tone = if self.timeline.failed() {
+                Tone::Warning
+            } else {
+                Tone::Neutral
+            };
+            tag(&mut self.tree, row, label, tone);
+            if let Some(detail) = self.timeline.detail() {
+                self.tree.insert(
+                    Some(row),
+                    Label::new(detail)
+                        .font_size(11.0)
+                        .color(Role::Muted)
+                        .truncation(noa_gpui_core::widgets::Truncation::Tail),
+                );
+            }
+            // A running review's runner sends what is pending; a stored one
+            // has none, so 再試行 is what sends it.
+            let retry = if self.read_only {
+                self.stored_dir.is_some() && self.timeline.unsent()
+            } else {
+                self.timeline.failed()
+            };
+            if retry {
+                let retry = self.tree.insert(
+                    Some(row),
+                    small("再試行").tooltip("タイムラインへの投稿をもう一度送ります"),
+                );
+                self.tree
+                    .set_accessible_label(retry, "タイムラインへの投稿を再試行");
+                self.actions.push((retry, Action::RetryTimeline));
+            }
+        }
         // In the header (the title gives way), not the tab row, which the
         // smallest window fills: ⌘F works from every tab.
         let search = self.tree.insert(
@@ -1409,6 +1633,13 @@ impl Review {
                 }
                 self.built = None;
             }
+            // A stored review's (the snapshots of a running one say theirs).
+            while let Ok((generation, status)) = channel.timelines.try_recv() {
+                if generation >= current && self.read_only && self.timeline != status {
+                    self.timeline = status;
+                    self.built = None;
+                }
+            }
         }
         let refused_start = self.starting
             && self.session.is_none()
@@ -1452,6 +1683,10 @@ impl Review {
             self.session = snapshot.session;
             if self.origin != snapshot.origin {
                 self.origin = snapshot.origin;
+                self.built = None;
+            }
+            if self.timeline != snapshot.timeline {
+                self.timeline = snapshot.timeline;
                 self.built = None;
             }
             self.drop_hidden_selection();
@@ -1735,6 +1970,10 @@ impl Review {
                 self.send_cmd(Command::Intervene { to, body });
             }
             Action::Retry => self.send_cmd(Command::Retry),
+            Action::RetryTimeline => match self.stored_dir.clone().filter(|_| self.read_only) {
+                Some(dir) => self.send_cmd(Command::StoredTimeline { dir, resend: true }),
+                None => self.send_cmd(Command::RetryTimeline),
+            },
             // Ending a review before its last round cannot be undone (it
             // can be neither resumed nor extended), so it is asked first;
             // Return and Escape keep it running.

@@ -30,3 +30,17 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSLoca
 
 [dev-dependencies]
 tempfile = "3"
+
+# The tests lay out and shape text through cosmic-text. Unoptimized, its font
+# parsing and shaping dominate them (the tasks widget's tests: 88s at
+# opt-level 0, 25s with these four at 1). Only these crates are optimized, so
+# a cold build costs ~25s more rather than ~3x; debug assertions and overflow
+# checks stay on.
+[profile.dev.package.font-types]
+opt-level = 1
+[profile.dev.package.read-fonts]
+opt-level = 1
+[profile.dev.package.skrifa]
+opt-level = 1
+[profile.dev.package.harfrust]
+opt-level = 1

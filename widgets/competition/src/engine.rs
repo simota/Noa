@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::model::reduce::{self, Event, ReduceError};
+use crate::auto_assign::AutoRecord;
+use crate::model::reduce::{self, CreatedRequest, Event, ReduceError};
 use crate::model::types::{
     AgentChoice, ArtifactFile, Author, Brief, MAX_JUDGES, MAX_PANEL, Message, Millis, MsgKind,
     PartId, Participant, Phase, Role, RoundKind, RoundNo, Session, SessionId, Submission, judge_id,
@@ -361,6 +362,20 @@ impl Engine {
         config: Config,
         now: Millis,
     ) -> Result<(Engine, Output), EngineError> {
+        Self::create_in_with_auto(id, setup, None, dir, config, now)
+    }
+
+    /// [`Engine::create_in`], recording in the created event the
+    /// auto-assignment the competition starts with (`None`: staffed by
+    /// hand). The record is kept as given; the panel is checked as ever.
+    pub fn create_in_with_auto(
+        id: SessionId,
+        setup: Setup<'_>,
+        auto: Option<AutoRecord>,
+        dir: &Path,
+        config: Config,
+        now: Millis,
+    ) -> Result<(Engine, Output), EngineError> {
         let request = setup.request.trim();
         if request.is_empty() {
             return rejected("依頼内容が空です");
@@ -386,7 +401,10 @@ impl Engine {
         } = participants(setup.judges, setup.panel);
         let batch = vec![Event::Created {
             id,
-            request: request.to_owned(),
+            request: CreatedRequest {
+                request: request.to_owned(),
+                auto,
+            },
             workdir: setup.workdir,
             max_rounds: setup.max_rounds,
             reveal_interval: setup.reveal_interval,

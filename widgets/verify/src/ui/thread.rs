@@ -5,12 +5,15 @@
 //! defect, or — nothing selected — the judge's latest summary and the
 //! verdict.
 
+use std::collections::BTreeSet;
+
 use noa_gpui_core::style::AlignItems;
 use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone};
 use noa_gpui_core::{Role, UiTree, WidgetId};
 
 use verify::model::types::{
-    CrossOutcome, DefectStatus, Evidence, EvidenceBody, EvidenceKey, Outcome, Session, Subject,
+    CrossOutcome, DefectStatus, Evidence, EvidenceBody, EvidenceKey, Outcome, Ruling, Session,
+    Subject,
 };
 
 use super::evidence::{self, Kind};
@@ -49,6 +52,54 @@ pub(super) struct Context<'a> {
     /// 証跡を追加 is offered (round 1 started, not closed, a runner holds
     /// the verification).
     pub(super) can_attach: bool,
+    pub(super) expanded: &'a BTreeSet<String>,
+}
+
+fn history_toggle(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    key: &str,
+    label: &str,
+    count: usize,
+    cx: &Context,
+    actions: &mut Vec<(WidgetId, Action)>,
+) -> bool {
+    let open = cx.expanded.contains(key);
+    let button = tree.insert(
+        Some(parent),
+        Button::new(format!(
+            "{label}を{}（{count}件）",
+            if open { "閉じる" } else { "開く" }
+        ))
+        .control_size(ControlSize::Small)
+        .selected(open),
+    );
+    actions.push((button, Action::ToggleHistory(key.to_owned())));
+    open
+}
+
+fn ruling_card(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    session: &Session,
+    id: &str,
+    ruling: &Ruling,
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
+    let box_ = card(tree, parent, false);
+    let top = tree.insert(
+        Some(box_),
+        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+    );
+    caption(tree, top, format!("R{}", ruling.round));
+    tag(tree, top, ruling.kind.label(), ruling_tone(ruling.kind));
+    if !ruling.rationale.is_empty() {
+        body(tree, box_, ruling.rationale.clone());
+    }
+    if !ruling.evidence.is_empty() {
+        caption(tree, box_, "判定の根拠");
+        cited(tree, box_, session, &ruling.evidence, Some(id), actions);
+    }
 }
 
 pub(super) fn insert(
@@ -97,6 +148,11 @@ fn cited(
             Some(parent),
             Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
         );
+        let reference = tree.insert(
+            Some(line),
+            Button::new(item.key.to_string()).control_size(ControlSize::Small),
+        );
+        actions.push((reference, Action::ShowEvidence(item.key.clone())));
         tag(tree, line, Kind::of(item).label(), Tone::Neutral);
         let text = match &item.body {
             EvidenceBody::Command { cmd, exit, .. } => format!("$ {cmd} → {exit}"),
@@ -107,9 +163,7 @@ fn cited(
             Some(line),
             Label::new(text).font_size(11.5).wrap(true).selectable(true),
         );
-        if let Some(rerun) = evidence::rerun_text(item) {
-            caption(tree, line, rerun);
-        }
+        evidence::rerun_details(tree, line, item);
         if matches!(item.body, EvidenceBody::Observation { .. }) {
             tag(tree, line, "未裏付け", Tone::Warning);
         } else if item.stored.is_some() {
@@ -171,6 +225,28 @@ fn criterion(
     );
     caption(tree, list, "確かめ方");
     body(tree, list, c.how.clone());
+    caption(tree, list, "最新の判定");
+    match session.rulings.get(id).and_then(|all| all.split_last()) {
+        Some((latest, previous)) => {
+            ruling_card(tree, list, session, id, latest, actions);
+            if !previous.is_empty()
+                && history_toggle(
+                    tree,
+                    list,
+                    &format!("rulings-{id}"),
+                    "判定の履歴",
+                    previous.len(),
+                    cx,
+                    actions,
+                )
+            {
+                for ruling in previous.iter().rev() {
+                    ruling_card(tree, list, session, id, ruling, actions);
+                }
+            }
+        }
+        None => note(tree, list, "まだ判定はありません"),
+    }
     if let Some(offer) = cx.offer {
         fix::insert(tree, list, offer, actions);
     }
@@ -273,28 +349,6 @@ fn criterion(
         cited(tree, box_, session, &ch.evidence, Some(id), actions);
     }
 
-    caption(tree, list, "判定の履歴");
-    match session.rulings.get(id) {
-        Some(all) if !all.is_empty() => {
-            for r in all.iter().rev() {
-                let box_ = card(tree, list, false);
-                let top = tree.insert(
-                    Some(box_),
-                    Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
-                );
-                caption(tree, top, format!("R{}", r.round));
-                tag(tree, top, r.kind.label(), ruling_tone(r.kind));
-                if !r.rationale.is_empty() {
-                    body(tree, box_, r.rationale.clone());
-                }
-                if !r.evidence.is_empty() {
-                    let keys: Vec<String> = r.evidence.iter().map(|k| k.to_string()).collect();
-                    caption(tree, box_, format!("根拠: {}", keys.join(", ")));
-                }
-            }
-        }
-        _ => note(tree, list, "まだ判定はありません"),
-    }
     let back = tree.insert(
         Some(list),
         Button::new("選択を解除").control_size(ControlSize::Small),
@@ -452,11 +506,25 @@ fn overview(
             tag(tree, top, v.decision.label(), decision_tone(v.decision));
             body(tree, c, v.rationale.clone());
             if !v.blocking.is_empty() {
-                caption(
-                    tree,
-                    c,
-                    format!("合格を妨げるもの: {}", v.blocking.join(", ")),
-                );
+                caption(tree, c, "合格を妨げるもの");
+                for id in &v.blocking {
+                    let action = if session.criterion(id).is_some() {
+                        Some(Action::InspectCriterion(id.clone()))
+                    } else if session.defect(id).is_some() {
+                        Some(Action::InspectDefect(id.clone()))
+                    } else {
+                        None
+                    };
+                    if let Some(action) = action {
+                        let button = tree.insert(
+                            Some(c),
+                            Button::new(format!("{id} を確認")).control_size(ControlSize::Small),
+                        );
+                        actions.push((button, action));
+                    } else {
+                        caption(tree, c, id.clone());
+                    }
+                }
             }
         }
         None if session.closed => note(tree, list, "判定なし（終了しました）"),
@@ -474,7 +542,21 @@ fn overview(
     if summaries.is_empty() && session.criteria_summary.is_empty() {
         note(tree, list, "判定役のまとめはまだありません");
     }
-    for (no, kind, outcome) in summaries {
+    let older_count = summaries.len().saturating_sub(1);
+    for (index, (no, kind, outcome)) in summaries.into_iter().enumerate() {
+        if index == 1
+            && !history_toggle(
+                tree,
+                list,
+                "round-summaries",
+                "過去の判定",
+                older_count,
+                cx,
+                actions,
+            )
+        {
+            break;
+        }
         let c = card(tree, list, false);
         caption(tree, c, format!("R{no}（{}）の判定", kind.label()));
         body(tree, c, outcome.summary.clone());

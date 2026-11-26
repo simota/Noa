@@ -1490,6 +1490,51 @@ fn ac1_verified_on_claudes_rerun() -> String {
 }
 
 #[test]
+fn ac13_a_text_only_not_reproduced_leaves_the_fail_open_but_old_accepted_logs_replay() {
+    let rig = second_round(
+        r#"{"summary": "Nothing assigned."}"#,
+        &reply_json(
+            &[],
+            &[r#"{"id": "o1", "kind": "observation", "text": "It looks fixed."}"#.to_owned()],
+            r#", "cross_checks": [{"subject": "codex/AC-1", "outcome": "not_reproduced", "note": "looks fixed", "evidence": ["o1"]}]"#,
+        ),
+    );
+    assert_eq!(
+        judge_problems(&rig, &ac1_verified_on_claudes_rerun()),
+        [
+            "AC-1: verified despite codex's R1 fail, which no not_reproduced cross-check has answered; claude-2/r2/o1 is text-only observation; answering a fail needs a stored command or file for AC-1"
+        ]
+    );
+    let report = crate::model::export::report_markdown(rig.engine.session(), None);
+    assert!(
+        report.contains("失敗を解消する保存済み証跡が不足: AC-1（codex R1） — 観察だけの not_reproduced は失敗を解消しません"),
+        "{report}"
+    );
+    // Such an answer was accepted under the old rule. Replaying its
+    // recorded ruling must not reinterpret or lose the historical result.
+    let stored = fail_answered_with(&[]);
+    let old_output = parse_judge(
+        &ac1_verified_on_claudes_rerun(),
+        stored.engine.session(),
+        stored.round(),
+    )
+    .unwrap();
+    let mut old_log = rig.log.clone();
+    old_log.push(vec![crate::model::types::Event::JudgeAccepted {
+        round: 2,
+        output: old_output,
+    }]);
+    let serialized = serde_json::to_string(&old_log).unwrap();
+    let old_log: Vec<Vec<crate::model::types::Event>> = serde_json::from_str(&serialized).unwrap();
+    let replayed = crate::model::reduce::replay(&old_log).unwrap();
+    assert_eq!(replayed.ruling("AC-1").unwrap().kind, RulingKind::Verified);
+    assert!(
+        crate::model::export::report_markdown(&replayed, None)
+            .contains("失敗を解消する保存済み証跡が不足: AC-1（codex R1）")
+    );
+}
+
+#[test]
 fn ac13_a_not_reproduced_on_media_for_another_criterion_answers_no_fail() {
     let answer = |shows: &str| {
         reply_json(

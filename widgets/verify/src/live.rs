@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use verify::auto_assign::AutoRecord;
+use verify::model::recheck::Recheck;
 use verify::model::types::{
     AgentChoice, CriteriaEdit, Isolation, Mark, PartId, RoundNo, Session, Target, VerifierChoice,
 };
@@ -66,6 +67,7 @@ pub enum Command {
         isolation: Isolation,
         /// The person's criteria, one per line as typed.
         user_criteria: Vec<String>,
+        recheck: Option<Recheck>,
         /// 基準を確認してから検証.
         confirm: bool,
         max_rounds: RoundNo,
@@ -83,8 +85,10 @@ pub enum Command {
     EditCriteria {
         edit: CriteriaEdit,
     },
-    /// 基準を確定して検証を開始: freezes the criteria, round 1 starts.
-    StartVerify,
+    /// Saves pending criteria and freezes them together, then starts R1.
+    StartVerify {
+        edits: Vec<CriteriaEdit>,
+    },
     /// 証跡を追加.
     Attach(Box<Attachment>),
     Intervene {
@@ -489,6 +493,7 @@ impl Dispatch {
                     target,
                     isolation,
                     user_criteria,
+                    recheck,
                     confirm,
                     max_rounds,
                     round_cap,
@@ -510,6 +515,7 @@ impl Dispatch {
                     target: *target,
                     isolation,
                     user_criteria,
+                    recheck,
                     confirm,
                     max_rounds,
                     round_cap,
@@ -572,7 +578,7 @@ fn stored_start(cmd: Command) -> Option<runner::Start> {
 fn forwarded(cmd: Command) -> Option<Action> {
     Some(match cmd {
         Command::EditCriteria { edit } => Action::EditCriteria { edit },
-        Command::StartVerify => Action::StartVerify,
+        Command::StartVerify { edits } => Action::StartVerify { edits },
         Command::Attach(attachment) => Action::Attach(attachment),
         Command::Intervene { to, body } => Action::Intervene { to, body },
         Command::Retry => Action::Retry,
@@ -839,7 +845,7 @@ mod tests {
                 part: PartId::new("claude"),
             },
             Command::ClosePanes,
-            Command::StartVerify,
+            Command::StartVerify { edits: Vec::new() },
         ] {
             channel.send(cmd);
             let (generation, notice) = channel.notices.recv_timeout(WAIT).unwrap();
@@ -859,7 +865,10 @@ mod tests {
             forwarded(Command::Extend { by: 3 }),
             Some(Action::Extend { by: 3 })
         );
-        assert_eq!(forwarded(Command::StartVerify), Some(Action::StartVerify));
+        assert_eq!(
+            forwarded(Command::StartVerify { edits: Vec::new() }),
+            Some(Action::StartVerify { edits: Vec::new() })
+        );
         assert_eq!(forwarded(Command::ClosePanes), Some(Action::ClosePanes));
         let edit = verify::model::types::CriteriaEdit::Remove { id: "AC-2".into() };
         assert_eq!(

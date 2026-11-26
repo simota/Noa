@@ -122,7 +122,7 @@ fn ac13_the_round_two_ruling_brief_lists_the_earlier_pass_a_verified_ruling_rest
     for line in [
         "Earlier rounds on this criterion (the evidence standard reads these too):",
         "- claude R1: pass — pwd shows /tmp.",
-        "  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)",
+        "  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0)",
         "    stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log",
         "- codex R1: fail — With a symlinked cwd the tab opens in $HOME.",
     ] {

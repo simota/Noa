@@ -14,9 +14,10 @@ use noa_gpui_core::widgets::{
     Button, CheckState, Checkbox, ComboBox, Container, ControlSize, Label, NumberInput,
     PopUpButton, ScrollView, SegmentMode, SegmentedControl, TextArea, TextField, Tone,
 };
-use noa_gpui_core::{Role, Style, UiTree, WidgetId};
+use noa_gpui_core::{Role, Style, UiTree, Widget, WidgetId};
 use noa_gpui_text::TextStore;
 
+use verify::model::recheck::Recheck;
 use verify::model::types::{
     AgentChoice, AgentKind, AgentSetup, BuiltinStrategy, DEFAULT_MAX_ROUNDS, Head, Isolation,
     MAX_MAX_ROUNDS, MAX_PANEL, MIN_PANEL, Millis, RoundNo, Session, Strategy, StrategyChoice,
@@ -36,6 +37,12 @@ const FIELD_WIDTH: f32 = 612.0;
 
 pub(super) struct Parts {
     pub(super) root: WidgetId,
+    cards: WidgetId,
+    settings: WidgetId,
+    settings_summary: WidgetId,
+    settings_toggle: WidgetId,
+    settings_open: bool,
+    stacked: bool,
     pub(super) kind: WidgetId,
     pub(super) repo: WidgetId,
     /// The base ref's column, hidden for a state target.
@@ -48,6 +55,8 @@ pub(super) struct Parts {
     pub(super) pick_spec: WidgetId,
     pub(super) request: WidgetId,
     pub(super) criteria: WidgetId,
+    recheck_note: WidgetId,
+    recheck: Option<Recheck>,
     pub(super) confirm: WidgetId,
     pub(super) isolation: WidgetId,
     pub(super) max_rounds: WidgetId,
@@ -218,6 +227,9 @@ pub(crate) struct Form {
     pub request: String,
     /// The person's criteria, one per line.
     pub criteria: String,
+    /// Structured criteria and the previous outcomes; the text area is
+    /// only a preview while these are present.
+    pub recheck: Option<Recheck>,
     /// 基準を確認してから検証.
     pub confirm: bool,
     pub isolation: Isolation,
@@ -265,6 +277,16 @@ fn next_row(kind: AgentKind, panel: &[VerifierChoice]) -> VerifierChoice {
 }
 
 impl Form {
+    pub(super) fn start_label(&self) -> &'static str {
+        if self.recheck.is_some() {
+            "受け入れ基準を確認"
+        } else if self.confirm {
+            "受け入れ基準を作成"
+        } else {
+            "検証を開始"
+        }
+    }
+
     /// The clean form for the available `kinds` (not empty): the judge is
     /// the first; the panel is L1-9's default (claude 仕様適合, codex 反証,
     /// claude 回帰) where those kinds are offered, else one row per kind,
@@ -304,6 +326,7 @@ impl Form {
             spec: String::new(),
             request: String::new(),
             criteria: String::new(),
+            recheck: None,
             confirm: true,
             isolation: Isolation::Worktree,
             max_rounds: DEFAULT_MAX_ROUNDS,
@@ -427,11 +450,14 @@ pub(super) fn again_note(session: &Session) -> Option<String> {
 
 impl Form {
     /// The form that starts `session` again: the same target, spec,
-    /// panel, isolation, round limit and request, the frozen criteria as
-    /// the person's (so they are kept word for word), and the request
-    /// followed by [`again_note`] (an earlier such note is dropped first).
+    /// panel, isolation, round limit and request, the structured criteria
+    /// for confirmation without asking the judge to draft them again,
+    /// and the request followed by [`again_note`] (an earlier such note
+    /// is dropped first).
     pub(super) fn from_session(session: &Session) -> Self {
         let target = &session.target;
+        let recheck = Recheck::from_session(session);
+        let confirm = session.confirm || recheck.is_some();
         let mut form = Self {
             kind: target.kind,
             repo: target.repo.display().to_string(),
@@ -453,7 +479,8 @@ impl Form {
                     .collect::<Vec<_>>()
                     .join("\n")
             },
-            confirm: session.confirm,
+            recheck,
+            confirm,
             isolation: session.isolation,
             max_rounds: session.max_rounds,
             round_cap: session.max_rounds.max(MAX_MAX_ROUNDS),
@@ -538,7 +565,9 @@ impl Form {
 
     /// The person's criteria, one per line as typed (blank lines dropped).
     pub(crate) fn user_criteria(&self) -> Vec<String> {
-        lines(&self.criteria)
+        self.recheck
+            .as_ref()
+            .map_or_else(|| lines(&self.criteria), |r| r.user_criteria.clone())
     }
 }
 
@@ -747,6 +776,11 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(criteria_col),
         TextArea::new("空欄なら判定役が依頼と仕様から作成").min_lines(3),
     );
+    let recheck_note = tree.insert(
+        Some(criteria_col),
+        Label::new("").font_size(11.0).color(Role::Muted).wrap(true),
+    );
+    tree.set_hidden(recheck_note, true);
     let confirm = tree.insert(
         Some(criteria_col),
         Checkbox::new("基準を確認してから検証").checked(true),
@@ -757,7 +791,23 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         "書いた行はそのままの文言で基準になります。オンにすると、判定役の基準を確かめて直してから検証を始めます",
     );
 
-    let judge_col = tree.insert(Some(card), Container::column().gap(6.0));
+    let settings_head = section(tree, card, "実行設定");
+    let settings_summary = tree.insert(
+        Some(settings_head),
+        Label::new("").font_size(12.0).wrap(true),
+    );
+    let settings_controls = tree.insert(
+        Some(settings_head),
+        Container::wrapping_row(8.0, 6.0).align_items(AlignItems::CENTER),
+    );
+    let settings_toggle = tree.insert(
+        Some(settings_controls),
+        Button::new("詳細設定を開く").control_size(ControlSize::Small),
+    );
+    let auto_host = tree.insert(Some(settings_controls), Container::row().gap(6.0));
+    let settings = tree.insert(Some(card), Container::column().gap(14.0));
+    tree.set_hidden(settings, true);
+    let judge_col = tree.insert(Some(settings), Container::column().gap(6.0));
     let judge_head = tree.insert(
         Some(judge_col),
         Container::row().align_items(AlignItems::CENTER).gap(8.0),
@@ -767,10 +817,6 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Label::new("判定役").font_size(13.0).weight(600),
     );
     spacer(tree, judge_head);
-    let auto_host = tree.insert(
-        Some(judge_head),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
-    );
     let judge_row = tree.insert(
         Some(judge_col),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
@@ -789,7 +835,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
 
     let panel_col = section(
         tree,
-        card,
+        settings,
         &format!("検証者（{MIN_PANEL}〜{MAX_PANEL}体）・手法"),
     );
     let panel_list = tree.insert(Some(panel_col), Container::column().gap(8.0));
@@ -813,7 +859,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
             .color(Role::Muted),
     );
 
-    let isolation_col = section(tree, card, "隔離");
+    let isolation_col = section(tree, settings, "隔離");
     let isolation = tree.insert(
         Some(isolation_col),
         SegmentedControl::new(
@@ -828,7 +874,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         "個別 worktree: 検証者ごとに対象を別の worktree に作り、そこで自由に動かします。共有: 全員がこのチェックアウトで読み取りだけ行います（再実行なし）",
     );
 
-    let rounds_col = section(tree, card, "ラウンド上限");
+    let rounds_col = section(tree, settings, "ラウンド上限");
     let rounds_row = tree.insert(
         Some(rounds_col),
         Container::row().align_items(AlignItems::CENTER).gap(10.0),
@@ -852,6 +898,12 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     let past = insert_past_card(tree, cards);
     let mut parts = Parts {
         root,
+        cards,
+        settings,
+        settings_summary,
+        settings_toggle,
+        settings_open: false,
+        stacked: false,
         kind,
         repo,
         base_col,
@@ -862,6 +914,8 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         pick_spec,
         request,
         criteria,
+        recheck_note,
+        recheck: None,
         confirm,
         isolation,
         max_rounds,
@@ -1196,6 +1250,19 @@ pub(super) fn fill(
     form: &Form,
     text: &mut TextStore,
 ) -> Vec<AgentKind> {
+    parts.recheck = form.recheck.clone();
+    let reused = parts.recheck.is_some();
+    tree.set_enabled(parts.criteria, !reused);
+    tree.set_enabled(parts.confirm, !reused);
+    tree.set_hidden(parts.recheck_note, !reused);
+    if let Some(previous) = &parts.recheck {
+        tree.update::<Label, _>(parts.recheck_note, |l, cx| {
+            l.set_text(cx, format!(
+                "{} の基準・確認方法・優先度・出典を引き継ぎます。開始後の基準確認画面で変更できます。",
+                previous.parent
+            ));
+        });
+    }
     let kind = TargetKind::ALL
         .iter()
         .position(|k| *k == form.kind)
@@ -1224,7 +1291,7 @@ pub(super) fn fill(
         let value = value.clone();
         tree.update::<TextArea, _>(id, |a, cx| a.set_text(cx, value));
     }
-    let confirm = if form.confirm {
+    let confirm = if form.confirm || reused {
         CheckState::On
     } else {
         CheckState::Off
@@ -1284,10 +1351,65 @@ pub(super) fn set_spec_file(tree: &mut UiTree, parts: &Parts, path: &Path) {
 
 pub(super) fn actions(parts: &Parts, actions: &mut Vec<(WidgetId, Action)>) {
     actions.push((parts.start_button, Action::Start));
+    actions.push((parts.settings_toggle, Action::ToggleStartSettings));
     actions.push((parts.add_row, Action::AddPanelRow));
     actions.push((parts.pick_spec, Action::PickSpec));
     for (index, row) in parts.panel.iter().enumerate() {
         actions.push((row.remove, Action::RemovePanelRow(index)));
+    }
+}
+
+pub(super) fn toggle_settings(tree: &mut UiTree, parts: &mut Parts) {
+    parts.settings_open = !parts.settings_open;
+    tree.set_hidden(parts.settings, !parts.settings_open);
+    tree.update::<Button, _>(parts.settings_toggle, |button, cx| {
+        button.set_label(
+            cx,
+            if parts.settings_open {
+                "詳細設定を閉じる"
+            } else {
+                "詳細設定を開く"
+            },
+        );
+    });
+}
+
+/// Only visibility changes: the fields, their drafts and the planner's row ids stay.
+pub(super) fn adapt(tree: &mut UiTree, parts: &mut Parts, width: f32) {
+    let stacked = width < CARD_WIDTH + PAST_WIDTH + 64.0;
+    if stacked != parts.stacked {
+        parts.stacked = stacked;
+        if let Some(mut style) = tree.get::<Container>(parts.cards).map(Widget::style) {
+            style.flex_direction = if stacked {
+                FlexDirection::Column
+            } else {
+                FlexDirection::Row
+            };
+            tree.update::<Container, _>(parts.cards, |cards, cx| cards.set_style(cx, style));
+        }
+    }
+    let form = read(tree, parts);
+    let summary = format!(
+        "検証者 {}名 · 判定役 {} · 最大 {}ラウンド · {}",
+        form.panel.len(),
+        form.judge.kind.command(),
+        form.max_rounds,
+        form.isolation.label()
+    );
+    if tree
+        .get::<Label>(parts.settings_summary)
+        .is_some_and(|label| label.text() != summary)
+    {
+        tree.update::<Label, _>(parts.settings_summary, |label, cx| {
+            label.set_text(cx, summary)
+        });
+    }
+    let label = form.start_label();
+    if tree
+        .get::<Button>(parts.start_button)
+        .is_some_and(|button| button.label() != label)
+    {
+        tree.update::<Button, _>(parts.start_button, |button, cx| button.set_label(cx, label));
     }
 }
 
@@ -1405,6 +1527,7 @@ pub(super) fn read(tree: &UiTree, parts: &Parts) -> Form {
         spec: path(parts.spec),
         request: area(parts.request).trim().to_owned(),
         criteria: area(parts.criteria),
+        recheck: parts.recheck.clone(),
         confirm: tree
             .get::<Checkbox>(parts.confirm)
             .is_none_or(|c| c.state() == CheckState::On),

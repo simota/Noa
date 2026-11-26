@@ -2,13 +2,48 @@
 //! (headings larger, list items as lines). Media links are shown relative
 //! to the judge's reply dir, as the report's own text lists them.
 
-use noa_gpui_core::widgets::Label;
+use noa_gpui_core::widgets::{Button, Container, ControlSize, Label};
 use noa_gpui_core::{Role, UiTree, WidgetId};
 
 use verify::model::export;
-use verify::model::types::Session;
+use verify::model::types::{EvidenceKey, Session};
 
-use super::{keep_scroll, scroll_column};
+use super::{Action, keep_scroll, scroll_column};
+
+/// Only references that exist in this session become actions. Markdown
+/// paths and external links never become executable commands or URLs.
+fn references(line: &str, session: &Session) -> Vec<(String, Action)> {
+    let mut found = Vec::new();
+    for token in line.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/')))
+    {
+        if token.is_empty() {
+            continue;
+        }
+        let key = EvidenceKey::new(token);
+        let action = if session.evidence_item(&key).is_some() {
+            Some(Action::ShowEvidence(key))
+        } else if session.criterion(token).is_some() {
+            Some(Action::InspectCriterion(token.to_owned()))
+        } else if session.defect(token).is_some() {
+            Some(Action::InspectDefect(token.to_owned()))
+        } else if let Some((part, criterion)) = token.split_once('/') {
+            session
+                .verifiers
+                .iter()
+                .find(|p| p.id.as_str() == part)
+                .filter(|_| session.criterion(criterion).is_some())
+                .map(|p| Action::ShowResultEvidence(p.id.clone(), criterion.to_owned()))
+        } else {
+            None
+        };
+        if let Some(action) = action {
+            if !found.iter().any(|(_, a)| a == &action) {
+                found.push((token.to_owned(), action));
+            }
+        }
+    }
+    found
+}
 
 /// One report line as shown, as Markdown renders its inline marks: a code
 /// span (a run of backticks closed by a run of the same length) loses its
@@ -92,7 +127,12 @@ fn plain(line: &str) -> String {
         .collect()
 }
 
-pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session) {
+pub(super) fn insert(
+    tree: &mut UiTree,
+    host: WidgetId,
+    session: &Session,
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
     let list = scroll_column(tree, host, 4.0);
     keep_scroll(tree, list, session, "report");
     let md = export::report_markdown(session, None);
@@ -122,12 +162,45 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session) {
             Label::new(plain(line)).font_size(12.5).wrap(true)
         };
         tree.insert(Some(list), label.selectable(true));
+        let references = references(line, session);
+        if !references.is_empty() {
+            let row = tree.insert(Some(list), Container::wrapping_row(6.0, 4.0));
+            for (label, action) in references {
+                let link = tree.insert(
+                    Some(row),
+                    Button::new(format!("{label} を確認")).control_size(ControlSize::Small),
+                );
+                actions.push((link, action));
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::plain;
+    use super::{plain, references};
+
+    #[test]
+    fn references_link_only_whole_known_ids_and_never_external_paths() {
+        use super::Action;
+        use verify::model::types::EvidenceKey;
+        let session = crate::demo::session();
+        let links = references(
+            "**AC-1** AC-1x AC-100 D1 D100 `claude/r1/e1` https://example.com/AC-1 AC-1",
+            &session,
+        );
+        assert_eq!(
+            links,
+            vec![
+                ("AC-1".into(), Action::InspectCriterion("AC-1".into())),
+                ("D1".into(), Action::InspectDefect("D1".into())),
+                (
+                    "claude/r1/e1".into(),
+                    Action::ShowEvidence(EvidenceKey::new("claude/r1/e1"))
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn the_report_view_drops_only_the_marks_markdown_renders() {

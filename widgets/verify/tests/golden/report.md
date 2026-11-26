@@ -38,7 +38,7 @@ Every must criterion holds; the slow cold start (should) and the nested-link def
 ### AC-1 New tabs open in the focused pane's cwd
 
 - 判定: 検証済（R2）— claude's re-run matched and the person's screenshot shows /tmp; codex's failure did not reproduce.
-  - `claude/r1/e1` コマンド `cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 一致（0） · digest `3145b15b544f640b` · 1029 バイト · `evidence/r1/claude/logs/1.log`
+  - `claude/r1/e1` コマンド `cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 終了コード一致（0） · 出力内容は未比較 · 再実行ログ保存済み · digest `3145b15b544f640b` · 1029 バイト · `evidence/r1/claude/logs/1.log`
   - `user/1` 画像（PNG）`Screenshot 2026-11-24.png`「pwd shows /tmp in the new tab」（あなたが添付） · digest `d08a6e548ee8ef4f` · 1019 バイト · `evidence/user/1.png`
 - claude（R1）: 成功 — pwd shows /tmp.
 - codex（R1）: 失敗 — With a symlinked cwd the tab opens in $HOME.
@@ -53,7 +53,7 @@ Every must criterion holds; the slow cold start (should) and the nested-link def
 ### AC-2 A cwd that no longer exists falls back to $HOME
 
 - 判定: 検証済（R2）— claude's test re-ran with the same status.
-  - `claude/r1/e1` コマンド `cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 一致（0） · digest `3145b15b544f640b` · 1029 バイト · `evidence/r1/claude/logs/1.log`
+  - `claude/r1/e1` コマンド `cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 終了コード一致（0） · 出力内容は未比較 · 再実行ログ保存済み · digest `3145b15b544f640b` · 1029 バイト · `evidence/r1/claude/logs/1.log`
 - claude（R1）: 成功
 - codex（R1）: 成功
 - agy（R1）: 成功
@@ -93,11 +93,11 @@ Every must criterion holds; the slow cold start (should) and the nested-link def
 
 ## 証跡一覧
 
-再実行は各検証者自身のペインで、その検証者のエージェントがウィジェットの書いたスクリプトを起動して行いました。同じ環境で同じ終了コードが出るかの確認で、別の検証者による独立した追試ではありません（追試は「## 追試」）。
+再実行は各検証者自身のペインで、その検証者のエージェントがウィジェットの書いたスクリプトを起動して行いました。同じ環境で同じ終了コードが出るかを確認し、出力内容は比較していません。別の検証者による独立した追試ではありません（追試は「## 追試」）。
 
-- `codex/r1/e3` コマンド `cargo test -p app cwd_gone`（.） · 終了コード 0 · 再実行 不一致（1） · digest `e789da942a51bc14` · 1028 バイト · `evidence/r1/codex/logs/3.log`
+- `codex/r1/e3` コマンド `cargo test -p app cwd_gone`（.） · 終了コード 0 · 再実行 終了コード相違（1） · 出力内容は未比較 · 再実行ログ保存済み · digest `e789da942a51bc14` · 1028 バイト · `evidence/r1/codex/logs/3.log`
   - 再実行のログ: digest `40944dff7b077ac1` · 1029 バイト · `evidence/r1/codex.rerun/2.log`
-- `claude/r1/e1` コマンド `cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 一致（0） · digest `3145b15b544f640b` · 1029 バイト · `evidence/r1/claude/logs/1.log`
+- `claude/r1/e1` コマンド `cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 終了コード一致（0） · 出力内容は未比較 · 再実行ログ保存済み · digest `3145b15b544f640b` · 1029 バイト · `evidence/r1/claude/logs/1.log`
   - 再実行のログ: digest `419e46c259bc2dcb` · 1030 バイト · `evidence/r1/claude.rerun/1.log`
 - `claude/r1/e2` 画像（PNG）`shots/new tab.png`「pwd in the new tab shows /tmp」 · digest `56af731184d382ca` · 1036 バイト · `evidence/r1/claude/shots/new tab.png`
 - `claude/r1/e3` コマンド 3 行（bench） · 終了コード 0 · digest `233e39392ce9da75` · 1029 バイト · `evidence/r1/claude/logs/3.log`
@@ -106,15 +106,15 @@ Every must criterion holds; the slow cold start (should) and the nested-link def
     ./bench open-tab
   done
   ```
-- `codex/r1/e1` コマンド `cargo test -p app cwd_symlink -- --exact`（.） · 終了コード 101 · 再実行 一致（101） · digest `d91652720290f86e` · 1028 バイト · `evidence/r1/codex/logs/1.log`
+- `codex/r1/e1` コマンド `cargo test -p app cwd_symlink -- --exact`（.） · 終了コード 101 · 再実行 終了コード一致（101） · 出力内容は未比較 · 再実行ログ保存済み · digest `d91652720290f86e` · 1028 バイト · `evidence/r1/codex/logs/1.log`
   - 再実行のログ: digest `29e17307b368c040` · 1029 バイト · `evidence/r1/codex.rerun/1.log`
 - `codex/r1/e2` 動画（MOV）`video/symlink.mov`「cd into a symlink, Cmd-T, pwd」 · digest `7fbb867bbedf39d4` · 1035 バイト · `evidence/r1/codex/video/symlink.mov`
-- `agy/r1/e1` コマンド `LANG=ja_JP.UTF-8 cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 一致（0） · digest `419d5086c11d4da2` · 1026 バイト · `evidence/r1/agy/logs/1.log`
+- `agy/r1/e1` コマンド `LANG=ja_JP.UTF-8 cargo test -p app cwd_`（.） · 終了コード 0 · 再実行 終了コード一致（0） · 出力内容は未比較 · 再実行ログ保存済み · digest `419d5086c11d4da2` · 1026 バイト · `evidence/r1/agy/logs/1.log`
   - 再実行のログ: digest `b44e0d77d18712ac` · 1027 バイト · `evidence/r1/agy.rerun/1.log`
 - `agy/r1/e2` コマンド `./bench open-tab --long-path`（bench） · 終了コード 0 · 保存なし
 - `agy/r1/o1` 観察（未裏付け）: The pane closed when I pressed Cmd-Q.
 - `user/1` 画像（PNG）`Screenshot 2026-11-24.png`「pwd shows /tmp in the new tab」（あなたが添付） · digest `d08a6e548ee8ef4f` · 1019 バイト · `evidence/user/1.png`
-- `claude/r2/e1` コマンド `cargo test -p app cwd_symlink -- --exact`（.） · 終了コード 0 · 再実行 一致（0） · digest `b5c829dabcf4f722` · 1029 バイト · `evidence/r2/claude/logs/1.log`
+- `claude/r2/e1` コマンド `cargo test -p app cwd_symlink -- --exact`（.） · 終了コード 0 · 再実行 終了コード一致（0） · 出力内容は未比較 · 再実行ログ保存済み · digest `b5c829dabcf4f722` · 1029 バイト · `evidence/r2/claude/logs/1.log`
   - 再実行のログ: digest `f0c6d72cc0fc172c` · 1030 バイト · `evidence/r2/claude.rerun/1.log`
 - `claude/r2/e2` コマンド `./scripts/nested-link.sh`（.） · 終了コード 1 · digest `034760f3b5757f7f` · 1029 バイト · `evidence/r2/claude/logs/2.log`
 - `agy/r2/e1` コマンド `./bench open-tab --cold`（bench） · 終了コード 1 · digest `e1baf61110e31231` · 1026 バイト · `evidence/r2/agy/logs/1.log`

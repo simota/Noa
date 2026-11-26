@@ -4,6 +4,7 @@
 
 pub mod brief;
 pub mod export;
+pub mod recheck;
 pub mod reduce;
 pub mod rules;
 pub mod strategy;

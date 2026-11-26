@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::auto_assign::AutoRecord;
+use crate::model::recheck::Recheck;
 
 /// Wall-clock time in milliseconds since the Unix epoch. Always injected by
 /// the caller, so the model and the engine never read a clock themselves.
@@ -1994,6 +1995,9 @@ pub struct Session {
     /// The auto-assignment it was started with, from its created event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<AutoRecord>,
+    /// The previous run, for criteria reuse and comparison only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recheck: Option<Recheck>,
     /// The judge's criteria brief.
     #[serde(default)]
     pub criteria_brief: Option<Brief>,
@@ -2305,6 +2309,11 @@ pub enum Event {
         #[serde(default)]
         summary: String,
         criteria: Vec<Criterion>,
+    },
+    /// A new run starts with the previous run's criteria and waits for
+    /// confirmation. No previous result, evidence or ruling becomes live.
+    CriteriaReused {
+        previous: Box<Recheck>,
     },
     /// One change the person made before round 1.
     CriteriaEdited {
@@ -3099,6 +3108,7 @@ mod tests {
             verifiers,
             confirm,
             auto,
+            recheck: None,
             criteria_brief: Some(brief(JUDGE_ID, BriefKind::Work)),
             criteria_accepted: true,
             criteria_summary: "One criterion.".into(),
@@ -3300,6 +3310,7 @@ mod tests {
             confirm: true,
             auto: None,
             criteria_brief: None,
+            recheck: None,
             criteria_accepted: false,
             criteria_summary: String::new(),
             criteria: Vec::new(),

@@ -11,6 +11,7 @@ pub mod evidence;
 pub mod fsx;
 pub mod media;
 pub mod model;
+pub mod preview;
 pub mod rerun;
 pub mod sibling;
 pub mod store;

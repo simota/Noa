@@ -1,8 +1,9 @@
 //! The 証跡 tab: every evidence item, filtered by who gave it (a verifier
 //! or あなた), round, kind, criterion and re-run outcome, shown as 一覧 or
 //! as ギャラリー (media only, grouped by criterion). Media are shown as
-//! placeholder cards only (L1-5a): the window draws no picture and writes
-//! no thumbnail; 開く hands the stored copy to the system viewer or player.
+//! placeholder cards (L1-5a): 開く hands the stored copy to the system
+//! viewer or player. 画像を比較 opens a self-contained browser page; the
+//! native window still draws no picture and writes no thumbnail.
 //! Also the two parts that stay built across rebuilds: the read-only log
 //! view (開く on a command's log) and the 証跡を追加 form.
 
@@ -18,8 +19,8 @@ use noa_gpui_core::widgets::{
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use verify::model::types::{
-    Evidence, EvidenceBody, MAX_CAPTION, MAX_MARKS, Mark, Media, Rerun, RoundNo, Session, Subject,
-    USER_EVIDENCE_OWNER,
+    Evidence, EvidenceBody, EvidenceKey, MAX_CAPTION, MAX_MARKS, Mark, Media, Rerun, RoundNo,
+    Session, Subject, USER_EVIDENCE_OWNER,
 };
 
 use super::defects::filter_row;
@@ -97,8 +98,8 @@ impl RerunKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            RerunKind::Matched => "↻ 一致",
-            RerunKind::Differed => "≠ 相違",
+            RerunKind::Matched => "↻ 終了コード一致",
+            RerunKind::Differed => "≠ 終了コード相違",
             RerunKind::TimedOut => "⏱ 時間切れ",
             RerunKind::NotRun => "– 未実行",
             RerunKind::None => "再実行なし",
@@ -125,6 +126,13 @@ pub struct Filters {
     pub kind: Option<Kind>,
     pub criterion: Option<String>,
     pub rerun: Option<RerunKind>,
+}
+
+/// A result or report reference opened temporarily. The ordinary evidence
+/// filters remain intact and are restored when this view is left.
+pub(super) struct Focus {
+    pub title: String,
+    pub keys: Vec<EvidenceKey>,
 }
 
 impl Filters {
@@ -261,13 +269,13 @@ pub(super) fn mark_time(t_ms: u64) -> String {
     out
 }
 
-/// What a re-run gave, in words: `↻ 再実行も 101`.
+/// A re-run compares exit codes, never the command's output.
 pub(super) fn rerun_text(item: &Evidence) -> Option<String> {
     Some(match item.rerun.as_ref()? {
-        Rerun::Matched { exit, .. } => format!("↻ 再実行も {exit}（一致）"),
+        Rerun::Matched { exit, .. } => format!("↻ 終了コード一致（{exit}）"),
         Rerun::Differed { exit, .. } => match exit {
-            Some(exit) => format!("≠ 再実行は {exit}（相違）"),
-            None => "≠ 再実行は終了コードなし（相違）".to_owned(),
+            Some(exit) => format!("≠ 終了コード相違（再実行 {exit}）"),
+            None => "≠ 再実行の終了コードを取得できず".to_owned(),
         },
         Rerun::TimedOut { .. } => "⏱ 再実行が時間切れ".to_owned(),
         Rerun::NotRun { why, .. } => format!("– 再実行されず: {why}"),
@@ -276,10 +284,49 @@ pub(super) fn rerun_text(item: &Evidence) -> Option<String> {
 
 fn rerun_tone(item: &Evidence) -> Tone {
     match &item.rerun {
-        Some(Rerun::Matched { .. }) => Tone::Success,
+        Some(Rerun::Matched { log: Some(_), .. }) => Tone::Success,
+        Some(Rerun::Matched { log: None, .. }) => Tone::Warning,
         Some(Rerun::Differed { .. }) => Tone::Critical,
         Some(Rerun::TimedOut { .. }) => Tone::Warning,
         Some(Rerun::NotRun { .. }) | None => Tone::Neutral,
+    }
+}
+
+/// Keep the comparison and the saved log separate: a matched exit code
+/// does not promise equal output or that a re-run log was kept.
+pub(super) fn rerun_details(tree: &mut UiTree, parent: WidgetId, item: &Evidence) {
+    let (Some(text), Some(rerun)) = (rerun_text(item), item.rerun.as_ref()) else {
+        return;
+    };
+    let column = tree.insert(Some(parent), Container::column().gap(3.0).grow(1.0));
+    let line = tree.insert(Some(column), Container::wrapping_row(6.0, 4.0));
+    tag(tree, line, text, rerun_tone(item));
+    let log = match rerun {
+        Rerun::Matched { log, .. }
+        | Rerun::Differed { log, .. }
+        | Rerun::TimedOut { log }
+        | Rerun::NotRun { log, .. } => log,
+    };
+    tag(
+        tree,
+        line,
+        if log.is_some() {
+            "再実行ログ保存済み"
+        } else {
+            "再実行ログ未保存"
+        },
+        if log.is_none() && !matches!(rerun, Rerun::NotRun { .. }) {
+            Tone::Warning
+        } else {
+            Tone::Neutral
+        },
+    );
+    if matches!(rerun, Rerun::Matched { .. } | Rerun::Differed { .. }) {
+        note(
+            tree,
+            column,
+            "出力内容は未比較（ウィジェットは終了コードだけを比較します）",
+        );
     }
 }
 
@@ -419,8 +466,10 @@ pub(super) fn insert(
     host: WidgetId,
     session: &Session,
     filters: &Filters,
+    focus: Option<&Focus>,
     gallery: bool,
     can_attach: bool,
+    preview: &super::preview::Offer,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let list = scroll_column(tree, host, 8.0);
@@ -428,8 +477,34 @@ pub(super) fn insert(
         tree,
         list,
         session,
-        if gallery { "gallery" } else { "evidence" },
+        if focus.is_some() {
+            "evidence-reference"
+        } else if gallery {
+            "gallery"
+        } else {
+            "evidence"
+        },
     );
+    if let Some(focus) = focus {
+        let top = tree.insert(Some(list), Container::wrapping_row(6.0, 4.0));
+        tree.insert(
+            Some(top),
+            Label::new(focus.title.clone())
+                .font_size(13.0)
+                .weight(600)
+                .wrap(true),
+        );
+        let back = tree.insert(
+            Some(top),
+            Button::new("元の表示に戻る").control_size(ControlSize::Small),
+        );
+        actions.push((back, Action::LeaveEvidenceFocus));
+        note(
+            tree,
+            list,
+            "この参照が引用した証跡を表示しています。元の絞り込み条件は保持しています",
+        );
+    }
     let top = tree.insert(
         Some(list),
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
@@ -451,7 +526,15 @@ pub(super) fn insert(
         ));
     }
     spacer(tree, top);
-    let shown: Vec<&Evidence> = shown(session, filters)
+    let items = match focus {
+        Some(focus) => focus
+            .keys
+            .iter()
+            .filter_map(|key| session.evidence_item(key))
+            .collect(),
+        None => shown(session, filters),
+    };
+    let shown: Vec<&Evidence> = items
         .into_iter()
         .filter(|e| !gallery || e.media().is_some())
         .collect();
@@ -465,11 +548,14 @@ pub(super) fn insert(
         session.evidence.len()
     };
     caption(tree, top, format!("表示 {} / 全 {all}", shown.len()));
-    let clear = tree.insert(
-        Some(top),
-        Button::new("条件をすべて解除").control_size(ControlSize::Small),
-    );
-    actions.push((clear, Action::ClearEvidenceFilters));
+    super::preview::control(tree, top, preview, actions);
+    if focus.is_none() {
+        let clear = tree.insert(
+            Some(top),
+            Button::new("条件をすべて解除").control_size(ControlSize::Small),
+        );
+        actions.push((clear, Action::ClearEvidenceFilters));
+    }
     if can_attach {
         let attach = tree.insert(
             Some(top),
@@ -479,7 +565,9 @@ pub(super) fn insert(
         );
         actions.push((attach, Action::AttachEvidence));
     }
-    filter_bar(tree, list, session, filters, gallery, actions);
+    if focus.is_none() {
+        filter_bar(tree, list, session, filters, gallery, actions);
+    }
     if session.evidence.is_empty() {
         note(
             tree,
@@ -489,7 +577,15 @@ pub(super) fn insert(
         return;
     }
     if shown.is_empty() {
-        note(tree, list, "条件に合う証跡はありません。");
+        note(
+            tree,
+            list,
+            if focus.is_some() {
+                "この参照には表示できる証跡がありません。ギャラリーでは画像・動画だけを表示します"
+            } else {
+                "条件に合う証跡はありません。"
+            },
+        );
         return;
     }
     if gallery {
@@ -552,9 +648,7 @@ fn row(tree: &mut UiTree, list: WidgetId, item: &Evidence, actions: &mut Vec<(Wi
                 Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
             );
             caption(tree, facts, format!("cwd {cwd} · 終了コード {exit}"));
-            if let Some(text) = rerun_text(item) {
-                tag(tree, facts, text, rerun_tone(item));
-            }
+            rerun_details(tree, c, item);
         }
         EvidenceBody::File {
             path, caption: cap, ..
@@ -1121,6 +1215,24 @@ pub(super) fn read_attach(
 mod tests {
     use super::*;
     use verify::model::types::EvidenceKey;
+
+    #[test]
+    fn a_matched_exit_without_a_saved_rerun_log_warns_instead_of_claiming_success() {
+        let session = crate::demo::session();
+        let mut item = session
+            .evidence_item(&EvidenceKey::new("claude/r1/e2"))
+            .unwrap()
+            .clone();
+        // Older logs omit `log`; their exit status remains readable.
+        item.rerun = Some(serde_json::from_str(r#"{"outcome":"matched","exit":0}"#).unwrap());
+        assert_eq!(rerun_text(&item).as_deref(), Some("↻ 終了コード一致（0）"));
+        assert!(matches!(rerun_tone(&item), Tone::Warning));
+        item.rerun = Some(Rerun::Matched {
+            exit: 0,
+            log: Some(item.stored.clone().unwrap()),
+        });
+        assert!(matches!(rerun_tone(&item), Tone::Success));
+    }
 
     #[test]
     fn marks_and_sizes_read_as_the_cards_show_them() {

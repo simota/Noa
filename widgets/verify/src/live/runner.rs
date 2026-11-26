@@ -109,6 +109,7 @@ pub struct NewVerification {
     pub target: Target,
     pub isolation: Isolation,
     pub user_criteria: Vec<String>,
+    pub recheck: Option<verify::model::recheck::Recheck>,
     pub confirm: bool,
     pub max_rounds: RoundNo,
     pub round_cap: RoundNo,
@@ -126,7 +127,9 @@ pub enum Action {
     EditCriteria {
         edit: CriteriaEdit,
     },
-    StartVerify,
+    StartVerify {
+        edits: Vec<CriteriaEdit>,
+    },
     Attach(Box<Attachment>),
     Intervene {
         to: Vec<PartId>,
@@ -1087,7 +1090,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 Action::EditCriteria { edit } => {
                     self.feed_user(Input::CriteriaEdit { edit, at })?;
                 }
-                Action::StartVerify => self.feed_user(Input::UserStartVerify { at })?,
+                Action::StartVerify { edits } => {
+                    self.feed_user(Input::UserStartVerify { edits, at })?;
+                }
                 Action::Attach(attachment) => self.attach(*attachment, at)?,
                 Action::Intervene { to, body } => {
                     self.feed_user(Input::UserIntervention { to, body, at })?;
@@ -3018,6 +3023,7 @@ fn new_verification(
         target,
         isolation,
         user_criteria,
+        recheck,
         confirm,
         max_rounds,
         round_cap,
@@ -3075,7 +3081,14 @@ fn new_verification(
         judge,
         panel: &panel,
     };
-    let (engine, output) = match Engine::create_auto_in(id, setup, auto, &dir, config, now) {
+    let created =
+        Engine::create_auto_in(id, setup, auto, &dir, config, now).and_then(|(engine, output)| {
+            match recheck {
+                Some(previous) => engine.with_recheck(output, previous),
+                None => Ok((engine, output)),
+            }
+        });
+    let (engine, output) = match created {
         Ok(created) => created,
         Err(e) => {
             undo();
@@ -3666,6 +3679,7 @@ pub(crate) mod tests {
             judge: AgentKind::Claude.into(),
             panel: panel(),
             auto: None,
+            recheck: None,
             root: root.join("store"),
         }))
     }
@@ -4343,13 +4357,13 @@ pub(crate) mod tests {
         let judge = fake.pane_of(":judge");
         let brief = fake.pastes(judge).last().cloned().unwrap();
         assert!(
-            brief.contains("exit 5; re-run differed (exit 3)"),
+            brief.contains("exit 5; re-run exit code differed (3)"),
             "{brief}"
         );
         let report = verify::model::export::report_markdown(s, None);
         assert!(
             report.contains(
-                "`claude/r1/e1` コマンド `exit 3`（.） · 終了コード 5 · 再実行 不一致（3）"
+                "`claude/r1/e1` コマンド `exit 3`（.） · 終了コード 5 · 再実行 終了コード相違（3）"
             ),
             "{report}"
         );
@@ -5001,7 +5015,7 @@ pub(crate) mod tests {
                     id: "AC-1".into(),
                     statement: Some("The library builds without warnings.".into()),
                     how: None,
-                    priority: None,
+                    priority: Some(verify::model::types::Priority::Should),
                 },
             })
             .unwrap();
@@ -5018,9 +5032,46 @@ pub(crate) mod tests {
         );
         assert_eq!(s.criteria_edits.len(), 1);
         assert_eq!(notices(&updates), ["基準は1件以上必要です"]);
-        actions.send(Action::StartVerify).unwrap();
+        let before = runner.engine.session().clone();
+        let log = fs::read(runner.engine.dir().join(store::EVENTS_FILE)).unwrap();
+        let edit = CriteriaEdit::Edit {
+            id: "AC-1".into(),
+            statement: None,
+            how: Some("Build with warnings denied".into()),
+            priority: None,
+        };
+        actions
+            .send(Action::StartVerify {
+                edits: vec![
+                    edit.clone(),
+                    CriteriaEdit::Add {
+                        statement: "An unfinished addition".into(),
+                        how: String::new(),
+                        priority: verify::model::types::Priority::Must,
+                    },
+                ],
+            })
+            .unwrap();
+        runner.drain_actions(Some(&mut conn)).unwrap();
+        assert_eq!(*runner.engine.session(), before);
+        assert_eq!(
+            fs::read(runner.engine.dir().join(store::EVENTS_FILE)).unwrap(),
+            log
+        );
+        assert!(!notices(&updates).is_empty());
+        actions
+            .send(Action::StartVerify { edits: vec![edit] })
+            .unwrap();
         runner.drain_actions(Some(&mut conn)).unwrap();
         assert!(runner.engine.session().frozen_at.is_some());
+        assert_eq!(
+            runner.engine.session().criteria[0].how,
+            "Build with warnings denied"
+        );
+        assert_eq!(
+            runner.engine.session().criteria[0].priority,
+            verify::model::types::Priority::Should
+        );
         // The worktrees are made, then the round starts on the next tick.
         assert_eq!(runner.engine.session().worktrees.len(), 2);
         step(&mut runner, &mut conn);
@@ -5337,6 +5388,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_recheck_captures_the_updated_target_and_persists_its_own_comparison() {
+        let root = temp_root();
+        let previous_dir = finished_with_a_failure(&root);
+        let previous = store::read_session(&previous_dir).unwrap();
+        let baseline = verify::model::recheck::Recheck::from_session(&previous).unwrap();
+        fs::write(
+            previous.workdir.join("src/lib.rs"),
+            "pub fn one() -> u32 { 2 }\n",
+        )
+        .unwrap();
+        let Start::New(mut new) = new_start(
+            &root,
+            state_of(&previous.workdir),
+            Isolation::Worktree,
+            false,
+        ) else {
+            unreachable!()
+        };
+        new.recheck = Some(baseline.clone());
+        let (engine, store) = new_verification(*new, CONFIG, 100_000).unwrap();
+        let session = engine.session();
+        assert_eq!(session.phase(), Phase::Confirming);
+        assert_eq!(session.criteria, previous.criteria);
+        assert_ne!(session.id, previous.id);
+        assert_ne!(
+            session.rebuild.worktree_patch,
+            previous.rebuild.worktree_patch
+        );
+        assert_eq!(session.recheck.as_ref(), Some(&baseline));
+        assert!(session.rulings.is_empty());
+        assert!(session.results.is_empty());
+        assert!(session.evidence.is_empty());
+        assert!(session.criteria_brief.is_none());
+        let dir = store.dir().to_owned();
+        drop(store);
+        fs::remove_dir_all(previous_dir).unwrap();
+        assert_eq!(store::read_session(&dir).unwrap(), *session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn an_id_taken_anywhere_moves_on_and_a_refused_start_removes_only_its_own() {
         let root = temp_root();
         let work = repo(&root);
@@ -5371,6 +5463,7 @@ pub(crate) mod tests {
             judge: AgentKind::Claude.into(),
             panel: panel(),
             auto: None,
+            recheck: None,
             root: root.join("store"),
         };
         assert!(new_verification(new, CONFIG, 5).is_err());
@@ -6759,6 +6852,57 @@ pub(crate) mod tests {
                 at: 1_000,
             }]
         );
+    }
+
+    #[test]
+    fn a_recheck_keeps_the_task_link_without_copying_the_previous_outcome() {
+        let root = temp_root();
+        let work = repo(&root);
+        let key_dir = task_run(&root, "run-recheck", &work, Some("task-recheck"), &work);
+        let fake = linked_fake(&root);
+        let start = new_start(&root, state_of(&work), Isolation::Worktree, false);
+        let (runner, _actions, _updates) = run_to_a_failure_from(&fake, start, |_| {});
+        let previous = runner.engine.session().clone();
+        stop(runner);
+        let before = link_events(&key_dir);
+        assert!(before.iter().any(|event| matches!(
+            event,
+            task_links::LinkEvent::SessionOutcome {
+                session, decision: Some(decision), closed: true, ..
+            } if session == previous.id.as_str() && decision == "fail"
+        )));
+        let Start::New(mut new) = new_start(&root, state_of(&work), Isolation::Worktree, false)
+        else {
+            unreachable!()
+        };
+        new.recheck = verify::model::recheck::Recheck::from_session(&previous);
+        let (runner, _actions, updates) = rig_on(&fake, Start::New(new));
+        let session = runner.engine.session();
+        assert_eq!(session.phase(), Phase::Confirming);
+        assert_eq!(session.recheck.as_ref().unwrap().parent, previous.id);
+        assert!(session.verdict().is_none());
+        let origin = origins(&updates)
+            .pop()
+            .flatten()
+            .expect("the recheck's task link");
+        assert_eq!(origin.run, "run-recheck");
+        assert_eq!(origin.key_dir, key_dir);
+        assert_eq!(linked(&key_dir).len(), 2);
+        let after = link_events(&key_dir);
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert!(matches!(
+            &after[before.len()..],
+            [task_links::LinkEvent::SessionLinked {
+                kind: SessionKind::Verify, session: linked_session, run, ..
+            }] if linked_session == session.id.as_str() && run == "run-recheck"
+        ));
+        // SessionLinked starts a new running link. SessionOutcome is
+        // written only when that session's outcome changes; the older
+        // session's failure stays in the log under its own id.
+        assert!(!session.closed);
+        assert_eq!(runner.outcome, Some((None, false)));
+        drop(runner);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

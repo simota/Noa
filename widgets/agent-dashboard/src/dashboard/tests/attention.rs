@@ -41,9 +41,9 @@ fn every_kind_has_what_the_tests_need() {
         .workers
         .iter()
         .filter_map(|w| w.need())
-        .map(|n| n.title())
+        .map(|n| format!("{n:?}"))
         .collect();
-    for title in ["承認待ち", "質問", "失敗", "通知", "静止"] {
+    for title in ["Approval", "Question", "Failure", "Notice", "Quiet"] {
         assert!(needs.contains(title), "{title} in {needs:?}");
     }
     assert!(

@@ -1,5 +1,6 @@
-//! AC4 (header) and AC7 (counts): the header fits from 1100 to 1920 px, and
-//! drops its items in the order the spec gives.
+//! AC4 (header): the header fits from 1100 to 1920 px, and drops its items
+//! in the order the spec gives (dashboard-worker-list U3: the グループ
+//! caption, then the title; no counts, 最長 or chips are left to drop).
 
 use std::time::Instant;
 
@@ -15,22 +16,18 @@ const WIDTHS: [f32; 5] = [1100.0, 1280.0, 1440.0, 1680.0, 1920.0];
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
     Default,
-    AllHidden,
-    /// The filter focused, holding "perf".
+    /// The filter focused, holding "perf": the match count shows too, the
+    /// worst case.
     Filtering,
-    /// Everything hidden and the filter active: the worst case.
-    HiddenAndFiltering,
     /// A status text 300 characters long (a notice).
     LongStatus,
     /// Down with a 200-character reason.
     LongReason,
 }
 
-const STATES: [State; 6] = [
+const STATES: [State; 4] = [
     State::Default,
-    State::AllHidden,
     State::Filtering,
-    State::HiddenAndFiltering,
     State::LongStatus,
     State::LongReason,
 ];
@@ -41,17 +38,12 @@ fn size(width: f32) -> Size {
 
 /// A dashboard in `state` at `width`, laid out.
 fn at(width: f32, state: State) -> (Dashboard, TextStore) {
-    let hidden = matches!(state, State::AllHidden | State::HiddenAndFiltering);
-    let view = View {
-        shown: if hidden { [false; 5] } else { [true; 5] },
-        ..View::of(Grouping::Orchestrator)
-    };
-    let mut dashboard = Dashboard::showing(view);
+    let mut dashboard = Dashboard::new(Grouping::Orchestrator);
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(size(width), &mut text);
     let now = Instant::now();
     match state {
-        State::Filtering | State::HiddenAndFiltering => {
+        State::Filtering => {
             let dispatch = |dashboard: &mut Dashboard, text: &mut TextStore, event| {
                 dashboard.dispatch(event, text);
                 dashboard.prepare(size(width), text);
@@ -71,7 +63,7 @@ fn at(width: f32, state: State) -> (Dashboard, TextStore) {
             dashboard.show_notice_at("あ".repeat(300), now);
         }
         State::LongReason => lose_link(&mut dashboard, &mut text, now),
-        State::Default | State::AllHidden => {}
+        State::Default => {}
     }
     dashboard.prepare(size(width), &mut text);
     (dashboard, text)
@@ -146,7 +138,6 @@ fn the_header_fits_from_1100_to_1920() {
             let never = [
                 ("dot", header.health.dot),
                 ("status slot", slot),
-                ("urgency counts", header.counts),
                 ("filter field", header.filter_field),
                 ("? keycap", header.help_key),
                 ("grouping control", header.grouping_control),
@@ -190,67 +181,54 @@ fn descendants(tree: &UiTree, id: WidgetId) -> Vec<WidgetId> {
         .collect()
 }
 
-#[test]
-fn at_1440_with_every_panel_hidden_only_the_caption_goes() {
-    let (dashboard, _text) = at(1440.0, State::AllHidden);
-    let header = &dashboard.header;
-    assert!(!shown(&dashboard, header.group_caption));
-    for chip in &header.chip_parts {
-        assert!(shown(&dashboard, chip.title));
-    }
-    assert!(shown(&dashboard, header.title));
-    assert!(shown(&dashboard, header.longest.unwrap()));
-}
-
-/// Which of the four droppable items are hidden, in drop order: the グループ
-/// caption, the chip titles, the 最長 tag, the title.
-fn dropped(dashboard: &Dashboard) -> [bool; 4] {
+/// Which of the two droppable items are hidden, in drop order: the
+/// グループ caption, the title.
+fn dropped(dashboard: &Dashboard) -> [bool; 2] {
     let header = &dashboard.header;
     [
         !shown(dashboard, header.group_caption),
-        header
-            .chip_parts
-            .iter()
-            .any(|chip| !shown(dashboard, chip.title)),
-        header.longest.is_some_and(|id| !shown(dashboard, id)),
         !shown(dashboard, header.title),
     ]
 }
 
+/// The narrowest width the filtering header fits at with nothing dropped,
+/// measured: the drop tests derive their widths from it, not from the
+/// fonts of one platform.
+fn widest_drop() -> u32 {
+    let (mut dashboard, mut text) = at(1920.0, State::Filtering);
+    let mut width = 1920;
+    while dropped(&dashboard) == [false; 2] {
+        assert!(width > 400, "nothing drops down to {width} px");
+        width -= 1;
+        dashboard.prepare(size(width as f32), &mut text);
+    }
+    width
+}
+
 #[test]
 fn the_drop_order_is_kept() {
-    let (dashboard, _text) = at(1100.0, State::HiddenAndFiltering);
-    let header = &dashboard.header;
-    assert!(!shown(&dashboard, header.group_caption), "グループ caption");
-    for chip in &header.chip_parts {
-        assert!(!shown(&dashboard, chip.title), "a chip title");
-        assert!(shown(&dashboard, chip.key), "a chip keycap stays");
-    }
-    // The title goes last, and only after the 最長 tag.
-    if !shown(&dashboard, header.title) {
-        let longest = header.longest.expect("the demo has a longest wait");
-        assert!(!shown(&dashboard, longest), "the title went before 最長");
-    }
-
-    // Narrowing one window from 1920 to 1000 px in steps of 4: each item
-    // goes only after the ones before it, none comes back, and the header
-    // fits at every width.
-    let (mut dashboard, mut text) = at(1920.0, State::HiddenAndFiltering);
+    // Narrowing one window from 1920 px in steps of 4 until both items
+    // went (or the never-dropped items alone fill the bar): each item goes
+    // only after the one before it and none comes back; the header fits at
+    // every width while anything is left to drop.
+    let (mut dashboard, mut text) = at(1920.0, State::Filtering);
     let mut previous = dropped(&dashboard);
-    assert_eq!(previous, [false; 4], "1920 px drops nothing");
-    for width in (1000..=1916).rev().step_by(4) {
+    assert_eq!(previous, [false; 2], "1920 px drops nothing");
+    let mut width = 1916;
+    while previous != [true; 2] && width > 400 {
         dashboard.prepare(size(width as f32), &mut text);
         let now = dropped(&dashboard);
         for (before, after) in previous.iter().zip(&now) {
             assert!(!before || *after, "{width}: an item came back: {now:?}");
         }
-        for pair in now.windows(2) {
-            assert!(pair[0] || !pair[1], "{width}: out of order: {now:?}");
+        assert!(now[0] || !now[1], "{width}: the title went first: {now:?}");
+        if now != [true; 2] {
+            no_overlap(&dashboard, width as f32, &format!("{width} px narrowing"));
         }
-        no_overlap(&dashboard, width as f32, &format!("{width} px narrowing"));
         previous = now;
+        width -= 4;
     }
-    assert_eq!(previous, [true; 4], "1000 px is narrower than 1100");
+    assert_eq!(previous, [true; 2], "both go before 400 px");
 }
 
 /// The shown children of the bar neither overlap nor leave [16, width - 16].
@@ -275,24 +253,22 @@ fn no_overlap(dashboard: &Dashboard, width: f32, what: &str) {
 
 #[test]
 fn dropped_items_come_back_when_the_window_widens() {
-    let (mut dashboard, mut text) = at(1100.0, State::HiddenAndFiltering);
+    let narrow = widest_drop() as f32 - 40.0;
+    let (mut dashboard, mut text) = at(narrow, State::Filtering);
     let caption = dashboard.header.group_caption;
     assert!(!shown(&dashboard, caption));
     dashboard.prepare(size(1920.0), &mut text);
     dashboard.prepare(size(1920.0), &mut text);
     assert!(shown(&dashboard, caption));
-    for chip in &dashboard.header.chip_parts {
-        assert!(shown(&dashboard, chip.title));
-    }
     assert!(shown(&dashboard, dashboard.header.title));
     // And it settles: laying out again changes nothing.
     assert!(!dashboard.prepare(size(1920.0), &mut text));
 
-    // Widening one window from 1000 to 1920 px: items come back in the
-    // reverse order and none goes again, and the header fits throughout.
-    let (mut dashboard, mut text) = at(1000.0, State::HiddenAndFiltering);
+    // Widening one window to 1920 px: items come back in the reverse
+    // order and none goes again, and the header fits throughout.
+    let (mut dashboard, mut text) = at(narrow, State::Filtering);
     let mut previous = dropped(&dashboard);
-    for width in (1004..=1920).step_by(4) {
+    for width in (narrow as u32 + 4..=1920).step_by(4) {
         dashboard.prepare(size(width as f32), &mut text);
         let now = dropped(&dashboard);
         for (before, after) in previous.iter().zip(&now) {
@@ -301,70 +277,25 @@ fn dropped_items_come_back_when_the_window_widens() {
         no_overlap(&dashboard, width as f32, &format!("{width} px widening"));
         previous = now;
     }
-    assert_eq!(previous, [false; 4]);
-}
-
-fn count_texts(dashboard: &Dashboard) -> Vec<String> {
-    labels_under(&dashboard.tree, dashboard.header.counts)
-}
-
-#[test]
-fn urgency_counts_count_each_need() {
-    let (dashboard, _text) = laid_out(Grouping::Orchestrator);
-    assert_eq!(
-        count_texts(&dashboard),
-        ["承認 2", "質問 1", "失敗 1", "静止 1"]
-    );
-
-    // A fleet without failures says 失敗 0.
-    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let mut workers = fleet::canned();
-    for worker in &mut workers.workers {
-        if worker.need() == Some(crate::fleet::Need::Failure) {
-            worker.state = crate::fleet::State::Finished;
-            worker.attention = false;
-        }
-    }
-    dashboard.apply(live(workers, 0), &mut text);
-    assert_eq!(
-        count_texts(&dashboard),
-        ["承認 2", "質問 1", "失敗 0", "静止 1"]
-    );
-}
-
-#[test]
-fn the_counts_ignore_the_filter() {
-    let (dashboard, _text) = at(1440.0, State::Filtering);
-    assert_eq!(dashboard.filter.query, "perf");
-    assert_eq!(
-        count_texts(&dashboard),
-        ["承認 2", "質問 1", "失敗 1", "静止 1"],
-        "urgency is not filtered"
-    );
+    assert_eq!(previous, [false; 2]);
 }
 
 #[test]
 fn the_tally_tags_and_the_hint_strip_are_gone() {
     let (dashboard, _text) = laid_out(Grouping::Orchestrator);
     let tags = tags_under(&dashboard.tree, dashboard.header.bar);
-    // The header's only tag is the longest wait.
-    assert_eq!(tags.len(), 1, "{tags:?}");
-    assert!(tags[0].starts_with("最長 "), "{tags:?}");
+    // No tag at all: the 最長 tag went with the urgency counts.
+    assert!(tags.is_empty(), "{tags:?}");
 }
 
-/// The states a lost link must stay readable in: each panel and filter
-/// combination of `STATES`.
-const LAYOUTS: [State; 4] = [
-    State::Default,
-    State::AllHidden,
-    State::Filtering,
-    State::HiddenAndFiltering,
-];
+/// The states a lost link must stay readable in: with the filter's count
+/// and without.
+const LAYOUTS: [State; 2] = [State::Default, State::Filtering];
 
 #[test]
 fn a_lost_link_keeps_its_age_readable_at_every_width() {
-    // What must show however long the reason is: the link state, the
-    // data's age and the stale mark, then the reason's start.
+    // What must show however long the reason is: the link state and the
+    // data's age, then the reason's start.
     let fixed = "切断: 最後の受信から 0 秒 · ";
     for state in LAYOUTS {
         for width in (1100..=1920).step_by(20) {
@@ -388,9 +319,8 @@ fn a_lost_link_keeps_its_age_readable_at_every_width() {
 
 #[test]
 fn a_stale_link_keeps_its_age_readable_at_every_width() {
-    // What must show however the slot is squeezed: the stale mark and the
-    // data's age, from seconds to many minutes. The worker count may be
-    // cut.
+    // What must show however the slot is squeezed: the data's age, from
+    // seconds to many minutes. 古いデータ after it may be cut.
     let ages = [
         (10, "10 秒"),
         (59, "59 秒"),
@@ -418,59 +348,6 @@ fn a_stale_link_keeps_its_age_readable_at_every_width() {
     }
 }
 
-/// The longest wait, rewritten in place to a far longer text: every
-/// worker's `since` (non-structural: the screen is not rebuilt).
-fn longer_waits(dashboard: &mut Dashboard, text: &mut TextStore, now: Instant) {
-    let mut fleet = dashboard.feed.fleet.clone();
-    for worker in &mut fleet.workers {
-        worker.since = "1000 分以上".to_owned();
-    }
-    let tag = dashboard.header.longest.unwrap();
-    dashboard.apply_received(live(fleet, 0), now, text);
-    dashboard.tick(now);
-    assert_eq!(dashboard.header.longest, Some(tag), "updated in place");
-}
-
-#[test]
-fn a_hidden_item_comes_back_at_its_current_width() {
-    let now = Instant::now();
-    let (mut dashboard, mut text) = at(1920.0, State::HiddenAndFiltering);
-    dashboard.apply_received(live(fleet::canned(), 0), now, &mut text);
-    dashboard.tick(now);
-    // Narrow until the 最長 tag goes: by 1000 px at the latest, which is
-    // narrower than any window AC4 names.
-    let mut width = 1920;
-    while !dropped(&dashboard)[2] {
-        assert!(width > 1000, "the 最長 tag is still shown at {width} px");
-        width -= 1;
-        dashboard.prepare(size(width as f32), &mut text);
-    }
-    let longest = dashboard.header.longest.unwrap();
-    let before = dashboard
-        .tree
-        .get::<Tag>(longest)
-        .unwrap()
-        .text()
-        .to_owned();
-    // While it is hidden, its text grows.
-    longer_waits(&mut dashboard, &mut text, now);
-    let after = dashboard
-        .tree
-        .get::<Tag>(longest)
-        .unwrap()
-        .text()
-        .to_owned();
-    assert!(after.len() > before.len(), "{before} → {after}");
-    dashboard.prepare(size(width as f32), &mut text);
-    // Widening a pixel at a time, every frame fits: it comes back only when
-    // its new width does.
-    for width in width..=1920 {
-        dashboard.prepare(size(width as f32), &mut text);
-        no_overlap(&dashboard, width as f32, &format!("{width} px widening"));
-    }
-    assert!(shown(&dashboard, longest), "1920 px shows it again");
-}
-
 #[test]
 fn the_status_keeps_its_width_until_everything_else_is_dropped() {
     let now = Instant::now();
@@ -492,16 +369,10 @@ fn the_status_keeps_its_width_until_everything_else_is_dropped() {
                 .unwrap();
             let wanted = status_natural(&dashboard, &mut text).min(STATUS_MAX_WIDTH);
             if width_of(&dashboard, slot) < wanted - 0.5 {
-                // Every droppable item there is has gone: with every panel
-                // shown there are no chips, so no chip title is shown.
+                // Every droppable item has gone.
                 let header = &dashboard.header;
-                let all_gone = !shown(&dashboard, header.group_caption)
-                    && header
-                        .chip_parts
-                        .iter()
-                        .all(|chip| !shown(&dashboard, chip.title))
-                    && header.longest.is_none_or(|id| !shown(&dashboard, id))
-                    && !shown(&dashboard, header.title);
+                let all_gone =
+                    !shown(&dashboard, header.group_caption) && !shown(&dashboard, header.title);
                 assert!(
                     all_gone,
                     "{what}: the status shrank to {} before the rest went: {:?}",

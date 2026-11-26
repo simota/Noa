@@ -1,4 +1,4 @@
-//! The `/` text filter (AC2): which workers the panels show.
+//! The `/` text filter (AC2): which workers the list and the analysis views show.
 
 use noa_gpui_core::Event;
 
@@ -15,7 +15,7 @@ pub(super) struct Filter {
 
 impl Filter {
     /// The filter is on once anything is typed, blanks too: the header
-    /// shows the match count, an empty panel says "該当なし" and the graph
+    /// shows the match count, an empty list says "該当なし" and the map
     /// mutes what does not match, all by this one rule. (A query of blanks
     /// matches every worker, so it hides no one.)
     pub(super) fn active(&self) -> bool {
@@ -71,14 +71,14 @@ fn match_qualified(worker: &Worker, term: &str) -> Option<bool> {
     use crate::fleet::{Need, State};
     let hit = match key {
         "state" | "s" => match value {
-            "running" | "作業中" => worker.state == State::Running,
+            "running" | "作業中" | "実行中" => worker.state == State::Running,
             "permission" | "approval" | "承認" | "承認待ち" => {
                 worker.state == State::Permission
             }
             "input" | "question" | "入力" | "入力待ち" | "質問" => {
                 worker.state == State::Input
             }
-            "finished" | "done" | "完了" => worker.state == State::Finished,
+            "finished" | "done" | "完了" | "終了" => worker.state == State::Finished,
             "error" | "fail" | "failure" | "失敗" => worker.state == State::Error,
             "quiet" | "静止" => worker.quiet,
             "closed" | "閉じた" => worker.is_closed(),

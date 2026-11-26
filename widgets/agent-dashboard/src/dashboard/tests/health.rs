@@ -177,19 +177,20 @@ fn the_status_ticks_without_a_snapshot() {
 fn a_lost_link_keeps_the_last_data_marked_stale() {
     let base = Instant::now();
     let (mut dashboard, mut text) = live_at(base, 0);
-    let queue = |dashboard: &Dashboard| {
-        dashboard.registry.lists[Panel::Queue as usize]
-            .as_ref()
-            .map(|parts| parts.items.len())
+    let attention = |dashboard: &Dashboard| {
+        let rows = rows_of(dashboard);
+        let fleet = &dashboard.feed.fleet;
+        let waiting = rows.iter().filter_map(|pane| fleet.worker(*pane));
+        Some(waiting.filter(|w| w.needs_attention()).count())
     };
-    assert_eq!(queue(&dashboard), Some(4));
+    assert_eq!(attention(&dashboard), Some(4));
 
     let lost = base + secs(30);
     dashboard.apply_received(down("接続が切れました"), lost, &mut text);
     dashboard.tick(lost);
     dashboard.prepare(window(), &mut text);
 
-    assert_eq!(queue(&dashboard), Some(4), "the last data stays");
+    assert_eq!(attention(&dashboard), Some(4), "the last data stays");
     assert_eq!(dashboard.feed.fleet.workers.len(), 9);
     let status = status_text(&dashboard);
     assert!(status.starts_with("切断: "), "{status}");
@@ -520,7 +521,8 @@ fn a_held_snapshot_from_a_link_back_up_shows_it_live() {
     dashboard.frame(back, &mut text);
     assert!(dashboard.pending.is_some(), "held");
     assert_eq!(dashboard.feed.fleet.workers.len(), 9, "the body waits");
-    // The header counts the workers the snapshot brings, from when it came.
+    // The header says the link state the held snapshot brings, as of when
+    // it came.
     let live_text = "同期済み".to_owned();
     let muted = dashboard.tree.theme().color(Role::Muted);
     assert_eq!(drawn(&mut dashboard, &mut text), (live_text, muted, GREEN));
@@ -562,7 +564,7 @@ fn the_empty_body_gives_the_reason_on_one_line() {
     let mut dashboard = Dashboard::of_snapshot(Grouping::Orchestrator, down);
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    assert!(dashboard.panels.iter().all(Option::is_none));
+    assert!(dashboard.registry.list.is_none(), "no list without workers");
     let tree = &dashboard.tree;
     let texts = labels_under(tree, tree.root().unwrap());
     let reason = "Noa に接続できません: A B \u{5D0} C";

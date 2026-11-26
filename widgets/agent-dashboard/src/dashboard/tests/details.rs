@@ -19,8 +19,12 @@ fn key_at(dashboard: &mut Dashboard, text: &mut TextStore, key: Key, size: Size)
 }
 
 /// [`select`] in a window of `size`: J, then K when `pane` comes before
-/// the selection.
+/// the selection, in 終了 for a worker that has ended.
 fn select_at(dashboard: &mut Dashboard, text: &mut TextStore, pane: u64, size: Size) {
+    // A worker that has ended is in 終了's list.
+    if !dashboard.order().contains(&pane) {
+        key_at(dashboard, text, Key::Char('3'), size);
+    }
     for step in ['j', 'k'] {
         for _ in 0..20 {
             if dashboard.view.selected == Some(pane) {
@@ -181,14 +185,9 @@ fn space_opens_the_drawer_for_any_worker() {
 }
 
 #[test]
-fn the_card_details_button_opens_the_drawer() {
+fn the_row_details_button_opens_the_drawer() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let (button, _) = *dashboard
-        .registry
-        .detail_buttons
-        .iter()
-        .find(|(_, pane)| *pane == 11)
-        .expect("running card 11 has a 詳細 button");
+    let button = row_button(&dashboard, 11);
     let pos = center(&dashboard.tree, button);
     click(&mut dashboard, &mut text, pos);
     assert_eq!(dashboard.view.detail, Some(11));
@@ -320,8 +319,8 @@ fn a_rebuild_keeps_the_drawer_open() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     select(&mut dashboard, &mut text, 11);
     key(&mut dashboard, &mut text, Key::Space);
-    key(&mut dashboard, &mut text, Key::Char('5'));
-    assert!(!dashboard.view.shown[Panel::Graph as usize]);
+    key(&mut dashboard, &mut text, Key::Char('g'));
+    assert_eq!(dashboard.view.grouping, Grouping::Agent);
     assert_eq!(dashboard.view.detail, Some(11));
     assert_eq!(dashboard.tree.overlays().count(), 1);
     assert!(shows(&dashboard, label_of(&dashboard, 11)));
@@ -397,49 +396,6 @@ fn the_drawer_stays_inside_the_window() {
     }
 }
 
-/// `GroupBox::card` made the running cards 247 / 231 / 255 px and the done
-/// cards 198 px tall (measured before U1). The caption line (15 px) became a
-/// row with a small 詳細 button, 26.32 px tall: every card grew by 11.32 px.
-///
-/// Measured where every card is shown whole: a hidden card (one a list
-/// pages out) measures 0. The cards' widths are fixed (336 px running, the
-/// 270 px done panel), so their heights do not depend on the window; at
-/// 1440×1800 the lists are about 900 px taller than at 1440×900, far more
-/// than both panels' cards need, so nothing has to page out.
-#[test]
-fn the_running_cards_keep_their_height() {
-    const ROW_GROWTH: f32 = 26.32 - 15.0;
-    let size = Size::new(1440.0, 1800.0);
-    let mut dashboard = Dashboard::new(Grouping::Orchestrator);
-    let mut text = TextStore::new(Default::default());
-    dashboard.prepare(size, &mut text);
-    let tree = &dashboard.tree;
-    for (panel, pane, group_box) in [
-        (Panel::Running, 11, 247.0),
-        (Panel::Running, 12, 231.0),
-        (Panel::Running, 13, 255.0),
-        (Panel::Done, 17, 198.0),
-        (Panel::Done, 18, 198.0),
-    ] {
-        let parts = dashboard.registry.lists[panel as usize].as_ref().unwrap();
-        let (card, _) = *parts.items.iter().find(|(_, p)| *p == Some(pane)).unwrap();
-        assert!(!tree.is_hidden(card), "card {pane} is shown");
-        let card_rect = rect(tree, card);
-        assert!(
-            inside(card_rect, rect(tree, parts.list)),
-            "card {pane} {card_rect:?} lies inside its list"
-        );
-        let height = card_rect[3];
-        assert!(
-            (height - (group_box + ROW_GROWTH)).abs() <= 0.5,
-            "card {pane}: {height} vs {}",
-            group_box + ROW_GROWTH
-        );
-    }
-}
-
-/// AC8: the start row says "開始 {started}前", or "不明" when the start is
-/// not known.
 #[test]
 fn an_unknown_start_says_unknown() {
     let mut fleet = fleet::canned();
@@ -745,13 +701,6 @@ fn hostile_on(grouping: Grouping, pane: u64, edit: impl Fn(&mut Worker)) -> (Das
     let mut dashboard = Dashboard::live(grouping, channel);
     let mut text = TextStore::new(Default::default());
     dashboard.prepare(window(), &mut text);
-    for digit in ['4', '5'] {
-        press(&mut dashboard, &mut text, digit, Modifiers::default());
-    }
-    assert_eq!(
-        dashboard.view.shown,
-        shown_only(&[Panel::Timeline, Panel::Graph])
-    );
     snapshots.send(live(fleet, 0)).unwrap();
     dashboard.before_frame(&mut text);
     dashboard.prepare(window(), &mut text);
@@ -761,18 +710,12 @@ fn hostile_on(grouping: Grouping, pane: u64, edit: impl Fn(&mut Worker)) -> (Das
     (dashboard, text)
 }
 
-/// Every label and tag shown in the drawer and in the running and done
-/// lists is drawn on one line; returns what they say.
+/// Every label and tag shown in the drawer and in the list is drawn on
+/// one line; returns what they say.
 fn assert_one_line_everywhere(dashboard: &Dashboard, what: &str) -> Vec<String> {
     let tree = &dashboard.tree;
     let mut roots = vec![drawer(dashboard).expect("the drawer is open")];
-    for panel in [Panel::Running, Panel::Done] {
-        roots.extend(
-            dashboard.registry.lists[panel as usize]
-                .as_ref()
-                .map(|l| l.list),
-        );
-    }
+    roots.extend(dashboard.registry.list.as_ref().map(|l| l.list));
     let texts: Vec<String> = roots
         .into_iter()
         .flat_map(|root| shown_under(tree, root))
@@ -785,8 +728,8 @@ fn assert_one_line_everywhere(dashboard: &Dashboard, what: &str) -> Vec<String> 
 }
 
 /// D1: a kind, model or branch with a paragraph break (live input) is
-/// drawn on one line in the drawer's tags, the card's tags and the group
-/// titles; the drawer's tags keep the text as given for assistive
+/// drawn on one line in the drawer's tags and the row's kind tag (a row
+/// shows no model or branch, and the list no group title); the drawer's tags keep the text as given for assistive
 /// technology. Before the fix, laying it out panicked in the shaper.
 #[test]
 fn tags_with_a_paragraph_break_are_drawn_on_one_line() {
@@ -807,9 +750,10 @@ fn tags_with_a_paragraph_break_are_drawn_on_one_line() {
             let what = format!("{given:?} {grouping:?}");
             let texts = assert_one_line_everywhere(&dashboard, &what);
             let line = drawer::one_line(given);
-            // The drawer's two tags, the card's two tags, the group title.
+            // The drawer's two tags, and the row's kind tag.
+            let wanted = if grouping == Grouping::Agent { 3 } else { 2 };
             let shown = texts.iter().filter(|t| t.starts_with(&line)).count();
-            assert_eq!(shown, 5, "{what}: {line:?} in {texts:?}");
+            assert_eq!(shown, wanted, "{what}: {line:?} in {texts:?}");
             let tree = &dashboard.tree;
             let tags: Vec<&drawer::FitTag> = shown_under(tree, drawer(&dashboard).unwrap())
                 .into_iter()
@@ -823,6 +767,31 @@ fn tags_with_a_paragraph_break_are_drawn_on_one_line() {
                 assert_eq!(node.label(), Some(given), "{what}");
             }
         }
+    }
+}
+
+/// D1: a done worker's model with a paragraph break is drawn on one line
+/// as its group's title in the タイムライン tab, grouped by model: the tab
+/// draws its group titles itself (`panel::group_header`).
+#[test]
+fn a_done_group_title_with_a_paragraph_break_is_drawn_on_one_line() {
+    for given in PARAGRAPH_BREAKS {
+        let mut fleet = fleet::canned();
+        let worker = fleet.workers.iter_mut().find(|w| w.pane == 17).unwrap();
+        assert_eq!(worker.state, crate::fleet::State::Finished, "17 is done");
+        worker.model = given.to_owned();
+        worker.effort.clear();
+        let mut dashboard =
+            Dashboard::of_snapshot(Grouping::Model, live(fleet, 0)).with_tab(Tab::Timeline);
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(window(), &mut text);
+        let what = format!("{given:?}");
+        let texts = labels_under(&dashboard.tree, dashboard.body);
+        for shown in &texts {
+            assert!(!breaks_lines(shown), "{what}: {shown:?} is drawn");
+        }
+        let wanted = format!("{} · 1", drawer::one_line(given));
+        assert!(texts.contains(&wanted), "{what}: {wanted:?} in {texts:?}");
     }
 }
 
@@ -843,7 +812,7 @@ fn a_cut_tag_shows_its_one_line_text_as_its_tooltip() {
 }
 
 /// D1: a worker label with a paragraph break is drawn on one line as the
-/// drawer's head and as the card's title.
+/// drawer's head and in the row's エージェント column.
 #[test]
 fn a_label_with_a_paragraph_break_is_drawn_on_one_line() {
     for given in PARAGRAPH_BREAKS {
@@ -853,10 +822,7 @@ fn a_label_with_a_paragraph_break_is_drawn_on_one_line() {
         let texts = assert_one_line_everywhere(&dashboard, &format!("{given:?}"));
         let line = drawer::one_line(given);
         let shown = texts.iter().filter(|t| **t == line).count();
-        assert_eq!(
-            shown, 2,
-            "{given:?}: the head and the card title in {texts:?}"
-        );
+        assert_eq!(shown, 2, "{given:?}: the head and the row in {texts:?}");
     }
 }
 
@@ -878,8 +844,8 @@ fn drawer_section(dashboard: &Dashboard, title: &str) -> Vec<String> {
 
 /// D1: a task and a detail with a paragraph break are each drawn as one
 /// paragraph, wrapped, where they belong: the detail under the drawer's
-/// 状態 after the state, the task under its 依頼, and on the running card
-/// the task after "依頼: " and the detail on a line of its own.
+/// 状態 after the state, the task under its 依頼, and in the row the task
+/// on its line and the detail before the parent on the next.
 #[test]
 fn a_task_and_detail_with_a_paragraph_break_are_drawn_as_one_paragraph() {
     for given in PARAGRAPH_BREAKS {
@@ -899,49 +865,15 @@ fn a_task_and_detail_with_a_paragraph_break_are_drawn_as_one_paragraph() {
         assert_eq!(asked, std::slice::from_ref(&task), "{what}");
 
         let tree = &dashboard.tree;
-        let running = dashboard.registry.lists[Panel::Running as usize].as_ref();
-        let (card, _) = running
-            .unwrap()
-            .items
-            .iter()
-            .find(|(_, pane)| *pane == Some(11))
-            .expect("11's running card");
-        let on_card: Vec<String> = shown_under(tree, *card)
+        let on_row: Vec<String> = shown_under(tree, row_of(&dashboard, 11))
             .into_iter()
             .filter_map(|id| text_of(tree, id))
             .collect();
-        let lines = |wanted: &str| on_card.iter().filter(|t| *t == wanted).count();
-        assert_eq!(lines(&format!("依頼: {task}")), 1, "{what}: {on_card:?}");
-        assert_eq!(lines(&detail), 1, "{what}: {on_card:?}");
-        assert_eq!(lines(&task), 0, "{what}: {on_card:?}");
-        assert_eq!(lines(&format!("依頼: {detail}")), 0, "{what}: {on_card:?}");
-    }
-}
-
-/// D1: a done worker's model with a paragraph break is drawn on one line
-/// as its group's title in the done panel, grouped by model: the done
-/// panel draws its group titles itself.
-#[test]
-fn a_done_group_title_with_a_paragraph_break_is_drawn_on_one_line() {
-    for given in PARAGRAPH_BREAKS {
-        let (dashboard, _text) = hostile_on(Grouping::Model, 17, |worker| {
-            assert_eq!(worker.state, crate::fleet::State::Finished, "17 is done");
-            worker.model = given.to_owned();
-            worker.effort.clear();
-        });
-        let what = format!("{given:?}");
-        assert_one_line_everywhere(&dashboard, &what);
-        let tree = &dashboard.tree;
-        let done = dashboard.registry.lists[Panel::Done as usize].as_ref();
-        let titles: Vec<String> = done
-            .unwrap()
-            .headers
-            .iter()
-            .filter(|(id, _)| !tree.is_hidden(*id))
-            .filter_map(|(id, _)| text_of(tree, *id))
-            .collect();
-        let wanted = format!("{} · 1", drawer::one_line(given));
-        assert!(titles.contains(&wanted), "{what}: {wanted:?} in {titles:?}");
+        let lines = |wanted: &str| on_row.iter().filter(|t| *t == wanted).count();
+        assert_eq!(lines(&task), 1, "{what}: {on_row:?}");
+        let report = format!("{detail} · 親 release-0.9.7");
+        assert_eq!(lines(&report), 1, "{what}: {on_row:?}");
+        assert_eq!(lines(&detail), 0, "{what}: {on_row:?}");
     }
 }
 

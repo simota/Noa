@@ -694,3 +694,180 @@ a later unit that depends on it is listed as editing it too.
   (read from source only, not run).
 - Whether Noa gives out pane ids in creation order (the fallback tie-break
   uses pane ids; ordering never depends on it alone).
+
+## Implementation record
+
+### U3: the worker list (2026-11-26, `orch/u3`)
+
+Built as designed, with these choices and deviations:
+
+- `list.rs` holds `rows` (membership + order), `counts`, the row texts and
+  `build`; `fill_body` builds only it for 一覧. `cards.rs`, `queue.rs`,
+  `urgency.rs` and the panel builders in `graph.rs` / `timeline.rs` are
+  deleted; `graph.rs` keeps `mark` and `edge`, `timeline.rs` keeps what
+  `gantt` measures lanes by. Code only the panels used went with them:
+  `Need::{title, rank}`, `Tier::title`, `Worker::card_tail`,
+  `FRESHNESS_MAX` (`fleet.rs`), `HINT_STRIP_SHRINK`, `set_tag`
+  (`style.rs`). U1's `dead_code` allows are all removed: the list uses
+  `Status`, `Scope`, `status`, `in_scope` and `parent_name` (the row's
+  親; U4 reuses it in the drawer).
+- The test-only `Dashboard::panels` is gone without a `list` field of its
+  own: `Dashboard` derefs to `Registry` in the tests, whose `list` already
+  names the rows; the panel is `tree.parent(list)`.
+- The pager pages one list (`ListParts { list, items: (row, pane),
+  indicator }`, no group headers or nested panes). A fresh list starts at
+  `View::anchor` (the first row's pane, written by every fit) with
+  `Aim::Stay`, or at the selection a user move asked for (`view.reveal`).
+  A scope switch, a filter change and another server clear the anchor:
+  those start from the top with the selection in view, as before.
+- J / K and N walk the rows as shown (`walk_order`: the built list's
+  panes), so a clock tick that would order the waits differently moves
+  neither the rows nor the walk. A worker selected outside the list (a
+  click in an analysis tab, a drawer opened on an ended worker while 現在
+  is shown) stays selected while the filter shows it. A selection a live
+  update takes out of the scope is cleared with 「… が一覧から外れたため
+  選択を解除しました（… は 終了 に移りました）」; its open drawer stays.
+- New attention is announced only once workers were shown (the first
+  snapshot's rows are not news); it is joined to a dropped-selection
+  notice with " · " when both come at once.
+- 承認画面へ, 入力する (`start_send`, extracted from the S arm), 確認する,
+  詳細, 結果を見る as in AC8. The time column is coloured only for a
+  worker that needs attention (a closed failure says 失敗 in red, its
+  time muted).
+- `filter.rs`: `state:実行中` = `state:running`, `state:終了` =
+  `state:finished`.
+- Help: one row 「1–3 表示の切替（現在・要対応・終了）」, N says
+  「次の要対応ワーカーを選ぶ（一覧の順）」, and the note
+  「1 行 = 1 ワーカーペイン（依頼の件数ではありません）」 above the footer.
+- Outside U3's file list, kept minimal: `fleet.rs` (the allows and the
+  dead code above, the `Tier` doc), `filter.rs` (the `state:実行中` and
+  `state:終了` aliases above), `live.rs` (one doc line naming
+  `card_tail`; the test
+  `a_watch_named_after_a_server_never_shown_heals_on_the_next_snapshot`
+  now opens 3's drawer — Enter, J, Space — since only the drawer's
+  worker is watched, and reads the drawer's overlay for the tail), and
+  the drawer-, help- and tab-related test files where they used panels
+  (`details.rs`, `help_overlay.rs`, `header_fit.rs`).
+- Checks on Linux: fmt and clippy clean; `cargo test` 357 passed, 0
+  failed, 2 ignored. The baseline failure
+  `header_fit::the_drop_order_is_kept` is rewritten (two droppable items,
+  widths measured from the `TextStore` it runs with) and passes.
+
+Not verified here (needs a person at a window): the rows at 1440×900 and
+1100×700, emphasis, and that the drawer (384 px, right) covers the rows'
+time and 操作 columns while it is open.
+
+### Deleted or replaced tests (U3)
+
+| Test (before) | Now covered by |
+| --- | --- |
+| `actions::clicking_urgency_count_toggles_filter_and_clicking_lane_or_node_selects_worker` | `actions::clicking_a_row_selects_its_worker` (no urgency counts); lane clicks: `selection::clicking_a_timeline_lane_selects_its_worker` (the タイムライン tab's lanes, the selection painted on them); node clicks: `tabs::mindmap_switches_axes_and_detects_branch_conflict_and_opens_drawer_on_click` |
+| `closed_workers::closed_workers_are_done_and_tagged` | `closed_workers::closed_workers_are_ended_and_say_so` |
+| `closed_workers::a_closed_failure_is_shown_done_and_counted_failed` | `closed_workers::a_closed_failure_is_ended_and_counted_failed` |
+| `details::the_card_details_button_opens_the_drawer` | `details::the_row_details_button_opens_the_drawer` |
+| `details::the_running_cards_keep_their_height` | `list::every_row_is_row_height` |
+| `details::a_done_group_title_with_a_paragraph_break_is_drawn_on_one_line` | rewritten under the same name on the タイムライン tab, which still draws group titles (`panel::group_header`); the list has none, and `details::tags_with_a_paragraph_break_are_drawn_on_one_line` covers the row's kind |
+| `feed::the_demo_done_cards_keep_their_times_and_results` | `feed::the_demo_ended_rows_keep_their_times_and_results` |
+| `feed::the_drawer_worker_is_watched_too` | `feed::the_drawer_worker_is_watched` (the drawer's worker only) |
+| `filtering::the_filter_applies_to_all_five_panels` | `filtering::the_filter_applies_to_the_list_and_its_counts` |
+| `filtering::the_timeline_counts_its_lanes` | `list::the_attention_count_is_the_rows_it_lays_out`, `filtering::a_query_of_blanks_shows_the_count` |
+| `filtering::digits_type_into_the_filter_without_toggling_panels` | `filtering::digits_type_into_the_filter_without_switching_the_scope` |
+| `filtering::a_query_of_blanks_says_which_panels_have_nobody` | `filtering::a_query_of_blanks_says_the_empty_scope_has_no_match` |
+| `header_fit::at_1440_with_every_panel_hidden_only_the_caption_goes` | none: no chips; `header_fit::nothing_is_dropped_at_1440` |
+| `header_fit::urgency_counts_count_each_need` | `list::the_switch_shows_each_scope_with_its_count`, `hints::the_header_holds_no_counts_longest_or_chips` |
+| `header_fit::the_counts_ignore_the_filter` | `filtering::the_filter_applies_to_the_list_and_its_counts` (the switch counts under the filter, AC3) |
+| `header_fit::a_hidden_item_comes_back_at_its_current_width` | none: the 最長 tag, the one item whose width changed while hidden, is gone; `header_fit::dropped_items_come_back_when_the_window_widens` |
+| `hints::each_panel_title_shows_its_shortcut` | `list::the_switch_shows_each_scope_with_its_count`, `keys::digits_switch_the_scope_and_save_it` |
+| `hints::hidden_panels_show_as_chips_in_the_header` | `hints::the_header_holds_no_counts_longest_or_chips` |
+| `hints::the_longest_wait_tag_needs_a_wait_text` | `hints::the_header_holds_no_counts_longest_or_chips` |
+| `hints::a_long_longest_label_leaves_room_for_the_link_status` | `hints::long_labels_leave_room_for_the_link_status` |
+| `hints::with_nothing_to_show_the_panel_keys_stay_on_screen` | `hints::with_nothing_to_show_the_body_says_why` |
+| `lanes::a_long_lane_label_is_cut_inside_its_column`, `lanes::lanes_reach_now_whatever_the_span` | none: the timeline panel is deleted; the タイムライン tab draws its own lanes (`gantt.rs`, `tabs::gantt_computes_concurrency_and_switches_time_scales`) |
+| `layout::every_card_needing_you_shows_without_scrolling`, `layout::the_queue_fits_with_any_other_panels_hidden`, `window_sizes::panels_stay_apart_and_inside_the_window` | `list::rows_stay_inside_the_list_at_every_window`, `paging::every_page_shows_whole_rows` |
+| `layout::all_panels_on_keeps_todays_layout`, `layout::a_hidden_panel_leaves_its_row_to_the_others`, `layout::each_shortcut_hides_and_restores_its_panel` | `list::the_default_view_is_one_list`, `keys::digits_switch_the_scope_and_save_it` |
+| `layout::the_grouping_control_stays_reachable_at_1140` | `header_fit::the_header_fits_from_1100_to_1920` (the grouping control is never dropped) |
+| `layout::the_last_segment_removes_the_groups` | `rebuild::a_grouping_change_reaches_the_next_frame` (groups order the analysis views only) |
+| `paging::no_card_is_drawn_partly`, `paging::every_page_shows_whole_items` | `paging::every_page_shows_whole_rows` |
+| `paging::the_running_panel_says_what_it_hides` | `paging::the_list_says_what_it_hides` |
+| `paging::the_wheel_pages_one_item` | `paging::the_wheel_pages_one_row` |
+| `paging::selecting_brings_the_card_into_view` | `paging::selecting_brings_the_row_into_view` |
+| `paging::the_timeline_and_graph_page_too`, `paging::the_whole_queue_shows_with_any_other_panels`, `paging::showing_a_panel_again_shows_the_selected_card` | none: one list (`paging::*`) |
+| `paging::one_long_wheel_event_pages_as_far_as_short_ones`, `paging::travel_past_the_end_does_not_eat_the_way_back`, `paging::a_long_wheel_event_stops_at_the_last_page`, `paging::a_larger_window_pages_back_what_fits`, `paging::an_unchanged_frame_presents_nothing`, `paging::a_wheel_that_turns_no_page_presents_nothing`, `paging::a_wheel_after_a_selection_turns_from_its_page`, `paging::the_latest_of_a_selection_and_a_wheel_decides_the_page` | rewritten on the list under the same names |
+| `paging::clearing_the_filter_keeps_the_selected_card_in_view` | `paging::a_filter_change_starts_from_the_top_with_the_selection_in_view` |
+| `paging::another_server_starts_the_lists_at_the_top` | `paging::another_server_starts_the_list_at_the_top` |
+| `paging::the_wheel_does_not_fight_the_selection` | rewritten on the list under the same name: a time-only live update (the rows' times, in place) after the wheel turned the page away from the selection does not page back to it |
+| `paging::a_new_size_keeps_a_page_turned_away_from_the_selection` | `paging::the_latest_of_a_selection_and_a_wheel_decides_the_page` |
+| `paging::a_larger_window_shows_everything_when_an_earlier_page_fits`, `paging::more_room_finds_the_earliest_page_that_shows_the_rest` | `paging::a_larger_window_pages_back_what_fits` |
+| `paging::a_card_its_list_can_hold_is_not_pushed_out_by_its_title`, `paging::a_row_taller_than_its_list_is_cut_at_the_list`, `paging::an_item_above_that_shrinks_comes_back` | none: no group titles, and every row is `ROW_HEIGHT` (`list::every_row_is_row_height`); the rebuild guarantee is `paging::a_live_rebuild_keeps_the_first_row` |
+| `paging::a_shown_selection_stays_shown_when_a_card_grows` | `paging::a_shown_selection_stays_shown_when_the_window_shrinks` (a row does not grow; a smaller window pushes the shown selection below the page the same way, and the page follows it) |
+| `paragraphs::a_fleet_with_paragraph_breaks_draws_in_every_panel` | `paragraphs::a_fleet_with_paragraph_breaks_draws_in_the_list_and_the_drawer` |
+| `queue_cards::the_most_urgent_card_starts_expanded`, `queue_cards::details_expands_that_card_instead` | none: no expanded card; `list::the_order_is_attention_first_then_running_by_parent` |
+| `queue_cards::open_names_the_pane_it_would_go_to` | `list::the_approval_button_focuses_the_pane` |
+| `queue_cards::a_plain_command_has_no_model_tag` | `list::a_row_shows_its_columns_and_nothing_else` (no model in any row) |
+| `queue_cards::the_queue_card_keeps_its_buttons_inside`, `queue_cards::a_long_label_leaves_the_wait_inside_its_queue_card` | `list::a_long_label_leaves_the_wait_and_the_button_inside_the_row` |
+| `rebuild::hide_and_restore_cycles_release_the_old_text_layouts` | `rebuild::scope_switch_cycles_release_the_old_text_layouts` |
+| `rebuild::a_press_right_after_a_panel_toggle_hits_the_grouping_control` | `rebuild::a_press_right_after_a_scope_switch_hits_the_grouping_control` |
+| `rebuild::a_panel_toggle_reaches_the_next_frame` | `rebuild::a_scope_switch_reaches_the_next_frame` |
+| `relations::the_orchestrator_is_the_graph_root_not_its_own_child`, `relations::the_graph_keeps_roots_with_one_name_apart`, `selection::every_graph_node_names_its_root_row` | none: the graph panel is deleted; the マップ tab draws relations (`mindmap.rs`, `tabs::*`), and a row names its parent (`list::a_row_shows_its_columns_and_nothing_else`) |
+| `selection::j_and_k_walk_the_panel_order` | `selection::j_and_k_walk_the_list_order` |
+| `selection::an_open_info_section_walks_its_cards_after_the_others` | `selection::j_and_k_walk_the_list_order` (the quiet 13 runs in 現在) |
+| `selection::the_selection_shows_in_card_lane_and_node` | `selection::the_selection_shows_in_place_on_its_row` |
+| `selection::selecting_a_queue_worker_expands_its_card`, `selection::the_queue_comes_back_with_the_selected_card_expanded` | none: no expanded card |
+| `selection::the_queue_cards_keep_the_order_j_walks`, `selection::a_new_top_card_is_expanded_in_place`, `triage::an_open_info_section_reorders_in_place_as_a_build_shows_it` | `selection::the_rows_keep_their_order_as_time_passes`, `list::a_clock_advance_does_not_reorder` |
+| `selection::running_and_done_cards_are_named_groups` | `selection::rows_are_named_groups` |
+| `triage::the_queue_puts_decisions_first_and_folds_what_only_informs` | `list::the_order_is_attention_first_then_running_by_parent`, `list::the_attention_count_is_the_rows_it_lays_out` |
+| `triage::what_only_informs_is_never_expanded_on_its_own` | `triage::what_only_informs_never_needs_attention` |
+| `triage::a_visible_failure_still_says_how_many_decisions_the_filter_hides` | `triage::a_visible_failure_still_says_how_many_need_attention_outside` (failures count too, AC7) |
+| `triage::a_filter_that_matches_only_folded_cards_says_so` | `triage::a_filter_that_matches_only_a_quiet_worker_shows_it_running` |
+| `triage::the_drawer_shows_more_of_the_screen_than_a_card` | `triage::the_drawer_shows_the_whole_screen_tail_and_a_row_none` |
+| `urgency_steps::steps_follow_the_thresholds`, `urgency_steps::a_card_looks_its_step`, `urgency_steps::a_step_change_needs_no_rebuild` | none: urgency steps are deleted with the queue cards; a row's wait still updates in place (`feed::a_volatile_snapshot_updates_in_place`) |
+
+Tests rewritten in place under their old names (assertions moved from
+panels to the list): `feed::a_volatile_snapshot_updates_in_place`,
+`feed::a_structural_snapshot_rebuilds_the_screen` (now also the new
+attention notice), `feed::a_live_screen_follows_its_feed`,
+`feed::unknown_times_and_results_are_not_shown`,
+`selection::a_vanished_selection_moves_to_its_neighbour`,
+`selection::the_drawer_follows_any_reselection`,
+`selection::a_reselection_to_nobody_closes_the_drawer`,
+`hardening::another_server_instance_is_watched_afresh`,
+`header_fit::the_drop_order_is_kept` (the baseline failure),
+`header_fit::dropped_items_come_back_when_the_window_widens`,
+`saved_view::*`, `keys::*` and others that used panel keys or
+`queue_buttons`.
+
+New tests (U3): `list::*` (20), `keys::digits_switch_the_scope_and_save_it`,
+`keys::the_list_keys_act_on_the_rows`,
+`prefs::tests::{a_version_1_file_loads_in_the_current_scope,
+a_view_is_written_as_version_2_with_its_scope,
+an_old_file_is_rewritten_only_when_the_view_changes}`,
+`saved_view::an_old_saved_view_starts_in_the_current_scope`,
+`selection::a_selection_that_leaves_the_scope_says_where_it_went`,
+`paging::{a_scope_switch_starts_from_the_top, a_live_rebuild_keeps_the_first_row}`.
+
+Review fixes (U3): 入力する clicked while a close waited for its second
+press (X or ⇧X) left nothing focused — the drawer was relabelled after
+`start_send` had focused its send field, and the rebuilt drawer did not
+focus it again. A row's button now has the drawer relabelled before it
+acts, as a key does (`act`); the drawer's own buttons are still relabelled
+after. 入力する on a worker whose drawer stayed open after a live update
+took it out of the list (and the selection with it) now selects it too.
+Tests: `list::the_input_button_focuses_the_send_field_while_a_close_waits`,
+`list::the_input_button_selects_a_row_whose_drawer_stayed_open` (an open
+drawer covers the rows' 操作 column from the pointer, so with the drawer
+open they press the button as assistive technology does). Checks on
+Linux after the fixes: fmt and clippy clean; `cargo test` 363 passed, 0
+failed, 2 ignored. Second review: a selection outside the scope's rows
+that a live update drops is named in the notice (its label is now taken
+from the fleet before the snapshot, not from the scope's rows), and every
+switch (scope, grouping, tab, map axis, timeline scale) takes back a close
+waiting for its second press, as keys 1–3 do; tests
+`selection::a_selection_outside_the_list_that_leaves_says_so`,
+`actions::a_switch_takes_back_a_waiting_close`; `cargo test` 365 passed,
+0 failed, 2 ignored.
+Third review: a click on a row (or a lane or a マップ node) away from its
+button clears the focus, as a click on space that takes none does, so the
+filter or send field no longer keeps it, and resets `pressed_in_filter`;
+tests `filtering::clicking_a_row_leaves_the_filter_field`,
+`list::clicking_the_row_leaves_the_send_field`; `cargo test` 367 passed, 0
+failed, 2 ignored.

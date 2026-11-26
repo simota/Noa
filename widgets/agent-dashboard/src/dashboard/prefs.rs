@@ -1,4 +1,4 @@
-//! The view kept across runs: the tab, the grouping, the panels shown, the
+//! The view kept across runs: the tab, the grouping, the list's scope, the
 //! map's axis, the timeline's scale and the filter. Saved whenever one of
 //! them changes and when the window closes, restored at start; the
 //! command line's `--tab`, `--group` and `--filter` win over what was
@@ -9,12 +9,11 @@ use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::fleet::{Grouping, one_line};
+use crate::fleet::{Grouping, Scope, one_line};
 
 use super::Tab;
 use super::gantt::TimeScale;
 use super::mindmap::MapAxis;
-use super::panel::Panel;
 
 /// The longest filter kept: a query is typed by hand.
 const FILTER_MAX_CHARS: usize = 1000;
@@ -25,7 +24,7 @@ const FILE_MAX_BYTES: u64 = 64 * 1024;
 pub struct Prefs {
     pub(super) tab: Tab,
     pub(super) grouping: Grouping,
-    pub(super) shown: [bool; 5],
+    pub(super) scope: Scope,
     pub(super) map_axis: MapAxis,
     pub(super) time_scale: TimeScale,
     pub(super) filter: String,
@@ -36,7 +35,7 @@ impl Default for Prefs {
         Prefs {
             tab: Tab::Operations,
             grouping: Grouping::Orchestrator,
-            shown: [true; 5],
+            scope: Scope::Current,
             map_axis: MapAxis::Orchestrator,
             time_scale: TimeScale::All,
             filter: String::new(),
@@ -97,30 +96,13 @@ fn parse_scale(name: &str) -> Option<TimeScale> {
         .find(|scale| scale_name(*scale) == name)
 }
 
-fn panel_name(panel: Panel) -> &'static str {
-    match panel {
-        Panel::Queue => "queue",
-        Panel::Running => "running",
-        Panel::Done => "done",
-        Panel::Timeline => "timeline",
-        Panel::Graph => "graph",
-    }
-}
-
 impl Prefs {
     pub(super) fn to_json(&self) -> serde_json::Value {
-        let shown: serde_json::Map<String, serde_json::Value> = Panel::ALL
-            .iter()
-            .map(|panel| {
-                let on = self.shown[*panel as usize];
-                (panel_name(*panel).to_owned(), on.into())
-            })
-            .collect();
         serde_json::json!({
-            "version": 1,
+            "version": 2,
             "tab": tab_name(self.tab),
             "group": grouping_name(self.grouping),
-            "shown": shown,
+            "scope": self.scope.name(),
             "mapAxis": axis_name(self.map_axis),
             "timeScale": scale_name(self.time_scale),
             // Cut as a read cuts it: a view written is read back whole.
@@ -131,20 +113,16 @@ impl Prefs {
     /// The view `text` keeps. Text that is not a JSON object is no view:
     /// `None`, and the caller starts from the defaults. Within an object,
     /// each value that is missing or not one this version knows is its
-    /// default, the others are kept.
+    /// default, the others are kept. Version 1 and 2 files read alike (the
+    /// version is not checked): a version 1 file's `shown` panels are
+    /// ignored — panel visibility maps onto no scope, and starting in a
+    /// subset because a panel was once hidden would hide work — so it
+    /// starts in 現在.
     pub(super) fn from_json(text: &str) -> Option<Prefs> {
         let value: serde_json::Value = serde_json::from_str(text).ok()?;
         let object = value.as_object()?;
         let text_of = |key: &str| object.get(key).and_then(serde_json::Value::as_str);
         let base = Prefs::default();
-        let mut shown = base.shown;
-        if let Some(saved) = object.get("shown").and_then(serde_json::Value::as_object) {
-            for panel in Panel::ALL {
-                if let Some(on) = saved.get(panel_name(panel)).and_then(|v| v.as_bool()) {
-                    shown[panel as usize] = on;
-                }
-            }
-        }
         let filter: String = text_of("filter")
             .map(|query| one_line(query).chars().take(FILTER_MAX_CHARS).collect())
             .unwrap_or_default();
@@ -153,7 +131,9 @@ impl Prefs {
             grouping: text_of("group")
                 .and_then(Grouping::parse)
                 .unwrap_or(base.grouping),
-            shown,
+            scope: text_of("scope")
+                .and_then(Scope::parse)
+                .unwrap_or(base.scope),
             map_axis: text_of("mapAxis")
                 .and_then(parse_axis)
                 .unwrap_or(base.map_axis),
@@ -303,7 +283,7 @@ mod tests {
         Prefs {
             tab: Tab::Timeline,
             grouping: Grouping::Model,
-            shown: [true, false, true, false, true],
+            scope: Scope::Ended,
             map_axis: MapAxis::Branch,
             time_scale: TimeScale::Quarter,
             filter: "parent:release -state:done".into(),
@@ -353,12 +333,12 @@ mod tests {
 
     #[test]
     fn a_value_this_version_does_not_know_is_its_default_alone() {
-        let text = r#"{"tab":"gantt-v9","group":"agent","shown":{"done":false,"graph":"no"},
+        let text = r#"{"tab":"gantt-v9","group":"agent","scope":"finished",
             "mapAxis":"state","timeScale":7,"filter":"a\nb"}"#;
         let prefs = Prefs::from_json(text).unwrap();
         assert_eq!(prefs.tab, Tab::Operations);
         assert_eq!(prefs.grouping, Grouping::Agent);
-        assert_eq!(prefs.shown, [true, true, false, true, true]);
+        assert_eq!(prefs.scope, Scope::Current, "an unknown scope is 現在");
         assert_eq!(prefs.map_axis, MapAxis::State);
         assert_eq!(prefs.time_scale, TimeScale::All);
         assert_eq!(prefs.filter, "a b", "the filter is kept on one line");
@@ -367,6 +347,65 @@ mod tests {
             Prefs::from_json(&long).unwrap().filter.len(),
             FILTER_MAX_CHARS
         );
+    }
+
+    /// What a version 1 dashboard wrote: its panels, no scope.
+    const OLD_FILE: &str = r#"{"version":1,"tab":"ops","group":"model",
+        "shown":{"queue":false,"running":true,"done":false,"timeline":true,"graph":false},
+        "mapAxis":"branch","timeScale":"15m","filter":"parent:release"}"#;
+
+    /// dashboard-worker-list AC10: an old file loads, in 現在, its other
+    /// values kept.
+    #[test]
+    fn a_version_1_file_loads_in_the_current_scope() {
+        let prefs = Prefs::from_json(OLD_FILE).expect("an old view is a view");
+        assert_eq!(
+            prefs,
+            Prefs {
+                tab: Tab::Operations,
+                grouping: Grouping::Model,
+                scope: Scope::Current,
+                map_axis: MapAxis::Branch,
+                time_scale: TimeScale::Quarter,
+                filter: "parent:release".into(),
+            }
+        );
+        for scope in Scope::ALL {
+            let text = format!(r#"{{"scope":"{}"}}"#, scope.name());
+            assert_eq!(Prefs::from_json(&text).unwrap().scope, scope);
+        }
+    }
+
+    /// dashboard-worker-list AC10: version 2, the scope, no panels.
+    #[test]
+    fn a_view_is_written_as_version_2_with_its_scope() {
+        let json = sample().to_json();
+        assert_eq!(json["version"], 2);
+        assert_eq!(json["scope"], "ended");
+        assert!(json.get("shown").is_none(), "{json}");
+    }
+
+    /// dashboard-worker-list AC10: an old file is not rewritten at start,
+    /// only at the first change of the view.
+    #[test]
+    fn an_old_file_is_rewritten_only_when_the_view_changes() {
+        let path = temp("old-file");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, OLD_FILE).unwrap();
+        let mut store = PrefsStore::at(path.clone());
+        let loaded = store.load();
+        store.start_from(loaded.clone());
+        store.save(&loaded);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), OLD_FILE);
+        let changed = Prefs {
+            scope: Scope::Attention,
+            ..loaded
+        };
+        store.save(&changed);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains(r#""version":2"#), "{written}");
+        assert_eq!(PrefsStore::at(path.clone()).load(), changed);
+        std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
     }
 
     #[test]

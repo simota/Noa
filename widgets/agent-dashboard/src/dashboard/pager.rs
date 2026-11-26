@@ -1,8 +1,10 @@
-//! Paging instead of scrolling (AC3). Each panel list is a clipped column
-//! (`panel::card_list`) that shows whole items only: `fit` hides the items
+//! Paging instead of scrolling (AC3). The worker list is a clipped column
+//! (`panel::card_list`) that shows whole rows only: `fit` hides the rows
 //! before the page's first one and those that would not fit below it, and
-//! says in the panel's title row how many are hidden. The wheel turns pages
-//! a whole item at a time; a selected worker is paged into view.
+//! says in the list's toolbar how many are hidden. The wheel turns pages a
+//! whole row at a time; a selection the user makes is paged into view, and
+//! a list built again starts at the row its page started at
+//! (`View::anchor`).
 
 use std::cell::Cell;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -66,116 +68,69 @@ struct Seen {
 /// Everything about a list, as laid out, that decides its page.
 #[derive(Debug, Clone, PartialEq)]
 struct Look {
-    /// The list's rect: the room the panel gives it.
+    /// The list's rect: the room the window gives it.
     list: Option<Rect>,
-    /// Each item: a digest of what it holds, and its rect while it is
-    /// shown. Any item can decide the page when it grows or shrinks in
-    /// place: a shown one by moving its own rect or a later one, a hidden
-    /// one below by fitting after all, a hidden one above by letting the
-    /// last page start earlier. A hidden item has no rect, so its digest
-    /// stands for its size; it names the item's widget, so a list that now
-    /// holds other items (or the same in another order) looks different.
+    /// Each row: a digest of what it holds, and its rect while it is
+    /// shown. A hidden row has no rect, so its digest stands for its size;
+    /// it names the row's widget, so a list that now holds other rows (or
+    /// the same in another order) looks different.
     items: Vec<(u64, Option<Rect>)>,
 }
 
-/// One panel's pageable list.
+/// The pageable list.
 #[derive(Debug)]
 pub(super) struct ListParts {
     /// The list container.
     pub(super) list: WidgetId,
-    /// The items in order, each with the pane it shows.
-    pub(super) items: Vec<(WidgetId, Option<u64>)>,
-    /// Panes an item shows besides its own, with the item's index: a graph
-    /// root row holds its children's and grandchildren's nodes.
-    pub(super) nested: Vec<(u64, usize)>,
-    /// Group headers (and wrap grids) with the indices of their items.
-    pub(super) headers: Vec<(WidgetId, Vec<usize>)>,
-    /// The "上に N 件 · 下に M 件" label in the title row.
+    /// The rows in order, each with the pane it shows.
+    pub(super) items: Vec<(WidgetId, u64)>,
+    /// The "上に N 件 · 下に M 件" label in the toolbar.
     pub(super) indicator: WidgetId,
 }
 
-/// Where a page ends, as measured.
-#[derive(Debug, Clone, Copy)]
-struct Page {
-    /// One past the page's last item.
-    end: usize,
-    /// Whether the page's first item is shown without its group's title
-    /// above it: with the title it would not fit (see `ListParts::show`).
-    bare: bool,
-}
-
 impl ListParts {
-    /// The index of the item that shows `pane`, as its own or nested in it.
+    /// The index of the row that shows `pane`.
     pub(super) fn item_of(&self, pane: u64) -> Option<usize> {
-        self.items
-            .iter()
-            .position(|(_, own)| *own == Some(pane))
-            .or_else(|| {
-                let nested = self.nested.iter().find(|(p, _)| *p == pane);
-                nested.map(|(_, item)| *item)
-            })
+        self.items.iter().position(|(_, own)| *own == pane)
     }
 
-    /// Whether `header` is a group's title above `item` — not the wrap grid
-    /// that holds it.
-    fn titles(&self, tree: &UiTree, header: WidgetId, of: &[usize], item: usize) -> bool {
-        of.contains(&item) && !tree.ancestors(self.items[item].0).any(|id| id == header)
+    /// The pane of each row, in order.
+    pub(super) fn panes(&self) -> Vec<u64> {
+        self.items.iter().map(|(_, pane)| *pane).collect()
     }
 
-    /// Shows the items in `shown` and the headers of any of them; hides the
-    /// rest. When `bare`, the title of the first shown item's group is left
-    /// out (see `page`): the earlier items are hidden, and their gaps with
-    /// them, so that title is the one thing above a page's first item that
-    /// can push it out of a list that could hold it. True when anything
+    /// Shows the rows in `shown` and hides the rest; true when anything
     /// changed.
-    fn show(&self, tree: &mut UiTree, shown: Range<usize>, bare: bool) -> bool {
-        let items = self.items.iter().enumerate().map(|(index, (id, _))| {
-            let on = shown.contains(&index);
-            (*id, on)
-        });
-        let headers = self.headers.iter().map(|(id, of)| {
-            let left_out = bare && self.titles(tree, *id, of, shown.start);
-            let on = !left_out && of.iter().any(|index| shown.contains(index));
-            (*id, on)
-        });
-        let changes: Vec<(WidgetId, bool)> = items.chain(headers).collect();
+    fn show(&self, tree: &mut UiTree, shown: Range<usize>) -> bool {
         let mut changed = false;
-        for (id, on) in changes {
-            changed |= set_shown(tree, id, on);
+        for (index, (id, _)) in self.items.iter().enumerate() {
+            changed |= set_shown(tree, *id, shown.contains(&index));
         }
         changed
     }
 
-    /// Measures the page from `first` as laid out with every item from
-    /// `first` on shown: the first item that ends below the list is cut with
-    /// all after it, unless it is `first` itself, which is shown alone and
-    /// clipped by the list (it is taller than the list). `None` when `first`
-    /// does not fit below its group's title, which it must then be measured
-    /// without (`bare`).
-    fn page(&self, tree: &UiTree, first: usize, bare: bool) -> Option<Page> {
+    /// One past the last row of the page from `first`, as laid out with
+    /// every row from `first` on shown: the first row that ends below the
+    /// list is cut with all after it, unless it is `first` itself, which is
+    /// shown alone and clipped by the list (it is taller than the list).
+    fn page(&self, tree: &UiTree, first: usize) -> usize {
         let len = self.items.len();
         let Some(list) = tree.window_rect(self.list) else {
-            return Some(Page { end: len, bare });
+            return len;
         };
         let bottom = list.y + list.height + SLACK;
         let cut = self.items[first..].iter().position(|(id, _)| {
             tree.window_rect(*id)
                 .is_some_and(|item| item.y + item.height > bottom)
         });
-        let titled = || {
-            let mut headers = self.headers.iter();
-            headers.any(|(id, of)| self.titles(tree, *id, of, first))
-        };
-        let end = match cut {
-            Some(0) if !bare && titled() => return None,
+        match cut {
             Some(0) => first + 1,
             Some(n) => first + n,
             None => len,
-        };
-        Some(Page { end, bare })
+        }
     }
 
-    /// The items not shown below the page that starts at `first`.
+    /// The rows not shown below the page that starts at `first`.
     fn hidden_below(&self, tree: &UiTree, first: usize) -> usize {
         let after = self.items.iter().skip(first);
         after.filter(|(id, _)| tree.is_hidden(*id)).count()
@@ -185,7 +140,7 @@ impl ListParts {
     fn memory<'t>(&self, tree: &'t UiTree) -> (WidgetId, &'t PageMemory) {
         let row = tree
             .parent(self.indicator)
-            .expect("the indicator is in a title row");
+            .expect("the indicator is in the toolbar");
         let mut children = tree.children(row).iter();
         children
             .find_map(|id| Some((*id, tree.get::<PageMemory>(*id)?)))
@@ -204,7 +159,7 @@ impl ListParts {
         }
     }
 
-    /// `pane` when its item is shown.
+    /// `pane` when its row is shown.
     fn shown(&self, tree: &UiTree, pane: Option<u64>) -> Option<u64> {
         let item = pane.and_then(|pane| self.item_of(pane))?;
         (!tree.is_hidden(self.items[item].0))
@@ -289,257 +244,191 @@ impl Aim {
     }
 }
 
-/// A list `fit` pages again this time.
-struct Job<'a> {
-    panel: usize,
-    parts: &'a ListParts,
+/// The list's page as `fit` moves it toward its aim.
+struct Job {
     aim: Aim,
     /// Wheel steps to take once `aim` is reached (forward positive): the
-    /// wheel turned this list after the selection the aim brings into view.
+    /// wheel turned the list after the selection the aim brings into view.
     then: isize,
-    page: Page,
 }
 
-impl Job<'_> {
-    /// The first item after one round from `first`, whose page is `page`;
-    /// `None` when this list is settled.
-    fn step(&mut self, first: usize, page: Page) -> Option<usize> {
-        let len = self.parts.items.len();
+impl Job {
+    /// The first row after one round from `first`, whose page ends at
+    /// `end` of `len` rows; `None` when the list is settled.
+    fn step(&mut self, first: usize, end: usize, len: usize) -> Option<usize> {
         match self.aim {
             Aim::Item(item) if item < first => Some(item),
-            Aim::Item(item) if item >= page.end => Some(first + 1),
+            Aim::Item(item) if item >= end => Some(first + 1),
             Aim::Item(_) if self.then != 0 => {
                 // The selection is on the page: the wheel's steps follow.
                 let steps = std::mem::take(&mut self.then);
                 if steps > 0 {
                     self.aim = Aim::Forward(first + steps.unsigned_abs());
-                    self.step(first, page)
+                    self.step(first, end, len)
                 } else {
                     self.aim = Aim::Back;
                     let back = first.saturating_sub(steps.unsigned_abs());
                     (back != first).then_some(back)
                 }
             }
-            Aim::Forward(to) if first < to && page.end < len => Some(first + 1),
+            Aim::Forward(to) if first < to && end < len => Some(first + 1),
             _ => None,
         }
     }
 }
 
-/// Lays out the page from each `(parts, first)` and measures it: twice for
-/// a page whose first item does not fit below its group's title, the second
-/// time without the title. Sets `changed` when it changed the tree.
+/// Lays out the page from `first` with every row from it on shown and
+/// measures where it ends. Sets `changed` when it changed the tree.
 fn measure(
     tree: &mut UiTree,
     text: &mut TextStore,
     viewport: Size,
-    pages: &[(&ListParts, usize)],
+    parts: &ListParts,
+    first: usize,
     changed: &mut bool,
-) -> Vec<Page> {
-    let mut lay_out = |tree: &mut UiTree, bare: &dyn Fn(usize) -> bool| {
-        let mut shown = false;
-        for (k, (parts, first)) in pages.iter().enumerate() {
-            shown |= parts.show(tree, *first..parts.items.len(), bare(k));
-        }
-        if shown {
-            *changed = true;
-            tree.prepare(viewport, text);
-        }
-    };
-    lay_out(tree, &|_| false);
-    let measured: Vec<Option<Page>> = pages
-        .iter()
-        .map(|(parts, first)| parts.page(tree, *first, false))
-        .collect();
-    if measured.iter().all(Option::is_some) {
-        return measured.into_iter().flatten().collect();
+) -> usize {
+    if parts.show(tree, first..parts.items.len()) {
+        *changed = true;
+        tree.prepare(viewport, text);
     }
-    lay_out(tree, &|k| measured[k].is_none());
-    let pages = pages.iter().zip(measured);
-    pages
-        .map(|((parts, first), page)| {
-            page.unwrap_or_else(|| {
-                let bare = parts.page(tree, *first, true);
-                bare.expect("a bare page is always measured")
-            })
-        })
-        .collect()
+    parts.page(tree, first)
 }
 
-/// Pages every list to fit its panel at `viewport`; true when it changed
-/// the tree (the caller lays out again).
+/// Pages the list to fit its room at `viewport`; true when it changed the
+/// tree (the caller lays out again). Writes the pane of the page's first
+/// row to `view.anchor`.
 ///
-/// A list keeps its page while nothing that decides it changed: the same
-/// room, the same items holding the same content laid out the same way,
-/// the same first item. Then `fit` touches nothing, so a frame with nothing
-/// new (the live window wakes every second) is neither laid out again nor
+/// The list keeps its page while nothing that decides it changed: the same
+/// room, the same rows holding the same content laid out the same way, the
+/// same first row. Then `fit` touches nothing, so a frame with nothing new
+/// (the live window wakes every second) is neither laid out again nor
 /// presented. Otherwise its page is decided by one rule — **the user's most
 /// recent action wins**:
 ///
-/// - a list built again (no memory: a rebuild, a filter change, another
-///   server) starts at its first item, with the selected worker in view;
+/// - a list built again (no memory: a live update, a rebuild) starts at the
+///   row its page started at (`view.anchor`), else at its first row kept
+///   in range, and aims nowhere unless the user just selected a worker: a
+///   row that came above the page moves nothing the user is reading, and
+///   the selection never moves. With no anchor (the first build; the user
+///   changed the scope or the filter, which clears it) it starts at the
+///   top, with the selected worker in view;
 /// - a selection made since the list's last fit (`view.reveal`) is paged
-///   into view; when the wheel turned this list after that selection
+///   into view; when the wheel turned the list after that selection
 ///   (`PageMemory::after_reveal`), its steps are then taken from the page
 ///   that shows the selection — the page a fit between the two would have
 ///   left, so a frame drawn between them or not makes no difference;
 /// - the wheel's page holds when no selection came since: its steps
 ///   forward stop at the first page that hides nothing below (`wheel`
 ///   cannot lay out to see it);
-/// - with no user action since the last fit (a new size, an item changed
-///   in place), the page keeps its first item; the selected worker is
-///   brought back only when it was on the page (the user had not paged
-///   away from it) and the change pushed it off. Then the page starts at
-///   the earliest item from which everything to the end fits, if there is
-///   one before it (a larger window, an item that shrank) — also when the
-///   page from its own first item does not reach the end: cards wrapped in
-///   rows pair up differently from an earlier first item.
+/// - with no user action since the last fit (a new size, a row changed in
+///   place), the page keeps its first row; the selected worker is brought
+///   back only when it was on the page (the user had not paged away from
+///   it) and the change pushed it off. Then the page starts at the
+///   earliest row from which everything to the end fits, if there is one
+///   before it (a larger window).
 ///
-/// The fit is measured, not computed: card heights change in place (a
-/// queue card expands or collapses on a volatile snapshot, lanes are made
-/// again), so every item from the page's first one on is shown, laid out,
-/// and those that end below the list hidden again. A hidden item's place is
-/// free, so hiding a later item never moves an earlier one: one layout is
-/// enough for each first item tried (two when its group's title must go).
+/// The fit is measured, not computed: every row from the page's first one
+/// on is shown, laid out, and those that end below the list hidden again.
+/// A hidden row's place is free, so hiding a later row never moves an
+/// earlier one: one layout is enough for each first row tried.
 pub(super) fn fit(
     tree: &mut UiTree,
     text: &mut TextStore,
     viewport: Size,
-    lists: &[Option<ListParts>; 5],
+    list: Option<&ListParts>,
     view: &mut View,
 ) -> bool {
-    let mut jobs = Vec::new();
-    for (panel, parts) in lists.iter().enumerate() {
-        let Some(parts) = parts else {
-            continue;
-        };
-        let (_, memory) = parts.memory(tree);
-        let after_reveal = memory.after_reveal.take();
-        let then = after_reveal
-            .filter(|(pane, _)| view.reveal == Some(*pane))
-            .map_or(0, |(_, steps)| steps);
-        let seen = memory.seen.clone();
-        let look = parts.look(tree);
-        let first = &mut view.first[panel];
-        let kept = seen
-            .as_ref()
-            .is_some_and(|seen| seen.first == *first && seen.look == look);
-        let item = |pane: Option<u64>| pane.and_then(|pane| parts.item_of(pane));
-        let selected = item(view.selected);
-        let aim = match &seen {
-            None => {
-                *first = 0;
+    let Some(parts) = list else {
+        view.reveal = None;
+        return false;
+    };
+    let len = parts.items.len();
+    let (_, memory) = parts.memory(tree);
+    let after_reveal = memory.after_reveal.take();
+    let then = after_reveal
+        .filter(|(pane, _)| view.reveal == Some(*pane))
+        .map_or(0, |(_, steps)| steps);
+    let seen = memory.seen.clone();
+    let look = parts.look(tree);
+    let item = |pane: Option<u64>| pane.and_then(|pane| parts.item_of(pane));
+    let selected = item(view.selected);
+    let revealed = item(view.reveal);
+    let anchored = item(view.anchor);
+    let anchor = view.anchor;
+    let first = &mut view.first;
+    let kept = seen
+        .as_ref()
+        .is_some_and(|seen| seen.first == *first && seen.look == look);
+    let aim = match &seen {
+        None if anchor.is_some() => {
+            if let Some(at) = anchored {
+                *first = at;
+            }
+            revealed.map_or(Aim::Stay, Aim::Item)
+        }
+        None => {
+            *first = 0;
+            revealed.or(selected).map_or(Aim::Stay, Aim::Item)
+        }
+        Some(seen) => match revealed {
+            Some(item) => Aim::Item(item),
+            None if seen.first < *first => Aim::Forward(std::mem::replace(first, seen.first)),
+            None if seen.first > *first => Aim::Back,
+            None if seen.held.is_some() && seen.held == view.selected => {
                 selected.map_or(Aim::Stay, Aim::Item)
             }
-            Some(seen) => match item(view.reveal) {
-                Some(item) => Aim::Item(item),
-                None if seen.first < *first => Aim::Forward(std::mem::replace(first, seen.first)),
-                None if seen.first > *first => Aim::Back,
-                None if seen.held.is_some() && seen.held == view.selected => {
-                    selected.map_or(Aim::Stay, Aim::Item)
-                }
-                None => Aim::Stay,
-            },
-        };
-        *first = (*first).min(parts.items.len().saturating_sub(1));
-        let on_page = match aim {
-            Aim::Item(item) => look.items[item].1.is_some(),
-            _ => true,
-        };
-        if kept && on_page && then == 0 {
-            let held = parts.shown(tree, view.selected);
-            if seen.is_some_and(|seen| seen.held != held) {
-                parts.remember(tree, *first, view.selected);
-            }
-            continue;
-        }
-        let page = Page {
-            end: parts.items.len(),
-            bare: false,
-        };
-        jobs.push(Job {
-            panel,
-            parts,
-            aim,
-            then,
-            page,
-        });
-    }
+            None => Aim::Stay,
+        },
+    };
+    *first = (*first).min(len.saturating_sub(1));
     view.reveal = None;
-    if jobs.is_empty() {
+    let on_page = match aim {
+        Aim::Item(item) => look.items[item].1.is_some(),
+        _ => true,
+    };
+    if kept && on_page && then == 0 {
+        let held = parts.shown(tree, view.selected);
+        if seen.is_some_and(|seen| seen.held != held) {
+            parts.remember(tree, view.first, view.selected);
+        }
+        view.anchor = parts.items.get(view.first).map(|(_, pane)| *pane);
         return false;
     }
     let mut changed = false;
-    let first = &mut view.first;
+    let mut job = Job { aim, then };
 
-    // Each round moves a list's first item one step toward its aim (the
-    // wheel's steps back after a selection are one round), so a list of n
-    // items needs at most 2n + 1 rounds.
-    let mut open: Vec<usize> = (0..jobs.len()).collect();
-    while !open.is_empty() {
-        let pages: Vec<(&ListParts, usize)> = open
-            .iter()
-            .map(|&j| (jobs[j].parts, first[jobs[j].panel]))
-            .collect();
-        let pages = measure(tree, text, viewport, &pages, &mut changed);
-        let mut next = Vec::new();
-        for (j, page) in open.into_iter().zip(pages) {
-            let job = &mut jobs[j];
-            job.page = page;
-            let first = &mut first[job.panel];
-            let Some(step) = job.step(*first, page) else {
-                continue;
-            };
-            *first = step;
-            next.push(j);
-        }
-        open = next;
+    // Each round moves the first row one step toward the aim (the wheel's
+    // steps back after a selection are one round), so a list of n rows
+    // needs at most 2n + 1 rounds.
+    let mut end = measure(tree, text, viewport, parts, *first, &mut changed);
+    while let Some(step) = job.step(*first, end, len) {
+        *first = step;
+        end = measure(tree, text, viewport, parts, *first, &mut changed);
     }
 
-    // A page starts at the earliest item from which everything to the end
-    // fits, when there is one before its first. Cards wrapped in rows do
-    // not fit by count (two high cards share a row only when they start
-    // it), so every earlier first item is tried, earliest first, not just
-    // the one before — and also for a page that does not reach the end:
-    // from an earlier first item the rows can pair up so that all fits.
-    let mut open: Vec<(usize, usize)> = (0..jobs.len())
-        .filter(|&j| jobs[j].aim.fills_back() && first[jobs[j].panel] > 0)
-        .map(|j| (j, 0))
-        .collect();
-    while !open.is_empty() {
-        let pages: Vec<(&ListParts, usize)> = open
-            .iter()
-            .map(|&(j, earlier)| (jobs[j].parts, earlier))
-            .collect();
-        let pages = measure(tree, text, viewport, &pages, &mut changed);
-        let mut next = Vec::new();
-        for ((j, earlier), page) in open.into_iter().zip(pages) {
-            let job = &mut jobs[j];
-            if page.end == job.parts.items.len() {
-                first[job.panel] = earlier;
-                job.page = page;
-            } else if earlier + 1 < first[job.panel] {
-                next.push((j, earlier + 1));
+    // A page starts at the earliest row from which everything to the end
+    // fits, when there is one before its first.
+    if job.aim.fills_back() {
+        for earlier in 0..*first {
+            let page = measure(tree, text, viewport, parts, earlier, &mut changed);
+            if page == len {
+                *first = earlier;
+                end = page;
+                break;
             }
         }
-        open = next;
     }
 
-    let mut settled = false;
-    for job in &jobs {
-        let first = first[job.panel];
-        let Page { end, bare } = job.page;
-        settled |= job.parts.show(tree, first..end, bare);
-        let hidden = indicator_text(first, job.parts.items.len() - end);
-        settled |= set_indicator(tree, job.parts.indicator, hidden);
-    }
+    let first = *first;
+    let mut settled = parts.show(tree, first..end);
+    let hidden = indicator_text(first, len - end);
+    settled |= set_indicator(tree, parts.indicator, hidden);
     if settled {
         changed = true;
         tree.prepare(viewport, text);
     }
-    for job in &jobs {
-        job.parts.remember(tree, first[job.panel], view.selected);
-    }
+    parts.remember(tree, first, view.selected);
+    view.anchor = parts.items.get(first).map(|(_, pane)| *pane);
     if changed && let Some(root) = tree.root() {
         // The layouts inside this fit took the changes with them: the
         // caller's second layout must still hand the window a frame to
@@ -562,17 +451,17 @@ fn set_indicator(tree: &mut UiTree, id: WidgetId, text: Option<String>) -> bool 
     set_shown(tree, id, true) || !same
 }
 
-/// Pages a panel list with a wheel event over it: every full `WHEEL_STEP`
-/// forward shows the list from one item later while something is hidden
-/// below, every step back from one item earlier while something is hidden
-/// above. While a selection in this list waits to be paged into view
-/// (`view.reveal`), the steps are kept for `fit` to take from the page
-/// that shows it (see `PageMemory::after_reveal`), which stops them at
-/// either end. True when that turned the page: the caller then pages and
-/// presents. Travel that turns no page (less than a step, sideways, past
-/// either end) and a wheel over anything else — the header, a panel's
-/// title, an overlay above a list — are left to the tree (false), where
-/// nothing under a list takes a wheel: the frame is not presented again.
+/// Pages the list with a wheel event over it: every full `WHEEL_STEP`
+/// forward shows the list from one row later while something is hidden
+/// below, every step back from one row earlier while something is hidden
+/// above. While a selection waits to be paged into view (`view.reveal`),
+/// the steps are kept for `fit` to take from the page that shows it (see
+/// `PageMemory::after_reveal`), which stops them at either end. True when
+/// that turned the page: the caller then pages and presents. Travel that
+/// turns no page (less than a step, sideways, past either end) and a wheel
+/// over anything else — the header, the toolbar, an overlay above the
+/// list — are left to the tree (false), where nothing under the list takes
+/// a wheel: the frame is not presented again.
 ///
 /// Travel that turns no page leaves nothing behind to spend later: the
 /// remainder is dropped when the wheel turns the other way, and all of it
@@ -584,31 +473,27 @@ fn set_indicator(tree: &mut UiTree, id: WidgetId, text: Option<String>) -> bool 
 /// the first page that hides nothing below.
 pub(super) fn wheel(
     tree: &UiTree,
-    lists: &[Option<ListParts>; 5],
+    list: Option<&ListParts>,
     view: &mut View,
-    accum: &mut [f32; 5],
+    accum: &mut f32,
     event: &Event,
 ) -> bool {
     let Event::Wheel { pos, delta } = event else {
         return false;
     };
+    let Some(parts) = list else {
+        return false;
+    };
     // The list must be what is drawn at `pos`: the hit is inside it, not in
-    // an overlay above it (the details drawer covers the done panel).
+    // an overlay above it (the details drawer covers its right side).
     let Some(hit) = tree.hit_test(*pos) else {
         return false;
     };
-    let over = lists.iter().enumerate().find_map(|(panel, parts)| {
-        let parts = parts.as_ref()?;
-        tree.ancestors(hit)
-            .any(|id| id == parts.list)
-            .then_some((panel, parts))
-    });
-    let Some((panel, parts)) = over else {
+    if !tree.ancestors(hit).any(|id| id == parts.list) {
         return false;
-    };
+    }
     // Positive `delta.y` moves content down, toward the start.
     let travel = -delta.y;
-    let accum = &mut accum[panel];
     if *accum * travel < 0.0 {
         *accum = 0.0;
     }
@@ -629,7 +514,7 @@ pub(super) fn wheel(
             .set(Some((pane, before + steps as isize)));
         return true;
     }
-    let first = &mut view.first[panel];
+    let first = &mut view.first;
     let from = *first;
     let last = parts.items.len().saturating_sub(1);
     let on_last_page = parts.hidden_below(tree, *first) == 0;

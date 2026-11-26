@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use noa_gpui_core::clipboard::MemoryClipboard;
-use noa_gpui_core::widgets::{Label, TextField};
+use noa_gpui_core::widgets::TextField;
 
 use crate::dashboard::filter::matches;
 
@@ -272,57 +272,31 @@ fn drawer_copies_screen_tail_and_reloads_and_copies_result() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// dashboard-worker-list AC4: a click on a row, not its button, selects
+/// its worker in place, in any scope.
 #[test]
-fn clicking_urgency_count_toggles_filter_and_clicking_lane_or_node_selects_worker() {
+fn clicking_a_row_selects_its_worker() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    // Click "失敗 1" in header.
-    let failure_label = dashboard
-        .header
-        .urgency_labels
-        .iter()
-        .find(|(_, need)| *need == fleet::Need::Failure)
-        .unwrap()
-        .0;
-    click_id(&mut dashboard, &mut text, failure_label);
-    assert_eq!(dashboard.filter.query, "need:failure");
-    let count_text = dashboard
-        .tree
-        .get::<Label>(dashboard.header.match_count)
-        .unwrap()
-        .text();
-    assert_eq!(count_text, "1 / 9 件");
-
-    // Clicking the same urgency count again clears the filter.
-    let failure_label = dashboard
-        .header
-        .urgency_labels
-        .iter()
-        .find(|(_, need)| *need == fleet::Need::Failure)
-        .unwrap()
-        .0;
-    click_id(&mut dashboard, &mut text, failure_label);
-    assert_eq!(dashboard.filter.query, "");
-
-    // Click a timeline lane (pane 12) to select it.
-    let lane_12 = dashboard
-        .registry
-        .marks
-        .iter()
-        .find(|(_, pane, mark)| *pane == 12 && matches!(mark, Mark::Lane))
-        .unwrap()
-        .0;
-    click_id(&mut dashboard, &mut text, lane_12);
+    let row = row_of(&dashboard, 12);
+    let at = rect(&dashboard.tree, row);
+    // Its status column, away from the button at its end.
+    click(
+        &mut dashboard,
+        &mut text,
+        Point::new(at[0] + 30.0, at[1] + 20.0),
+    );
     assert_eq!(dashboard.view.selected, Some(12));
+    assert_eq!(dashboard.view.detail, None, "a row's click opens no drawer");
+    assert_eq!(row_of(&dashboard, 12), row, "selecting rebuilds nothing");
 
-    // Click a graph node (pane 17) to select it.
-    let node_17 = dashboard
-        .registry
-        .marks
-        .iter()
-        .find(|(_, pane, mark)| *pane == 17 && matches!(mark, Mark::Node { .. }))
-        .unwrap()
-        .0;
-    click_id(&mut dashboard, &mut text, node_17);
+    in_scope(&mut dashboard, &mut text, Scope::Ended);
+    let row = row_of(&dashboard, 17);
+    let at = rect(&dashboard.tree, row);
+    click(
+        &mut dashboard,
+        &mut text,
+        Point::new(at[0] + 30.0, at[1] + 20.0),
+    );
     assert_eq!(dashboard.view.selected, Some(17));
 }
 
@@ -499,6 +473,71 @@ fn the_close_confirmation_does_not_outlive_the_next_action_or_its_notice() {
         closed(&commands).is_empty(),
         "after the notice: X only asks again"
     );
+}
+
+/// A click on a switch (the list's 現在 / 要対応 / 終了, the grouping, the
+/// tabs, the マップ's axis, the タイムライン's scale) is not the confirming
+/// press: it takes back a close waiting for one (X, ⇧X), as keys 1–3 do,
+/// and the next press only asks again.
+#[test]
+fn a_switch_takes_back_a_waiting_close() {
+    let at = |tab: Tab| Tab::ALL.iter().position(|t| *t == tab).unwrap();
+    /// A switch, the tab it is on, and where it is.
+    type Switch = (&'static str, Tab, fn(&Dashboard) -> WidgetId);
+    let switches: [Switch; 5] = [
+        ("scope", Tab::Operations, |d| {
+            d.registry.scope_control.unwrap()
+        }),
+        ("grouping", Tab::Operations, |d| d.grouping_control),
+        ("tab", Tab::Operations, |d| d.tab_control),
+        ("axis", Tab::MindMap, |d| d.registry.axis_control.unwrap()),
+        ("scale", Tab::Timeline, |d| {
+            d.registry.scale_control.unwrap()
+        }),
+    ];
+    for (switch, tab, control) in switches {
+        for arm in ["X", "⇧X"] {
+            let (mut dashboard, mut text, _snapshots, commands) = live_dashboard();
+            let tabs = dashboard.tab_control;
+            super::hardening::pick_segment(&mut dashboard, &mut text, tabs, at(tab));
+            assert_eq!(dashboard.view.tab, tab);
+            // Finished: lint-pass is outside 現在 and 要対応 alike, so no
+            // switch moves the selection off it.
+            dashboard.select(Some(17), &mut text);
+            let press = |dashboard: &mut Dashboard, text: &mut TextStore| {
+                if arm == "X" {
+                    key(dashboard, text, Key::Char('x'));
+                    assert_eq!(dashboard.view.confirm_close, Some(17), "{switch}, {arm}");
+                } else {
+                    super::bulk_close::shift_x(dashboard, text);
+                    assert!(dashboard.close_ended.is_some(), "{switch}, {arm}");
+                }
+            };
+            press(&mut dashboard, &mut text);
+            let switched = |d: &Dashboard| {
+                let v = d.view;
+                (v.scope, v.grouping, v.tab, v.map_axis, v.time_scale)
+            };
+            let before = switched(&dashboard);
+
+            // Segment 1 is never the one shown: 要対応, エージェント, 統計,
+            // ブランチ, 60 分.
+            let id = control(&dashboard);
+            super::hardening::pick_segment(&mut dashboard, &mut text, id, 1);
+            assert_ne!(switched(&dashboard), before, "{switch}: nothing switched");
+            assert_eq!(dashboard.view.confirm_close, None, "{switch}, {arm}");
+            assert!(dashboard.close_ended.is_none(), "{switch}, {arm}");
+            press(&mut dashboard, &mut text);
+            let sent: Vec<Command> = commands
+                .try_iter()
+                .filter(|c| matches!(c, Command::Close { .. } | Command::CloseMany { .. }))
+                .collect();
+            assert!(
+                sent.is_empty(),
+                "{switch}, {arm}: closed without asking again: {sent:?}"
+            );
+        }
+    }
 }
 
 /// Each worker's send field puts the caret at the end of its own draft,

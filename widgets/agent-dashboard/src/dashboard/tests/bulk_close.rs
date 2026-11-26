@@ -9,7 +9,7 @@ use super::*;
 
 /// ⇧X as the platform sends it: Shift goes down, the key `x` with Shift
 /// held and its text "X", then Shift comes up.
-fn shift_x(dashboard: &mut Dashboard, text: &mut TextStore) {
+pub(super) fn shift_x(dashboard: &mut Dashboard, text: &mut TextStore) {
     let shift = Modifiers {
         shift: true,
         ..Modifiers::default()

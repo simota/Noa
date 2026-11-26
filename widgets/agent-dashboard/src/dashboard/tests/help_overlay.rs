@@ -17,11 +17,13 @@ fn overlay(dashboard: &Dashboard) -> WidgetId {
 type HelpRow = (Vec<Vec<String>>, String);
 
 /// The help as built, child by child: the title, then each section's
-/// heading with the rows that follow it up to the next heading, and the
-/// footer row last. Anything else among the overlay's children fails here.
+/// heading with the rows that follow it up to the next heading, the note
+/// on what a row of the list is, and the footer row last. Anything else
+/// among the overlay's children fails here.
 struct Help {
     title: String,
     sections: Vec<(String, Vec<HelpRow>)>,
+    note: Option<String>,
     footer: WidgetId,
 }
 
@@ -31,7 +33,12 @@ fn help_of(tree: &UiTree, root: WidgetId) -> Help {
     let (title, rest) = kids.split_first().expect("the help has a title");
     let (footer, body) = rest.split_last().expect("the help has a footer");
     let mut sections: Vec<(String, Vec<HelpRow>)> = Vec::new();
+    let mut note = None;
     for id in body {
+        if let Some(text) = label(*id).filter(|text| text == help::ROW_NOTE) {
+            note = Some(text);
+            continue;
+        }
         if let Some(heading) = label(*id) {
             sections.push((heading, Vec::new()));
             continue;
@@ -52,6 +59,7 @@ fn help_of(tree: &UiTree, root: WidgetId) -> Help {
     Help {
         title: label(*title).expect("the help's title"),
         sections,
+        note,
         footer: *footer,
     }
 }
@@ -90,6 +98,11 @@ fn question_mark_opens_help_with_every_binding() {
     let groups: usize = want.iter().map(|(_, rows)| rows.len()).sum();
     assert!(groups >= 12, "{groups} groups");
     assert_eq!(help.sections, want);
+    // dashboard-worker-list AC10: a row stands for a pane, not a task.
+    assert_eq!(
+        help.note.as_deref(),
+        Some("1 行 = 1 ワーカーペイン（依頼の件数ではありません）")
+    );
 }
 
 /// AC5's footer: the note on the mouse and 閉じる side by side in one row,
@@ -147,14 +160,14 @@ fn escape_and_question_mark_close_help() {
 fn help_blocks_the_keys_below() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     typed(&mut dashboard, &mut text, "?");
-    let shown = dashboard.view.shown;
+    let scope = dashboard.view.scope;
     let selected = dashboard.view.selected;
-    for c in ['1', 'j'] {
+    for c in ['3', 'j'] {
         key(&mut dashboard, &mut text, Key::Char(c));
         typed(&mut dashboard, &mut text, &c.to_string());
     }
     assert!(dashboard.view.help);
-    assert_eq!(dashboard.view.shown, shown);
+    assert_eq!(dashboard.view.scope, scope);
     assert_eq!(dashboard.view.selected, selected);
 }
 

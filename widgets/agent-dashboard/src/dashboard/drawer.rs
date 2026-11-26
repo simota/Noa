@@ -634,7 +634,7 @@ pub(super) fn build(
     if worker.is_closed() {
         tree.insert(
             Some(tags),
-            Tag::new(super::cards::CLOSED_TAG).style(TagStyle::Outlined),
+            Tag::new(super::list::CLOSED_TAG).style(TagStyle::Outlined),
         );
     }
     if worker.has_result {

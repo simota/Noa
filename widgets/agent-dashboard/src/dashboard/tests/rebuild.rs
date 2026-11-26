@@ -16,17 +16,21 @@ fn view_of(dashboard: &Dashboard) -> View {
 }
 
 #[test]
-fn hide_and_restore_cycles_release_the_old_text_layouts() {
+fn scope_switch_cycles_release_the_old_text_layouts() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     let fresh = layout_count(view_of(&dashboard));
     assert_eq!(text.layouts().len(), fresh);
     for _ in 0..3 {
-        press(&mut dashboard, &mut text, '1', Modifiers::default());
+        press(&mut dashboard, &mut text, '3', Modifiers::default());
         press(&mut dashboard, &mut text, '1', Modifiers::default());
     }
-    assert_eq!(text.layouts().len(), fresh, "after hide/restore cycles");
-    // A screen with a panel off owns fewer layouts than one with all on.
-    press(&mut dashboard, &mut text, '2', Modifiers::default());
+    assert_eq!(
+        text.layouts().len(),
+        fresh,
+        "after switching back and forth"
+    );
+    // 終了's two rows own fewer layouts than 現在's seven.
+    press(&mut dashboard, &mut text, '3', Modifiers::default());
     assert_eq!(text.layouts().len(), layout_count(view_of(&dashboard)));
     assert!(text.layouts().len() < fresh);
 }
@@ -46,10 +50,9 @@ fn a_grouping_change_releases_the_old_text_layouts() {
 #[test]
 fn a_details_click_releases_the_old_text_layouts() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let (button, label) = dashboard.queue_buttons.details[1];
-    let pos = center(&dashboard.tree, button);
+    let pos = center(&dashboard.tree, row_button(&dashboard, 11));
     click(&mut dashboard, &mut text, pos);
-    assert_eq!(dashboard.view.expanded, Some(label));
+    assert_eq!(dashboard.view.detail, Some(11));
     assert_eq!(text.layouts().len(), layout_count(view_of(&dashboard)));
 }
 
@@ -61,16 +64,16 @@ fn last_segment(dashboard: &Dashboard) -> Point {
 }
 
 #[test]
-fn a_press_right_after_a_panel_toggle_hits_the_grouping_control() {
+fn a_press_right_after_a_scope_switch_hits_the_grouping_control() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     let pos = last_segment(&dashboard);
     let button = PointerButton::Primary;
-    let key = Key::Char('2');
+    let key = Key::Char('3');
     let modifiers = Modifiers::default();
     // The window delivers input before it lays out for the next frame:
-    // no `prepare` between the toggle and the press.
+    // no `prepare` between the switch and the press.
     dashboard.dispatch(Event::KeyDown { key, modifiers }, &mut text);
-    assert!(dashboard.panels[Panel::Running as usize].is_none());
+    assert_eq!(dashboard.view.scope, Scope::Ended);
     dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
     dashboard.prepare(window(), &mut text);
     dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
@@ -80,15 +83,15 @@ fn a_press_right_after_a_panel_toggle_hits_the_grouping_control() {
 #[test]
 fn a_press_right_after_a_details_click_hits_the_open_button() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let (details, label) = dashboard.queue_buttons.details[1];
-    let pos = center(&dashboard.tree, details);
+    let label = 11;
+    let pos = center(&dashboard.tree, row_button(&dashboard, label));
     let button = PointerButton::Primary;
     dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
     dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
-    assert_eq!(dashboard.view.expanded, Some(label));
-    // The new 開く button's place is known from the rebuilt tree before any
+    assert_eq!(dashboard.view.detail, Some(label));
+    // The drawer's 開く's place is known from the new drawer before any
     // `prepare`, so the press can be aimed at it.
-    let (open, _) = dashboard.queue_buttons.open[0];
+    let (open, _) = dashboard.registry.open_buttons[0];
     let pos = center(&dashboard.tree, open);
     dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
     dashboard.prepare(window(), &mut text);
@@ -122,13 +125,13 @@ fn assert_next_frame_shows_the_rebuild(
 }
 
 #[test]
-fn a_panel_toggle_reaches_the_next_frame() {
+fn a_scope_switch_reaches_the_next_frame() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     let before = frame_of(dashboard.display_list(), &text);
-    let key = Key::Char('2');
+    let key = Key::Char('3');
     let modifiers = Modifiers::default();
     dashboard.dispatch(Event::KeyDown { key, modifiers }, &mut text);
-    assert!(dashboard.panels[Panel::Running as usize].is_none());
+    assert_eq!(dashboard.view.scope, Scope::Ended);
     assert_next_frame_shows_the_rebuild(&mut dashboard, &mut text, &before);
 }
 
@@ -148,12 +151,15 @@ fn a_grouping_change_reaches_the_next_frame() {
 fn a_details_click_reaches_the_next_frame() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     let before = frame_of(dashboard.display_list(), &text);
-    let (details, label) = dashboard.queue_buttons.details[1];
-    let pos = center(&dashboard.tree, details);
+    let pos = center(&dashboard.tree, row_button(&dashboard, 11));
     let button = PointerButton::Primary;
     dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
     dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
-    assert_eq!(dashboard.view.expanded, Some(label));
+    assert_eq!(dashboard.view.detail, Some(11));
+    // The click leaves the focus ring on the button, which a screen built
+    // from scratch has nowhere.
+    assert_eq!(dashboard.tree.focused(), Some(row_button(&dashboard, 11)));
+    dashboard.tree.set_focus(None);
     assert_next_frame_shows_the_rebuild(&mut dashboard, &mut text, &before);
 }
 
@@ -162,7 +168,7 @@ fn a_rebuild_keeps_the_appearance() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     dashboard.set_system_appearance(Appearance::Light);
     assert_eq!(dashboard.tree.theme().appearance, Appearance::Light);
-    press(&mut dashboard, &mut text, '1', Modifiers::default());
-    assert!(dashboard.panels[Panel::Queue as usize].is_none());
+    press(&mut dashboard, &mut text, '3', Modifiers::default());
+    assert_eq!(dashboard.view.scope, Scope::Ended);
     assert_eq!(dashboard.tree.theme().appearance, Appearance::Light);
 }

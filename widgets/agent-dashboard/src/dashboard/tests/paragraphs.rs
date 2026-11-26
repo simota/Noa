@@ -83,7 +83,7 @@ fn texts(dashboard: &Dashboard) -> Vec<String> {
 }
 
 #[test]
-fn a_fleet_with_paragraph_breaks_draws_in_every_panel() {
+fn a_fleet_with_paragraph_breaks_draws_in_the_list_and_the_drawer() {
     let sizes = [
         Size::new(1100.0, 700.0),
         Size::new(1440.0, 900.0),
@@ -98,9 +98,7 @@ fn a_fleet_with_paragraph_breaks_draws_in_every_panel() {
         for grouping in Grouping::ALL {
             for &size in sizes {
                 let view = View {
-                    // fix-tests' queue card, with its screen tail, expanded;
                     // docs-sync (running) in the drawer.
-                    expanded: Some(14),
                     selected: Some(12),
                     detail: Some(12),
                     ..View::of(grouping)
@@ -113,9 +111,9 @@ fn a_fleet_with_paragraph_breaks_draws_in_every_panel() {
                 let mut text = TextStore::new(Default::default());
                 dashboard.prepare(size, &mut text);
                 let what = format!("{how} fleet, {grouping:?} at {size:?}");
-                assert!(dashboard.panels.iter().all(Option::is_some), "{what}");
+                assert!(dashboard.registry.list.is_some(), "{what}");
+                assert_eq!(rows_of(&dashboard).len(), 7, "{what}: 現在's rows");
                 assert!(dashboard.registry.drawer.is_some(), "{what}: drawer");
-                assert_eq!(dashboard.queue_buttons.expanded, Some(14), "{what}");
                 // What time changes is drawn again in place.
                 dashboard.refresh(&mut text);
                 dashboard.prepare(size, &mut text);

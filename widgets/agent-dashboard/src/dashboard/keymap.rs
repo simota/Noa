@@ -1,15 +1,15 @@
 //! The one key router: every key and text event the dashboard sees goes
 //! through `route` before the tree, so a focused filter field types digits
-//! instead of toggling panels, and the help overlay keeps keys from the
+//! instead of switching the list's scope, and the help overlay keeps keys from the
 //! screen below. `BINDINGS` is also what the help lists.
 
 use noa_gpui_core::{Event, Key, Modifiers};
 
-use super::panel::Panel;
+use crate::fleet::Scope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
-    /// Nothing typed into: keys move the selection and toggle panels.
+    /// Nothing typed into: keys move the selection and switch the scope.
     Browse,
     /// The filter field has the focus: keys not bound here edit it.
     Filter,
@@ -44,7 +44,7 @@ pub(super) enum Action {
     NextTab,
     StartFilter,
     Back,
-    TogglePanel(Panel),
+    SetScope(Scope),
     OpenHelp,
     ClearFilter,
     CommitFilter,
@@ -94,9 +94,9 @@ const NEXT: &str = "次のワーカーを選ぶ";
 const PREV: &str = "前のワーカーを選ぶ";
 const MOVE: &str = "入力したまま選択を動かす";
 const CLOSE_HELP: &str = "ヘルプを閉じる";
-/// The five panel keys share one help row (one keycap, 1–5), so every row
-/// fits the smallest window.
-const PANELS: &str = "パネル表示の切替（要対応・作業中・完了・推移・関連）";
+/// The three scope keys share one help row (one keycap, 1–3), so every row
+/// fits the smallest window. 4 and 5 are bound to nothing.
+const SCOPES: &str = "表示の切替（現在・要対応・終了）";
 
 pub(super) const BINDINGS: &[Binding] = &[
     bind(Browse, K(Key::Char('j')), &["J"], Next, NEXT),
@@ -108,7 +108,7 @@ pub(super) const BINDINGS: &[Binding] = &[
         K(Key::Char('n')),
         &["N"],
         NextWaiting,
-        "次の要対応ワーカーを選ぶ",
+        "次の要対応ワーカーを選ぶ（一覧の順）",
     ),
     bind(
         Browse,
@@ -187,37 +187,23 @@ pub(super) const BINDINGS: &[Binding] = &[
     bind(
         Browse,
         K(Key::Char('1')),
-        &["1–5"],
-        TogglePanel(Panel::Queue),
-        PANELS,
+        &["1–3"],
+        SetScope(Scope::Current),
+        SCOPES,
     ),
     bind(
         Browse,
         K(Key::Char('2')),
         &[],
-        TogglePanel(Panel::Running),
-        PANELS,
+        SetScope(Scope::Attention),
+        SCOPES,
     ),
     bind(
         Browse,
         K(Key::Char('3')),
         &[],
-        TogglePanel(Panel::Done),
-        PANELS,
-    ),
-    bind(
-        Browse,
-        K(Key::Char('4')),
-        &[],
-        TogglePanel(Panel::Timeline),
-        PANELS,
-    ),
-    bind(
-        Browse,
-        K(Key::Char('5')),
-        &[],
-        TogglePanel(Panel::Graph),
-        PANELS,
+        SetScope(Scope::Ended),
+        SCOPES,
     ),
     bind(Browse, T("?"), &["?"], OpenHelp, "このヘルプ"),
     bind(

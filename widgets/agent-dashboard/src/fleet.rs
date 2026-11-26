@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-const CARD_TAIL_LINES: usize = 6;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Running,
@@ -64,28 +62,6 @@ impl Need {
         }
     }
 
-    pub fn title(self) -> &'static str {
-        match self {
-            Need::Approval => "承認待ち",
-            Need::Failure => "失敗",
-            Need::Question => "質問",
-            Need::Notice => "通知",
-            Need::Quiet => "静止",
-        }
-    }
-
-    /// The queue's order: what waits on a decision (an approval, then a
-    /// question), then a failure to look at, then what only informs.
-    pub fn rank(self) -> u8 {
-        match self {
-            Need::Approval => 0,
-            Need::Question => 1,
-            Need::Failure => 2,
-            Need::Notice => 3,
-            Need::Quiet => 4,
-        }
-    }
-
     pub fn tier(self) -> Tier {
         match self {
             Need::Approval | Need::Question => Tier::Decision,
@@ -95,8 +71,9 @@ impl Need {
     }
 }
 
-/// The queue's sections. 参考情報 asks nobody for anything: it is left out
-/// of the queue's count and folded away until asked for.
+/// How much a need asks of a person: a decision (an approval, a question),
+/// a check (a failure), or nothing (a notice, a quiet worker). The search's
+/// `need:decision` and the map's decision counts read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     Decision,
@@ -104,23 +81,9 @@ pub enum Tier {
     Info,
 }
 
-impl Tier {
-    pub fn title(self) -> &'static str {
-        match self {
-            Tier::Decision => "判断待ち",
-            Tier::Check => "要確認",
-            Tier::Info => "参考情報",
-        }
-    }
-}
-
 /// What a row says a worker is doing (its 状態). No word for success
 /// exists here: a finished worker, open or closed, has ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "the worker list (dashboard-worker-list U3) shows it"
-)]
 pub enum Status {
     Approval,
     Input,
@@ -129,10 +92,6 @@ pub enum Status {
     Ended,
 }
 
-#[allow(
-    dead_code,
-    reason = "the worker list (dashboard-worker-list U3) shows it"
-)]
 impl Status {
     pub fn title(self) -> &'static str {
         match self {
@@ -160,20 +119,12 @@ impl Status {
 /// Which list a worker is in: 現在 and 終了 split every worker between
 /// them, and 要対応 is the part of 現在 that waits on a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "the worker list (dashboard-worker-list U3) switches it"
-)]
 pub enum Scope {
     Current,
     Attention,
     Ended,
 }
 
-#[allow(
-    dead_code,
-    reason = "the worker list (dashboard-worker-list U3) switches it"
-)]
 impl Scope {
     pub const ALL: [Scope; 3] = [Scope::Current, Scope::Attention, Scope::Ended];
 
@@ -270,10 +221,6 @@ impl Worker {
         !self.is_closed() && matches!(self.state, State::Permission | State::Input | State::Error)
     }
 
-    #[allow(
-        dead_code,
-        reason = "the worker list (dashboard-worker-list U3) shows it"
-    )]
     pub fn status(&self) -> Status {
         match self.state {
             State::Permission if !self.is_closed() => Status::Approval,
@@ -284,10 +231,6 @@ impl Worker {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "the worker list (dashboard-worker-list U3) filters by it"
-    )]
     pub fn in_scope(&self, scope: Scope) -> bool {
         let current = !self.is_closed() && self.state != State::Finished;
         match scope {
@@ -295,13 +238,6 @@ impl Worker {
             Scope::Attention => self.needs_attention(),
             Scope::Ended => !current,
         }
-    }
-
-    /// The last lines of the screen tail, as a queue card shows them (the
-    /// drawer shows the whole tail).
-    pub fn card_tail(&self) -> &[String] {
-        let from = self.screen_tail.len().saturating_sub(CARD_TAIL_LINES);
-        &self.screen_tail[from..]
     }
 
     /// Whether a bulk close may take the worker without anyone looking at
@@ -414,10 +350,6 @@ impl Fleet {
     /// The worker's parent as a row and the drawer name it: the parent
     /// worker's label (else its pane), なし for an orchestrator itself or a
     /// worker started alone, 不明 when unknown, else the orchestrator.
-    #[allow(
-        dead_code,
-        reason = "the worker list and drawer (dashboard-worker-list U3, U4) show it"
-    )]
     pub fn parent_name(&self, worker: &Worker) -> String {
         match worker.parent {
             Some(pane) => self
@@ -550,8 +482,6 @@ impl Grouping {
             .collect()
     }
 }
-
-pub const FRESHNESS_MAX: f64 = 5.0;
 
 pub fn canned() -> Fleet {
     let mut workers = vec![

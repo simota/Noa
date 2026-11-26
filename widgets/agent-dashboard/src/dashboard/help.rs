@@ -8,6 +8,9 @@ use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use super::keymap::{BINDINGS, Mode};
 use super::style::{gap, spacer};
 
+/// What one row of the list stands for.
+pub(super) const ROW_NOTE: &str = "1 行 = 1 ワーカーペイン（依頼の件数ではありません）";
+
 /// Width of the keycaps column.
 const KEYS_WIDTH: f32 = 104.0;
 
@@ -77,6 +80,11 @@ pub(super) fn build(tree: &mut UiTree, root: WidgetId) -> WidgetId {
             tree.insert(Some(line), Label::new(row.title).font_size(12.0));
         }
     }
+    // What a row is: a pane, which can be given more tasks.
+    tree.insert(
+        Some(root),
+        Label::new(ROW_NOTE).font_size(11.0).color(Role::Muted),
+    );
     // The footer: the note on the mouse, and 閉じる at the row's end.
     let footer = tree.insert(
         Some(root),

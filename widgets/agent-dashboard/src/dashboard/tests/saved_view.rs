@@ -54,7 +54,7 @@ fn a_changed_view_comes_back_at_the_next_start() {
     let (again, _text) = started(&path, None);
     assert_eq!(again.view.tab, Tab::Timeline);
     assert_eq!(again.view.grouping, Grouping::Agent);
-    assert_eq!(again.view.shown, [true, true, false, true, true]);
+    assert_eq!(again.view.scope, Scope::Ended, "key 3");
     assert_eq!(again.view.map_axis, MapAxis::Branch);
     assert_eq!(again.view.time_scale, TimeScale::Quarter);
     assert_eq!(again.filter.query, "agent:claude");
@@ -90,7 +90,34 @@ fn a_corrupt_saved_view_starts_from_the_defaults() {
     let (dashboard, _text) = started(&path, None);
     assert_eq!(dashboard.view.tab, Tab::Operations);
     assert_eq!(dashboard.view.grouping, Grouping::Orchestrator);
-    assert_eq!(dashboard.view.shown, [true; 5]);
+    assert_eq!(dashboard.view.scope, Scope::Current);
     assert!(dashboard.filter.query.is_empty());
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+/// dashboard-worker-list AC10: a view a version 1 dashboard saved (its
+/// panels, no scope) starts in 現在 with its other values, and is not
+/// written again until the view changes.
+#[test]
+fn an_old_saved_view_starts_in_the_current_scope() {
+    let path = temp("old");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let old = r#"{"version":1,"tab":"ops","group":"agent",
+        "shown":{"queue":false,"running":true,"done":false,"timeline":true,"graph":true},
+        "mapAxis":"parent","timeScale":"all","filter":""}"#;
+    std::fs::write(&path, old).unwrap();
+    let (mut dashboard, mut text) = started(&path, None);
+    assert_eq!(dashboard.view.scope, Scope::Current);
+    assert_eq!(dashboard.view.grouping, Grouping::Agent);
+    assert!(
+        dashboard.registry.list.is_some(),
+        "the list, whatever was hidden"
+    );
+    dashboard.close_requested();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+    key(&mut dashboard, &mut text, Key::Char('2'));
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains(r#""scope":"attention""#), "{saved}");
+    assert!(!saved.contains("shown"), "{saved}");
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

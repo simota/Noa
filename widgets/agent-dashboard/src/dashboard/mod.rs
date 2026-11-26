@@ -6,8 +6,8 @@ use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, length, percent,
 };
 use noa_gpui_core::widgets::{
-    ButtonClicked, Chart, Container, ControlSize, Label, LevelIndicator, ScrollView, SegmentMode,
-    SegmentedControl, SelectionChanged, TextChanged, TextField, Truncation,
+    ButtonClicked, Container, ControlSize, Label, ScrollView, SegmentMode, SegmentedControl,
+    SelectionChanged, TextChanged, TextField, Truncation,
 };
 use noa_gpui_core::{
     Appearance, Dirty, Edge, Event, Message, OverlayOptions, Placement, PointerButton, Role, Style,
@@ -17,12 +17,11 @@ use noa_gpui_platform::Screen;
 use noa_gpui_scene::{Color, Point, Size};
 use noa_gpui_text::TextStore;
 
-use crate::fleet::{self, Fleet, Grouping, Need, State, Tier, Worker};
+use crate::fleet::{self, Fleet, Grouping, Scope, State, Worker};
 use crate::live::{Channel, CloseTarget, Command, Link, Snapshot, Unsent};
 use crate::repo_browser::{self, Launcher};
 
 mod analytics;
-mod cards;
 mod drawer;
 mod filter;
 mod gantt;
@@ -31,29 +30,25 @@ mod header;
 mod health;
 mod help;
 mod keymap;
+mod list;
 mod mindmap;
 mod pager;
 mod panel;
 mod prefs;
-mod queue;
 mod select;
 mod style;
 mod timeline;
-mod urgency;
-use cards::{Cards, done, done_caption, quiet_text, running, running_caption};
 use filter::Filter;
 use gantt::TimeScale;
-use graph::graph;
-use header::{HeaderParts, longest, longest_text, match_text, waited_text};
+use header::{HeaderParts, match_text};
 use keymap::{Action, Mode, Route};
+use list::RowAction;
 use mindmap::MapAxis;
 use pager::ListParts;
-use panel::{Panel, empty, history_row, panel};
+use panel::empty;
 pub use prefs::{Prefs, PrefsStore, default_path as default_prefs_path};
-use queue::{QueueButtons, queue, queue_since};
 use select::Step;
-use style::{GUTTER, HEADER_HEIGHT, fill_remaining, gap, set_label, set_tag};
-use timeline::{TimelineParts, fill_lanes, span_text, timeline, timeline_span};
+use style::{GUTTER, HEADER_HEIGHT, fill_remaining, gap, set_label};
 
 /// What a rebuild carries over to the drawer it builds: the unsent
 /// messages (`Dashboard::drafts`, `Dashboard::send_caret`), so the drawer
@@ -105,11 +100,8 @@ struct View {
     map_axis: MapAxis,
     time_scale: TimeScale,
     grouping: Grouping,
-    /// The queue card shown expanded.
-    expanded: Option<u64>,
-    /// Whether the queue shows its 参考情報 cards.
-    info_open: bool,
-    shown: [bool; 5],
+    /// Which workers the list shows (dashboard-worker-list AC2).
+    scope: Scope,
     /// The selected worker (AC1).
     selected: Option<u64>,
     /// The worker in the details drawer (AC8).
@@ -120,9 +112,13 @@ struct View {
     confirm_close: Option<u64>,
     /// Whether the keyboard help is open (AC5).
     help: bool,
-    /// The first item each panel list shows (AC3, the pager).
-    first: [usize; 5],
-    /// The pane the pager must bring into view (AC3).
+    /// The first row the list shows (AC3, the pager).
+    first: usize,
+    /// The pane of that row, as the pager last saw it: a list built again
+    /// starts from it, so a row that comes above moves nothing the user is
+    /// reading (dashboard-worker-list AC5). `None` starts at the top.
+    anchor: Option<u64>,
+    /// The pane the pager must bring into view (AC3): the user's own move.
     reveal: Option<u64>,
 }
 
@@ -133,15 +129,14 @@ impl View {
             map_axis: MapAxis::Orchestrator,
             time_scale: TimeScale::All,
             grouping,
-            expanded: None,
-            info_open: false,
-            shown: [true; 5],
+            scope: Scope::Current,
             selected: None,
             detail: None,
             result: None,
             confirm_close: None,
             help: false,
-            first: [0; 5],
+            first: 0,
+            anchor: None,
             reveal: None,
         }
     }
@@ -152,7 +147,7 @@ impl View {
             tab: prefs.tab,
             map_axis: prefs.map_axis,
             time_scale: prefs.time_scale,
-            shown: prefs.shown,
+            scope: prefs.scope,
             ..View::of(prefs.grouping)
         }
     }
@@ -223,11 +218,30 @@ enum Vanish {
     Clear,
 }
 
-fn dropped_text(label: &str) -> String {
-    format!(
-        "{} が一覧から外れたため選択を解除しました",
-        fleet::one_line(label)
-    )
+/// What the notice says of a selection a live update took: where its
+/// worker went, when it is still there under the filter (`moved_to`).
+fn dropped_text(label: &str, moved_to: Option<Scope>) -> String {
+    let label = fleet::one_line(label);
+    match moved_to {
+        Some(scope) => format!(
+            "{label} が一覧から外れたため選択を解除しました（{label} は {} に移りました）",
+            scope.title()
+        ),
+        None => format!("{label} が一覧から外れたため選択を解除しました"),
+    }
+}
+
+/// What the notice says of workers a live update put in need of attention.
+fn arrived_text(arrived: &[&Worker]) -> Option<String> {
+    match arrived {
+        [] => None,
+        [worker] => Some(format!(
+            "要対応が増えました: {}（{}）",
+            fleet::one_line(&worker.label),
+            worker.status().title()
+        )),
+        more => Some(format!("要対応が {} 件増えました", more.len())),
+    }
 }
 
 impl Feed {
@@ -289,16 +303,11 @@ impl Feed {
 /// `Dashboard::refresh`; the pane names the worker it shows.
 #[derive(Debug, Clone, Copy)]
 enum Pulse {
-    Waited,
-    Longest,
-    QueueSince(u64),
-    /// A queue card, whose look follows its urgency step (`queue::refresh_card`).
-    QueueCard(u64),
-    QuietTag(u64),
-    Output(u64),
-    Freshness(u64),
-    RunningCaption(u64),
-    DoneCaption(u64),
+    /// A row's wait or last update (`list::time_text`).
+    RowTime(u64),
+    /// A quiet row's qualifiers, which say how long its output stood still
+    /// (`list::qualifiers`).
+    RowQuiet(u64),
     /// A time label in the details drawer (`drawer::refresh`).
     Drawer(u64),
 }
@@ -306,18 +315,19 @@ enum Pulse {
 impl Pulse {
     /// Lives outside the body, so a body refill keeps it.
     fn outside_body(self) -> bool {
-        matches!(self, Pulse::Longest | Pulse::Drawer(_))
+        matches!(self, Pulse::Drawer(_))
     }
 }
 
 /// How a widget shows that its worker is selected (`Dashboard::paint_selection`).
 #[derive(Debug, Clone, Copy)]
 enum Mark {
-    /// A card's accent bar: shown when selected.
+    /// A row's accent bar: shown when selected.
     Bar,
     /// A timeline lane row: filled when selected.
     Lane,
-    /// A graph node pill: a 2 px accent border when selected, else its own.
+    /// A マップ (mindmap) node pill: a 2 px accent border when selected,
+    /// else its own.
     Node { normal: Color },
 }
 
@@ -325,14 +335,20 @@ enum Mark {
 #[derive(Default)]
 pub struct Registry {
     pulses: Vec<(WidgetId, Pulse)>,
-    /// The drawer's 開く (the queue's are in `Dashboard::queue_buttons`).
+    /// The drawer's 開く.
     open_buttons: Vec<(WidgetId, u64)>,
-    /// Running and done cards' 詳細: they open the drawer.
-    detail_buttons: Vec<(WidgetId, u64)>,
     marks: Vec<(WidgetId, u64, Mark)>,
-    /// Each panel's list, by `Panel` index.
-    lists: [Option<ListParts>; 5],
-    timeline: Option<TimelineParts>,
+    /// The worker list's rows, which the pager pages.
+    list: Option<ListParts>,
+    /// Each row, for a click that selects its worker.
+    rows: Vec<(WidgetId, u64)>,
+    /// Each row's button and what it does (AC8).
+    row_actions: Vec<(WidgetId, u64, RowAction)>,
+    /// The list's 現在 / 要対応 / 終了 switch.
+    scope_control: Option<WidgetId>,
+    /// The toolbar's 「絞り込み外に要対応N件」 and its 絞り込みを解除 (AC7).
+    outside_note: Option<WidgetId>,
+    clear_filter: Option<WidgetId>,
     /// The drawer overlay and its 閉じる.
     drawer: Option<(WidgetId, WidgetId)>,
     /// The drawer's ペインを閉じる / 本当に閉じる button.
@@ -363,16 +379,19 @@ impl Registry {
     /// Forgets what the body registered; the header and overlays stay.
     fn clear_body(&mut self) {
         self.pulses.retain(|(_, pulse)| pulse.outside_body());
-        self.detail_buttons.clear();
         self.marks.clear();
-        self.lists = Default::default();
-        self.timeline = None;
+        self.list = None;
+        self.rows.clear();
+        self.row_actions.clear();
+        self.scope_control = None;
+        self.outside_note = None;
+        self.clear_filter = None;
         self.axis_control = None;
         self.scale_control = None;
     }
 }
 
-/// The footer bar under the panels: left notice text (cut at available width)
+/// The footer bar under the list: left notice text (cut at available width)
 /// and right tab switcher (`運用 / 統計 / マップ / タイムライン`). Keeps its
 /// fixed height (`NOTICE_HEIGHT`) so switching notices moves nothing.
 fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed, tab: Tab) -> (WidgetId, WidgetId) {
@@ -428,7 +447,10 @@ fn scroll_views(tree: &UiTree, id: WidgetId) -> Vec<WidgetId> {
 }
 
 fn button_pane(buttons: &[(WidgetId, u64)], source: WidgetId) -> Option<u64> {
-    QueueButtons::worker(buttons, source)
+    buttons
+        .iter()
+        .find(|(id, _)| *id == source)
+        .map(|(_, pane)| *pane)
 }
 
 /// How many workers a bulk close names by label before it counts the rest.
@@ -463,7 +485,7 @@ pub struct Dashboard {
     #[cfg(test)]
     status: WidgetId,
     grouping_control: WidgetId,
-    /// The container the panels are built in; a filter change refills it.
+    /// The container the list is built in; a filter change refills it.
     body: WidgetId,
     /// The notice line at the foot of the window (`health::tick`).
     notice: WidgetId,
@@ -477,7 +499,6 @@ pub struct Dashboard {
     /// The send field's caret across rebuilds, with the pane whose draft it
     /// is in: another worker's field puts its caret at its draft's end.
     send_caret: Option<(u64, usize)>,
-    queue_buttons: QueueButtons,
     registry: Registry,
     /// The size the last `prepare` laid the screen out at. A rebuilt screen is
     /// laid out at it at once (see `rebuilt`).
@@ -485,8 +506,8 @@ pub struct Dashboard {
     /// The panes whose screen tails the feed was last asked for; `None`
     /// until the next `watch` asks, whatever it finds.
     watched: Option<Vec<u64>>,
-    /// Wheel travel not yet turned into pages, per panel (the pager).
-    wheel_accum: [f32; 5],
+    /// Wheel travel not yet turned into pages (the pager).
+    wheel_accum: f32,
     /// A structural snapshot held back while an IME composes in the filter
     /// field (a rebuild would end the composition), with when it came.
     pending: Option<(Snapshot, Instant)>,
@@ -520,8 +541,6 @@ pub struct Dashboard {
     prefs_store: Option<PrefsStore>,
     /// Starts the Repo Browser for 差分を見る.
     repo_browser: Box<dyn Launcher>,
-    #[cfg(test)]
-    panels: [Option<WidgetId>; 5],
     /// Lets the tests drive `wheel` as if the pager took the event: U1's
     /// pager stub takes none (U3 fills `pager::wheel` in).
     #[cfg(test)]
@@ -622,7 +641,7 @@ impl Dashboard {
         Prefs {
             tab: self.view.tab,
             grouping: self.view.grouping,
-            shown: self.view.shown,
+            scope: self.view.scope,
             map_axis: self.view.map_axis,
             time_scale: self.view.time_scale,
             filter: self.filter.query.clone(),
@@ -695,9 +714,12 @@ impl Dashboard {
     }
 
     /// Takes a snapshot in that came at `received`. One that changes only
-    /// what time changes (texts, meters, lanes, the queue's order) updates
-    /// those widgets in place, so the scroll positions and the hover
-    /// survive; any other change rebuilds the screen. A snapshot from
+    /// what time changes (the rows' waits and updates, the drawer's times)
+    /// updates those widgets in place and moves no row, so the page, the
+    /// order and the hover survive; any other change rebuilds the screen,
+    /// and the list starts at the row its page started at (`View::anchor`).
+    /// The notice says which workers came to need attention, and where a
+    /// selected worker that left the list went. A snapshot from
     /// another server instance rebuilds it without the panes chosen on the
     /// old one (`forget_panes`). The caller brings the header's time up to
     /// its own (`tick`).
@@ -714,11 +736,25 @@ impl Dashboard {
     /// changes nothing there.
     fn apply_received(&mut self, snapshot: Snapshot, received: Instant, text: &mut TextStore) {
         let old = self.order();
-        let old_labels: Vec<(u64, String)> = old
-            .iter()
-            .filter_map(|pane| Some((*pane, self.feed.fleet.worker(*pane)?.label.clone())))
-            .collect();
+        // Only the selection can be dropped, and it may be outside the
+        // scope's rows (chosen in another tab): its label is taken from
+        // the fleet before the snapshot replaces it.
+        let selected_label = self
+            .view
+            .selected
+            .and_then(|pane| Some((pane, self.feed.fleet.worker(pane)?.label.clone())));
         let other_server = self.feed.other_server(&snapshot);
+        // Announced only once workers were shown: the first snapshot's
+        // attention rows are the list itself, not news.
+        let announce = self.feed.had_data && !other_server;
+        let attention_before: Vec<u64> = self
+            .feed
+            .fleet
+            .workers
+            .iter()
+            .filter(|w| w.needs_attention())
+            .map(|w| w.pane)
+            .collect();
         let fleet = health::keep_on_down(&self.feed.fleet, snapshot.fleet.clone(), &snapshot.link);
         let structural = other_server
             || self.feed.link.as_ref() != Some(&snapshot.link)
@@ -737,9 +773,33 @@ impl Dashboard {
             // snapshot can move the selection or the drawer, and its
             // rebuild shows that.
             let dropped = self.reselect(&old, Vanish::Clear);
-            let label = dropped.and_then(|pane| old_labels.iter().find(|(p, _)| *p == pane));
-            if let Some((_, label)) = label {
-                self.feed.notice = Some((dropped_text(label), received));
+            let label = dropped.and(selected_label.as_ref());
+            let dropped = label.map(|(pane, label)| {
+                let moved_to = self
+                    .feed
+                    .fleet
+                    .worker(*pane)
+                    .filter(|w| self.filter.matches(w))
+                    .map(|w| {
+                        if w.in_scope(Scope::Current) {
+                            Scope::Current
+                        } else {
+                            Scope::Ended
+                        }
+                    });
+                dropped_text(label, moved_to)
+            });
+            let arrived: Vec<&Worker> = self
+                .feed
+                .fleet
+                .workers
+                .iter()
+                .filter(|w| w.needs_attention() && !attention_before.contains(&w.pane))
+                .collect();
+            let arrived = arrived_text(&arrived).filter(|_| announce);
+            let notice = [dropped, arrived].into_iter().flatten().collect::<Vec<_>>();
+            if !notice.is_empty() {
+                self.feed.notice = Some((notice.join(" · "), received));
             }
         }
         if structural {
@@ -753,8 +813,8 @@ impl Dashboard {
     }
 
     /// Drops what names a pane of the server instance the screen showed
-    /// until now — the selection, the drawer, the expanded queue card, the
-    /// unsent drafts — since the new instance may give those ids to other
+    /// until now — the selection, the drawer, the list's anchor, the unsent
+    /// drafts — since the new instance may give those ids to other
     /// panes: Enter, the drawer's 開く or 送信 would then reach a worker
     /// nobody chose. The rebuild that follows shows the new server's
     /// workers from the top, and asks
@@ -768,7 +828,8 @@ impl Dashboard {
         self.view.result = None;
         self.view.confirm_close = None;
         self.close_ended = None;
-        self.view.expanded = None;
+        self.view.anchor = None;
+        self.view.first = 0;
         self.drafts.clear();
         self.send_caret = None;
     }
@@ -855,27 +916,51 @@ impl Dashboard {
         }
     }
 
-    /// The order J / K walk now.
+    /// The rows of the scope shown, in the order a list built now has.
     fn order(&self) -> Vec<u64> {
         select::order(&self.feed.fleet, &self.view, &self.filter)
     }
 
+    /// The order J / K and N walk: the rows as the list shows them, which
+    /// time does not reorder (`refresh` moves no row), else `order`.
+    fn walk_order(&self) -> Vec<u64> {
+        match &self.registry.list {
+            Some(parts) => parts.panes(),
+            None => self.order(),
+        }
+    }
+
     /// After the order changed from `old`: a selected pane that left it is
-    /// replaced by its neighbour (expanding its queue card) after the user's
-    /// own change (`Vanish::Neighbour`), and dropped after a live update
-    /// (`Vanish::Clear`): Enter then opens only a pane the user chose. The
-    /// drawer closes when its worker left the fleet or the filter; else it
-    /// follows a selection that moved, as it does on J / K. The caller's
-    /// rebuild, refill or `reopen_drawer` shows that, and `watch` asks for
-    /// its tail. Returns the pane a live update dropped.
+    /// replaced by its neighbour after the user's own change
+    /// (`Vanish::Neighbour`), and dropped after a live update
+    /// (`Vanish::Clear`): Enter then opens only a pane the user chose. A
+    /// worker selected outside the list (another tab, a drawer opened on
+    /// it) is kept while the filter shows it. The drawer closes when its
+    /// worker left the fleet or the filter; else it follows a selection
+    /// the user moved, as it does on J / K, and stays where it is when a
+    /// live update dropped the selection. The caller's rebuild, refill or
+    /// `reopen_drawer` shows that, and `watch` asks for its tail. Returns
+    /// the pane a live update dropped.
     fn reselect(&mut self, old: &[u64], vanish: Vanish) -> Option<u64> {
         let order = self.order();
+        // A worker chosen outside the list (in another tab, or the drawer
+        // opened on it) stays chosen while it is not in the list, as long
+        // as the filter shows it.
+        let shown = |pane: u64| {
+            let worker = self.feed.fleet.worker(pane);
+            worker.is_some_and(|w| self.filter.matches(w))
+        };
+        let outside = self
+            .view
+            .selected
+            .is_some_and(|pane| !old.contains(&pane) && !order.contains(&pane) && shown(pane));
         let dropped = self
             .view
             .selected
-            .filter(|pane| vanish == Vanish::Clear && !order.contains(pane));
+            .filter(|pane| !outside && vanish == Vanish::Clear && !order.contains(pane));
         let selected = match dropped {
             Some(_) => None,
+            None if outside => self.view.selected,
             None => select::reselect(old, &order, self.view.selected),
         };
         let moved = selected != self.view.selected;
@@ -885,11 +970,6 @@ impl Dashboard {
             self.view.selected = selected;
             self.view.reveal = selected;
         }
-        // The selected worker's queue card is the expanded one, also when
-        // the queue comes back after the selection moved without it.
-        if let Some(pane) = self.view.selected.filter(|pane| self.waits(*pane)) {
-            self.view.expanded = Some(pane);
-        }
         let gone = |pane: u64| {
             self.feed
                 .fleet
@@ -898,20 +978,13 @@ impl Dashboard {
         };
         if self.view.detail.is_some_and(gone) {
             self.view.detail = None;
-        } else if moved && self.view.detail.is_some() {
-            // With no selection left, the drawer closes.
+        } else if moved && dropped.is_none() && self.view.detail.is_some() {
+            // With no selection left, the drawer closes; one a live update
+            // took out of the scope keeps its drawer while the filter
+            // shows it.
             self.view.detail = selected;
         }
         dropped
-    }
-
-    /// Whether the worker has a queue card: it waits on a person, or it
-    /// informs and the queue shows 参考情報.
-    fn waits(&self, pane: u64) -> bool {
-        let worker = self.feed.fleet.worker(pane);
-        worker
-            .and_then(Worker::need)
-            .is_some_and(|need| self.view.info_open || need.tier() != Tier::Info)
     }
 
     fn show_notice(&mut self, notice: String) {
@@ -941,66 +1014,18 @@ impl Dashboard {
         );
     }
 
+    /// Brings what time changes up to date in place: the rows' times and a
+    /// quiet row's qualifiers, the drawer's times. No row moves.
     fn refresh(&mut self, text: &mut TextStore) {
         let (tree, fleet) = (&mut self.tree, &self.feed.fleet);
         for &(id, pulse) in &self.registry.pulses {
             let worker = |pane: u64| fleet.worker(pane).expect("the same structure");
             match pulse {
-                Pulse::Waited => set_tag(tree, id, waited_text(&fleet.workers)),
-                Pulse::Longest => {
-                    if let Some(worker) = longest(&fleet.workers) {
-                        set_tag(tree, id, longest_text(worker));
-                    }
-                }
-                Pulse::QueueSince(pane) => {
-                    let worker = worker(pane);
-                    if let Some(need) = worker.need() {
-                        set_label(tree, id, queue_since(worker, need));
-                    }
-                }
-                Pulse::QueueCard(pane) => queue::refresh_card(tree, id, worker(pane)),
-                Pulse::QuietTag(pane) => set_tag(tree, id, quiet_text(worker(pane))),
-                Pulse::Output(pane) => {
-                    let values = worker(pane).lines_per_tick.clone();
-                    tree.update::<Chart, _>(id, |c, cx| c.set_values(cx, 0, values));
-                }
-                Pulse::Freshness(pane) => {
-                    let value = worker(pane).freshness;
-                    tree.update::<LevelIndicator, _>(id, |l, cx| l.set_value(cx, value));
-                }
-                Pulse::RunningCaption(pane) => set_label(tree, id, running_caption(worker(pane))),
-                Pulse::DoneCaption(pane) => set_label(tree, id, done_caption(worker(pane))),
+                Pulse::RowTime(pane) => set_label(tree, id, list::time_text(worker(pane))),
+                Pulse::RowQuiet(pane) => set_label(tree, id, list::qualifiers(worker(pane))),
                 Pulse::Drawer(pane) => drawer::refresh(tree, id, worker(pane)),
             }
         }
-        if let Some(parts) = self.registry.timeline.take() {
-            let matching: Vec<&Worker> = fleet
-                .workers
-                .iter()
-                .filter(|w| self.filter.matches(w))
-                .collect();
-            let span = timeline_span(&matching);
-            set_label(tree, parts.span, span_text(span));
-            for lane in tree.children(parts.lanes).to_vec() {
-                tree.remove(lane, text);
-            }
-            let registry = &mut self.registry;
-            registry
-                .marks
-                .retain(|(_, _, mark)| !matches!(mark, Mark::Lane));
-            let filtering = self.filter.active();
-            fill_lanes(
-                tree,
-                &parts,
-                &matching,
-                self.view.grouping,
-                filtering,
-                span,
-                registry,
-            );
-            registry.timeline = Some(parts);
-        }
-        self.reorder_queue(text);
         self.paint_selection();
         if self.view.tab != Tab::Operations {
             // The other tabs draw what time changes (totals, charts, bars,
@@ -1026,111 +1051,6 @@ impl Dashboard {
                 .update::<ScrollView, _>(id, |s, cx| s.set_scroll_position(cx, position));
         }
         self.lay_out_again(text);
-    }
-
-    /// Puts the queue's cards (and its pager items) in the queue's order
-    /// again, which waits change: the cards show the order J / K walk. A
-    /// card keeps to its section (a change of need is structural), so the
-    /// cards of each section trade places among the list's slots for that
-    /// section, and the section headers and a caption stay where they are.
-    /// The expanded card follows as a build picks it — `view.expanded`
-    /// while the queue has it, else the top card outside 参考情報 — so a new
-    /// top card is expanded in place (and watched), as a fresh build of the
-    /// same state shows it.
-    fn reorder_queue(&mut self, text: &mut TextStore) {
-        let Some(parts) = self.registry.lists[Panel::Queue as usize].as_mut() else {
-            return;
-        };
-        let matching = self
-            .feed
-            .fleet
-            .workers
-            .iter()
-            .filter(|w| self.filter.matches(w));
-        let cards = queue::cards(matching, self.view.info_open);
-        let order: Vec<u64> = cards.iter().map(|(w, _)| w.pane).collect();
-        let tier_of = |pane: u64| {
-            cards
-                .iter()
-                .find(|(w, _)| w.pane == pane)
-                .map(|(_, n)| n.tier())
-        };
-        let card_pane = |id: WidgetId| {
-            parts
-                .items
-                .iter()
-                .find(|(card, _)| *card == id)
-                .and_then(|(_, pane)| *pane)
-        };
-        let children = self.tree.children(parts.list).to_vec();
-        let mut sorted: Vec<(WidgetId, u64)> = children
-            .iter()
-            .filter_map(|id| Some((*id, card_pane(*id)?)))
-            .collect();
-        let at = |pane: u64| order.iter().position(|p| *p == pane);
-        sorted.sort_by_key(|(_, pane)| at(*pane));
-        let mut placed = Vec::with_capacity(children.len());
-        for id in children {
-            let Some(pane) = card_pane(id) else {
-                placed.push(id);
-                continue;
-            };
-            let tier = tier_of(pane);
-            let next = sorted
-                .iter()
-                .position(|(_, other)| tier_of(*other) == tier)
-                .expect("a card of the same section");
-            placed.push(sorted.remove(next).0);
-        }
-        for (index, id) in placed.iter().enumerate() {
-            self.tree.move_child(*id, index);
-        }
-        let position = |id: &WidgetId| placed.iter().position(|p| p == id);
-        parts.items.sort_by_key(|(id, _)| position(id));
-        let expanded = self
-            .view
-            .expanded
-            .filter(|pane| order.contains(pane))
-            .or(cards
-                .iter()
-                .find(|(_, need)| need.tier() != Tier::Info)
-                .map(|(w, _)| w.pane));
-        if expanded != self.queue_buttons.expanded {
-            self.expand_in_place(expanded, &order, text);
-        }
-    }
-
-    /// Makes `pane`'s queue card the expanded one without a rebuild: the
-    /// card expanded so far collapses, and the buttons are registered as
-    /// `queue` registers them (in the queue's `order`).
-    fn expand_in_place(&mut self, pane: Option<u64>, order: &[u64], text: &mut TextStore) {
-        let Some(parts) = self.registry.lists[Panel::Queue as usize].as_ref() else {
-            return;
-        };
-        let card_of = |pane: u64| {
-            let item = parts.items.iter().find(|(_, own)| *own == Some(pane));
-            item.map(|(card, _)| *card)
-        };
-        let fleet = &self.feed.fleet;
-        let buttons = &mut self.queue_buttons;
-        for (pane, expanded) in [(buttons.expanded, false), (pane, true)] {
-            let Some((pane, card)) = pane.and_then(|pane| Some((pane, card_of(pane)?))) else {
-                continue;
-            };
-            let worker = fleet.worker(pane).expect("a queue card's worker");
-            let button = queue::set_expanded(&mut self.tree, card, worker, expanded, text);
-            buttons.open.retain(|(_, own)| *own != pane);
-            buttons.details.retain(|(_, own)| *own != pane);
-            if expanded {
-                buttons.open.push((button, pane));
-            } else {
-                buttons.details.push((button, pane));
-            }
-        }
-        buttons.expanded = pane;
-        let at = |pane: u64| order.iter().position(|p| *p == pane);
-        buttons.details.sort_by_key(|(_, pane)| at(*pane));
-        self.watch();
     }
 
     /// Builds the same screen again for a changed view, in the same `UiTree`:
@@ -1237,8 +1157,8 @@ impl Dashboard {
             })
             .background(Role::Background),
         );
-        let mut registry = Registry::default();
-        let header = header::header(&mut tree, root, &feed, &view, &filter, &mut registry);
+        let registry = Registry::default();
+        let header = header::header(&mut tree, root, &feed, &view, &filter);
         let body = tree.insert(
             Some(root),
             Container::new(Style {
@@ -1267,11 +1187,10 @@ impl Dashboard {
             preview,
             drafts: drafts.text,
             send_caret: drafts.caret,
-            queue_buttons: QueueButtons::default(),
             registry,
             viewport: None,
             watched: None,
-            wheel_accum: [0.0; 5],
+            wheel_accum: 0.0,
             pending: None,
             ticked: None,
             held: Vec::new(),
@@ -1284,8 +1203,6 @@ impl Dashboard {
             prefs_store: None,
             repo_browser: Box::new(repo_browser::System),
             #[cfg(test)]
-            panels: [None; 5],
-            #[cfg(test)]
             pager_takes_wheel: false,
         };
         dashboard.fill_body();
@@ -1296,7 +1213,8 @@ impl Dashboard {
         dashboard
     }
 
-    /// Builds the panels into the body for the view and the filter.
+    /// Builds the body for the view and the filter: the worker list, or
+    /// the tab's analysis view.
     fn fill_body(&mut self) {
         let Self {
             tree,
@@ -1311,18 +1229,7 @@ impl Dashboard {
         let workers = &feed.fleet.workers;
         let matching: Vec<&Worker> = workers.iter().filter(|w| filter.matches(w)).collect();
         let filtering = filter.active();
-        let mut queue_buttons = QueueButtons::default();
-        #[cfg(test)]
-        let mut panels = [None; 5];
-        let now_shown = Panel::NOW.iter().any(|p| view.shown[*p as usize]);
-        let rows = [
-            (Panel::NOW.as_slice(), fill_remaining()),
-            (Panel::HISTORY.as_slice(), history_row(now_shown)),
-        ];
         let nobody = feed.link.as_ref().filter(|_| workers.is_empty());
-        if let Some(link) = nobody {
-            empty(tree, body, link, &view.shown);
-        }
         // The demo's numbers stand for lines; the live ones count preview
         // updates.
         let output_caption = if feed.link.is_some() {
@@ -1330,85 +1237,34 @@ impl Dashboard {
         } else {
             "出力（行 / 間隔）"
         };
-        let cards = Cards {
-            grouping: view.grouping,
-            output_caption,
-            filtering,
-        };
-        if nobody.is_none() {
-            match view.tab {
-                Tab::Operations => {
-                    for (members, style) in rows {
-                        if !members.iter().any(|p| view.shown[*p as usize]) {
-                            continue;
-                        }
-                        let row = tree.insert(
-                            Some(body),
-                            Container::new(Style {
-                                flex_direction: FlexDirection::Row,
-                                align_items: AlignItems::STRETCH,
-                                gap: gap(GUTTER),
-                                ..style
-                            }),
-                        );
-                        for &member in members.iter().filter(|p| view.shown[**p as usize]) {
-                            let id = panel(tree, row, member.style(&view.shown));
-                            #[cfg(test)]
-                            {
-                                panels[member as usize] = Some(id);
-                            }
-                            match member {
-                                Panel::Queue => {
-                                    queue_buttons = queue(
-                                        tree, id, &matching, workers, &view, filtering, registry,
-                                    );
-                                }
-                                Panel::Running => running(tree, id, &matching, cards, registry),
-                                Panel::Done => done(tree, id, &matching, cards, registry),
-                                Panel::Timeline => {
-                                    timeline(
-                                        tree,
-                                        id,
-                                        &matching,
-                                        view.grouping,
-                                        filtering,
-                                        registry,
-                                    );
-                                }
-                                Panel::Graph => graph(tree, id, &feed.fleet, filter, registry),
-                            }
-                        }
-                    }
-                }
-                Tab::Analytics => {
-                    analytics::build(tree, body, &matching, output_caption, filtering, registry);
-                }
-                Tab::MindMap => {
-                    registry.axis_control = Some(mindmap::build(
-                        tree,
-                        body,
-                        &feed.fleet,
-                        filter,
-                        view.map_axis,
-                        registry,
-                    ));
-                }
-                Tab::Timeline => {
-                    registry.scale_control = Some(gantt::build(
-                        tree,
-                        body,
-                        &matching,
-                        view.grouping,
-                        view.time_scale,
-                        registry,
-                    ));
-                }
+        match (nobody, view.tab) {
+            (Some(link), _) => empty(tree, body, link),
+            (None, Tab::Operations) => {
+                list::build(tree, body, &feed.fleet, &view, filter, registry)
             }
-        }
-        self.queue_buttons = queue_buttons;
-        #[cfg(test)]
-        {
-            self.panels = panels;
+            (None, Tab::Analytics) => {
+                analytics::build(tree, body, &matching, output_caption, filtering, registry);
+            }
+            (None, Tab::MindMap) => {
+                registry.axis_control = Some(mindmap::build(
+                    tree,
+                    body,
+                    &feed.fleet,
+                    filter,
+                    view.map_axis,
+                    registry,
+                ));
+            }
+            (None, Tab::Timeline) => {
+                registry.scale_control = Some(gantt::build(
+                    tree,
+                    body,
+                    &matching,
+                    view.grouping,
+                    view.time_scale,
+                    registry,
+                ));
+            }
         }
         self.paint_selection();
     }
@@ -1449,39 +1305,27 @@ impl Dashboard {
         }
     }
 
-    /// Selects `pane` (or nothing). A worker with a queue card gets it
-    /// expanded (a rebuild when another card was); an open drawer moves to
-    /// the new worker.
+    /// Selects `pane` (or nothing), in place; an open drawer moves to the
+    /// new worker.
     fn select(&mut self, pane: Option<u64>, text: &mut TextStore) {
         if self.view.confirm_close != pane {
             self.view.confirm_close = None;
         }
         self.view.selected = pane;
         self.view.reveal = pane;
-        let mut rebuild = false;
-        if let Some(pane) = pane {
-            if self.waits(pane) && self.view.shown[Panel::Queue as usize] {
-                rebuild = self.queue_buttons.expanded != Some(pane);
-                self.view.expanded = Some(pane);
-            }
-            if self.view.detail.is_some_and(|detail| detail != pane) {
-                self.view.detail = Some(pane);
-                if !rebuild {
-                    self.reopen_drawer(text);
-                }
-            }
+        if let Some(pane) = pane
+            && self.view.detail.is_some_and(|detail| detail != pane)
+        {
+            self.view.detail = Some(pane);
+            self.reopen_drawer(text);
         }
-        if rebuild {
-            self.rebuilt(self.view, text);
-        } else {
-            self.paint_selection();
-            self.watch();
-        }
+        self.paint_selection();
+        self.watch();
     }
 
-    /// Moves the selection one step through the order.
+    /// Moves the selection one step through the rows as shown.
     fn step(&mut self, step: Step, text: &mut TextStore) {
-        let next = select::step(&self.order(), self.view.selected, step);
+        let next = select::step(&self.walk_order(), self.view.selected, step);
         if next.is_some() && next != self.view.selected {
             self.select(next, text);
         }
@@ -1711,35 +1555,33 @@ impl Dashboard {
         }
     }
 
-    /// Asks the feed for the screen tails of the expanded queue card and the
-    /// drawer's worker, when they changed.
+    /// Asks the feed for the screen tail of the drawer's worker, when it
+    /// changed.
     fn watch(&mut self) {
         let Some(channel) = &self.feed.channel else {
             return;
         };
-        let mut panes = Vec::new();
-        for pane in [self.queue_buttons.expanded, self.view.detail]
+        // A closed worker has no pane to fetch a screen from.
+        let panes: Vec<u64> = self
+            .view
+            .detail
+            .filter(|pane| !self.feed.fleet.worker(*pane).is_some_and(Worker::is_closed))
             .into_iter()
-            .flatten()
-        {
-            // A closed worker has no pane to fetch a screen from.
-            let closed = self.feed.fleet.worker(pane).is_some_and(Worker::is_closed);
-            if !closed && !panes.contains(&pane) {
-                panes.push(pane);
-            }
-        }
+            .collect();
         if self.watched.as_ref() != Some(&panes) {
             channel.send(Command::Watch(panes.clone()));
             self.watched = Some(panes);
         }
     }
 
-    /// A changed query (and caret): the body is built again, the header and
-    /// its field stay.
+    /// A changed query (and caret): the body is built again, from the top
+    /// of the list, the header and its field stay.
     fn set_filter(&mut self, query: String, caret: usize, text: &mut TextStore) {
         let old = self.order();
         let detail = self.view.detail;
         self.filter = Filter { query, caret };
+        self.view.anchor = None;
+        self.view.first = 0;
         self.reselect(&old, Vanish::Neighbour);
         // Other workers to close at once: a close armed for the old ones is
         // taken back, and the drawer's button names the new count.
@@ -1775,12 +1617,23 @@ impl Dashboard {
         self.set_filter(String::new(), 0, text);
     }
 
-    /// A view change that rebuilds the screen (panels, grouping).
+    /// A view change that rebuilds the screen (scope, tab, grouping).
     fn change_view(&mut self, view: View, text: &mut TextStore) {
         let old = self.order();
         self.view = view;
         self.reselect(&old, Vanish::Neighbour);
         self.rebuilt(self.view, text);
+    }
+
+    /// Shows the list of `scope`, from its top (keys 1–3, the switch).
+    fn set_scope(&mut self, scope: Scope, text: &mut TextStore) {
+        let view = View {
+            scope,
+            first: 0,
+            anchor: None,
+            ..self.view
+        };
+        self.change_view(view, text);
     }
 
     fn mode(&self) -> Mode {
@@ -2098,29 +1951,8 @@ impl Dashboard {
         self.show_notice("結果をコピーしました".to_owned());
     }
 
-    fn toggle_urgency_filter(&mut self, need: Need, text: &mut TextStore) {
-        let token = match need {
-            Need::Approval => "need:approval",
-            Need::Question => "need:question",
-            Need::Failure => "need:failure",
-            Need::Quiet => "need:quiet",
-            Need::Notice => "need:notice",
-        };
-        if self.filter.query.trim().eq_ignore_ascii_case(token) {
-            self.clear_filter(text);
-        } else {
-            let field = self.header.filter_field;
-            let caret = token.len();
-            self.tree.update::<TextField, _>(field, |f, cx| {
-                f.set_text(cx, token);
-                f.select(cx, caret..caret);
-            });
-            self.set_filter(token.to_owned(), caret, text);
-        }
-    }
-
-    /// Handles a direct click on a header urgency count, timeline lane, or
-    /// graph node without changing any widget layout.
+    /// Handles a direct click on a list row (not its button), a timeline
+    /// lane or a マップ (mindmap) node without changing any widget layout.
     fn try_direct_click(&mut self, pos: Point, text: &mut TextStore) -> bool {
         if self.view.help {
             return false;
@@ -2128,34 +1960,39 @@ impl Dashboard {
         let Some(hit) = self.tree.hit_test(pos) else {
             return false;
         };
-        if let Some((_, need)) = self
-            .header
-            .urgency_labels
-            .iter()
-            .find(|(id, _)| *id == hit)
-            .copied()
-        {
-            self.disarm_close(text);
-            self.toggle_urgency_filter(need, text);
-            return true;
-        }
         // Ignore clicks inside an open drawer overlay.
         if let Some((drawer_root, _)) = self.registry.drawer
             && self.tree.ancestors(hit).any(|id| id == drawer_root)
         {
             return false;
         }
-        let clicked_pane = self.registry.marks.iter().find_map(|&(id, pane, mark)| {
-            matches!(mark, Mark::Lane | Mark::Node { .. })
-                .then(|| {
-                    self.tree
-                        .ancestors(hit)
-                        .any(|anc| anc == id)
-                        .then_some(pane)
-                })
-                .flatten()
+        let under = |id: WidgetId| self.tree.ancestors(hit).any(|anc| anc == id);
+        // A row's button acts as a button (`click`).
+        if self
+            .registry
+            .row_actions
+            .iter()
+            .any(|(id, _, _)| under(*id))
+        {
+            return false;
+        }
+        let row = self.registry.rows.iter().find(|(id, _)| under(*id));
+        let clicked_pane = row.map(|(_, pane)| *pane).or_else(|| {
+            self.registry.marks.iter().find_map(|&(id, pane, mark)| {
+                matches!(mark, Mark::Lane | Mark::Node { .. })
+                    .then(|| under(id).then_some(pane))
+                    .flatten()
+            })
         });
         if let Some(pane) = clicked_pane {
+            // Focus goes as on a press on space that takes none (the tree
+            // clears it there, in `UiTree::dispatch`, which this press never
+            // reaches): out of the filter or send field, so the next key
+            // acts on the selected row. Cleared before selecting, so nothing
+            // rebuilt on the way puts it back.
+            self.tree.set_focus(None);
+            self.filter_had_focus = false;
+            self.pressed_in_filter = false;
             self.disarm_close(text);
             if self.view.tab == Tab::Operations {
                 self.select(Some(pane), text);
@@ -2191,12 +2028,8 @@ impl Dashboard {
             Action::Next => self.step(Step::Next, text),
             Action::Prev => self.step(Step::Prev, text),
             Action::NextWaiting => {
-                match select::next_waiting(
-                    &self.feed.fleet,
-                    &self.view,
-                    &self.filter,
-                    self.view.selected,
-                ) {
+                let order = self.walk_order();
+                match select::next_waiting(&self.feed.fleet, &order, self.view.selected) {
                     Some(pane) => self.select(Some(pane), text),
                     None => self.show_notice("要対応のワーカーはありません".to_owned()),
                 }
@@ -2213,29 +2046,7 @@ impl Dashboard {
                 None => self.show_notice(NOTHING_SELECTED.to_owned()),
             },
             Action::StartSend => match self.view.selected {
-                Some(pane) => {
-                    let worker = self.feed.fleet.worker(pane);
-                    if worker.is_some_and(Worker::is_closed) {
-                        self.show_notice(drawer::CLOSED_SEND_GUARD.to_owned());
-                        return;
-                    }
-                    if worker.is_some_and(|w| w.state == State::Permission) {
-                        self.show_notice(drawer::PERMISSION_SEND_GUARD.to_owned());
-                        return;
-                    }
-                    if self.view.detail != Some(pane) {
-                        self.set_detail(Some(pane), text);
-                    }
-                    if let Some((field, _)) = self.registry.send_field {
-                        self.tree.set_focus(Some(field));
-                        self.tree.update::<TextField, _>(field, |f, cx| {
-                            let end = f.text().len();
-                            f.select(cx, end..end);
-                        });
-                        let end = self.drafts.get(&pane).map_or(0, String::len);
-                        self.send_caret = Some((pane, end));
-                    }
-                }
+                Some(pane) => self.start_send(pane, text),
                 None => self.show_notice(NOTHING_SELECTED.to_owned()),
             },
             Action::SubmitSend => {
@@ -2310,11 +2121,7 @@ impl Dashboard {
                     self.select(None, text);
                 }
             }
-            Action::TogglePanel(panel) => {
-                let mut view = self.view;
-                view.shown[panel as usize] = !view.shown[panel as usize];
-                self.change_view(view, text);
-            }
+            Action::SetScope(scope) => self.set_scope(scope, text),
             Action::OpenHelp => {
                 self.cancel_press(text);
                 self.view.help = true;
@@ -2327,11 +2134,42 @@ impl Dashboard {
         }
     }
 
-    /// Takes a wheel event over a panel list to page it (the pager).
+    /// Opens the drawer on `pane` (selecting it) with its send field
+    /// focused, the caret at the draft's end: S, and an input row's 入力する.
+    /// Refused for a closed worker and an approval, as sending is.
+    fn start_send(&mut self, pane: u64, text: &mut TextStore) {
+        let worker = self.feed.fleet.worker(pane);
+        if worker.is_some_and(Worker::is_closed) {
+            self.show_notice(drawer::CLOSED_SEND_GUARD.to_owned());
+            return;
+        }
+        if worker.is_some_and(|w| w.state == State::Permission) {
+            self.show_notice(drawer::PERMISSION_SEND_GUARD.to_owned());
+            return;
+        }
+        if self.view.detail != Some(pane) {
+            self.set_detail(Some(pane), text);
+        } else if self.view.selected != Some(pane) {
+            // The drawer stayed on it while a live update took it out of
+            // the list (`reselect`): it is selected again all the same.
+            self.select(Some(pane), text);
+        }
+        if let Some((field, _)) = self.registry.send_field {
+            self.tree.set_focus(Some(field));
+            self.tree.update::<TextField, _>(field, |f, cx| {
+                let end = f.text().len();
+                f.select(cx, end..end);
+            });
+            let end = self.drafts.get(&pane).map_or(0, String::len);
+            self.send_caret = Some((pane, end));
+        }
+    }
+
+    /// Takes a wheel event over the list to page it (the pager).
     fn wheel(&mut self, event: &Event, text: &mut TextStore) -> bool {
         let taken = pager::wheel(
             &self.tree,
-            &self.registry.lists,
+            self.registry.list.as_ref(),
             &mut self.view,
             &mut self.wheel_accum,
             event,
@@ -2411,7 +2249,7 @@ impl Screen for Dashboard {
 
     /// Every key goes through the key map first (`keymap::route`): the tree
     /// has no shortcuts, so a digit typed into the filter field never
-    /// toggles a panel.
+    /// switches the scope.
     fn dispatch(&mut self, event: Event, text: &mut TextStore) {
         let Some(event) = self.track_press(event) else {
             return;
@@ -2449,7 +2287,6 @@ impl Screen for Dashboard {
                 } = event
                     && self.try_direct_click(pos, text)
                 {
-                    self.filter_had_focus = false;
                     self.after_input();
                     return;
                 }
@@ -2481,7 +2318,7 @@ impl Screen for Dashboard {
             &mut self.tree,
             text,
             viewport,
-            &self.registry.lists,
+            self.registry.list.as_ref(),
             &mut self.view,
         );
         if header || pages {
@@ -2554,12 +2391,20 @@ impl Screen for Dashboard {
             return;
         }
         if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>() {
+            // A switch is not the confirming press: it takes back a close
+            // waiting for one, as keys 1–3 do (`act`). None of the
+            // switches is in the drawer, which this relabels.
+            self.disarm_close(text);
             if message.source == self.grouping_control {
                 let view = View {
                     grouping: Grouping::ALL[*index],
                     ..self.view
                 };
                 self.change_view(view, text);
+                return;
+            }
+            if self.registry.scope_control == Some(message.source) {
+                self.set_scope(Scope::ALL[*index], text);
                 return;
             }
             if message.source == self.tab_control {
@@ -2593,7 +2438,16 @@ impl Screen for Dashboard {
         let source = message.source;
         // Any other button takes back a close waiting for its confirmation;
         // the drawer's button is relabelled once this click is handled
-        // (relabelling first would give the drawer's buttons new ids).
+        // (relabelling first would give the drawer's buttons new ids). A
+        // row's button is in the list, which relabelling leaves alone: there
+        // the drawer is relabelled first, as a key does (`act`), so what the
+        // row's button opens is not built again under it — 入力する's
+        // focused send field would lose its focus.
+        let in_row = self
+            .registry
+            .row_actions
+            .iter()
+            .any(|(id, _, _)| *id == source);
         let confirms = self
             .registry
             .close_pane_button
@@ -2611,10 +2465,14 @@ impl Screen for Dashboard {
                 self.close_ended.take().is_some(),
             )
         };
+        let relabels = |detail: Option<u64>| {
+            (disarmed.is_some() && disarmed == detail) || (bulk && detail.is_some())
+        };
+        if in_row && relabels(self.view.detail) {
+            self.reopen_drawer(text);
+        }
         self.click(source, text);
-        if (disarmed.is_some() && disarmed == self.view.detail)
-            || (bulk && self.view.detail.is_some())
-        {
+        if !in_row && relabels(self.view.detail) {
             self.reopen_drawer(text);
         }
     }
@@ -2623,27 +2481,17 @@ impl Screen for Dashboard {
 impl Dashboard {
     /// What a clicked button does (`Screen::handle`).
     fn click(&mut self, source: WidgetId, text: &mut TextStore) {
-        if self.queue_buttons.info_toggle == Some(source) {
-            let view = View {
-                info_open: !self.view.info_open,
-                ..self.view
-            };
-            self.change_view(view, text);
-            return;
-        }
-        let queue = &self.queue_buttons;
-        if let Some(pane) = button_pane(&queue.details, source) {
-            self.select(Some(pane), text);
-        } else if let Some(pane) = button_pane(&queue.open, source)
-            .or_else(|| button_pane(&self.registry.open_buttons, source))
-        {
+        let mut row_actions = self.registry.row_actions.iter();
+        let row_action = row_actions.find(|(id, _, _)| *id == source);
+        if let Some(&(_, pane, action)) = row_action {
+            self.row_action(pane, action, text);
+        } else if self.registry.clear_filter == Some(source) {
+            self.clear_filter(text);
+        } else if let Some(pane) = button_pane(&self.registry.open_buttons, source) {
             self.open(pane);
             if self.view.selected != Some(pane) {
                 self.select(Some(pane), text);
             }
-        } else if let Some(pane) = button_pane(&self.registry.detail_buttons, source) {
-            let detail = (self.view.detail != Some(pane)).then_some(pane);
-            self.set_detail(detail, text);
         } else if self.registry.result_toggle == Some(source) {
             let shown = self.view.result.is_some() && self.view.result == self.view.detail;
             self.view.result = if shown { None } else { self.view.detail };
@@ -2681,6 +2529,26 @@ impl Dashboard {
             self.set_detail(None, text);
         } else if self.registry.help.is_some_and(|(_, close)| close == source) {
             self.close_help(text);
+        }
+    }
+
+    /// What a row's button does (AC8).
+    fn row_action(&mut self, pane: u64, action: RowAction, text: &mut TextStore) {
+        match action {
+            RowAction::OpenPane => {
+                self.open(pane);
+                if self.view.selected != Some(pane) {
+                    self.select(Some(pane), text);
+                }
+            }
+            RowAction::StartSend => self.start_send(pane, text),
+            RowAction::Detail => self.set_detail(Some(pane), text),
+            RowAction::Result => {
+                // As the drawer's 表示 does: the file is read for this view.
+                self.view.result = Some(pane);
+                self.preview = None;
+                self.set_detail(Some(pane), text);
+            }
         }
     }
 }

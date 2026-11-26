@@ -23,6 +23,8 @@ pub mod error;
 pub mod protocol;
 pub mod push;
 pub mod server;
+pub mod timeline;
+pub mod timeline_outbox;
 
 pub use attach::{
     ATTACH_BACKPRESSURE_TIMEOUT, ATTACH_OUTPUT_CAPACITY_BYTES, ATTACH_TOKEN_TTL, AttachOutputError,
@@ -36,13 +38,15 @@ pub use client::{
 };
 pub use error::{ErrorCode, IpcError};
 pub use protocol::{
-    AttachParams, AttachResult, Attr, CAPABILITY_BOARD_TAB, DetachParams, EventKind, FieldMask,
-    GetTextResult, ListPanelsResult, PROTOCOL_VERSION, PaneIdResult, Panel, PanelAgent, PanelExit,
-    PanelField, PanelSpawn, ResizePaneParams, Row, Span, SpanColor, SpawnConfig, SpawnParams,
-    SplitDirection, SplitPlacement, TextSource, UpdateSubscriptionParams, WireId, is_plain_shell,
+    AttachParams, AttachResult, Attr, CAPABILITY_BOARD_TAB, CAPABILITY_BOARD_TIMELINE_V1,
+    DetachParams, EventKind, FieldMask, GetTextResult, ListPanelsResult, PROTOCOL_VERSION,
+    PaneIdResult, Panel, PanelAgent, PanelExit, PanelField, PanelSpawn, ResizePaneParams, Row,
+    Span, SpanColor, SpawnConfig, SpawnParams, SplitDirection, SplitPlacement, TextSource,
+    UpdateSubscriptionParams, WireId, is_plain_shell,
 };
 pub use push::{Broadcaster, ChangedPanel, EventMask, PushQueue};
 pub use server::{
     ATTACH_HANDSHAKE_CLOSE_REASON, MESSAGE_TOO_BIG_REASON, Server, ServerConfig, ServerHandle,
     TOO_MANY_CONNECTIONS_REASON,
 };
+pub use timeline::{Seq, TimelineCall, TimelineError, TimelineErrorKind};

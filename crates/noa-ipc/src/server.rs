@@ -132,6 +132,7 @@ use crate::push::{
     AddSubscriptionError, Broadcaster, EventMask, PushQueue, QueuedNotification,
     SubscriptionUpdate, UpdateSubscriptionError,
 };
+use crate::timeline::{MAX_POST_PARAMS_BYTES, TimelineCall, TimelineError};
 
 /// Server startup configuration (spec §L2 "Config キー").
 pub struct ServerConfig {
@@ -1319,6 +1320,7 @@ const JSONRPC_VERSION: &str = "2.0";
 struct RpcFail {
     code: ErrorCode,
     message: String,
+    data: Option<Value>,
 }
 
 impl RpcFail {
@@ -1326,11 +1328,37 @@ impl RpcFail {
         RpcFail {
             code,
             message: message.into(),
+            data: None,
         }
     }
 
     fn invalid_params() -> Self {
         RpcFail::new(ErrorCode::InvalidParams, "invalid params")
+    }
+
+    fn unknown_method(method: &str) -> Self {
+        Self::new(
+            ErrorCode::MethodNotFound,
+            format!("unknown method: {method}"),
+        )
+    }
+
+    fn response(self, id: Value) -> String {
+        let mut error = serde_json::json!({ "code": self.code.code(), "message": self.message });
+        if let Some(data) = self.data {
+            error["data"] = data;
+        }
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": error }).to_string()
+    }
+}
+
+impl From<TimelineError> for RpcFail {
+    fn from(err: TimelineError) -> Self {
+        Self {
+            code: err.code(),
+            data: Some(err.data()),
+            message: err.message,
+        }
     }
 }
 
@@ -1415,12 +1443,38 @@ fn capped_get_text_response(id: &Value, mut result: Value) -> String {
 }
 
 fn error_response(id: Value, code: ErrorCode, message: &str) -> String {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": { "code": code.code(), "message": message },
-    })
-    .to_string()
+    RpcFail::new(code, message).response(id)
+}
+
+// Only large post requests need a second pass. The parsed Value has lost
+// whitespace and escape spellings; measure the original params object,
+// excluding the RPC envelope. Serde skips nested values and quoted strings.
+fn check_post_params_size(raw: &str) -> Result<(), TimelineError> {
+    if raw.len() <= MAX_POST_PARAMS_BYTES {
+        return Ok(());
+    }
+    let invalid = || TimelineError::invalid_params("invalid post params");
+    let mut rest = raw.trim_start().strip_prefix('{').ok_or_else(invalid)?;
+    loop {
+        let mut keys = serde_json::Deserializer::from_str(rest).into_iter::<String>();
+        let key = keys.next().and_then(Result::ok).ok_or_else(invalid)?;
+        rest = rest[keys.byte_offset()..]
+            .trim_start()
+            .strip_prefix(':')
+            .ok_or_else(invalid)?
+            .trim_start();
+        let mut values =
+            serde_json::Deserializer::from_str(rest).into_iter::<serde::de::IgnoredAny>();
+        values.next().and_then(Result::ok).ok_or_else(invalid)?;
+        let len = values.byte_offset();
+        if key == "params" && len > MAX_POST_PARAMS_BYTES {
+            return Err(TimelineError::invalid_params("post params exceed 64 KiB"));
+        }
+        match rest[len..].trim_start().strip_prefix(',') {
+            Some(next) => rest = next,
+            None => return Ok(()),
+        }
+    }
 }
 
 fn require_scope(session: &Session, scope: Scope) -> Result<(), RpcFail> {
@@ -1504,7 +1558,14 @@ fn dispatch(
     }
 
     if req.method == "noa.hello" {
-        return Some(handle_hello(id, req.params, token, allowed_scopes, session));
+        return Some(handle_hello(
+            id,
+            req.params,
+            token,
+            allowed_scopes,
+            session,
+            backend.as_ref(),
+        ));
     }
 
     if !session.hello_done {
@@ -1525,7 +1586,7 @@ fn dispatch(
                     panels: &backend.list_panels(),
                 },
             ),
-            Err(fail) => error_response(id, fail.code, &fail.message),
+            Err(fail) => fail.response(id),
         });
     }
 
@@ -1584,17 +1645,23 @@ fn dispatch(
                 require_scope(session, Scope::Read)?;
                 handle_unsubscribe(broadcaster, conn_id, req.params)
             }
-            _ => Err(RpcFail::new(
-                ErrorCode::MethodNotFound,
-                format!("unknown method: {}", req.method),
-            )),
+            method if method.starts_with("noa.timeline.") => {
+                let call = TimelineCall::parse(method, req.params)?
+                    .ok_or_else(|| RpcFail::unknown_method(method))?;
+                require_scope(session, call.scope())?;
+                if matches!(call, TimelineCall::Post(_)) {
+                    check_post_params_size(raw)?;
+                }
+                backend.timeline(call).map_err(Into::into)
+            }
+            method => Err(RpcFail::unknown_method(method)),
         }
     })();
 
     Some(match outcome {
         Ok(result) if is_get_text => capped_get_text_response(&id, result),
         Ok(result) => success_response(&id, &result),
-        Err(fail) => error_response(id, fail.code, &fail.message),
+        Err(fail) => fail.response(id),
     })
 }
 
@@ -1617,6 +1684,7 @@ fn handle_hello(
     token: &str,
     allowed_scopes: ScopeSet,
     session: &mut Session,
+    backend: &dyn IpcBackend,
 ) -> String {
     let hello: HelloParams = match serde_json::from_value(params) {
         Ok(p) => p,
@@ -1646,7 +1714,12 @@ fn handle_hello(
         granted_scopes: session.granted_scopes.to_strings(),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         server_instance_id: server_instance_id().to_string(),
-        capabilities: SERVER_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+        capabilities: SERVER_CAPABILITIES
+            .iter()
+            .copied()
+            .chain(backend.capabilities())
+            .map(str::to_owned)
+            .collect(),
     };
     success_response(&id, &serde_json::to_value(result).unwrap())
 }
@@ -2718,6 +2791,7 @@ mod tests {
             "tok",
             ScopeSet::default_read_only(),
             &mut first,
+            &NoopBackend,
         );
         let b = handle_hello(
             Value::from(2),
@@ -2725,6 +2799,7 @@ mod tests {
             "tok",
             ScopeSet::default_read_only(),
             &mut second,
+            &NoopBackend,
         );
         let a: Value = serde_json::from_str(&a).unwrap();
         let b: Value = serde_json::from_str(&b).unwrap();

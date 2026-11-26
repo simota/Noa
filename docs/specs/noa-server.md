@@ -113,8 +113,20 @@ Assumptions: iOS reaches the server via a tunnel / loopback bind is possible eve
 | `noa.subscribe` | read | `{ events:["state_changed","output"], paneIds?:[…], fields?:[…] }` | `{ subscriptionId }` |
 | `noa.updateSubscription` | read | `{ subscriptionId, events?, paneIds?, fields? }` | `{ ok:true }` |
 | `noa.unsubscribe` | read | `{ subscriptionId }` | `{ ok:true }` |
+| `noa.timeline.context` | read | `{ paneId }` or `{ boardId }` | Board, head sequence, live workers and runs |
+| `noa.timeline.boards` | read | `{ before?:{activityAt,boardId}, limit? }` | `{ boards, hasMore, nextBefore }`, newest activity first |
+| `noa.timeline.registerRun` | control | `{ requestId, publishPolicy, boardId?, boardName?, orchestratorPaneId?, workerPaneId?, taskRef?, retryOfRunId?, role?, label? }` | `{ boardId, runId, workerId, producerId, created }` |
+| `noa.timeline.setPublishPolicy` | control | `{ boardId, runId, requestId, publishPolicy }` | Updated run |
+| `noa.timeline.post` | control | `{ boardId, runId?, producerId, requestId, post }` | Durable ack `{ postId, seq, createdAt, duplicate }` |
+| `noa.timeline.list` | read | `{ boardId, beforeSeq?, limit?, filter?, query? }` | Summaries, newest first, with `headSeq`, `hasMore` and `nextBeforeSeq` |
+| `noa.timeline.get` | read | `{ boardId, postId }` | `{ post, supersededBy }`, including the body |
+| `noa.timeline.changes` | read | `{ boardId, afterSeq, limit? }` | Summaries, oldest first, with `headSeq`, `hasMore` and `nextAfterSeq` |
 | notification `noa.stateChanged` | — | `{ panels:[Panel], removedPaneIds?:[id], dropped?:bool }` (delta) | (notification, no response) |
 | notification `noa.output` | — | `{ paneId, coordinateGeneration, lines:[Row], dropped?:true }` | (notification, no response) |
+
+`noa.hello` advertises `boardTimelineV1` when the backend has a timeline service. All eight methods take named parameters. Sequence numbers are decimal strings. Post parameters are limited to 64 KiB of raw JSON, and timeline responses to 192 KiB. On a lost acknowledgement, resend the same envelope, including the original `requestId`.
+
+Timeline errors include `error.data.kind`: `invalid_params` (-32602), `outcome_unknown` (-32009, with `requestId`), `conflict` (-32012, with the existing post or run ID when available), `not_found` (-32013), `busy` (-32014), `storage_full` (-32015), `io_error` (-32016), `corrupt_store` (-32017, with a 1-based `line`), or `unsupported` (-32018). Scope denial (-32003) and unknown method (-32601) retain the standard error shape. The full wire types, pagination and idempotency rules are in the [Board Timeline specification](board-timeline.md).
 
 ### ID model & Panel metadata
 

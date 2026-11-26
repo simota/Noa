@@ -817,6 +817,12 @@ pub struct NewTabParams {
 /// keeps the last release's version while it already has the feature.
 pub const CAPABILITY_BOARD_TAB: &str = "boardTab";
 
+/// Board timeline (`docs/specs/board-timeline.md` D5): the `noa.hello`
+/// capability of a Noa whose `noa.timeline.*` methods are served. Not in
+/// [`SERVER_CAPABILITIES`]: the backend adds it only once its timeline
+/// service started (`IpcBackend::capabilities`).
+pub const CAPABILITY_BOARD_TIMELINE_V1: &str = "boardTimelineV1";
+
 /// Every capability this server advertises in `noa.hello`.
 pub const SERVER_CAPABILITIES: &[&str] = &[CAPABILITY_BOARD_TAB];
 

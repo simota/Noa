@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use noa_ipc::backend::{GridResult, IpcBackend, PaneRef, TextResult, WindowRef};
 use noa_ipc::error::IpcError;
+use noa_ipc::protocol::CAPABILITY_BOARD_TIMELINE_V1;
 use noa_ipc::protocol::{Panel, Row, SplitDirection, TextSource, WireId};
+use noa_ipc::timeline::{MAX_POST_PARAMS_BYTES, TimelineCall, TimelineError, TimelineErrorKind};
 use noa_ipc::{
     Broadcaster, ChangedPanel, FieldMask, PROTOCOL_VERSION, PanelField, ScopeSet, Server,
     ServerConfig,
@@ -20,6 +22,9 @@ use tungstenite::{Message, WebSocket};
 
 #[derive(Default)]
 struct MockBackend {
+    timeline_enabled: bool,
+    timeline_calls: Mutex<Vec<&'static str>>,
+    timeline_error: Mutex<Option<TimelineError>>,
     panels: Mutex<Vec<Panel>>,
     closed_panes: Mutex<std::collections::HashSet<u64>>,
     sent_text: Mutex<Vec<(u64, String, bool)>>,
@@ -37,6 +42,25 @@ struct MockBackend {
 }
 
 impl IpcBackend for MockBackend {
+    fn capabilities(&self) -> Vec<&'static str> {
+        if self.timeline_enabled {
+            vec![CAPABILITY_BOARD_TIMELINE_V1]
+        } else {
+            vec![]
+        }
+    }
+
+    fn timeline(&self, call: TimelineCall) -> Result<Value, TimelineError> {
+        self.timeline_calls.lock().unwrap().push(call.method());
+        if !self.timeline_enabled {
+            return Err(TimelineError::unsupported());
+        }
+        if let Some(error) = self.timeline_error.lock().unwrap().take() {
+            return Err(error);
+        }
+        Ok(json!({"method": call.method()}))
+    }
+
     fn list_panels(&self) -> Arc<Vec<Panel>> {
         Arc::new(self.panels.lock().unwrap().clone())
     }
@@ -313,6 +337,159 @@ fn hello(
         json!({ "protocolVersion": protocol_version, "token": token, "scopes": scopes }),
     );
     recv_json(sock)
+}
+
+const TIMELINE_BOARD: &str = "bd-0123456789abcdef";
+
+fn timeline_post() -> Value {
+    json!({
+        "boardId": TIMELINE_BOARD, "producerId": "human", "requestId": "r1",
+        "post": { "schemaVersion": 1, "kind": "summary", "outcome": "partial",
+            "title": "Update", "summary": "Ready for review",
+            "sourceRef": { "namespace": "manual", "sessionId": "s", "eventId": "e" } }
+    })
+}
+
+#[test]
+fn ac1_timeline_scopes_and_dispatch_per_method() {
+    let backend = Arc::new(MockBackend {
+        timeline_enabled: true,
+        ..Default::default()
+    });
+    let handle = start_test_server(backend.clone(), "tok", ScopeSet::parse_list("read,control"));
+    let mut reader = connect_plain(handle.port());
+    let mut writer = connect_plain(handle.port());
+    let resp = hello(&mut reader, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    assert_eq!(
+        resp["result"]["capabilities"],
+        json!(["boardTab", "boardTimelineV1"])
+    );
+    hello(&mut writer, 1, PROTOCOL_VERSION, Some("tok"), &["control"]);
+    let run = "rn-0123456789abcdef";
+    for (method, params, write) in [
+        ("noa.timeline.context", json!({"paneId":"5"}), false),
+        ("noa.timeline.boards", Value::Null, false),
+        (
+            "noa.timeline.list",
+            json!({"boardId":TIMELINE_BOARD}),
+            false,
+        ),
+        (
+            "noa.timeline.get",
+            json!({"boardId":TIMELINE_BOARD, "postId":"po-0123456789abcdef"}),
+            false,
+        ),
+        (
+            "noa.timeline.changes",
+            json!({"boardId":TIMELINE_BOARD, "afterSeq":"0"}),
+            false,
+        ),
+        (
+            "noa.timeline.registerRun",
+            json!({"orchestratorPaneId":"5", "requestId":"r1",
+            "publishPolicy":{"owner":"worker"}}),
+            true,
+        ),
+        (
+            "noa.timeline.setPublishPolicy",
+            json!({"boardId":TIMELINE_BOARD, "runId":run, "requestId":"r2",
+            "publishPolicy":{"owner":"manual", "producerId":"human"}}),
+            true,
+        ),
+        ("noa.timeline.post", timeline_post(), true),
+    ] {
+        let (granted, denied) = if write {
+            (&mut writer, &mut reader)
+        } else {
+            (&mut reader, &mut writer)
+        };
+        send_rpc(denied, 2, method, params.clone());
+        let resp = recv_json(denied);
+        assert_eq!(resp["error"]["code"], -32003, "{method}: {resp}");
+        assert!(resp["error"].get("data").is_none());
+        send_rpc(granted, 3, method, params);
+        let resp = recv_json(granted);
+        assert_eq!(resp["result"], json!({"method":method}), "{resp}");
+        assert_eq!(*backend.timeline_calls.lock().unwrap(), [method]);
+        backend.timeline_calls.lock().unwrap().clear();
+    }
+}
+
+#[test]
+fn ac1_timeline_capability_absent_and_unknown_method() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend.clone(), "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    let resp = hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    assert_eq!(resp["result"]["capabilities"], json!(["boardTab"]));
+    send_rpc(&mut sock, 2, "noa.timeline.boards", json!({}));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32018);
+    assert_eq!(resp["error"]["data"], json!({"kind":"unsupported"}));
+    send_rpc(&mut sock, 3, "noa.timeline.future", json!([]));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32601);
+    assert!(resp["error"].get("data").is_none());
+    send_rpc(&mut sock, 4, "noa.timeline.boards", json!([]));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32602);
+    assert_eq!(resp["error"]["data"], json!({"kind":"invalid_params"}));
+    assert_eq!(
+        *backend.timeline_calls.lock().unwrap(),
+        ["noa.timeline.boards"]
+    );
+}
+
+#[test]
+fn ac1_timeline_backend_error_preserves_details() {
+    let mut error = TimelineError::new(TimelineErrorKind::OutcomeUnknown, "reply timed out");
+    error.request_id = Some("r1".into());
+    let backend = Arc::new(MockBackend {
+        timeline_enabled: true,
+        timeline_error: Mutex::new(Some(error)),
+        ..Default::default()
+    });
+    let handle = start_test_server(backend, "tok", ScopeSet::parse_list("control"));
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["control"]);
+    send_rpc(&mut sock, 2, "noa.timeline.post", timeline_post());
+    assert_eq!(
+        recv_json(&mut sock)["error"],
+        json!({
+            "code":-32009, "message":"reply timed out", "data":{"kind":"outcome_unknown", "requestId":"r1"}
+        })
+    );
+}
+
+#[test]
+fn ac1_timeline_post_caps_original_params_not_rpc_envelope() {
+    let backend = Arc::new(MockBackend {
+        timeline_enabled: true,
+        ..Default::default()
+    });
+    let handle = start_test_server(backend.clone(), "tok", ScopeSet::parse_list("control"));
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, PROTOCOL_VERSION, Some("tok"), &["control"]);
+    let post = timeline_post().to_string();
+    let body = post.strip_prefix('{').unwrap();
+    for size in [MAX_POST_PARAMS_BYTES, MAX_POST_PARAMS_BYTES + 1] {
+        let padding = " ".repeat(size - post.len());
+        let request = format!(
+            r#"{{"id":5,"jsonrpc":"2.0","other":{{"params":"nested"}},"method":"noa.timeline.post","par\u0061ms":{{{padding}{body}}}"#
+        );
+        sock.send(Message::Text(request)).unwrap();
+        let resp = recv_json(&mut sock);
+        if size == MAX_POST_PARAMS_BYTES {
+            assert_eq!(resp["result"]["method"], "noa.timeline.post", "{resp}");
+        } else {
+            assert_eq!(resp["error"]["code"], -32602);
+            assert_eq!(resp["error"]["data"]["kind"], "invalid_params");
+        }
+    }
+    assert_eq!(
+        *backend.timeline_calls.lock().unwrap(),
+        ["noa.timeline.post"]
+    );
 }
 
 // ---- AC-4: no/wrong token -> -32001, no backend method invoked ----

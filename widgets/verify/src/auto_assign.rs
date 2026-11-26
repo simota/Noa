@@ -179,10 +179,13 @@ impl PlanError {
                     Some(code) => format!("終了コード {code} で終了しました"),
                     None => "シグナルで終了しました".to_owned(),
                 };
+                // An interactive login bash (the `-l -i` the planner runs
+                // under; macOS's /bin/sh is bash) prints `logout` as it
+                // exits, after whatever the planner wrote.
                 let line = stderr_tail
                     .lines()
                     .map(str::trim)
-                    .rfind(|line| !line.is_empty());
+                    .rfind(|line| !line.is_empty() && *line != "logout");
                 match line {
                     Some(line) => format!("{planner} が{how}（{line}）"),
                     None => format!("{planner} が{how}"),
@@ -1396,6 +1399,16 @@ mod tests {
         assert_eq!(
             silent.message(p),
             "claude (sonnet · medium) がシグナルで終了しました"
+        );
+        // bash, run as `-l -i` (macOS's /bin/sh is bash), writes `logout` to
+        // stderr as it exits: that line is the shell's, not the planner's cause.
+        let bash = PlanError::Exit {
+            code: Some(3),
+            stderr_tail: "early\nerror: bad flag\nlogout\n".into(),
+        };
+        assert_eq!(
+            bash.message(p),
+            "claude (sonnet · medium) が終了コード 3 で終了しました（error: bad flag）"
         );
         assert_eq!(
             PlanError::Timeout(180).message(p),

@@ -1,0 +1,7 @@
+Checked: registration consistency only. Not checked: the contents of built artifacts.
+sources: 13 ok, 1 unknown
+  unknown scripts/package-linux.sh: anchor not found: WIDGETS=(
+widgets: 2 (alpha, beta)
+explained differences: 0
+unexplained differences: 0
+result: unknown

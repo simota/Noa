@@ -1,0 +1,7 @@
+Checked: registration consistency only. Not checked: the contents of built artifacts.
+sources: 16 ok, 0 unknown
+widgets: 3 (alpha, beta, gamma)
+explained differences: 0
+unexplained differences: 1
+  gamma launch: missing-registration (crates/noa-app/src/helper_program.rs:15, widgets/gamma/Cargo.toml:2)
+result: inconsistent

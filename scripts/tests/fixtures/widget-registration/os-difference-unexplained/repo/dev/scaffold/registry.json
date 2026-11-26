@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "widgets": {
+    "alpha": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "beta": {
+      "ships": [
+        "macos"
+      ]
+    }
+  },
+  "assets": []
+}

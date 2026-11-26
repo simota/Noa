@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Fixture: the gate.
+alp=widgets/alpha/Cargo.toml
+bet=widgets/beta/Cargo.toml
+gam=widgets/gamma/Cargo.toml
+widget_check() {
+  cargo build --manifest-path "$1" --locked --all-targets
+}
+usage_check() {
+  cargo test --manifest-path "$1" --locked
+}
+
+if [ "$full" = 1 ]; then
+  run alpha widget_check "$alp"
+  run beta usage_check "$bet"
+  run gamma usage_check "$gam"
+elif [ "${#changed[@]}" -gt 0 ]; then
+  for path in "${changed[@]}"; do
+    case $path in widgets/alpha/*) alpc=1 ;; esac
+    case $path in widgets/beta/*) betc=1 ;; esac
+    case $path in widgets/gamma/*) gamc=1 ;; esac
+  done
+  uses=$(widget_uses "$alp")
+  uses=$(widget_uses "$bet")
+  uses=$(widget_uses "$gam")
+  [ "$alpc" = 1 ] && run alpha widget_check "$alp"
+  [ "$betc" = 1 ] && run beta usage_check "$bet"
+  [ "$gamc" = 1 ] && run gamma usage_check "$gam"
+fi

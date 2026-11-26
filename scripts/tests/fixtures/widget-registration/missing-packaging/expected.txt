@@ -1,0 +1,8 @@
+Checked: registration consistency only. Not checked: the contents of built artifacts.
+sources: 16 ok, 0 unknown
+widgets: 3 (alpha, beta, gamma)
+explained differences: 0
+unexplained differences: 2
+  gamma linux: ship-missing (dev/scaffold/registry.json:16, scripts/package-linux.sh:3)
+  gamma macos: ship-missing (dev/scaffold/registry.json:16, scripts/bundle-macos.sh:3)
+result: inconsistent

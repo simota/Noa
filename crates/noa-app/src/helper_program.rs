@@ -2,12 +2,12 @@
 //! loop) beside Noa: the agent dashboard (`agent-dashboard.open`), the repo
 //! browser (`repo-browser.open`), the discussion (`discussion.open`), the
 //! competition (`competition.open`), the review (`review.open`), the verify
-//! (`verify.open`), the tasks (`tasks.open`) and the agent usage
-//! (`agent-usage.open`). Each runs as a
-//! process of its own. All but the agent usage read Noa's panes through the
-//! control server; the agent usage needs neither the server nor
-//! `server-enable`. Only the review, the verify and the tasks get an
-//! argument: the focused pane's directory.
+//! (`verify.open`), the tasks (`tasks.open`), the scaffold
+//! (`scaffold.open`) and the agent usage (`agent-usage.open`). Each runs as a
+//! process of its own. All but the scaffold and the agent usage read Noa's
+//! panes through the control server; those two need neither the server nor
+//! `server-enable`. Only the review, the verify, the tasks and the scaffold
+//! get an argument: the focused pane's directory.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -70,6 +70,12 @@ pub(crate) const TASKS: HelperProgram = HelperProgram {
     crate_name: "tasks",
 };
 
+pub(crate) const SCAFFOLD: HelperProgram = HelperProgram {
+    title: "Scaffold",
+    bundled: "Noa Scaffold",
+    crate_name: "scaffold",
+};
+
 pub(crate) const AGENT_USAGE: HelperProgram = HelperProgram {
     title: "Agent Usage",
     bundled: "Noa Agent Usage",
@@ -78,14 +84,15 @@ pub(crate) const AGENT_USAGE: HelperProgram = HelperProgram {
 
 /// What `helper` is started with, given the working directory of the
 /// focused pane (local, an existing directory, as `App::focused_pane_cwd`
-/// gives it): the review, the verify and the tasks take it as `--repo=`, the
+/// gives it): the review, the verify, the tasks and the scaffold take it as `--repo=`, the
 /// place their start views offer first; every other program starts with no argument.
 pub(crate) fn launch_args(helper: HelperProgram, focused_cwd: Option<&str>) -> Vec<String> {
     match focused_cwd {
         Some(cwd)
             if (helper.crate_name == REVIEW.crate_name
                 || helper.crate_name == VERIFY.crate_name
-                || helper.crate_name == TASKS.crate_name)
+                || helper.crate_name == TASKS.crate_name
+                || helper.crate_name == SCAFFOLD.crate_name)
                 && Path::new(cwd).is_absolute() =>
         {
             vec![format!("--repo={cwd}")]
@@ -297,6 +304,7 @@ mod tests {
             VERIFY,
             AGENT_USAGE,
             TASKS,
+            SCAFFOLD,
         ] {
             let dirs = dev_build_dirs(helper);
             assert_eq!(dirs.len(), 2);
@@ -325,6 +333,29 @@ mod tests {
                     .is_file(),
                 "{dirs:?}"
             );
+        }
+    }
+
+    #[test]
+    fn scaffold_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("scaffold-exe");
+        let dev = scratch_dir("scaffold-dev");
+        assert_eq!(
+            locate(SCAFFOLD, Some(&exe_dir), std::slice::from_ref(&dev)),
+            None
+        );
+        std::fs::write(dev.join("scaffold"), "").unwrap();
+        assert_eq!(
+            locate(SCAFFOLD, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(dev.join("scaffold"))
+        );
+        std::fs::write(exe_dir.join("Noa Scaffold"), "").unwrap();
+        assert_eq!(
+            locate(SCAFFOLD, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(exe_dir.join("Noa Scaffold"))
+        );
+        for dir in [exe_dir, dev] {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 
@@ -489,7 +520,7 @@ mod tests {
 
     #[test]
     fn ac28_only_the_review_the_verify_and_the_tasks_are_given_the_focused_panes_directory() {
-        for helper in [REVIEW, VERIFY, TASKS] {
+        for helper in [REVIEW, VERIFY, TASKS, SCAFFOLD] {
             assert_eq!(
                 launch_args(helper, Some("/Users/me/src/noa")),
                 ["--repo=/Users/me/src/noa"],

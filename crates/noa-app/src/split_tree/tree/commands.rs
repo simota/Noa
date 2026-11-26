@@ -71,6 +71,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::OpenReview
         | AppCommand::OpenVerify
         | AppCommand::OpenTasks
+        | AppCommand::OpenScaffold
         | AppCommand::OpenAgentUsage
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar

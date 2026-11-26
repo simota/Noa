@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "widgets": {
+    "agent-dashboard": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "agent-usage": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "competition": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "discussion": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "repo-browser": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "review": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "scaffold": {
+      "ships": [
+        "macos"
+      ],
+      "reason": "Linux では未確認（AC11 の手動確認は macOS のみ）。Linux 配布は確認後に判断する。"
+    },
+    "tasks": {
+      "ships": [
+        "macos"
+      ],
+      "reason": "Linux 配布は未判断（追加時に scripts/package-linux.sh に入らず、理由の記録がない）。docs/specs/scaffold-widget.md Q1 で判断する。"
+    },
+    "verify": {
+      "ships": [
+        "macos"
+      ],
+      "reason": "Linux 配布は未判断（追加時に scripts/package-linux.sh に入らず、理由の記録がない）。docs/specs/scaffold-widget.md Q1 で判断する。"
+    }
+  },
+  "assets": [
+    {
+      "id": "check-widget-registration",
+      "kind": "checker",
+      "title": "ウィジェット登録の整合チェック",
+      "path": "scripts/check-widget-registration.py",
+      "decisions": [
+        {
+          "to": "trial",
+          "at": "2026-11-26",
+          "reason": "登録の食い違いを機械で見つけるため試作した。scripts/verify.sh が毎回実行する。",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "id": "add-widget-runbook",
+      "kind": "runbook",
+      "title": "ウィジェット追加の手順書",
+      "path": "docs/runbooks/add-widget.md",
+      "decisions": [
+        {
+          "to": "trial",
+          "at": "2026-11-26",
+          "reason": "登録箇所の一覧と手順を一か所にまとめるため試作した。",
+          "evidence": []
+        }
+      ]
+    }
+  ]
+}

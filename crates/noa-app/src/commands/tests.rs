@@ -1270,6 +1270,23 @@ fn ac28_the_tasks_widget_is_addressable_by_action_and_menu_id() {
 }
 
 #[test]
+fn scaffold_is_addressable_by_action_and_menu_id() {
+    let command = AppCommand::OpenScaffold;
+    assert_eq!(command.action_name(), "scaffold.open");
+    assert_eq!(AppCommand::from_action_name("scaffold.open"), Some(command));
+    assert_eq!(command.menu_id(), "noa.view.open-scaffold");
+    assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+    assert_eq!(
+        crate::command_palette::command_palette_title(command),
+        "Open Scaffold"
+    );
+    assert_eq!(
+        crate::command_palette::command_category(command),
+        crate::command_palette::CommandCategory::View
+    );
+}
+
+#[test]
 fn the_verify_widget_is_addressable_by_action_and_menu_id() {
     let command = AppCommand::OpenVerify;
     assert_eq!(command.action_name(), "verify.open");

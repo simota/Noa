@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "widgets": {
+    "alpha": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "beta": {
+      "ships": [
+        "macos"
+      ],
+      "reason": "macOS 専用の想定。"
+    },
+    "delta": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "epsilon": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "nu": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "omega": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "theta": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "xi": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    },
+    "zeta": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
+    }
+  },
+  "assets": []
+}

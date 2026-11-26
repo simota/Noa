@@ -1,0 +1,7 @@
+Checked: registration consistency only. Not checked: the contents of built artifacts.
+sources: 14 ok, 0 unknown
+widgets: 2 (alpha, beta)
+explained differences: 1
+  beta linux: os-difference — Linux では動作未確認のため、配布しない。 (dev/scaffold/registry.json:10)
+unexplained differences: 0
+result: consistent

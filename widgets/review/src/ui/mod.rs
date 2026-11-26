@@ -560,6 +560,7 @@ impl Review {
         );
         let body = tree.insert(Some(root), Container::new(fill()));
         let start = start::insert(&mut tree, body);
+        let auto = auto::Auto::new(&mut tree, start.auto_host);
         let board = tree.insert(Some(body), Container::new(fill()));
         let split = tree.insert(
             Some(board),
@@ -628,7 +629,7 @@ impl Review {
             detection: start::Detection::all_installed(),
             installed: None,
             noa_version: None,
-            auto: auto::Auto::default(),
+            auto,
             start,
             board,
             left_host,
@@ -1592,7 +1593,7 @@ impl Review {
                     start::show_refusal(&mut self.tree, &self.start, &why, text);
                     return;
                 }
-                let auto = self.auto.record(&form);
+                let auto = self.auto.record(&self.start, &form);
                 self.auto.cancel_running();
                 self.starting = true;
                 self.render_auto(text);
@@ -1938,7 +1939,7 @@ impl Screen for Review {
             return;
         }
         if self.session.is_none() {
-            if self.auto.control == Some(message.source) {
+            if self.auto.control() == message.source {
                 if let Some(MenuChosen(i)) = message.downcast_ref() {
                     self.handle_action(Action::AutoAssign(*i), text);
                 } else if message.downcast_ref::<ButtonClicked>().is_some() {

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::TryRecvError;
 
-use noa_gpui_core::WidgetId;
-use noa_gpui_core::widgets::{Button, ControlSize, MenuItem, PullDownButton};
+use noa_gpui_core::widgets::{Button, ControlSize, Label, MenuItem, PullDownButton};
+use noa_gpui_core::{Role, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 use review::auto_assign::{
     self, Assignment, AutoRecord, Candidate, Job, Pick, PlanError, Planner, Planning, Request, Slot,
@@ -20,15 +20,17 @@ use review::model::types::{
     TargetKind, custom_label,
 };
 
-use super::start::{self, Form};
-use super::{Review, Source, caption, clear_children, note, system_now};
+use super::start::{self, Form, Parts};
+use super::{Review, Source, clear_children, note, system_now};
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
 type Spawn = dyn Fn(Job, Wake) -> Planning;
 
 pub(super) struct Auto {
     pub(super) spawn: Box<Spawn>,
-    pub(super) control: Option<WidgetId>,
+    menu: WidgetId,
+    status: WidgetId,
+    cancel: WidgetId,
     planners: Vec<Planner>,
     state: State,
     filled: Option<Filled>,
@@ -43,7 +45,7 @@ enum State {
 struct Filled {
     assignment: Assignment,
     at: Millis,
-    lenses: Vec<LensChoice>,
+    rows: Vec<(WidgetId, LensChoice)>,
 }
 
 struct Running {
@@ -59,16 +61,12 @@ impl Drop for Running {
     }
 }
 
-impl Default for Auto {
-    fn default() -> Self {
-        Self {
-            spawn: Box::new(|job, wake| auto_assign::spawn(job, "review-assign", move || wake())),
-            control: None,
-            planners: Vec::new(),
-            state: State::Idle,
-            filled: None,
-        }
-    }
+fn planner_menu(planners: &[Planner]) -> PullDownButton {
+    let items = planners
+        .iter()
+        .map(|p| MenuItem::new(format!("{} で決める", p.agent)))
+        .collect();
+    PullDownButton::new("自動で割り当て", items).control_size(ControlSize::Small)
 }
 
 fn choice(pick: &Pick) -> AgentChoice {
@@ -93,30 +91,56 @@ fn reviewer_index(pick: &Pick) -> Option<usize> {
         .checked_sub(1)
 }
 
-fn unchanged(form: &Form, lenses: &[LensChoice], pick: &Pick) -> bool {
-    if pick.slot == "lead" {
-        return form.lead == choice(pick);
+impl Filled {
+    fn unchanged(&self, pick: &Pick, parts: &Parts, form: &Form) -> bool {
+        if pick.slot == "lead" {
+            return form.lead == choice(pick);
+        }
+        let Some((host, lens)) = reviewer_index(pick).and_then(|i| self.rows.get(i)) else {
+            return false;
+        };
+        parts.panel.iter().zip(&form.panel).any(|(row, current)| {
+            row.host == *host && current.agent == choice(pick) && current.lens == *lens
+        })
     }
-    reviewer_index(pick).is_some_and(|i| {
-        form.panel
-            .get(i)
-            .is_some_and(|row| row.agent == choice(pick) && lenses.get(i) == Some(&row.lens))
-    })
 }
 
 impl Auto {
+    pub(super) fn new(tree: &mut UiTree, host: WidgetId) -> Self {
+        Self {
+            spawn: Box::new(|job, wake| auto_assign::spawn(job, "review-assign", move || wake())),
+            menu: tree.insert(Some(host), planner_menu(&[])),
+            status: tree.insert(
+                Some(host),
+                Label::new("").font_size(11.0).color(Role::Muted),
+            ),
+            cancel: tree.insert(
+                Some(host),
+                Button::new("中止").control_size(ControlSize::Small),
+            ),
+            planners: Vec::new(),
+            state: State::Idle,
+            filled: None,
+        }
+    }
+
+    pub(super) fn control(&self) -> WidgetId {
+        if matches!(self.state, State::Running(_)) {
+            self.cancel
+        } else {
+            self.menu
+        }
+    }
+
     pub(super) fn reset(&mut self) {
         self.state = State::Idle;
         self.filled = None;
     }
 
-    pub(super) fn record(&self, form: &Form) -> Option<AutoRecord> {
-        if matches!(self.state, State::Running(_)) {
-            return None;
-        }
+    pub(super) fn record(&self, parts: &Parts, form: &Form) -> Option<AutoRecord> {
         let filled = self.filled.as_ref()?;
         AutoRecord::of(&filled.assignment, filled.at, |pick| {
-            unchanged(form, &filled.lenses, pick)
+            filled.unchanged(pick, parts, form)
         })
     }
 
@@ -132,59 +156,58 @@ impl Review {
         let auto = &mut self.auto;
         let tree = &mut self.tree;
         let parts = &self.start;
-        clear_children(tree, parts.auto_host, text);
+        let had_focus = tree
+            .focused()
+            .is_some_and(|id| id == auto.menu || id == auto.cancel);
         clear_children(tree, parts.auto_note, text);
-        let host = Some(parts.auto_host);
-        if let State::Running(run) = &auto.state {
-            caption(
-                tree,
-                parts.auto_host,
-                format!("{} が割り当てを決めています…", run.planner.agent),
-            );
-            auto.control =
-                Some(tree.insert(host, Button::new("中止").control_size(ControlSize::Small)));
-            return;
-        }
         let form = start::read(tree, parts);
-        let kinds = self.detection.fix_kinds().unwrap_or_default();
-        auto.planners =
-            auto_assign::planners(&kinds.iter().map(|k| k.command()).collect::<Vec<_>>());
-        let menu = tree.insert(
-            host,
-            PullDownButton::new(
-                "自動で割り当て",
-                auto.planners
-                    .iter()
-                    .map(|p| MenuItem::new(format!("{} で決める", p.agent)))
-                    .collect(),
-            )
-            .control_size(ControlSize::Small),
-        );
-        auto.control = Some(menu);
-        let blocker = if kinds.is_empty() {
-            None // The installed-agents note already explains this.
-        } else if auto.planners.is_empty() {
-            Some(PlanError::NoPlanner.message(""))
+        let running = matches!(auto.state, State::Running(_));
+        tree.set_hidden(auto.status, !running);
+        tree.set_hidden(auto.cancel, !running);
+        tree.set_hidden(auto.menu, running);
+        if let State::Running(run) = &auto.state {
+            tree.update::<Label, _>(auto.status, |label, cx| {
+                label.set_text(
+                    cx,
+                    format!("{} が割り当てを決めています…", run.planner.agent),
+                )
+            });
         } else {
-            plan_target(&form).err()
-        };
-        tree.set_enabled(
-            menu,
-            matches!(self.source, Source::Live(_))
-                && !self.starting
-                && !auto.planners.is_empty()
-                && blocker.is_none(),
-        );
-        if let Some(why) = blocker {
-            note(tree, parts.auto_note, why);
+            let kinds = self.detection.fix_kinds().unwrap_or_default();
+            let planners =
+                auto_assign::planners(&kinds.iter().map(|k| k.command()).collect::<Vec<_>>());
+            // Pull-down items are fixed at construction. Only detection can change them.
+            if planners != auto.planners {
+                tree.remove(auto.menu, text);
+                auto.menu = tree.insert(Some(parts.auto_host), planner_menu(&planners));
+                auto.planners = planners;
+            }
+            let blocker = if kinds.is_empty() {
+                None // The installed-agents note already explains this.
+            } else if auto.planners.is_empty() {
+                Some(PlanError::NoPlanner.message(""))
+            } else {
+                plan_target(&form).err()
+            };
+            tree.set_enabled(
+                auto.menu,
+                matches!(self.source, Source::Live(_))
+                    && !self.starting
+                    && !auto.planners.is_empty()
+                    && blocker.is_none(),
+            );
+            if let Some(why) = blocker {
+                note(tree, parts.auto_note, why);
+            }
+        }
+        if had_focus {
+            tree.set_focus(Some(auto.control()));
         }
         if let State::Failed(why) = &auto.state {
             note(tree, parts.auto_note, why);
         }
-        if let Some(Filled {
-            assignment, lenses, ..
-        }) = &auto.filled
-        {
+        if let Some(filled) = &auto.filled {
+            let assignment = &filled.assignment;
             note(
                 tree,
                 parts.auto_note,
@@ -196,7 +219,7 @@ impl Review {
             for pick in &assignment.picks {
                 let label = reviewer_index(pick)
                     .map_or_else(|| "リード".to_owned(), |i| format!("レビュアー {}", i + 1));
-                let edited = if unchanged(&form, lenses, pick) {
+                let edited = if filled.unchanged(pick, parts, &form) {
                     ""
                 } else {
                     "（手動で変更）"
@@ -288,11 +311,17 @@ impl Review {
                         row.agent = choice(pick);
                     }
                     start::fill_agents(&mut self.tree, &mut self.start, &form, text);
-                    let lenses = form.panel.into_iter().map(|row| row.lens).collect();
+                    let rows = self
+                        .start
+                        .panel
+                        .iter()
+                        .zip(form.panel)
+                        .map(|(row, choice)| (row.host, choice.lens))
+                        .collect();
                     self.auto.filled = Some(Filled {
                         assignment,
                         at: system_now(),
-                        lenses,
+                        rows,
                     });
                     State::Idle
                 }

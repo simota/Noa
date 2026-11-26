@@ -2900,9 +2900,9 @@ mod auto_assign {
             ),
         ] {
             let (mut screen, _, tx, mut text) = live_pending();
-            assert!(!screen.tree.is_enabled(screen.auto.control.unwrap()));
+            assert!(!screen.tree.is_enabled(screen.auto.control()));
             report(&mut screen, &tx, found(&kinds), &mut text);
-            assert!(!screen.tree.is_enabled(screen.auto.control.unwrap()));
+            assert!(!screen.tree.is_enabled(screen.auto.control()));
             if expected.is_empty() {
                 assert!(note_lines(&screen).contains(&PlanError::NoPlanner.message("")));
                 continue;
@@ -2919,7 +2919,7 @@ mod auto_assign {
                 &mut text,
             );
             screen.rebuild(&mut text);
-            let id = screen.auto.control.unwrap();
+            let id = screen.auto.control();
             assert!(screen.tree.is_enabled(id));
             screen.tree.set_focus(Some(id));
             press(&mut screen, Key::Space);
@@ -3031,6 +3031,74 @@ mod auto_assign {
                 .filter(|p| p.slot != "reviewer-1")
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn deleting_a_filled_row_preserves_the_other_reviewers_reasons() {
+        let (mut screen, link, jobs, mut text) = ready();
+        act(&mut screen, Action::AutoAssign(0));
+        let plan = jobs.try_recv().unwrap();
+        let [lead, removed, second, third] = plan.answer.picks.as_slice() else {
+            panic!("expected three reviewers")
+        };
+        plan.tx.send(Ok(plan.answer.clone())).unwrap();
+        screen.poll_live(&mut text);
+        act(&mut screen, Action::RemovePanelRow(0));
+        let lines = note_lines(&screen);
+        act(&mut screen, Action::Start);
+        let [Command::Start { auto: Some(auto), .. }] = &commands(&link)[..] else {
+            panic!("expected an assigned start")
+        };
+        assert_eq!(auto.overridden, [removed.slot.clone()]);
+        assert_eq!(auto.picks, [lead.clone(), second.clone(), third.clone()]);
+        assert!(lines[2].ends_with(&format!("{}（手動で変更）", removed.reason)));
+        assert!(lines[3].ends_with(&second.reason));
+        assert!(lines[4].ends_with(&third.reason));
+    }
+
+    #[test]
+    fn starting_during_a_replan_keeps_the_applied_assignment() {
+        let (mut screen, link, jobs, mut text) = ready();
+        act(&mut screen, Action::AutoAssign(0));
+        let first = jobs.try_recv().unwrap();
+        first.tx.send(Ok(first.answer.clone())).unwrap();
+        screen.poll_live(&mut text);
+        let applied = start::read(&screen.tree, &screen.start);
+        let block = note_lines(&screen);
+        act(&mut screen, Action::AutoAssign(1));
+        let pending = jobs.try_recv().unwrap();
+        let during_replan = note_lines(&screen);
+        act(&mut screen, Action::Start);
+        assert!(pending.cancel.load(Ordering::Acquire));
+        assert!(pending.tx.send(Ok(pending.answer)).is_err());
+        let [Command::Start { auto: Some(auto), lead, panel, .. }] = &commands(&link)[..] else {
+            panic!("expected the first planner's assignment at start")
+        };
+        assert_eq!((lead, panel), (&applied.lead, &applied.panel));
+        assert_eq!(auto.planner, first.answer.planner);
+        assert_eq!(auto.picks, first.answer.picks);
+        assert!(auto.overridden.is_empty());
+        assert_eq!(during_replan, block);
+    }
+
+    #[test]
+    fn keyboard_planner_selection_and_cancel_keep_focus_across_rebuilds() {
+        let (mut screen, _, jobs, mut text) = ready();
+        let menu = screen.auto.control();
+        screen.tree.set_focus(Some(menu));
+        press(&mut screen, Key::Space);
+        press(&mut screen, Key::ArrowDown);
+        press(&mut screen, Key::ArrowDown);
+        screen.rebuild(&mut text);
+        press(&mut screen, Key::Enter);
+        let plan = jobs.try_recv().expect("the open menu keeps its choice");
+        assert_eq!(plan.answer.planner, core::PLANNERS[1].label());
+        let cancel = screen.auto.control();
+        assert_eq!(screen.tree.focused(), Some(cancel));
+        screen.rebuild(&mut text);
+        press(&mut screen, Key::Space);
+        assert!(plan.cancel.load(Ordering::Acquire));
+        assert_eq!(screen.tree.focused(), Some(menu));
     }
 
     #[test]
@@ -3180,7 +3248,7 @@ mod auto_assign {
         let manual = start::read(&screen.tree, &screen.start);
         act(&mut screen, Action::AutoAssign(0));
         let first = jobs.try_recv().unwrap();
-        let cancel = screen.auto.control.unwrap();
+        let cancel = screen.auto.control();
         screen.tree.set_focus(Some(cancel));
         press(&mut screen, Key::Space);
         assert!(first.cancel.load(Ordering::Acquire));

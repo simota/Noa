@@ -43,6 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   narrow widths down to 720 × 640. Stored images can be compared side by side
   with zoom in a local browser page; native media cards remain placeholders.
 
+### Changed
+
+- Agent Dashboard's operations view is one list with a row per worker pane
+  (not per task) instead of five panels. Rows put approvals, inputs and
+  failures first, longest wait first, then running workers in a stable order
+  a clock tick never changes; each row shows its state, task and latest
+  report with its parent, agent, wait or last update, and one action. A
+  現在 / 要対応 / 終了 switch (keys 1–3) replaces the panel toggles, and one
+  attention definition (approval, input, failure; never a notice or quiet
+  output) now drives the counts, the switch, `state:要対応` search,
+  statistics and the map. Quiet output reads 実行中 with 出力未変化 N分, and
+  終了 never says 成功. The drawer leads with the reason and the actions and
+  keeps the log and run info (model, effort, branch, cwd) collapsed;
+  statistics, map and timeline open from 分析. The link state reads 同期済み
+  or 最後の受信から N秒. Saved version 1 preferences load into 現在.
+
 ### Fixed
 
 - Verify includes unsaved criterion edits when starting verification and

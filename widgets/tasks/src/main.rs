@@ -28,7 +28,7 @@ const USAGE: &str = "usage: tasks [--demo | --repo=DIR] [--select=ID] \
 const DEFAULT_SIZE: (u32, u32) = (1280, 860);
 const SNAPSHOT_SCALE: f32 = 2.0;
 /// How often the window wakes on its own, so ages move.
-const TICK: Duration = Duration::from_secs(30);
+const TICK: Duration = Duration::from_secs(2);
 
 fn title(
     var: impl Fn(&str) -> Option<String>,
@@ -81,7 +81,7 @@ struct Args {
     demo: bool,
     repo: Option<PathBuf>,
     select: Option<String>,
-    layout: Layout,
+    layout: Option<Layout>,
     snapshot: Option<PathBuf>,
     size: Option<(u32, u32)>,
     help: bool,
@@ -110,7 +110,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             a.select = Some(v.to_owned());
         } else if let Some(v) = arg.strip_prefix("--layout=") {
             a.layout =
-                Layout::from_word(v).ok_or_else(|| format!("unknown layout {v:?}\n{USAGE}"))?;
+                Some(Layout::from_word(v).ok_or_else(|| format!("unknown layout {v:?}\n{USAGE}"))?);
         } else if let Some(v) = arg.strip_prefix("--snapshot=") {
             a.snapshot = Some(PathBuf::from(v));
         } else if let Some(v) = arg.strip_prefix("--size=") {
@@ -146,9 +146,13 @@ fn repo_dir(repo: Option<&Path>, cwd: &Path) -> PathBuf {
 }
 
 /// The screen on `feed`, with `select`'s detail open.
-fn screen(feed: Box<dyn Feed>, select: Option<&str>, layout: Layout) -> Result<Tasks, String> {
+fn screen(
+    feed: Box<dyn Feed>,
+    select: Option<&str>,
+    layout: Option<Layout>,
+) -> Result<Tasks, String> {
     let mut screen = Tasks::new(feed);
-    screen.set_layout(layout, &mut TextStore::new(Default::default()));
+    screen.initialize_layout(layout, &mut TextStore::new(Default::default()));
     if let Some(id) = select
         && !screen.select(id, &mut TextStore::new(Default::default()))
     {
@@ -240,7 +244,7 @@ fn main() -> Result<(), String> {
             }
         };
         let mut screen = Tasks::new(feed);
-        screen.set_layout(layout, &mut TextStore::new(Default::default()));
+        screen.initialize_layout(layout, &mut TextStore::new(Default::default()));
         // Live tasks arrive after the window opens: the card opens once listed.
         if let Some(id) = &select {
             screen.select_when_listed(id, &mut TextStore::new(Default::default()));
@@ -310,9 +314,9 @@ mod tests {
         assert!(args(&["--nope"]).is_err());
         assert_eq!(
             args(&["--layout=calendar"]).unwrap().layout,
-            Layout::Calendar
+            Some(Layout::Calendar)
         );
-        assert_eq!(args(&[]).unwrap().layout, Layout::Board);
+        assert_eq!(args(&[]).unwrap().layout, None);
         assert!(args(&["--layout=gantt"]).is_err());
     }
 
@@ -341,8 +345,15 @@ mod tests {
 
     #[test]
     fn select_names_a_demo_task_or_is_refused() {
-        assert!(screen(Box::<DemoFeed>::default(), Some("#12"), Layout::Board).is_ok());
-        assert!(screen(Box::<DemoFeed>::default(), Some("t-1"), Layout::Board).is_ok());
-        assert!(screen(Box::<DemoFeed>::default(), Some("#9999"), Layout::Board).is_err());
+        assert!(screen(Box::<DemoFeed>::default(), Some("#12"), Some(Layout::Board)).is_ok());
+        assert!(screen(Box::<DemoFeed>::default(), Some("t-1"), Some(Layout::Board)).is_ok());
+        assert!(
+            screen(
+                Box::<DemoFeed>::default(),
+                Some("#9999"),
+                Some(Layout::Board)
+            )
+            .is_err()
+        );
     }
 }

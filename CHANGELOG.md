@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tasks gains a personal workspace with a default List, navigation sidebar,
+  manual work states separate from agent/source state, priorities, assignees,
+  project/cycle groupings, due dates, estimates, parent/dependency links and
+  local comments/activity. Inline edits, multiple selection, atomic bulk
+  updates, undo, pins, manual list ordering, a command palette and saved views
+  keep frequent operations in the window. Search covers available bodies,
+  comments and properties with qualifiers and negation. Per-repository local
+  metadata and view preferences persist with conflict detection; GitHub stays
+  read-only. The existing Board, Timeline and Calendar remain views of source
+  state and execution history, without due-date scheduling.
 - Orchestration panes show a colored role strip with an Orchestrator or Board
   label, keeping the coordinator recognizable even after its last worker
   closes. The strip reserves space above the terminal instead of covering
@@ -19,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The board timeline gains a compact one-post-per-line view (`c`), a loaded
   post count and selection indicator, and one-step search and filter reset
   (`F`). Switching density preserves the selected post and pending updates.
+
+### Fixed
+
+- Tasks reloads previously opened GitHub issue bodies and comments when a
+  refreshed listing reports a newer issue update, keeping unchanged details
+  cached and retaining retry behavior after a failed detail fetch.
 
 ## [0.9.18] - 2026-11-26
 

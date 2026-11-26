@@ -165,6 +165,7 @@ impl Timeline {
 /// The live feed of one repository.
 pub struct LiveFeed<C> {
     repo: PathBuf,
+    workspace_file: PathBuf,
     issues: Box<dyn IssueFeed>,
     clock: Arc<dyn Fn() -> Millis + Send + Sync>,
     jobs: Sender<Job>,
@@ -265,6 +266,9 @@ impl<C: Connect + Send + 'static> LiveFeed<C> {
     ) -> Self {
         let (jobs, job_rx) = mpsc::channel();
         let (up_tx, ups) = mpsc::channel();
+        let workspace_file = root
+            .join(store::repo_key(&repo))
+            .join(tasks::workspace::FILE_NAME);
         let log = store::runs_log(&root, &store::repo_key(&repo));
         let links = start::links_of(&log);
         let (worker_repo, worker_clock, worker_wake) = (repo.clone(), clock.clone(), wake.clone());
@@ -316,6 +320,7 @@ impl<C: Connect + Send + 'static> LiveFeed<C> {
             .map(|e| format!("スレッドを開始できません: {e}"));
         LiveFeed {
             repo,
+            workspace_file,
             issues,
             clock,
             jobs,
@@ -393,6 +398,9 @@ fn same_view(a: &View, b: &View) -> bool {
 }
 
 impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
+    fn workspace_path(&self) -> Option<PathBuf> {
+        Some(self.workspace_file.clone())
+    }
     fn poll(&mut self) -> Option<View> {
         while let Ok(up) = self.ups.try_recv() {
             match up {

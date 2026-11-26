@@ -40,7 +40,8 @@ pub trait IssueFeed: Send {
     fn view(&self) -> GitHubView;
     /// `r`; the feed also refreshes on start and every REFRESH_MS.
     fn refresh(&mut self);
-    /// Fetches issue `number`'s body and comments (once).
+    /// Fetches issue `number`'s body and comments. A changed listing refreshes
+    /// details that were already requested; unchanged details stay cached.
     fn load_detail(&mut self, number: u64);
 }
 
@@ -465,6 +466,7 @@ impl Worker {
     fn fetch_list(&mut self) -> Millis {
         let result = self.list();
         let now = (self.clock)();
+        let mut refresh_details = Vec::new();
         if let Ok((repo, tasks)) = &result {
             write_cache(
                 &self.cache,
@@ -484,6 +486,32 @@ impl Worker {
                     // is another issue, so those of the one before go.
                     if shared.view.repo.as_deref() != Some(repo.as_str()) {
                         shared.view.details.clear();
+                    } else {
+                        // An issue's title and state can refresh while its
+                        // open detail still shows an old body or comments.
+                        // Invalidate before publishing the new listing, then
+                        // reload only details the person already requested.
+                        let changed: Vec<u64> = tasks
+                            .iter()
+                            .filter_map(|task| {
+                                let TaskRef::GitHub { number, .. } = &task.r#ref else {
+                                    return None;
+                                };
+                                let unchanged = shared.view.tasks.iter().any(|old| {
+                                    old.r#ref == task.r#ref && old.updated == task.updated
+                                });
+                                (shared.view.details.contains_key(number) && !unchanged)
+                                    .then_some(*number)
+                            })
+                            .collect();
+                        for number in changed {
+                            shared.view.details.remove(&number);
+                            // A queued retry will already read the new detail
+                            // after this listing, so never request it twice.
+                            if shared.inflight.insert(number) {
+                                refresh_details.push(number);
+                            }
+                        }
                     }
                     shared.view.repo = Some(repo);
                     shared.view.tasks = tasks;
@@ -494,6 +522,9 @@ impl Worker {
             }
         }
         (self.wake)();
+        for number in refresh_details {
+            self.fetch_detail(number);
+        }
         now
     }
 

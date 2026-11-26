@@ -1290,6 +1290,9 @@ pub(super) struct Surface {
     /// Who spawned this pane over IPC and under what label
     /// (agent-orchestration D2/D5).
     pub(super) orchestration: Option<Orchestration>,
+    /// Live role chrome, learned only after a successful orchestration spawn.
+    /// Kept until this pane closes; session restore starts with no role.
+    pub(super) orchestration_chrome: Option<super::orchestration_chrome::PaneChrome>,
     /// The command an IPC spawn ran in this pane, if it named one.
     pub(super) ipc_spawn: Option<IpcSpawn>,
     /// The pty child's argv, for the child-exited notice. `None` for remote
@@ -1519,6 +1522,7 @@ impl Surface {
             exit_status: None,
             surface_id: None,
             orchestration: None,
+            orchestration_chrome: None,
             ipc_spawn: None,
             child_command: None,
             child_exited: None,

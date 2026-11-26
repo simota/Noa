@@ -62,7 +62,18 @@ impl App {
         let (_, tile) = split_tree::compute_layout(&state.split_tree, bounds)
             .into_iter()
             .find(|(pane, _)| *pane == anim.pane())?;
-        Some(split_tree::zoom_frame(&anim, tile, bounds, now))
+        let mut frame = split_tree::zoom_frame(&anim, tile, bounds, now);
+        if state
+            .surfaces
+            .get(&anim.pane())
+            .is_some_and(|surface| surface.orchestration_chrome.is_some())
+            && let Some(gpu) = self.gpu.as_ref()
+        {
+            let metrics = gpu.fonts.get(self.window_font_px(window_id)).metrics();
+            frame.content =
+                orchestration_chrome::split_rect(frame.content, metrics, self.padding).1;
+        }
+        Some(frame)
     }
 
     /// The padding a pane at `rect` draws its grid with: the explicit
@@ -154,6 +165,15 @@ impl App {
         let mut targets = zoom_resize_targets(&state.split_tree, state.grid_zoomed(), bounds)
             .into_iter()
             .map(|(pane_id, rect)| {
+                let rect = if state
+                    .surfaces
+                    .get(&pane_id)
+                    .is_some_and(|surface| surface.orchestration_chrome.is_some())
+                {
+                    orchestration_chrome::split_rect(rect, metrics, padding).1
+                } else {
+                    rect
+                };
                 (
                     pane_id,
                     rect,

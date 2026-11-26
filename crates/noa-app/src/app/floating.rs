@@ -546,6 +546,31 @@ fn anchor_icon(anchor: FloatAnchor) -> char {
     }
 }
 
+/// Keep the role readable even at the float's minimum width. The anchor,
+/// gaps and three buttons consume ten cells in `strip_bytes`; shorten the
+/// status only when its full wording would hide the minimum `[O]` / `[B]`.
+fn role_strip_text(
+    cols: u16,
+    role: super::orchestration_chrome::PaneRole,
+    title: &str,
+    state: Option<noa_grid::AgentState>,
+) -> (String, &'static str) {
+    let room = usize::from(cols).saturating_sub(10);
+    let full = state.map_or("", |state| state.label());
+    let status = if room >= full.len() + 3 {
+        full
+    } else {
+        match state {
+            Some(noa_grid::AgentState::Permission) => "permit?",
+            Some(noa_grid::AgentState::Input) => "reply?",
+            Some(noa_grid::AgentState::Finished) => "ended",
+            _ => full,
+        }
+    };
+    let label = role.label(room.saturating_sub(status.len() + 2));
+    (format!("[{label}] {title}"), status)
+}
+
 /// The title strip as VT bytes for a one-row terminal `cols` wide (REQ-002):
 /// anchor icon, title, agent state, then the maximize, collapse and close
 /// buttons, each two cells wide.
@@ -691,8 +716,15 @@ impl App {
                 // takes while its agent needs attention.
                 let attention = status.is_some_and(|status| status.state.needs_attention());
                 let focused = state.focused_pane == placed.id;
+                let role = state
+                    .surfaces
+                    .get(&placed.id)
+                    .and_then(|surface| surface.orchestration_chrome.as_ref())
+                    .map(|chrome| chrome.role);
                 let (bg, fg) = if attention {
                     (palette.dot_red, palette.bg)
+                } else if let Some(role) = role {
+                    role.colors(focused)
                 } else if focused {
                     (palette.card_selected, palette.fg)
                 } else {
@@ -701,6 +733,13 @@ impl App {
                 let strip_cols = (placed.strip.w.saturating_sub(geometry.metrics.pad_w)
                     / geometry.metrics.cell_w)
                     .clamp(1, u32::from(u16::MAX)) as u16;
+                let role_text = role.map(|role| {
+                    role_strip_text(strip_cols, role, title, status.map(|status| status.state))
+                });
+                let (title, label) = role_text
+                    .as_ref()
+                    .map(|(title, label)| (title.as_str(), *label))
+                    .unwrap_or((title, label));
                 FloatDraw {
                     placed,
                     focused,
@@ -1939,6 +1978,53 @@ mod tests {
             cells[34..40],
             [' ', '\u{25a1}', ' ', '\u{2013}', ' ', '\u{00d7}']
         );
+    }
+
+    #[test]
+    fn narrow_orchestration_strips_keep_role_status_and_buttons() {
+        use super::super::orchestration_chrome::PaneRole;
+        use noa_grid::AgentState;
+
+        let palette = crate::chrome::palette();
+        for role in [PaneRole::Orchestrator, PaneRole::Board] {
+            for (state, short) in [
+                (AgentState::Permission, "permit?"),
+                (AgentState::Input, "reply?"),
+                (AgentState::Finished, "ended"),
+                (AgentState::Running, "running"),
+                (AgentState::Error, "error"),
+            ] {
+                for cols in 20..=28 {
+                    let (title, status) = role_strip_text(cols, role, "claude", Some(state));
+                    assert!(status == state.label() || status == short);
+                    let bytes = strip_bytes(
+                        cols,
+                        FloatAnchor::Tab,
+                        FloatState::Normal,
+                        &title,
+                        status,
+                        palette.band,
+                        palette.fg,
+                    );
+                    let mut terminal = Terminal::new(GridSize::new(cols, 1));
+                    Stream::new().feed(bytes.as_bytes(), &mut terminal);
+                    let snapshot = FrameSnapshot::from_terminal(&mut terminal);
+                    let cells: Vec<char> =
+                        snapshot.rows[0].cells.iter().map(|cell| cell.ch).collect();
+                    let row: String = cells.iter().collect();
+                    let chip = title.split_once(' ').unwrap().0;
+                    assert!(row.contains(chip), "{cols}: {row}");
+                    assert!(row.contains(status), "{cols}: {row}");
+                    assert_eq!(
+                        cells[usize::from(cols) - 6..],
+                        [' ', '\u{25a1}', ' ', '\u{2013}', ' ', '\u{00d7}'],
+                    );
+                    if cols == 20 {
+                        assert_eq!(status, short);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

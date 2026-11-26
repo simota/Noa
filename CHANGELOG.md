@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Orchestration panes show a colored role strip with an Orchestrator or Board
+  label, keeping the coordinator recognizable even after its last worker
+  closes. The strip reserves space above the terminal instead of covering
+  its output.
+- The board gains a workflow view (`v`) of the actual delegation links from
+  orchestrator to workers and their children, with state and progress counts
+  and the existing worker controls.
+- The board timeline gains a compact one-post-per-line view (`c`), a loaded
+  post count and selection indicator, and one-step search and filter reset
+  (`F`). Switching density preserves the selected post and pending updates.
+
 ## [0.9.18] - 2026-11-26
 
 Automatic worker assignment in the agent widgets, a durable board timeline

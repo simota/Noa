@@ -607,6 +607,7 @@ impl App {
         // Placing the worker focuses panes (split candidates, the anchor),
         // which acknowledges their notifications; nobody looked at them.
         let unread_before = self.session_store.unread_flags();
+        let parent = params.parent_pane_id.map(|pane| pane.0);
         let board_of = board_orchestrator(params.label.as_deref());
         let board_tab = matches!(target, noa_ipc::SpawnTarget::BoardTab { .. });
         let result = self.ipc_spawn_pane(event_loop, target, params);
@@ -655,6 +656,17 @@ impl App {
                 .and_then(|surface| surface.orchestration.as_mut())
         {
             orchestration.label = Some(board_tab_label(ipc_id));
+        }
+        // Mark roles only after spawn succeeded. The board's host and the
+        // worker's parent may be different panes (including different tabs).
+        for parent in parent.into_iter().chain(board_of) {
+            self.mark_orchestration_role(
+                parent,
+                super::orchestration_chrome::PaneRole::Orchestrator,
+            );
+        }
+        if board_tab || board_of.is_some() {
+            self.mark_orchestration_role(ipc_id, super::orchestration_chrome::PaneRole::Board);
         }
         // Rebuild the snapshot before replying, so a client that lists panes
         // right after this reply already sees the new worker.

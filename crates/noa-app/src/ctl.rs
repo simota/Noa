@@ -239,13 +239,15 @@ Commands:
                                 start of needs --task-file.
   report STATE [[--] DETAIL]    Write an agent-state report (running, permission,
                                 input, finished, error, clear) to this terminal.
-  board [--of PANE|self] [--timeline [--board-id B]]
+  board [--of PANE|self] [--timeline [--board-id B] | --workflow]
                                 Show an orchestrator's workers in this pane
                                 (default: this pane's own orchestrator, else
                                 every worker; self: this pane's own, for a
                                 board that is its own orchestrator). Keys are
                                 listed at the bottom. --timeline starts in its
                                 timeline (t switches), or board B's.
+                                --workflow starts in the delegation flow;
+                                v switches between the flow and worker list.
   board --open [--split right|down | --tab]
                                 Open a board on this pane's workers next to it
                                 (an open one is printed with \"existing\":true).
@@ -311,6 +313,10 @@ pub(crate) enum Command {
     BoardTimeline {
         of: Option<BoardOf>,
         board_id: Option<String>,
+    },
+    /// `board --workflow [--of PANE|self]`: start in the live delegation view.
+    BoardWorkflow {
+        of: Option<BoardOf>,
     },
     /// `status [--answers]`: this pane's workers with what the journal
     /// knows of them, or every answered prompt.
@@ -591,6 +597,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
         "board" => {
             let opening = rest.flag("--open");
             let timeline = rest.flag("--timeline");
+            let workflow = rest.flag("--workflow");
             let board_id = rest.value("--board-id")?;
             let placement = parse_placement(&mut rest)?;
             let of = rest
@@ -611,6 +618,14 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
                     "--timeline runs the board here; it does not go with --open".to_string()
                 );
             }
+            if workflow && timeline {
+                return Err("--workflow and --timeline are mutually exclusive".to_string());
+            }
+            if opening && workflow {
+                return Err(
+                    "--workflow runs the board here; it does not go with --open".to_string()
+                );
+            }
             if let Some(board) = &board_id {
                 if !timeline {
                     return Err("--board-id goes with --timeline".to_string());
@@ -621,7 +636,9 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
                     ));
                 }
             }
-            if timeline {
+            if workflow {
+                Command::BoardWorkflow { of }
+            } else if timeline {
                 Command::BoardTimeline { of, board_id }
             } else {
                 Command::Board {
@@ -2133,6 +2150,14 @@ impl Session {
                 let view = board::Open {
                     timeline: true,
                     board_id,
+                    ..Default::default()
+                };
+                return self.board(of, None, view);
+            }
+            Command::BoardWorkflow { of } => {
+                let view = board::Open {
+                    workflow: true,
+                    ..Default::default()
                 };
                 return self.board(of, None, view);
             }
@@ -5451,6 +5476,34 @@ mod tests {
         assert!(parse_args(&args(&["board", "--board-id", "bd-0123456789abcdef"])).is_err());
         assert!(parse_args(&args(&["board", "--timeline", "--board-id", "../x"])).is_err());
         assert!(parse_args(&args(&["board", "--timeline", "--open"])).is_err());
+    }
+
+    #[test]
+    fn board_workflow_starts_here_and_conflicting_views_are_refused() {
+        for (options, of) in [
+            (vec!["board", "--workflow"], None),
+            (
+                vec!["board", "--workflow", "--of", "self"],
+                Some(BoardOf::Own),
+            ),
+            (
+                vec!["board", "--workflow", "--of", "7"],
+                Some(BoardOf::Pane(7)),
+            ),
+        ] {
+            assert_eq!(
+                parse_args(&args(&options)),
+                Ok(Command::BoardWorkflow { of })
+            );
+        }
+        for options in [
+            vec!["board", "--workflow", "--timeline"],
+            vec!["board", "--workflow", "--open"],
+            vec!["board", "--workflow", "--split", "down"],
+            vec!["board", "--workflow", "--board-id", "bd-0123456789abcdef"],
+        ] {
+            assert!(parse_args(&args(&options)).is_err(), "{options:?}");
+        }
     }
 
     // board-timeline AC-4: only `send --new-run` starts a new run; an answer

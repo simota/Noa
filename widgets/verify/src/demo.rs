@@ -296,6 +296,7 @@ fn created(id: &str, confirm: bool) -> Log {
         verifiers,
         confirm,
         at: T0,
+        auto: None,
     }];
     let mut log = Log {
         batches: vec![first],

@@ -2046,10 +2046,35 @@ mod auto_assign {
             );
         }
 
+        /// The shown control of the auto-assign header of type `W`.
+        fn auto_shown<W: noa_gpui_core::Widget>(&self) -> WidgetId {
+            let tree = &self.screen.tree;
+            *tree
+                .children(self.screen.start.auto_controls)
+                .iter()
+                .find(|&&id| tree.get::<W>(id).is_some() && !tree.is_hidden(id))
+                .expect("the control is shown")
+        }
+
         fn auto_menu(&self) -> WidgetId {
-            let id = self.screen.tree.children(self.screen.start.auto_controls)[0];
-            assert!(self.screen.tree.get::<PullDownButton>(id).is_some());
-            id
+            self.auto_shown::<PullDownButton>()
+        }
+
+        fn auto_cancel(&self) -> WidgetId {
+            self.auto_shown::<Button>()
+        }
+
+        /// Opens the pull-down and moves to its `index`th planner.
+        fn highlight_planner(&mut self, index: usize) {
+            self.open_planners();
+            for _ in 0..=index {
+                self.key(Key::ArrowDown);
+            }
+        }
+
+        fn choose(&mut self, index: usize) {
+            self.highlight_planner(index);
+            self.key(Key::Enter);
         }
 
         fn open_planners(&mut self) -> Vec<String> {
@@ -2066,12 +2091,6 @@ mod auto_assign {
                 .map(MenuItem::label)
                 .map(str::to_owned)
                 .collect()
-        }
-
-        fn choose_first(&mut self) {
-            self.open_planners();
-            self.key(Key::ArrowDown);
-            self.key(Key::Enter);
         }
 
         fn poll(&mut self) {
@@ -2181,7 +2200,7 @@ mod auto_assign {
     fn fill_shows_every_reason_then_start_records_only_confirmed_choices() {
         let mut h = form();
         let jobs = h.fake_planner();
-        h.choose_first();
+        h.choose(0);
         assert!(h.screen.tree.is_enabled(h.screen.start.start_button));
         assert!(
             labels_under(&h.screen.tree, h.screen.start.auto_controls)
@@ -2255,7 +2274,7 @@ mod auto_assign {
         let mut h = form();
         let jobs = h.fake_planner();
         let before = start::read(&h.screen.tree, &h.screen.start);
-        h.choose_first();
+        h.choose(0);
         jobs.try_recv()
             .unwrap()
             .result
@@ -2279,7 +2298,7 @@ mod auto_assign {
         for change in 0..3 {
             let mut h = form();
             let jobs = h.fake_planner();
-            h.choose_first();
+            h.choose(0);
             match change {
                 0 => h.type_into(h.screen.start.moderator_setup.model, "custom"),
                 1 => h.screen.run(Action::AddPanelRow, &mut h.text),
@@ -2302,18 +2321,13 @@ mod auto_assign {
     fn cancel_and_manual_start_discard_outstanding_results() {
         let mut h = form();
         let jobs = h.fake_planner();
-        h.choose_first();
+        h.choose(0);
         let first = jobs.try_recv().unwrap();
         h.poll();
-        let cancel = *h
-            .screen
-            .tree
-            .children(h.screen.start.auto_controls)
-            .last()
-            .unwrap();
+        let cancel = h.auto_cancel();
         click(&mut h.screen, &mut h.text, cancel);
         assert!(first.cancel.load(Ordering::Acquire));
-        h.choose_first();
+        h.choose(0);
         assert!(first.result.send(Err(PlanError::Timeout(180))).is_err());
         let second = jobs.try_recv().unwrap();
         h.screen.run(Action::Start, &mut h.text);
@@ -2322,5 +2336,123 @@ mod auto_assign {
             matches!(&h.drain()[..], [Command::Start { auto: None, moderator, .. }] if *moderator == AgentKind::Claude.into())
         );
         assert!(note_of(&h).is_empty());
+    }
+
+    #[test]
+    fn a_replan_keeps_the_applied_fill_until_another_fill_replaces_it() {
+        let mut h = form();
+        let jobs = h.fake_planner();
+        h.choose(0);
+        let assignment = answer(jobs.try_recv().unwrap());
+        h.poll();
+        let applied = start::read(&h.screen.tree, &h.screen.start);
+        let block = note_of(&h);
+        assert_eq!(block.len(), 1 + assignment.picks.len());
+
+        // Running, cancelled, failed, refused: the rows still hold the
+        // first fill, and so do the block and the record.
+        h.choose(1);
+        assert_eq!(note_of(&h), block);
+        h.poll(); // Lays out the 中止 button just shown.
+        let cancel = h.auto_cancel();
+        click(&mut h.screen, &mut h.text, cancel);
+        assert!(jobs.try_recv().unwrap().cancel.load(Ordering::Acquire));
+        assert_eq!(note_of(&h), block);
+
+        h.choose(1);
+        let failed = jobs.try_recv().unwrap();
+        failed.result.send(Err(PlanError::Timeout(180))).unwrap();
+        h.poll();
+        let lines = note_of(&h);
+        assert!(lines[0].starts_with("自動割り当てに失敗しました"));
+        assert_eq!(lines[1..], block);
+
+        h.choose(1);
+        let refused = jobs.try_recv().unwrap();
+        h.screen.run(Action::AddPanelRow, &mut h.text);
+        answer(refused);
+        h.poll();
+        let lines = note_of(&h);
+        assert!(lines[0].contains("選択が変わったため反映しませんでした"));
+        assert_eq!(lines[1..], block);
+
+        h.choose(1);
+        let pending = jobs.try_recv().unwrap();
+        h.screen.run(Action::Start, &mut h.text);
+        assert!(pending.cancel.load(Ordering::Acquire));
+        let [
+            Command::Start {
+                auto: Some(record),
+                moderator,
+                panel,
+                ..
+            },
+        ] = &h.drain()[..]
+        else {
+            panic!("the applied fill is recorded")
+        };
+        assert_eq!(*moderator, applied.moderator);
+        assert_eq!(panel[..applied.panel.len()], applied.panel);
+        assert_eq!(record.planner, assignment.planner);
+        assert_eq!(record.picks, assignment.picks);
+        assert!(record.overridden.is_empty());
+    }
+
+    #[test]
+    fn removing_a_filled_row_overrides_only_that_row() {
+        let mut h = form();
+        let jobs = h.fake_planner();
+        h.choose(0);
+        let assignment = answer(jobs.try_recv().unwrap());
+        h.poll();
+        let [moderator, removed, second, third] = assignment.picks.as_slice() else {
+            panic!("expected three panelists")
+        };
+        h.screen.run(Action::RemovePanelRow(0), &mut h.text);
+        let lines = note_of(&h);
+        assert!(lines[1].ends_with(&moderator.reason));
+        assert!(lines[2].ends_with(&format!("{}（手動で変更）", removed.reason)));
+        assert!(lines[3].ends_with(&second.reason));
+        assert!(lines[4].ends_with(&third.reason));
+        h.screen.run(Action::Start, &mut h.text);
+        let [
+            Command::Start {
+                auto: Some(record), ..
+            },
+        ] = &h.drain()[..]
+        else {
+            panic!("the unchanged rows are recorded")
+        };
+        assert_eq!(record.overridden, [removed.slot.as_str()]);
+        assert_eq!(
+            record.picks,
+            [moderator.clone(), second.clone(), third.clone()]
+        );
+    }
+
+    #[test]
+    fn the_planner_menu_and_its_focus_survive_rebuilds() {
+        let mut h = form();
+        let jobs = h.fake_planner();
+        let menu = h.auto_menu();
+        h.highlight_planner(1);
+        // A history or link update rebuilds the start view meanwhile.
+        h.screen.rebuild(&mut h.text);
+        h.key(Key::Enter);
+        let codex = jobs.try_recv().expect("the open menu keeps its choice");
+        assert_eq!(codex.job.planner.agent, "codex");
+        let cancel = h.auto_cancel();
+        assert_eq!(h.screen.tree.focused(), Some(cancel));
+        h.screen.rebuild(&mut h.text);
+        assert_eq!(h.screen.tree.focused(), Some(cancel));
+        h.key(Key::Space);
+        assert!(codex.cancel.load(Ordering::Acquire));
+        assert_eq!((h.auto_menu(), h.screen.tree.focused()), (menu, Some(menu)));
+
+        h.choose(0);
+        assert_eq!(h.screen.tree.focused(), Some(h.auto_cancel()));
+        answer(jobs.try_recv().unwrap());
+        h.poll();
+        assert_eq!(h.screen.tree.focused(), Some(menu));
     }
 }

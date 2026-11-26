@@ -56,7 +56,7 @@ pub(super) struct Parts {
 
 /// One panelist: its agent kind, model and effort, and its remove button.
 pub(super) struct PanelRow {
-    host: WidgetId,
+    pub(super) host: WidgetId,
     pub(super) kind: WidgetId,
     pub(super) setup: SetupParts,
     pub(super) remove: WidgetId,

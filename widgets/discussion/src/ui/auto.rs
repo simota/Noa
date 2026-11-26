@@ -1,16 +1,19 @@
 //! Planning fills the editable start form. Each run owns a fresh result
 //! channel, so dropping a cancelled run also discards its generation's reply.
+//! The last fill applied to the form is kept apart from the run in flight:
+//! a re-run, its cancel, failure or refusal leaves that fill's block and its
+//! record, as the rows still hold it.
 
-use super::{Discussion, Source, caption, clear_children, note, start};
+use super::{Discussion, Source, caption, note, start};
 use crate::session::runner::{Clock, SystemClock, login_shell};
 use discussion::auto_assign::{
     self, Assignment, AutoRecord, Candidate, Job, Pick, PlanError, Planner, Planning, Request, Slot,
 };
 use discussion::model::types::{AgentChoice, AgentKind, AgentSetup, Millis};
 use noa_gpui_core::widgets::{
-    Button, ButtonClicked, ControlSize, MenuChosen, MenuItem, PullDownButton,
+    Button, ButtonClicked, ControlSize, Label, MenuChosen, MenuItem, PullDownButton,
 };
-use noa_gpui_core::{Message, WidgetId};
+use noa_gpui_core::{Message, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::Ordering, mpsc::TryRecvError};
@@ -34,8 +37,32 @@ impl Drop for Running {
 enum State {
     Idle,
     Running(Running),
-    Filled(Assignment, Millis),
     Failed(String),
+}
+
+/// The fill the rows hold, with each panel row's host at fill time: a row
+/// keeps its host until it is removed, so removing one row leaves the
+/// others matched to their own picks.
+struct Filled {
+    assignment: Assignment,
+    at: Millis,
+    rows: Vec<WidgetId>,
+}
+
+impl Filled {
+    fn unchanged(&self, pick: &Pick, parts: &start::Parts, form: &start::Form) -> bool {
+        let Some(index) = panel_index(pick) else {
+            return form.moderator == choice(pick);
+        };
+        let Some(host) = self.rows.get(index) else {
+            return false;
+        };
+        parts
+            .panel
+            .iter()
+            .zip(&form.panel)
+            .any(|(row, current)| row.host == *host && *current == choice(pick))
+    }
 }
 
 impl State {
@@ -50,36 +77,70 @@ impl State {
     }
 }
 
+/// The header's controls live as long as the start view and are shown,
+/// hidden and enabled in place: an open menu keeps its widget, so its
+/// choice arrives, and focus moves between the pull-down and 中止.
 pub(super) struct Auto {
-    state: State,
-    control: Option<WidgetId>,
     pub(super) spawn: Box<Spawn>,
+    menu: WidgetId,
+    status: WidgetId,
+    cancel: WidgetId,
+    /// The pull-down's items, in menu order.
+    planners: Vec<Planner>,
+    state: State,
+    filled: Option<Filled>,
 }
 
-impl Default for Auto {
-    fn default() -> Self {
-        Self {
-            state: State::Idle,
-            control: None,
-            spawn: Box::new(|job, wake| {
-                auto_assign::spawn(job, "discussion-assign", move || wake())
-            }),
-        }
-    }
+fn planner_menu(planners: &[Planner]) -> PullDownButton {
+    let items = planners
+        .iter()
+        .map(|p| MenuItem::new(format!("{} で決める", p.agent)))
+        .collect();
+    PullDownButton::new("自動で割り当て", items).control_size(ControlSize::Small)
 }
 
 impl Auto {
-    pub(super) fn reset(&mut self) {
-        self.state = State::Idle;
+    pub(super) fn new(tree: &mut UiTree, host: WidgetId) -> Self {
+        let menu = tree.insert(Some(host), planner_menu(&[]));
+        let status = caption(tree, host, "");
+        let cancel = tree.insert(
+            Some(host),
+            Button::new("中止").control_size(ControlSize::Small),
+        );
+        tree.set_hidden(status, true);
+        tree.set_hidden(cancel, true);
+        Self {
+            spawn: Box::new(|job, wake| {
+                auto_assign::spawn(job, "discussion-assign", move || wake())
+            }),
+            menu,
+            status,
+            cancel,
+            planners: Vec::new(),
+            state: State::Idle,
+            filled: None,
+        }
     }
 
-    pub(super) fn record(&self, form: &start::Form) -> Option<AutoRecord> {
-        match &self.state {
-            State::Filled(assignment, at) => {
-                AutoRecord::of(assignment, *at, |pick| unchanged(form, pick))
-            }
-            _ => None,
+    /// The control shown: 中止 while planning, else the pull-down.
+    fn control(&self) -> WidgetId {
+        if matches!(self.state, State::Running(_)) {
+            self.cancel
+        } else {
+            self.menu
         }
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.state = State::Idle;
+        self.filled = None;
+    }
+
+    pub(super) fn record(&self, parts: &start::Parts, form: &start::Form) -> Option<AutoRecord> {
+        let filled = self.filled.as_ref()?;
+        AutoRecord::of(&filled.assignment, filled.at, |pick| {
+            filled.unchanged(pick, parts, form)
+        })
     }
 }
 
@@ -97,14 +158,13 @@ fn choice(pick: &Pick) -> AgentChoice {
     }
 }
 
-fn unchanged(form: &start::Form, pick: &Pick) -> bool {
-    let current = match pick.slot.strip_prefix("panelist-") {
-        Some(index) => form
-            .panel
-            .get(index.parse::<usize>().expect("validated panel slot") - 1),
-        None => Some(&form.moderator),
-    };
-    current == Some(&choice(pick))
+/// The panel position a pick was made for; `None` for the moderator.
+fn panel_index(pick: &Pick) -> Option<usize> {
+    pick.slot
+        .strip_prefix("panelist-")?
+        .parse::<usize>()
+        .ok()?
+        .checked_sub(1)
 }
 
 fn job(planner: Planner, form: &start::Form, cwd: PathBuf, available: Vec<AgentKind>) -> Job {
@@ -166,87 +226,83 @@ impl Discussion {
             self.installed.as_ref(),
             text,
         );
-        let host = self.start.auto_controls;
-        clear_children(&mut self.tree, host, text);
-        if let State::Running(run) = &self.auto.state {
-            caption(
-                &mut self.tree,
-                host,
-                format!("{} が割り当てを決めています…", run.planner.agent),
-            );
-            self.auto.control = Some(self.tree.insert(
-                Some(host),
-                Button::new("中止").control_size(ControlSize::Small),
-            ));
-            return;
-        }
         let planners = self.planners();
-        let items = planners
-            .iter()
-            .map(|p| MenuItem::new(format!("{} で決める", p.agent)))
-            .collect();
-        let menu = self.tree.insert(
-            Some(host),
-            PullDownButton::new("自動で割り当て", items).control_size(ControlSize::Small),
-        );
-        self.auto.control = Some(menu);
-        let form = start::read(&self.tree, &self.start);
-        let unavailable = if !self.agents_ready() {
-            None // Detection's note is already visible.
-        } else if planners.is_empty() {
-            Some(PlanError::NoPlanner.message(""))
+        let ready = self.agents_ready();
+        let live = matches!(self.source, Source::Live(_));
+        let (tree, auto, parts) = (&mut self.tree, &mut self.auto, &self.start);
+        let had_focus = tree
+            .focused()
+            .is_some_and(|id| id == auto.menu || id == auto.cancel);
+        let running = matches!(auto.state, State::Running(_));
+        tree.set_hidden(auto.status, !running);
+        tree.set_hidden(auto.cancel, !running);
+        tree.set_hidden(auto.menu, running);
+        let form = start::read(tree, parts);
+        let area = parts.note;
+        if let State::Running(run) = &auto.state {
+            let status = format!("{} が割り当てを決めています…", run.planner.agent);
+            tree.update::<Label, _>(auto.status, |label, cx| label.set_text(cx, status));
         } else {
-            form.checked_workdir().err()
-        };
-        self.tree.set_enabled(
-            menu,
-            matches!(self.source, Source::Live(_)) && !planners.is_empty() && unavailable.is_none(),
-        );
-        let area = self.start.note;
-        if let Some(why) = unavailable {
-            note(&mut self.tree, area, why);
+            // A pull-down's items are fixed when it is made; only the
+            // check for installed agents changes them.
+            if planners != auto.planners {
+                tree.remove(auto.menu, text);
+                auto.menu = tree.insert(Some(parts.auto_controls), planner_menu(&planners));
+                auto.planners = planners;
+            }
+            let unavailable = if !ready {
+                None // Detection's note is already visible.
+            } else if auto.planners.is_empty() {
+                Some(PlanError::NoPlanner.message(""))
+            } else {
+                form.checked_workdir().err()
+            };
+            tree.set_enabled(
+                auto.menu,
+                live && !auto.planners.is_empty() && unavailable.is_none(),
+            );
+            if let Some(why) = unavailable {
+                note(tree, area, why);
+            }
         }
-        match &self.auto.state {
-            State::Filled(assignment, _) => {
+        if had_focus {
+            tree.set_focus(Some(auto.control()));
+        }
+        if let State::Failed(why) = &auto.state {
+            note(tree, area, why);
+        }
+        if let Some(filled) = &auto.filled {
+            note(
+                tree,
+                area,
+                format!(
+                    "自動割り当て（{} が決定）— 内容を確認して「ディスカッションを開始」を押してください",
+                    filled.assignment.planner
+                ),
+            );
+            for pick in &filled.assignment.picks {
+                let slot = panel_index(pick)
+                    .map_or_else(|| "司会".to_owned(), |i| format!("パネリスト {}", i + 1));
+                let edited = if filled.unchanged(pick, parts, &form) {
+                    ""
+                } else {
+                    "（手動で変更）"
+                };
                 note(
-                    &mut self.tree,
+                    tree,
                     area,
-                    format!(
-                        "自動割り当て（{} が決定）— 内容を確認して「ディスカッションを開始」を押してください",
-                        assignment.planner
-                    ),
+                    format!("{slot}: {} — {}{edited}", choice(pick).label(), pick.reason),
                 );
-                for (index, pick) in assignment.picks.iter().enumerate() {
-                    let slot = if index == 0 {
-                        "司会".into()
-                    } else {
-                        format!("パネリスト {index}")
-                    };
-                    let edited = if unchanged(&form, pick) {
-                        ""
-                    } else {
-                        "（手動で変更）"
-                    };
-                    note(
-                        &mut self.tree,
-                        area,
-                        format!("{slot}: {} — {}{edited}", choice(pick).label(), pick.reason),
-                    );
-                }
             }
-            State::Failed(why) => {
-                note(&mut self.tree, area, why);
-            }
-            _ => {}
         }
     }
 
     pub(super) fn handle_auto(&mut self, message: &Message, text: &mut TextStore) -> bool {
-        if self.auto.control != Some(message.source) {
+        if self.auto.control() != message.source {
             return false;
         }
         if let Some(MenuChosen(index)) = message.downcast_ref() {
-            if let Some(planner) = self.planners().get(*index).copied() {
+            if let Some(planner) = self.auto.planners.get(*index).copied() {
                 self.begin_planning(planner, text);
             }
         } else if message.downcast_ref::<ButtonClicked>().is_some() {
@@ -288,7 +344,7 @@ impl Discussion {
 
     pub(super) fn cancel_planning(&mut self, text: &mut TextStore) {
         if matches!(self.auto.state, State::Running(_)) {
-            self.auto.reset();
+            self.auto.state = State::Idle;
             self.render_auto(text);
         }
     }
@@ -319,7 +375,12 @@ impl Discussion {
                         &choices.collect::<Vec<_>>(),
                         text,
                     );
-                    State::Filled(assignment, SystemClock.now())
+                    self.auto.filled = Some(Filled {
+                        assignment,
+                        at: SystemClock.now(),
+                        rows: self.start.panel.iter().map(|row| row.host).collect(),
+                    });
+                    State::Idle
                 }
             }
             Err(err) => State::failure(err, run.planner),

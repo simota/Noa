@@ -288,6 +288,7 @@ impl Discussion {
         );
 
         let start = start::insert(&mut tree, body);
+        let auto = auto::Auto::new(&mut tree, start.auto_controls);
 
         let meeting = tree.insert(Some(body), Container::new(fill()));
         let split = tree.insert(
@@ -324,7 +325,7 @@ impl Discussion {
             built: None,
             history: Arc::new(Vec::new()),
             installed,
-            auto: auto::Auto::default(),
+            auto,
             start,
             meeting,
             tree_host,
@@ -1030,7 +1031,7 @@ impl Discussion {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let auto = self.auto.record(&form);
+        let auto = self.auto.record(&self.start, &form);
         self.cancel_planning(text);
         self.send(
             Command::Start {

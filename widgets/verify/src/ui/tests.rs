@@ -3526,3 +3526,137 @@ fn auto_opening_a_past_verification_while_deciding_stops_the_planner() {
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_dir_all(repo);
 }
+
+/// The pull-down and 中止 are made once and kept: planning hides one and
+/// shows the other. Hiding the focused one does not drop focus: choosing a
+/// planner from the keyboard puts it on 中止, and 中止, a result or a
+/// failure put it back on the pull-down. A planner ending while focus is
+/// in another control leaves it there.
+#[test]
+fn auto_focus_follows_the_control_shown_in_place_of_the_focused_one() {
+    let (mut screen, _link, planned, mut text, repo) = auto_ready("auto-focus", &AgentKind::ALL);
+    let menu = screen.auto.menu().expect("the pull-down is shown");
+
+    choose_planner(&mut screen, 0);
+    let stop = widget_for(&screen, &Action::AutoCancel).expect("中止 is shown");
+    assert_eq!(screen.tree.focused(), Some(stop), "planning: focus on 中止");
+    // 中止 pressed from the keyboard, where focus already is.
+    press(&mut screen, noa_gpui_core::Key::Space);
+    assert!(
+        planned.borrow()[0]
+            .cancel
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert_eq!(screen.auto.menu(), Some(menu), "the same pull-down is back");
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "stopped: focus on the pull-down"
+    );
+
+    choose_planner(&mut screen, 0);
+    assert_eq!(widget_for(&screen, &Action::AutoCancel), Some(stop));
+    assert_eq!(screen.tree.focused(), Some(stop));
+    let (request, one) = answered(&planned, 1);
+    one.answer
+        .send(Ok(answer_for(&one, &request, ANSWER)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    assert!(start_text(&screen).contains("自動割り当て（"), "filled");
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "filled: focus on the pull-down"
+    );
+
+    choose_planner(&mut screen, 0);
+    let (_, one) = answered(&planned, 1);
+    one.answer.send(Err(PlanError::Spawn("x".into()))).unwrap();
+    screen.poll_live(&mut text);
+    assert!(start_text(&screen).contains("自動割り当てに失敗しました"));
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "failed: focus on the pull-down"
+    );
+
+    // Focus moved to the repository field while planning stays there when
+    // the planner ends.
+    choose_planner(&mut screen, 0);
+    assert_eq!(screen.tree.focused(), Some(stop));
+    screen.tree.set_focus(Some(screen.start.repo));
+    let (request, one) = answered(&planned, 1);
+    one.answer
+        .send(Ok(answer_for(&one, &request, ANSWER)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    assert!(!matches!(
+        screen.auto.state,
+        auto::AutoState::Running { .. }
+    ));
+    assert_eq!(screen.tree.focused(), Some(screen.start.repo));
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+/// A rebuild while the pull-down's menu is open keeps the pull-down, so
+/// the item chosen after it still starts that planner.
+#[test]
+fn auto_a_rebuild_while_the_menu_is_open_keeps_the_chosen_item() {
+    let (mut screen, _link, planned, mut text, repo) =
+        auto_ready("auto-open-menu", &AgentKind::ALL);
+    let menu = screen.auto.menu().expect("the pull-down is shown");
+    screen.tree.set_focus(Some(menu));
+    press(&mut screen, noa_gpui_core::Key::Space);
+    assert!(
+        screen.tree.overlays().any(|id| screen
+            .tree
+            .get::<noa_gpui_core::widgets::Menu>(id)
+            .is_some()),
+        "the menu is open"
+    );
+    screen.rebuild(&mut text);
+    screen.poll_live(&mut text);
+    assert_eq!(screen.auto.menu(), Some(menu));
+    press(&mut screen, noa_gpui_core::Key::ArrowDown);
+    press(&mut screen, noa_gpui_core::Key::ArrowDown);
+    press(&mut screen, noa_gpui_core::Key::Enter);
+    let planned = planned.borrow();
+    assert_eq!(planned.len(), 1, "the chosen item started a planner");
+    assert_eq!(planned[0].job.planner.agent, "codex");
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+/// Resuming an unfinished past verification while a planner decides
+/// leaves the start view: the planner stops, as for 検証を開始.
+#[test]
+fn auto_resuming_a_past_verification_while_deciding_stops_the_planner() {
+    let root = temp("auto-resume-past");
+    let dir = stored_unfinished(&root);
+    let (mut screen, link, planned, mut text, repo) =
+        auto_ready("auto-resume-past-repo", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    act(&mut screen, Action::ResumePast(dir.clone()));
+    assert_eq!(commands(&link), [Command::Resume { dir: dir.clone() }]);
+    assert!(
+        planned.borrow()[0]
+            .cancel
+            .load(std::sync::atomic::Ordering::Acquire),
+        "the planner was not cancelled"
+    );
+    assert!(!matches!(
+        screen.auto.state,
+        auto::AutoState::Running { .. }
+    ));
+    // The resumed verification comes up; the late answer is never read.
+    let session = store::read_session(&dir).unwrap();
+    link.snapshots.send(snapshot(session, None, 0)).unwrap();
+    let (request, late) = answered(&planned, 0);
+    let _ = late.answer.send(Ok(answer_for(&late, &request, ANSWER)));
+    screen.poll_live(&mut text);
+    assert!(
+        screen.session.is_some(),
+        "the resumed verification is shown"
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(repo);
+}

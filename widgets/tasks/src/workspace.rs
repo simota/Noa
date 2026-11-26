@@ -965,7 +965,29 @@ fn read(path: &Path) -> Result<(WorkspaceData, Option<Vec<u8>>), String> {
     Ok((data, Some(bytes)))
 }
 
-fn lock(path: &Path) -> io::Result<File> {
+#[derive(Debug)]
+struct WorkspaceLock {
+    file: File,
+}
+
+impl Drop for WorkspaceLock {
+    fn drop(&mut self) {
+        // A concurrent fork can retain this open-file description until exec,
+        // even with O_CLOEXEC. Closing our fd alone then leaves the lock held.
+        // Release it at the end of the transaction, regardless of duplicates.
+        loop {
+            // SAFETY: file still owns the live descriptor that holds this lock.
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+                break;
+            }
+            if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
+}
+
+fn lock(path: &Path) -> io::Result<WorkspaceLock> {
     let base = base(path).map_err(io::Error::other)?;
     fs::create_dir_all(base)?;
     let parent = path
@@ -995,7 +1017,7 @@ fn lock(path: &Path) -> io::Result<File> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(file)
+    Ok(WorkspaceLock { file })
 }
 
 #[cfg(test)]
@@ -1420,6 +1442,26 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fs::read(target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn lock_guard_releases_while_a_duplicate_descriptor_is_still_open() {
+        let temp = TempDir::new("workspace-lock-duplicate");
+        let path = temp.path().join("repo").join(FILE_NAME);
+        let guard = lock(&path).unwrap();
+        // dup shares the lock just like a descriptor inherited across fork,
+        // without forking the multithreaded test process.
+        let duplicate = guard.file.try_clone().unwrap();
+        assert_eq!(lock(&path).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+
+        drop(guard);
+        let next = lock(&path).expect("a completed transaction must release its lock");
+        drop(duplicate);
+        // Closing the old duplicate must not release the next transaction's
+        // lock, which belongs to a separately opened file description.
+        assert_eq!(lock(&path).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        drop(next);
+        assert!(lock(&path).is_ok());
     }
 
     #[test]

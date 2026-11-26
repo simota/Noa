@@ -134,6 +134,12 @@ pub trait Feed {
     fn waker(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
         None
     }
+    /// How 「自動で割り当て」 plans instead of running the planner's CLI
+    /// ([`auto::Hooks::system`]): the demo, which starts nothing, answers
+    /// from its canned data. Asked once, when the screen is made.
+    fn planner(&self) -> Option<Box<auto::PlanFn>> {
+        None
+    }
 }
 
 /// The filter line's source choices, in order.
@@ -208,6 +214,10 @@ pub struct Tasks {
 
 impl Tasks {
     pub fn new(feed: Box<dyn Feed>) -> Tasks {
+        let mut auto_hooks = auto::Hooks::system();
+        if let Some(plan) = feed.planner() {
+            auto_hooks.plan = plan;
+        }
         let mut tree = UiTree::new();
         tree.set_theme(Theme::for_appearance(Appearance::Dark));
         let root = tree.insert(
@@ -357,7 +367,7 @@ impl Tasks {
             month: 0,
             month_buttons: None,
             layout_scroll: None,
-            auto_hooks: auto::Hooks::system(),
+            auto_hooks,
         };
         // Nothing is laid out yet: any store serves the first build.
         let mut text = TextStore::new(Default::default());
@@ -700,17 +710,7 @@ impl Tasks {
                 self.own_notice = Some("起動できるエージェントが見つかりません".to_owned());
                 self.rebuild(text);
             }
-            Some(agents) => {
-                // The planner reads the task as the run's agent would: an
-                // issue with its body once loaded.
-                let mut task = task.clone();
-                if let TaskRef::GitHub { number, .. } = &task.r#ref
-                    && let Some(Ok(detail)) = self.view.github.details.get(number)
-                {
-                    task.body = Some(detail.body.clone());
-                }
-                self.open_form(Form::run(&task, &agents), text)
-            }
+            Some(agents) => self.open_form(Form::run(task, &agents), text),
         }
     }
 
@@ -1128,7 +1128,7 @@ impl Screen for Tasks {
             let env = auto::Env {
                 hooks: &self.auto_hooks,
                 wake: self.feed.waker(),
-                repo: &self.view.repo,
+                view: &self.view,
             };
             match form.handle(&message, &mut self.tree, &env) {
                 FormOutcome::Pending => {}

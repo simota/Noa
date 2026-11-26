@@ -6,8 +6,11 @@
 //!
 //! Tasks has no model or effort (spec Q3): every candidate has empty
 //! lists, so the planner may only choose the agent.
+//!
+//! The planner reads the task as it is when a planner is chosen, not when
+//! the form opened: an issue's body loaded since is in the request.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::TryRecvError;
@@ -23,7 +26,7 @@ use tasks::auto_assign::{
 };
 use tasks::model::types::{AgentKind, Millis, Task, TaskRef};
 
-use super::style;
+use super::{View, style};
 
 /// The 実行 form's one slot.
 pub(super) const WORKER: &str = "worker";
@@ -36,11 +39,15 @@ const RUN: &str = "one agent does one task in a work tree";
 const ROLE: &str = "the one agent that does the task in a work tree and reports";
 const THREAD: &str = "tasks-assign";
 const CHANGED: &str = "割り当て中にエージェントの選択が変わったため反映しませんでした。もう一度「自動で割り当て」を押してください";
+/// The note when the form's task left the view (the run says the same).
+const GONE: &str = "そのタスクが見つかりません";
 
 /// Called by the planner's thread once its result is on the channel.
-pub(super) type Wake = Box<dyn Fn() + Send>;
-/// Starts a planner: [`auto_assign::spawn`], or a test's fake.
-pub(super) type PlanFn = dyn Fn(Job, Wake) -> Planning;
+pub(crate) type Wake = Box<dyn Fn() + Send>;
+/// Starts a planner: [`auto_assign::spawn`], the demo's canned answer
+/// (`Feed::planner`), or a test's fake. A result already on the channel
+/// when it returns is shown at once.
+pub(crate) type PlanFn = dyn Fn(Job, Wake) -> Planning;
 
 /// What the screen lends auto-assign: how a planner starts and the clock
 /// an assignment's arrival is stamped with. Tests replace both.
@@ -68,8 +75,9 @@ pub(super) struct Env<'a> {
     pub hooks: &'a Hooks,
     /// Wakes the screen (the live feed's waker), so `woken` drains the result.
     pub wake: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// The repository: the planner's working directory.
-    pub repo: &'a Path,
+    /// The screen's view as it is now: the task the planner reads, and the
+    /// repository, its working directory.
+    pub view: &'a View,
 }
 
 /// The 実行 form's slots: one worker.
@@ -113,6 +121,23 @@ pub(super) fn content_of(task: &Task) -> String {
     }
     out.push('\n');
     out
+}
+
+/// The task `r` names as the run's brief will have it, from `view` as it
+/// is now: an issue with its body once loaded, as `LiveFeed::task` makes
+/// it for 実行. An issue whose detail is not loaded goes without its body,
+/// as it does to the run.
+pub(super) fn current_task(view: &View, r: &TaskRef) -> Option<Task> {
+    let mut task = super::all_tasks(view)
+        .into_iter()
+        .find(|t| &t.r#ref == r)?
+        .clone();
+    if let TaskRef::GitHub { number, .. } = r
+        && let Some(Ok(detail)) = view.github.details.get(number)
+    {
+        task.body = Some(detail.body.clone());
+    }
+    Some(task)
 }
 
 /// The planner's request for `task` on `agents`.
@@ -173,7 +198,8 @@ struct Ids {
 
 /// Auto-assign's part of one 実行 form.
 pub(super) struct Auto {
-    task: Task,
+    /// The form's task: read from the view when a planner starts.
+    task: TaskRef,
     agents: Vec<AgentKind>,
     planners: Vec<Planner>,
     state: AutoState,
@@ -198,7 +224,7 @@ impl std::fmt::Debug for Auto {
 impl Auto {
     /// For the 実行 form on `task` offering `agents`; the planners are the
     /// installed ones of claude and codex.
-    pub fn new(task: &Task, agents: &[AgentKind]) -> Auto {
+    pub fn new(task: &TaskRef, agents: &[AgentKind]) -> Auto {
         let installed: Vec<&str> = agents.iter().map(|k| k.command()).collect();
         Auto {
             task: task.clone(),
@@ -290,9 +316,14 @@ impl Auto {
 
     fn start(&mut self, planner: Planner, snapshot: Option<AgentKind>, env: &Env) {
         self.cancel();
-        let (task, agents) = (self.task.clone(), self.agents.clone());
-        let cwd = if env.repo.is_dir() {
-            env.repo.to_owned()
+        let Some(task) = current_task(env.view, &self.task) else {
+            self.state = AutoState::Failed(GONE.to_owned());
+            return;
+        };
+        let agents = self.agents.clone();
+        let repo = &env.view.repo;
+        let cwd = if repo.is_dir() {
+            repo.to_owned()
         } else {
             std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
         };
@@ -553,10 +584,10 @@ mod tests {
     #[test]
     fn the_planners_are_the_installed_claude_and_codex() {
         let t = task(TaskRef::Local("t-1".into()), None);
-        let all = Auto::new(&t, &AgentKind::ALL);
+        let all = Auto::new(&t.r#ref, &AgentKind::ALL);
         let agents: Vec<&str> = all.planners.iter().map(|p| p.agent).collect();
         assert_eq!(agents, ["claude", "codex"]);
-        let agy = Auto::new(&t, &[AgentKind::Agy]);
+        let agy = Auto::new(&t.r#ref, &[AgentKind::Agy]);
         assert!(agy.planners.is_empty());
         assert_eq!(
             agy.note(Some(AgentKind::Agy)),

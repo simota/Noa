@@ -1496,3 +1496,112 @@ fn auto_the_planner_reads_a_loaded_issues_body() {
     assert!(content.contains("issue の本文"), "{content}");
     assert!(content.contains(&format!("Source: #{number}")), "{content}");
 }
+
+/// Hands out the View last put in `next`, once, as a feed does when its
+/// sources change; records nothing.
+struct Later {
+    next: Rc<RefCell<Option<View>>>,
+}
+
+impl Feed for Later {
+    fn poll(&mut self) -> Option<View> {
+        self.next.borrow_mut().take()
+    }
+
+    fn act(&mut self, _intent: Intent) {}
+}
+
+/// The request the fake planner's start `at` was handed.
+fn planned_request(planned: &Planned, at: usize) -> tasks::auto_assign::Request {
+    let mut jobs = planned.borrow_mut();
+    let request = std::mem::replace(&mut jobs[at].0.request, Box::new(|| unreachable!()));
+    request()
+}
+
+/// L1-3: the planner reads the task as it is when a planner is chosen, not
+/// when the form opened. 実行 pressed on an issue before its detail loaded,
+/// then the body arriving while the form is open: the next planner reads
+/// that body, as the run's brief would; before it arrived, the planner was
+/// told it is not loaded, as the run would be.
+#[test]
+fn auto_the_planner_reads_an_issues_body_loaded_after_the_form_opened() {
+    let mut view = demo::view();
+    view.agents = Some(vec![AgentKind::Claude]);
+    let issue = view.github.tasks[0].clone();
+    let TaskRef::GitHub { number, .. } = issue.r#ref.clone() else {
+        panic!("{issue:?}");
+    };
+    // Its detail not loaded yet (the demo has some loaded).
+    view.github.details.remove(&number);
+    assert!(issue.body.is_none());
+    let next = Rc::new(RefCell::new(Some(view.clone())));
+    let mut screen = Tasks::new(Box::new(Later { next: next.clone() }));
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(window(), &mut text);
+    let planned = fake_planner(&mut screen);
+    screen.select_ref(&issue.r#ref);
+    key(&mut screen, &mut text, 'x');
+    assert!(screen.form.is_some(), "the 実行 form is open");
+
+    choose_planner(&mut screen, &mut text, 0);
+    let before = planned_request(&planned, 0).content;
+    assert!(
+        before.ends_with("(The issue's text is not loaded.)\n"),
+        "{before}"
+    );
+    press_button(&mut screen, &mut text, "中止");
+
+    // `LoadDetail` finishes: the feed's next View has the body.
+    view.github.details.insert(
+        number,
+        Ok(tasks::model::types::IssueDetail {
+            body: "あとから読み込んだ本文".into(),
+            comments: Vec::new(),
+        }),
+    );
+    *next.borrow_mut() = Some(view);
+    screen.woken(&mut text);
+    screen.prepare(window(), &mut text);
+    assert!(screen.form.is_some(), "the form stays open");
+
+    choose_planner(&mut screen, &mut text, 0);
+    let after = planned_request(&planned, 1).content;
+    assert!(after.contains("あとから読み込んだ本文"), "{after}");
+    assert!(!after.contains("not loaded"), "{after}");
+}
+
+/// `--demo` starts nothing: 「自動で割り当て」 is answered by the demo's
+/// canned planner, not a CLI, and the demo has no waker, so the answer is
+/// shown as the planner is chosen, without a wake.
+#[test]
+fn auto_in_the_demo_the_canned_answer_shows_without_a_wake() {
+    let mut screen = Tasks::new(Box::<DemoFeed>::default());
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(window(), &mut text);
+    assert!(screen.feed.waker().is_none(), "the demo cannot wake");
+    screen.select_ref(&local("t-1"));
+    key(&mut screen, &mut text, 'x');
+    assert!(screen.form.is_some(), "the 実行 form is open");
+    assert_eq!(agent_selected(&screen), [true, false, false]);
+
+    // No `woken` between choosing codex and reading the form.
+    choose_planner(&mut screen, &mut text, 1);
+    assert!(
+        matches!(
+            screen.form.as_ref().unwrap().auto().unwrap().state(),
+            AutoState::Filled { .. }
+        ),
+        "{:?}",
+        screen.form.as_ref().unwrap().auto()
+    );
+    assert_eq!(agent_selected(&screen), [false, true, false]);
+    let block = format!(
+        "自動割り当て（codex (gpt-6.2-sol · medium) が決定）— 内容を確認して「実行」を押してください\nエージェント: codex — {}",
+        demo::PLANNED
+    );
+    assert!(
+        form_texts(&screen).contains(&block),
+        "{:?}",
+        form_texts(&screen)
+    );
+}

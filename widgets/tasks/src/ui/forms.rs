@@ -114,7 +114,6 @@ impl Form {
 
     /// 実行 on `task`: one of `agents` (or the one 「自動で割り当て」 picks) and
     /// the isolation (default `Isolation::Worktree`); submits `Intent::Run`.
-    /// `task` is what the planner reads: an issue's body once loaded.
     pub fn run(task: &Task, agents: &[AgentKind]) -> Form {
         let form = Form::new(
             Kind::Run {
@@ -127,7 +126,7 @@ impl Form {
             String::new(),
         );
         Form {
-            auto: Some(Auto::new(task, agents)),
+            auto: Some(Auto::new(&task.r#ref, agents)),
             ..form
         }
     }
@@ -276,6 +275,10 @@ impl Form {
         if let (Some(auto), Some((agent, _))) = (&mut self.auto, ids.choices) {
             let current = chosen_agent(&self.kind, agent, tree);
             if auto.handle(message, tree, agent, current, env) {
+                // A planner that answered before it returned (the demo's,
+                // a thread that could not start) is shown now: no wake
+                // may follow it.
+                self.poll_auto(tree, (env.hooks.clock)());
                 return FormOutcome::Pending;
             }
         }

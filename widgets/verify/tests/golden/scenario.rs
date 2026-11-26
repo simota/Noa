@@ -17,10 +17,10 @@ use std::path::{Path, PathBuf};
 
 use verify::engine::{Config, Effect, Engine, Input, Output, Setup};
 use verify::model::types::{
-    AgentChoice, AgentKind, AgentSetup, BriefKind, BuiltinStrategy, EvidenceBody, EvidenceKey,
-    FileFact, FileState, FileStatus, Head, Isolation, MAX_MAX_ROUNDS, Media, Millis, Omitted,
-    PartId, Phase, Rebuild, Rerun, RerunItem, RerunRequest, Session, SessionId, SpecFile, Stored,
-    StrategyChoice, Target, TargetFile, TargetKind, TargetManifest, VerifierChoice,
+    AgentChoice, AgentKind, AgentSetup, BriefKind, BuiltinStrategy, Event, EvidenceBody,
+    EvidenceKey, FileFact, FileState, FileStatus, Head, Isolation, MAX_MAX_ROUNDS, Media, Millis,
+    Omitted, PartId, Phase, Rebuild, Rerun, RerunItem, RerunRequest, Session, SessionId, SpecFile,
+    Stored, StrategyChoice, Target, TargetFile, TargetKind, TargetManifest, VerifierChoice,
 };
 
 pub const DIR: &str = "/golden/data/verifications/ver-golden";
@@ -103,8 +103,9 @@ fn stored(path: PathBuf) -> Stored {
     }
 }
 
-struct Run {
-    engine: Engine,
+pub(super) struct Run {
+    pub(super) engine: Engine,
+    pub(super) batches: Vec<Vec<Event>>,
     now: Millis,
     out: String,
 }
@@ -146,6 +147,7 @@ impl Run {
             .handle(input)
             .expect("the scenario's input is valid");
         self.record(&output);
+        self.batches.extend(output.batches);
     }
 
     fn session(&self) -> &Session {
@@ -463,7 +465,7 @@ pub fn extended() -> String {
     run.out
 }
 
-fn play() -> Run {
+pub(super) fn play() -> Run {
     let panel = vec![
         VerifierChoice {
             agent: AgentChoice {
@@ -484,7 +486,7 @@ fn play() -> Run {
             strategy: StrategyChoice::Custom("Odd locales & very long paths".into()),
         },
     ];
-    let (engine, _) = Engine::create_in(
+    let (engine, created) = Engine::create_in(
         SessionId::new("ver-golden"),
         Setup {
             request: "Verify that new tabs inherit the cwd; it must stay \"fast\" & <safe>.",
@@ -525,6 +527,7 @@ fn play() -> Run {
     .expect("the scenario's setup is valid");
     let mut run = Run {
         engine,
+        batches: created.batches,
         now: 1_000,
         out: String::new(),
     };

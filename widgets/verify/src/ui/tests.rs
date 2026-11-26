@@ -1703,7 +1703,18 @@ fn ac36_an_interrupted_stored_verification_is_not_offered_to_close_its_panes() {
     let dir = stored_unfinished(&root);
     let (channel, link) = Channel::fake();
     let mut screen = stored_ready(channel, &dir);
-    assert_eq!(commands(&link), [Command::Leave], "nothing to probe");
+    // Where its timeline posts stand is asked; nothing to probe.
+    assert_eq!(
+        commands(&link),
+        [
+            Command::Leave,
+            Command::StoredTimeline {
+                dir: dir.clone(),
+                resend: false,
+            }
+        ],
+        "nothing to probe"
+    );
     link.panes
         .send(OpenPanes {
             generation: 1,
@@ -1724,7 +1735,14 @@ fn ac36_a_finished_stored_verification_probes_its_panes_and_closes_them_by_folde
     let mut screen = stored_ready(channel, &dir);
     assert_eq!(
         commands(&link),
-        [Command::Leave, Command::ProbePanes { dir: dir.clone() }]
+        [
+            Command::Leave,
+            Command::ProbePanes { dir: dir.clone() },
+            Command::StoredTimeline {
+                dir: dir.clone(),
+                resend: false,
+            }
+        ]
     );
     assert!(
         !acts(&screen).contains(&Action::ClosePanes),
@@ -2164,7 +2182,17 @@ fn an_unfinished_verification_is_resumed_from_its_read_only_view_and_goes_live()
     let mut screen = stored_ready(channel, &dir);
     assert!(screen.read_only);
     assert!(acts(&screen).contains(&Action::ResumeShown));
-    assert_eq!(commands(&link), [Command::Leave]);
+    // It has no runner to say where its timeline posts stand.
+    assert_eq!(
+        commands(&link),
+        [
+            Command::Leave,
+            Command::StoredTimeline {
+                dir: dir.clone(),
+                resend: false,
+            }
+        ]
+    );
     act(&mut screen, Action::ResumeShown);
     assert_eq!(commands(&link), [Command::Resume { dir: dir.clone() }]);
     assert!(

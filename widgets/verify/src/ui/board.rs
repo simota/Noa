@@ -5,7 +5,7 @@
 
 use noa_gpui_core::style::AlignItems;
 use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Tone, Truncation};
-use noa_gpui_core::{Style, UiTree, WidgetId};
+use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
 
 use noa_gpui_core::style::{Size as LayoutSize, auto, length};
@@ -159,10 +159,46 @@ impl Verify {
         } else if session.ended_by_user() {
             tag(&mut self.tree, row, "判定なし", Tone::Neutral);
         }
+        if let Some(label) = self.timeline.label() {
+            let tone = if self.timeline.failed() {
+                Tone::Warning
+            } else {
+                Tone::Neutral
+            };
+            tag(&mut self.tree, row, label, tone);
+            if let Some(detail) = self.timeline.detail() {
+                self.tree.insert(
+                    Some(row),
+                    Label::new(detail)
+                        .font_size(11.0)
+                        .color(Role::Muted)
+                        .truncation(Truncation::Tail),
+                );
+            }
+        }
         let buttons = self.tree.insert(
             Some(column),
             Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
         );
+        // A running verification's runner sends what is pending; a stored
+        // one has none, so 再試行 is what sends it (not from a `--session`
+        // viewer, which posts nothing to Noa).
+        let retry = if self.read_only {
+            self.stored_dir.is_some() && !self.noa_viewer() && self.timeline.unsent()
+        } else {
+            self.timeline.failed()
+        };
+        if retry {
+            let retry = button(
+                &mut self.tree,
+                buttons,
+                small("タイムラインに再投稿").tooltip("タイムラインへの投稿をもう一度送ります"),
+                Action::RetryTimeline,
+                &mut self.actions,
+            );
+            self.tree
+                .set_accessible_label(retry, "タイムラインへの投稿を再試行");
+        }
         button(
             &mut self.tree,
             buttons,

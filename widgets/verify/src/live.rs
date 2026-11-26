@@ -6,7 +6,7 @@
 //! pane and worktree requests about a stored verification) run on threads
 //! of their own.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -16,6 +16,7 @@ use verify::model::types::{
 };
 use verify::sibling::{self, Launcher};
 use verify::task_links::{self, Origin};
+use verify::timeline::{self, Status, TimelineApi};
 
 use crate::session::fix::{self, FixRequest};
 use crate::session::ipc::IpcConnect;
@@ -95,6 +96,15 @@ pub enum Command {
     Focus {
         part: PartId,
     },
+    /// Sends the verification's unpublished timeline posts again (再試行).
+    RetryTimeline,
+    /// Where the stored verification in `dir` stands on its board's
+    /// timeline, answered on [`Channel::timelines`]; with `resend` (再試行:
+    /// it has no runner) its posts not yet published are sent first.
+    StoredTimeline {
+        dir: PathBuf,
+        resend: bool,
+    },
     /// Holds the running verification after each ruled round, or lets it
     /// go on.
     SetHold {
@@ -171,6 +181,8 @@ pub struct Channel {
     pub panes: Receiver<OpenPanes>,
     /// The task each runner's verification is linked to, once it is open.
     pub origins: Receiver<OriginOf>,
+    /// Where each runner's Board Timeline posts stand.
+    pub timelines: Receiver<(u64, Status)>,
     commands: Sender<(u64, Command)>,
     generation: Arc<AtomicU64>,
 }
@@ -213,6 +225,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
     let (version_tx, versions) = mpsc::channel();
     let (panes_tx, panes) = mpsc::channel();
     let (origin_tx, origins) = mpsc::channel();
+    let (timeline_tx, timelines) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let told = Arc::clone(&wake);
@@ -259,6 +272,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
                     versions: version_tx,
                     panes: panes_tx,
                     origins: origin_tx,
+                    timelines: timeline_tx,
                     wake,
                 },
                 Box::new(sibling::System),
@@ -272,6 +286,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
         versions,
         panes,
         origins,
+        timelines,
         commands,
         generation,
     }
@@ -288,6 +303,7 @@ struct Outlets {
     versions: Sender<(u64, String)>,
     panes: Sender<OpenPanes>,
     origins: Sender<OriginOf>,
+    timelines: Sender<(u64, Status)>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -384,6 +400,21 @@ impl Dispatch {
                 if let Err(why) = opened {
                     outlets.notify(generation, why);
                 }
+                return;
+            }
+            // A stored verification has no runner: one request of its own.
+            (Command::StoredTimeline { dir, resend }, _) => {
+                outlets.detached("verify-timeline", generation, move |outlets| {
+                    let root = noa_config::timeline_outbox_dir();
+                    let connect = || {
+                        timeline::connect().map(|client| Box::new(client) as Box<dyn TimelineApi>)
+                    };
+                    stored_timeline(root.as_deref(), &dir, resend, connect, &mut |status| {
+                        let _ = outlets.timelines.send((generation, status));
+                        (outlets.wake)();
+                    });
+                    None
+                });
                 return;
             }
             (Command::ProbePanes { dir }, _) => {
@@ -531,6 +562,7 @@ fn forwarded(cmd: Command) -> Option<Action> {
         Command::Retry => Action::Retry,
         Command::Close => Action::Close,
         Command::Focus { part } => Action::Focus { part },
+        Command::RetryTimeline => Action::RetryTimeline,
         Command::SetHold { hold } => Action::SetHold { hold },
         Command::Continue => Action::Continue,
         Command::Extend { by } => Action::Extend { by },
@@ -540,11 +572,45 @@ fn forwarded(cmd: Command) -> Option<Action> {
         | Command::ExtendStored { .. }
         | Command::ClosePanesStored { .. }
         | Command::ProbePanes { .. }
+        | Command::StoredTimeline { .. }
         | Command::RemoveWorktrees { .. }
         | Command::RequestFix(_)
         | Command::OpenTasks(_)
         | Command::Leave => return None,
     })
+}
+
+/// What the stored verification in `dir` shows of its timeline posts,
+/// said to `tell`: where they stand in its outbox (under `root`), and with
+/// `resend` a pending state while its posts not yet published are sent
+/// through `connect`, then where they stand after.
+pub(crate) fn stored_timeline(
+    root: Option<&Path>,
+    dir: &Path,
+    resend: bool,
+    connect: impl FnOnce() -> Result<Box<dyn TimelineApi>, String>,
+    tell: &mut dyn FnMut(Status),
+) {
+    let Some(root) = root else {
+        return tell(Status::Idle);
+    };
+    let session = match verify::store::read_session(dir) {
+        Ok(session) => session,
+        Err(e) => {
+            return tell(Status::Failed {
+                message: format!("{} を読めません: {e}", dir.display()),
+            });
+        }
+    };
+    let status = timeline::stored_status(root, &session);
+    if !resend || !status.unsent() {
+        return tell(status);
+    }
+    tell(Status::Pending);
+    tell(match connect() {
+        Ok(mut api) => timeline::resend_stored(root, &session, api.as_mut()),
+        Err(message) => Status::Failed { message },
+    });
 }
 
 /// Passes a runner's updates on, stamped with the generation of the
@@ -561,6 +627,7 @@ fn forward_updates(
         released,
         versions,
         origins,
+        timelines,
         wake,
         ..
     } = outlets;
@@ -610,6 +677,7 @@ fn forward_updates(
                 true
             }
             Update::Origin(origin) => origins.send((generation, origin)).is_ok(),
+            Update::Timeline(status) => timelines.send((generation, status)).is_ok(),
             Update::Ended(Ok(())) => break,
             Update::Ended(Err(why)) => {
                 ended.store(true, Ordering::Release);
@@ -645,6 +713,7 @@ pub struct FakeLink {
     pub versions: Sender<(u64, String)>,
     pub panes: Sender<OpenPanes>,
     pub origins: Sender<OriginOf>,
+    pub timelines: Sender<(u64, Status)>,
     pub commands: Receiver<(u64, Command)>,
 }
 
@@ -658,6 +727,7 @@ impl Channel {
         let (version_tx, versions) = mpsc::channel();
         let (panes_tx, panes) = mpsc::channel();
         let (origin_tx, origins) = mpsc::channel();
+        let (timeline_tx, timelines) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let channel = Channel {
             snapshots,
@@ -666,6 +736,7 @@ impl Channel {
             versions,
             panes,
             origins,
+            timelines,
             commands,
             generation: Arc::new(AtomicU64::new(0)),
         };
@@ -676,6 +747,7 @@ impl Channel {
             versions: version_tx,
             panes: panes_tx,
             origins: origin_tx,
+            timelines: timeline_tx,
             commands: command_rx,
         };
         (channel, link)
@@ -713,6 +785,7 @@ mod tests {
             versions: mpsc::channel().0,
             panes,
             origins: mpsc::channel().0,
+            timelines: mpsc::channel().0,
             wake: Arc::new(|| {}),
         };
         let ends = Ends {
@@ -1028,5 +1101,111 @@ mod tests {
         assert_eq!(notice, "Tasks が見つかりません");
         assert!(dispatch.handle.is_none(), "a runner was started");
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// A Noa with the timeline that answers each post (the first one, when
+    /// `lose_first`, stored but unanswered).
+    struct Answering {
+        posts: Vec<noa_ipc::timeline::PostParams>,
+        lose_first: bool,
+    }
+
+    impl noa_ipc::timeline_outbox::PostSink for Answering {
+        fn post(
+            &mut self,
+            p: &noa_ipc::timeline::PostParams,
+        ) -> Result<noa_ipc::timeline::PostResult, noa_ipc::ClientError> {
+            self.posts.push(p.clone());
+            if std::mem::take(&mut self.lose_first) {
+                return Err(noa_ipc::ClientError::Timeout("noa.timeline.post".into()));
+            }
+            Ok(noa_ipc::timeline::PostResult {
+                created_at: "2026-11-26T00:00:00Z".into(),
+                duplicate: self.posts.len() > 1,
+                post_id: "po-0000000000000001".into(),
+                seq: noa_ipc::timeline::Seq(1),
+            })
+        }
+    }
+
+    impl TimelineApi for Answering {
+        fn supports(&self) -> bool {
+            true
+        }
+
+        fn register_run(
+            &mut self,
+            p: &noa_ipc::timeline::RegisterRunParams,
+        ) -> Result<noa_ipc::timeline::RegisterRunResult, noa_ipc::ClientError> {
+            Ok(noa_ipc::timeline::RegisterRunResult {
+                board_id: "bd-0000000000000001".into(),
+                created: true,
+                producer_id: p.publish_policy.producer_id.clone().unwrap(),
+                run_id: "rn-0000000000000001".into(),
+                worker_id: None,
+            })
+        }
+    }
+
+    // Review defect 3: a finished verification has no runner; its stored
+    // state is read from its outbox, and 再試行 sends what was never
+    // answered.
+    #[test]
+    fn ac5_a_stored_verification_says_where_its_posts_stand_and_resends_them() {
+        let tmp = std::env::temp_dir().join(format!("noa-verify-stored-tl-{}", std::process::id()));
+        let dir = tmp.join("verifications").join(crate::demo::DONE_ID);
+        let log = crate::demo::log();
+        let mut store = verify::store::Store::create(&dir, &log[0]).unwrap();
+        store.append_all(&log[1..]).unwrap();
+        drop(store);
+        let session = verify::store::read_session(&dir).unwrap();
+        assert!(!timeline::candidates(&session).is_empty());
+        let root = tmp.join("outbox");
+        let ask = |root: Option<&Path>, resend: bool, api: Option<Answering>| {
+            let mut told = Vec::new();
+            let connect = || {
+                api.map(|a| Box::new(a) as Box<dyn TimelineApi>)
+                    .ok_or_else(|| "Noa に接続できません".to_owned())
+            };
+            stored_timeline(root, &dir, resend, connect, &mut |s| told.push(s));
+            told
+        };
+        assert_eq!(ask(Some(&root), true, None), [Status::Idle]);
+        assert_eq!(ask(None, true, None), [Status::Idle]);
+        assert!(!root.exists());
+
+        let mut noa = Answering {
+            posts: Vec::new(),
+            lose_first: true,
+        };
+        let mut publisher =
+            timeline::Publisher::open(&root, session.id.as_str(), Default::default()).unwrap();
+        let failed = publisher.sync(&mut noa, Some(7), &timeline::candidates(&session));
+        assert!(failed.failed(), "{failed:?}");
+        drop(publisher);
+        assert_eq!(ask(Some(&root), false, None), std::slice::from_ref(&failed));
+        assert_eq!(
+            ask(Some(&root), true, None),
+            [
+                Status::Pending,
+                Status::Failed {
+                    message: "Noa に接続できません".into()
+                }
+            ]
+        );
+        let answering = Answering {
+            posts: Vec::new(),
+            lose_first: false,
+        };
+        let published = Status::Published {
+            seq: 1,
+            post_id: "po-0000000000000001".into(),
+        };
+        assert_eq!(
+            ask(Some(&root), true, Some(answering)),
+            [Status::Pending, published.clone()]
+        );
+        assert_eq!(ask(Some(&root), true, None), [published]);
+        let _ = std::fs::remove_dir_all(tmp);
     }
 }

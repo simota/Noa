@@ -320,6 +320,37 @@ fn space_and_row_toggle_select_tasks_for_one_bulk_change_and_one_undo() {
 }
 
 #[test]
+fn select_all_and_existing_checks_stay_with_the_tasks_rendered_by_each_layout() {
+    let mut h = Harness::new(None);
+    let all = visible(&h.screen);
+    for layout in [Layout::Board, Layout::Timeline, Layout::Calendar] {
+        h.screen.set_layout(Layout::List, &mut h.text);
+        h.screen.tree.set_focus(None);
+        h.command(Key::Char('a'));
+        assert_eq!(h.screen.planning.checked, all);
+
+        h.screen.set_layout(layout, &mut h.text);
+        h.prepare();
+        let shown = visible(&h.screen);
+        assert!(!shown.is_empty(), "{layout:?} has selectable tasks");
+        assert!(
+            shown.len() < all.len(),
+            "{layout:?} excludes undated or old tasks"
+        );
+        assert_eq!(
+            h.screen.planning.checked, shown,
+            "{layout:?} prunes old checks"
+        );
+        h.screen.tree.set_focus(None);
+        h.command(Key::Char('a'));
+        assert_eq!(
+            h.screen.planning.checked, shown,
+            "{layout:?} selects only rendered tasks"
+        );
+    }
+}
+
+#[test]
 fn an_inline_priority_change_updates_only_its_row_and_does_not_open_detail() {
     let mut h = Harness::new(None);
     h.select_task("t-1");
@@ -459,6 +490,74 @@ fn a_refreshed_external_edit_is_not_overwritten_by_an_open_property_draft() {
             .project,
         "別の画面の編集"
     );
+}
+
+#[test]
+fn run_submission_rechecks_external_completion_or_dependencies_and_keeps_choices() {
+    for (changes, notice) in [
+        (
+            vec![Change::Workflow(Some(Workflow::Done))],
+            "完了・キャンセル",
+        ),
+        (
+            vec![Change::BlockedBy(vec![workspace::task_key(&local("t-2"))])],
+            "先に完了するタスク",
+        ),
+    ] {
+        let dir = TestDirectory::new();
+        let mut h = Harness::new(Some(dir.file()));
+        h.select_task("t-1");
+        h.character('x');
+        assert!(h.screen.form.is_some());
+        let controls: Vec<_> = descendants(&h.screen.tree, h.screen.form_host)
+            .into_iter()
+            .filter(|id| h.screen.tree.get::<SegmentedControl>(*id).is_some())
+            .collect();
+        assert_eq!(controls.len(), 2);
+        for id in &controls {
+            h.screen.tree.set_focus(Some(*id));
+            h.key(Key::ArrowRight);
+            h.key(Key::Space);
+            assert!(
+                h.screen
+                    .tree
+                    .get::<SegmentedControl>(*id)
+                    .unwrap()
+                    .selected()[1]
+            );
+        }
+
+        let mut other = Workspace::open(dir.file()).unwrap();
+        other.apply(&[local("t-1")], &changes, demo::NOW).unwrap();
+        // No poll between the external write and submit: the submit guard
+        // itself must reload and check the new workflow or dependencies.
+        let stale = h.screen.planning.workspace.meta(&local("t-1"));
+        assert_eq!(stale.workflow, None);
+        assert!(stale.blocked_by.is_empty());
+        let submit = button_under(&h.screen.tree, h.screen.form_host, "実行");
+        h.activate(submit);
+        assert!(h.sent.borrow().is_empty(), "a blocked run sends no intent");
+        assert!(h.screen.form.is_some(), "the run draft stays open");
+        assert!(
+            h.screen
+                .own_notice
+                .as_deref()
+                .is_some_and(|text| text.contains(notice))
+        );
+        for id in controls {
+            assert!(
+                h.screen
+                    .tree
+                    .get::<SegmentedControl>(id)
+                    .unwrap()
+                    .selected()[1]
+            );
+        }
+        assert_eq!(
+            h.screen.planning.workspace.meta(&local("t-1")),
+            other.meta(&local("t-1"))
+        );
+    }
 }
 
 #[test]

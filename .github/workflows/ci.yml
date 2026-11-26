@@ -24,6 +24,13 @@ env:
   # it, Cargo reuses what an earlier build left (artifacts are keyed by
   # version and features, so differing lockfiles still build apart).
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  # Every CI build starts from a fresh checkout, so incremental state is never
+  # reused: it only costs time to write (local cold run 469s -> 423s, target
+  # 23G -> 17G). Line tables keep file:line in backtraces but drop the rest of
+  # the debug info (423s -> 370s, 17G -> 8.1G). Neither changes what the tests
+  # check: debug assertions and overflow checks stay on.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   build-and-test:

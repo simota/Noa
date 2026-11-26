@@ -1708,7 +1708,7 @@ pub(crate) fn local_offset_at(unix: i64) -> i64 {
     if unsafe { libc::localtime_r(&at, &mut tm) }.is_null() {
         return crate::localtime::local_offset_seconds();
     }
-    tm.tm_gmtoff as i64
+    tm.tm_gmtoff
 }
 
 fn unix_now() -> i64 {

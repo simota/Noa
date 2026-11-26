@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::auto_assign::AutoRecord;
 use crate::model::brief;
 use crate::model::reduce::{self, ReduceError};
 use crate::model::rules;
@@ -580,6 +581,22 @@ impl Engine {
         config: Config,
         now: Millis,
     ) -> Result<(Engine, Output), EngineError> {
+        Self::create_auto_in(id, setup, None, dir, config, now)
+    }
+
+    /// [`Engine::create_in`], its created event recording `auto`, the
+    /// auto-assignment the panel was started with
+    /// (`docs/specs/auto-assign.md` L1-7). It is kept apart from [`Setup`]
+    /// so that the setups written before auto-assign existed stay as they
+    /// are; the panel itself is checked the same either way.
+    pub fn create_auto_in(
+        id: SessionId,
+        setup: Setup<'_>,
+        auto: Option<AutoRecord>,
+        dir: &Path,
+        config: Config,
+        now: Millis,
+    ) -> Result<(Engine, Output), EngineError> {
         if let Err(why) = check_panel(&setup.judge, setup.panel) {
             return rejected(why);
         }
@@ -622,6 +639,7 @@ impl Engine {
             verifiers,
             confirm: setup.confirm,
             at: now,
+            auto,
         }];
         let session = reduce::create(&batch)?;
         let engine = Engine::resume(session, dir, config);

@@ -68,6 +68,9 @@ pub(super) struct Parts {
     panel_list: WidgetId,
     pub(super) panel: Vec<PanelRow>,
     pub(super) add_row: WidgetId,
+    /// Holds 「自動で割り当て」 (`ui::auto` draws it), in the agents'
+    /// section header.
+    pub(super) auto_host: WidgetId,
     pub(super) start_button: WidgetId,
     note: WidgetId,
     past: WidgetId,
@@ -76,6 +79,11 @@ pub(super) struct Parts {
 impl Parts {
     pub(super) fn kinds(&self) -> &[AgentKind] {
         &self.kinds
+    }
+
+    /// The note under the form, which `ui::auto` adds its lines to.
+    pub(super) fn note(&self) -> WidgetId {
+        self.note
     }
 }
 
@@ -688,7 +696,20 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         "書いた行はそのままの文言で基準になります。オンにすると、判定役の基準を確かめて直してから検証を始めます",
     );
 
-    let judge_col = section(tree, card, "判定役");
+    let judge_col = tree.insert(Some(card), Container::column().gap(6.0));
+    let judge_head = tree.insert(
+        Some(judge_col),
+        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+    );
+    tree.insert(
+        Some(judge_head),
+        Label::new("判定役").font_size(13.0).weight(600),
+    );
+    spacer(tree, judge_head);
+    let auto_host = tree.insert(
+        Some(judge_head),
+        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+    );
     let judge_row = tree.insert(
         Some(judge_col),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
@@ -793,6 +814,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         panel_list,
         panel,
         add_row,
+        auto_host,
         start_button,
         note,
         past,
@@ -1077,6 +1099,32 @@ pub(super) fn judge_kind_changed(tree: &mut UiTree, parts: &mut Parts, text: &mu
     let (model, effort) = insert_setup_controls(tree, parts.judge_setup.host, kind);
     parts.judge_setup.model = model;
     parts.judge_setup.effort = effort;
+}
+
+/// Puts `judge` and `rows` (one per verifier row, in order) into the agent
+/// rows, as picking them by hand would: the kind, then the model and
+/// effort. Everything else of the form stays as it is. Each kind is one the
+/// menus offer.
+pub(super) fn set_agents(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    judge: &AgentChoice,
+    rows: &[AgentChoice],
+    text: &mut TextStore,
+) {
+    let index = kind_index(&parts.kinds, judge.kind);
+    tree.update::<PopUpButton, _>(parts.judge, |p, cx| p.set_selected(cx, index));
+    judge_kind_changed(tree, parts, text);
+    set_setup(tree, &parts.judge_setup, judge.kind, &judge.setup);
+    for (row, choice) in parts.panel.iter_mut().zip(rows) {
+        let index = kind_index(&parts.kinds, choice.kind);
+        tree.update::<PopUpButton, _>(row.kind, |p, cx| p.set_selected(cx, index));
+        clear_children(tree, row.setup.host, text);
+        let (model, effort) = insert_setup_controls(tree, row.setup.host, choice.kind);
+        row.setup.model = model;
+        row.setup.effort = effort;
+        set_setup(tree, &row.setup, choice.kind, &choice.setup);
+    }
 }
 
 /// Puts `form` into the start view. Entries of a kind the menus do not

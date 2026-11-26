@@ -205,10 +205,8 @@ mod tests {
     #[test]
     fn output_left_without_a_newline_does_not_hide_the_first_agent() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "discussion-installed-nl-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("discussion-installed-nl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("codex");
         std::fs::write(&path, "#!/bin/sh\n").unwrap();

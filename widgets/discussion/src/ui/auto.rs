@@ -26,6 +26,9 @@ struct Running {
     planning: Planning,
     moderator: AgentChoice,
     panel: Vec<AgentChoice>,
+    /// Each panel row's host at planning time: a row removed and re-added
+    /// with the same values is still a change.
+    rows: Vec<WidgetId>,
 }
 
 impl Drop for Running {
@@ -156,6 +159,10 @@ fn choice(pick: &Pick) -> AgentChoice {
             effort: pick.effort.clone(),
         },
     }
+}
+
+fn hosts(parts: &start::Parts) -> Vec<WidgetId> {
+    parts.panel.iter().map(|row| row.host).collect()
 }
 
 /// The panel position a pick was made for; `None` for the moderator.
@@ -337,6 +344,7 @@ impl Discussion {
             planning,
             moderator: form.moderator,
             panel: form.panel,
+            rows: hosts(&self.start),
         });
         self.render_auto(text);
         self.poll_auto(text); // A thread-start failure is delivered synchronously.
@@ -363,7 +371,10 @@ impl Discussion {
         self.auto.state = match result {
             Ok(assignment) => {
                 let form = start::read(&self.tree, &self.start);
-                if form.moderator != run.moderator || form.panel != run.panel {
+                if form.moderator != run.moderator
+                    || form.panel != run.panel
+                    || hosts(&self.start) != run.rows
+                {
                     State::Failed("割り当て中にエージェントの選択が変わったため反映しませんでした。もう一度「自動で割り当て」を押してください".into())
                 } else {
                     let mut choices = assignment.picks.iter().map(choice);
@@ -378,7 +389,7 @@ impl Discussion {
                     self.auto.filled = Some(Filled {
                         assignment,
                         at: SystemClock.now(),
-                        rows: self.start.panel.iter().map(|row| row.host).collect(),
+                        rows: hosts(&self.start),
                     });
                     State::Idle
                 }

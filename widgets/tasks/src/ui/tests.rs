@@ -1140,11 +1140,7 @@ fn form_texts(screen: &Tasks) -> Vec<String> {
 
 /// Presses the form's button labelled `label` from the keyboard.
 fn press_button(screen: &mut Tasks, text: &mut TextStore, label: &str) {
-    let tree = &screen.tree;
-    let button = find_under(tree, screen.form_host, &|id| {
-        tree.get::<Button>(id).is_some_and(|b| b.label() == label)
-    })
-    .unwrap_or_else(|| panic!("no button {label:?}"));
+    let button = form_button(screen, label);
     assert!(visible(&screen.tree, button), "{label} is hidden");
     screen.tree.set_focus(Some(button));
     special(screen, text, Key::Space);
@@ -1421,6 +1417,77 @@ fn auto_a_fill_after_the_agent_changed_meanwhile_is_refused() {
         ),
         "{got:?}"
     );
+}
+
+fn form_button(screen: &Tasks, label: &str) -> WidgetId {
+    find_under(&screen.tree, screen.form_host, &|id| {
+        screen
+            .tree
+            .get::<Button>(id)
+            .is_some_and(|b| b.label() == label)
+    })
+    .unwrap_or_else(|| panic!("no button {label:?}"))
+}
+
+/// Hiding the focused control does not drop focus: choosing a planner from
+/// the keyboard puts it on 中止, and 中止, a result or a failure put it
+/// back on the pull-down. A planner ending while focus is in another
+/// control leaves it there.
+#[test]
+fn auto_focus_follows_the_control_shown_in_place_of_the_focused_one() {
+    let (mut screen, _log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    let stop = form_button(&screen, "中止");
+    let menu = auto_menu(&screen);
+
+    choose_planner(&mut screen, &mut text, 0);
+    assert_eq!(screen.tree.focused(), Some(stop), "planning: focus on 中止");
+    // 中止 pressed from the keyboard, where focus already is.
+    special(&mut screen, &mut text, Key::Space);
+    assert!(
+        planned.borrow()[0]
+            .2
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "stopped: focus on the pull-down"
+    );
+
+    choose_planner(&mut screen, &mut text, 0);
+    assert_eq!(screen.tree.focused(), Some(stop));
+    answer(&planned, 1, Ok(assignment(worker("codex", "速い"))));
+    screen.woken(&mut text);
+    assert!(matches!(
+        screen.form.as_ref().unwrap().auto().unwrap().state(),
+        AutoState::Idle
+    ));
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "filled: focus on the pull-down"
+    );
+
+    choose_planner(&mut screen, &mut text, 0);
+    answer(&planned, 2, Err(PlanError::Spawn("x".into())));
+    screen.woken(&mut text);
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "failed: focus on the pull-down"
+    );
+
+    // Focus moved to the agent segment while planning stays there when the
+    // planner ends. (A start always has focus on the pull-down: closing its
+    // menu, by key or by pointer, gives focus back to it.)
+    choose_planner(&mut screen, &mut text, 0);
+    assert_eq!(screen.tree.focused(), Some(stop));
+    let segment = agent_segment(&screen);
+    screen.tree.set_focus(Some(segment));
+    answer(&planned, 3, Ok(assignment(worker("agy", "軽い"))));
+    screen.woken(&mut text);
+    assert_eq!(agent_selected(&screen), [false, false, true], "filled");
+    assert_eq!(screen.tree.focused(), Some(segment));
 }
 
 /// L1-2 step 2: 中止 cancels the planner (its flag is set, so `run` kills

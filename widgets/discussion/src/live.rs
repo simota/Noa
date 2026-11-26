@@ -100,7 +100,12 @@ pub enum Command {
     ClosePanes,
 }
 
+#[path = "timeline.rs"]
+pub(crate) mod timeline;
+use timeline::Timeline;
+
 pub struct Channel {
+    pub timeline: Option<Timeline>,
     pub snapshots: Receiver<Snapshot>,
     /// One-line messages for the user (a command that failed, and why).
     pub notices: Receiver<String>,
@@ -137,13 +142,21 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Channel {
 /// store them was found), and without the check for installed agents: its
 /// `installed` never delivers.
 pub fn start_in(root: Option<PathBuf>, wake: impl Fn() + Send + Sync + 'static) -> Channel {
-    start_with(root, wake, |start| runner::spawn_session(start, || {}))
+    let wake = Arc::new(wake);
+    let timeline = Timeline::start(wake.clone());
+    start_with(
+        root,
+        move || wake(),
+        Some(timeline),
+        |start| runner::spawn_session(start, || {}),
+    )
 }
 
 /// [`start_in`] with the runners started by `spawn_session`.
 fn start_with(
     root: Option<PathBuf>,
     wake: impl Fn() + Send + Sync + 'static,
+    timeline: Option<Timeline>,
     spawn_session: impl Fn(runner::Start) -> SessionHandle + Send + 'static,
 ) -> Channel {
     let (snapshot_tx, snapshots) = mpsc::channel();
@@ -152,6 +165,7 @@ fn start_with(
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let out = Out {
+        timeline: timeline.clone(),
         snapshots: snapshot_tx,
         notices: notice_tx,
         history: history_tx,
@@ -163,6 +177,7 @@ fn start_with(
         .spawn(move || run_commands(command_rx, root, out, spawn_session))
         .expect("spawn discussion-commands thread");
     Channel {
+        timeline,
         snapshots,
         notices,
         history,
@@ -174,6 +189,7 @@ fn start_with(
 /// The UI's ends of the channel, as the commands thread holds them.
 #[derive(Clone)]
 struct Out {
+    timeline: Option<Timeline>,
     snapshots: Sender<Snapshot>,
     notices: Sender<String>,
     history: Sender<Arc<Vec<Summary>>>,
@@ -352,9 +368,13 @@ fn run_commands(
 /// Shows the stored discussion at `dir` read-only, leaving what was shown.
 fn show_stored(shown: &mut Shown, dir: PathBuf, session: Session, out: &Out) {
     shown.leave();
+    let session = Arc::new(session);
+    if let Some(timeline) = &out.timeline {
+        timeline.recover(&session, &dir);
+    }
     let _ = out.snapshots.send(Snapshot {
         link: Link::Stored(dir.clone()),
-        session: Some(Arc::new(session)),
+        session: Some(session),
     });
     (out.wake)();
     *shown = Shown::Stored(dir);
@@ -442,7 +462,13 @@ fn forward_updates(handle: SessionHandle, ended: Arc<AtomicBool>, out: Out) {
     let mut session = None;
     for update in &handle.updates {
         let sent = match update {
-            Update::Session(next) => {
+            Update::Session {
+                session: next,
+                log_dir,
+            } => {
+                if let Some(timeline) = &out.timeline {
+                    timeline.observe(session.as_deref(), &next, log_dir);
+                }
                 session = Some(next);
                 out.snapshots
                     .send(Snapshot {
@@ -505,6 +531,7 @@ pub(crate) fn test_channel() -> (Channel, TestFeed) {
     let (commands, command_rx) = mpsc::channel();
     (
         Channel {
+            timeline: None,
             snapshots,
             notices,
             history,
@@ -542,7 +569,12 @@ mod tests {
         let file =
             std::env::temp_dir().join(format!("noa-discussion-not-a-dir-{}", std::process::id()));
         std::fs::write(&file, "").unwrap();
-        let channel = start(|| {});
+        let channel = start_with(
+            Some(temp_root("failed-start")),
+            || {},
+            None,
+            |s| runner::spawn_session(s, || {}),
+        );
         let start = || Command::Start {
             topic: "t".into(),
             workdir: Some(file.clone()),
@@ -646,7 +678,10 @@ mod tests {
             let (actions, action_rx) = mpsc::channel();
             let session = Arc::new(session.clone());
             std::thread::spawn(move || {
-                let _ = update_tx.send(Update::Session(session));
+                let _ = update_tx.send(Update::Session {
+                    session,
+                    log_dir: PathBuf::new(),
+                });
                 for action in action_rx {
                     if action == Action::Stop {
                         break;
@@ -669,7 +704,12 @@ mod tests {
         let root = temp_root("open");
         let closed = stored(&root, "disc-1", true);
         stored(&root, "disc-2", false);
-        let channel = start_in(Some(root.clone()), || {});
+        let channel = start_with(
+            Some(root.clone()),
+            || {},
+            None,
+            |s| runner::spawn_session(s, || {}),
+        );
         let listed = channel
             .history
             .recv_timeout(Duration::from_secs(1))
@@ -714,7 +754,12 @@ mod tests {
         let dir = root.join("disc-9");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(discussion::store::EVENTS_FILE), "garbage\n").unwrap();
-        let channel = start_in(Some(root.clone()), || {});
+        let channel = start_with(
+            Some(root.clone()),
+            || {},
+            None,
+            |s| runner::spawn_session(s, || {}),
+        );
         let listed = channel
             .history
             .recv_timeout(Duration::from_secs(1))
@@ -754,6 +799,7 @@ mod tests {
         let channel = start_with(
             Some(root.clone()),
             || {},
+            None,
             fake_runner(
                 session,
                 Some(Arc::new(std::sync::Mutex::new(gate))),
@@ -861,6 +907,7 @@ mod tests {
         let channel = start_with(
             Some(root.clone()),
             || {},
+            None,
             fake_runner_seeing(session, None, starts_tx, seen_tx),
         );
         let _ = channel.history.recv_timeout(Duration::from_secs(1));
@@ -913,6 +960,7 @@ mod tests {
         let channel = start_with(
             Some(root.clone()),
             || {},
+            None,
             fake_runner(session, None, starts_tx),
         );
         let _ = channel.history.recv_timeout(Duration::from_secs(1));

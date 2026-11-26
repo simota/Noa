@@ -483,15 +483,16 @@ fn the_close_confirmation_does_not_outlive_the_next_action_or_its_notice() {
 /// and the next press only asks again.
 #[test]
 fn a_switch_takes_back_a_waiting_close() {
-    let at = |tab: Tab| Tab::ALL.iter().position(|t| *t == tab).unwrap();
     /// A switch, the tab it is on, and where it is.
     type Switch = (&'static str, Tab, fn(&Dashboard) -> WidgetId);
     let switches: [Switch; 5] = [
         ("scope", Tab::Operations, |d| {
             d.registry.scope_control.unwrap()
         }),
-        ("grouping", Tab::Operations, |d| d.grouping_control),
-        ("tab", Tab::Operations, |d| d.tab_control),
+        ("grouping", Tab::Analytics, |d| {
+            d.registry.grouping_control.unwrap()
+        }),
+        ("tab", Tab::Analytics, |d| d.registry.tab_control.unwrap()),
         ("axis", Tab::MindMap, |d| d.registry.axis_control.unwrap()),
         ("scale", Tab::Timeline, |d| {
             d.registry.scale_control.unwrap()
@@ -500,9 +501,7 @@ fn a_switch_takes_back_a_waiting_close() {
     for (switch, tab, control) in switches {
         for arm in ["X", "⇧X"] {
             let (mut dashboard, mut text, _snapshots, commands) = live_dashboard();
-            let tabs = dashboard.tab_control;
-            super::hardening::pick_segment(&mut dashboard, &mut text, tabs, at(tab));
-            assert_eq!(dashboard.view.tab, tab);
+            super::tabs::show_tab(&mut dashboard, &mut text, tab);
             // Finished: lint-pass is outside 現在 and 要対応 alike, so no
             // switch moves the selection off it.
             dashboard.select(Some(17), &mut text);
@@ -522,7 +521,7 @@ fn a_switch_takes_back_a_waiting_close() {
             };
             let before = switched(&dashboard);
 
-            // Segment 1 is never the one shown: 要対応, エージェント, 統計,
+            // Segment 1 is never the one shown: 要対応, エージェント, マップ,
             // ブランチ, 60 分.
             let id = control(&dashboard);
             super::hardening::pick_segment(&mut dashboard, &mut text, id, 1);

@@ -2,17 +2,204 @@ use crate::dashboard::analytics::compute_metrics;
 use crate::dashboard::gantt::{TimeScale, compute_concurrency};
 use crate::dashboard::mindmap::MapAxis;
 
+use noa_gpui_core::accesskit::Action as Access;
+use noa_gpui_core::widgets::{Button, SegmentedControl};
+use noa_gpui_core::{access_id, access_item_id};
+
+use super::hardening::{assistive, pick_segment};
 use super::*;
+
+/// Presses `button` as assistive technology does (no layout needed).
+fn press_button(dashboard: &mut Dashboard, text: &mut TextStore, button: WidgetId) {
+    assistive(dashboard, text, access_id(button).0, Access::Click);
+}
+
+/// Shows `tab` as a person reaches it: 分析 from the list, then the
+/// analysis tabs' switch; 一覧へ戻る back to the list.
+pub(super) fn show_tab(dashboard: &mut Dashboard, text: &mut TextStore, tab: Tab) {
+    if tab == Tab::Operations {
+        if dashboard.view.tab != Tab::Operations {
+            let back = dashboard.registry.back_button.expect("一覧へ戻る");
+            press_button(dashboard, text, back);
+        }
+    } else {
+        if dashboard.view.tab == Tab::Operations {
+            let analysis = dashboard.registry.analysis_button.expect("分析");
+            press_button(dashboard, text, analysis);
+        }
+        if dashboard.view.tab != tab {
+            let control = dashboard.registry.tab_control.expect("the analysis switch");
+            let at = Tab::ANALYSIS.iter().position(|t| *t == tab).unwrap();
+            pick_segment(dashboard, text, control, at);
+        }
+    }
+    assert_eq!(dashboard.view.tab, tab);
+}
+
+fn button_text(dashboard: &Dashboard, id: WidgetId) -> String {
+    dashboard.tree.get::<Button>(id).unwrap().label().to_owned()
+}
+
+/// The segment titles of `control`, as assistive technology reads them.
+fn segments(dashboard: &Dashboard, control: WidgetId) -> Vec<String> {
+    let count = dashboard
+        .tree
+        .get::<SegmentedControl>(control)
+        .unwrap()
+        .selected()
+        .len();
+    let update = dashboard.tree.accessibility_update(1.0);
+    (0..count)
+        .map(|item| {
+            let id = access_item_id(control, item);
+            let (_, node) = update.nodes.iter().find(|(node, _)| *node == id).unwrap();
+            node.label().unwrap_or_default().to_owned()
+        })
+        .collect()
+}
+
+/// Every segmented control in the tree, overlays aside.
+fn segmented_controls(dashboard: &Dashboard) -> Vec<WidgetId> {
+    fn walk(tree: &UiTree, id: WidgetId, out: &mut Vec<WidgetId>) {
+        if tree.get::<SegmentedControl>(id).is_some() {
+            out.push(id);
+        }
+        for child in tree.children(id) {
+            walk(tree, *child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&dashboard.tree, dashboard.tree.root().unwrap(), &mut out);
+    out
+}
 
 #[test]
 fn t_key_cycles_through_all_four_tabs() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     assert_eq!(dashboard.view.tab, Tab::Operations);
+    assert_eq!(Tab::Operations.title(), "一覧");
     for expected in [Tab::Analytics, Tab::MindMap, Tab::Timeline, Tab::Operations] {
         key(&mut dashboard, &mut text, Key::Char('t'));
         assert_eq!(dashboard.view.tab, expected);
         assert_eq!(notice_of(&dashboard), format!("表示: {}", expected.title()));
     }
+    assert_eq!(notice_of(&dashboard), "表示: 一覧");
+}
+
+/// dashboard-worker-list AC10: the list's toolbar ends with 分析, which
+/// opens 統計; the analysis tabs' first row has 一覧へ戻る, which returns
+/// to the list as it was.
+#[test]
+fn analysis_opens_the_statistics_and_back_returns_to_the_list() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    in_scope(&mut dashboard, &mut text, Scope::Attention);
+    let analysis = dashboard.registry.analysis_button.expect("分析");
+    assert_eq!(button_text(&dashboard, analysis), "分析");
+    let list = dashboard.registry.list.as_ref().unwrap().list;
+    let toolbar = dashboard
+        .tree
+        .children(dashboard.tree.parent(list).unwrap())[0];
+    assert_eq!(
+        dashboard.tree.parent(analysis),
+        Some(toolbar),
+        "分析 is in the list's toolbar"
+    );
+    let last_shown = dashboard
+        .tree
+        .children(toolbar)
+        .iter()
+        .rev()
+        .find(|id| !dashboard.tree.is_hidden(**id))
+        .copied();
+    assert_eq!(last_shown, Some(analysis), "the toolbar ends with 分析");
+    assert!(dashboard.registry.back_button.is_none());
+
+    // A pointer click, as a person makes it.
+    let pos = center(&dashboard.tree, analysis);
+    click(&mut dashboard, &mut text, pos);
+    assert_eq!(dashboard.view.tab, Tab::Analytics);
+    let labels = labels_under(&dashboard.tree, dashboard.body);
+    assert!(labels.iter().any(|l| l == "フリート稼働状況"), "{labels:?}");
+    assert!(dashboard.registry.list.is_none(), "the list is not built");
+    assert!(dashboard.registry.analysis_button.is_none());
+    let back = dashboard.registry.back_button.expect("一覧へ戻る");
+    assert_eq!(button_text(&dashboard, back), "一覧へ戻る");
+    // The row is the body's first.
+    let first = dashboard.tree.children(dashboard.body)[0];
+    assert_eq!(dashboard.tree.parent(back), Some(first));
+
+    let pos = center(&dashboard.tree, back);
+    click(&mut dashboard, &mut text, pos);
+    assert_eq!(dashboard.view.tab, Tab::Operations);
+    assert_eq!(dashboard.view.scope, Scope::Attention, "the scope stays");
+    assert!(dashboard.registry.list.is_some());
+    assert!(dashboard.registry.back_button.is_none());
+}
+
+/// The analysis row's switch reaches 統計, マップ and タイムライン; the
+/// footer holds no tab switch any more.
+#[test]
+fn the_analysis_switch_reaches_every_analysis_tab() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let notice_bar = dashboard
+        .tree
+        .parent(dashboard.tree.parent(dashboard.notice).unwrap());
+    let in_footer = |dashboard: &Dashboard| {
+        segmented_controls(dashboard)
+            .into_iter()
+            .filter(|id| dashboard.tree.parent(*id) == notice_bar)
+            .count()
+    };
+    assert_eq!(in_footer(&dashboard), 0, "no tab switch in the footer");
+    for tab in [Tab::Timeline, Tab::MindMap, Tab::Analytics] {
+        show_tab(&mut dashboard, &mut text, tab);
+        let control = dashboard.registry.tab_control.unwrap();
+        assert_eq!(
+            segments(&dashboard, control),
+            ["統計", "マップ", "タイムライン"]
+        );
+        assert_eq!(in_footer(&dashboard), 0, "{tab:?}");
+    }
+    show_tab(&mut dashboard, &mut text, Tab::Operations);
+}
+
+/// The grouping control orders the analysis views only: it is in their
+/// row, never in the header or the list.
+#[test]
+fn the_grouping_control_exists_only_in_analysis_tabs() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    let grouping_titles: Vec<String> = Grouping::ALL.iter().map(|g| g.title().into()).collect();
+    let groupings = |dashboard: &Dashboard| -> Vec<WidgetId> {
+        segmented_controls(dashboard)
+            .into_iter()
+            .filter(|id| segments(dashboard, *id) == grouping_titles)
+            .collect()
+    };
+    let caption = |dashboard: &Dashboard| {
+        labels_under(&dashboard.tree, dashboard.tree.root().unwrap())
+            .iter()
+            .any(|l| l == "グループ")
+    };
+    assert!(dashboard.registry.grouping_control.is_none());
+    assert!(
+        groupings(&dashboard).is_empty(),
+        "a grouping control on 一覧"
+    );
+    assert!(!caption(&dashboard), "グループ on 一覧");
+    for tab in Tab::ANALYSIS {
+        show_tab(&mut dashboard, &mut text, tab);
+        let control = dashboard.registry.grouping_control.expect("グループ");
+        assert_eq!(groupings(&dashboard), [control], "{tab:?}");
+        assert!(caption(&dashboard), "{tab:?}");
+        let row = dashboard.tree.children(dashboard.body)[0];
+        assert_eq!(dashboard.tree.parent(control), Some(row), "{tab:?}");
+    }
+    // It still groups: the last segment.
+    let control = dashboard.registry.grouping_control.unwrap();
+    pick_segment(&mut dashboard, &mut text, control, Grouping::ALL.len() - 1);
+    assert_eq!(dashboard.view.grouping, Grouping::Flat);
+    show_tab(&mut dashboard, &mut text, Tab::Operations);
+    assert!(groupings(&dashboard).is_empty());
 }
 
 #[test]

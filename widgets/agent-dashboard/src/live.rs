@@ -655,7 +655,7 @@ impl Feed {
                         .is_some_and(|panel| state_of(panel) == State::Permission)
                     {
                         self.notice(
-                            "承認待ちのペインには安全のため送信しませんでした（開く で直接操作してください）"
+                            "承認待ちのペインには安全のため送信しませんでした（承認画面へ で直接操作してください）"
                                 .to_owned(),
                         );
                         self.give_back(instance, pane, text);

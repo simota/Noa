@@ -38,7 +38,8 @@ fn scope_switch_cycles_release_the_old_text_layouts() {
 #[test]
 fn a_grouping_change_releases_the_old_text_layouts() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let control = dashboard.grouping_control;
+    super::tabs::show_tab(&mut dashboard, &mut text, Tab::Analytics);
+    let control = dashboard.registry.grouping_control.unwrap();
     let origin = dashboard.tree.window_origin(control).unwrap();
     let rect = dashboard.tree.layout(control).unwrap().rect;
     let pos = Point::new(origin.x + rect.width - 12.0, origin.y + rect.height / 2.0);
@@ -56,17 +57,10 @@ fn a_details_click_releases_the_old_text_layouts() {
     assert_eq!(text.layouts().len(), layout_count(view_of(&dashboard)));
 }
 
-fn last_segment(dashboard: &Dashboard) -> Point {
-    let control = dashboard.grouping_control;
-    let origin = dashboard.tree.window_origin(control).unwrap();
-    let rect = dashboard.tree.layout(control).unwrap().rect;
-    Point::new(origin.x + rect.width - 12.0, origin.y + rect.height / 2.0)
-}
-
 #[test]
-fn a_press_right_after_a_scope_switch_hits_the_grouping_control() {
+fn a_press_right_after_a_scope_switch_hits_the_analysis_button() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let pos = last_segment(&dashboard);
+    let pos = center(&dashboard.tree, dashboard.registry.analysis_button.unwrap());
     let button = PointerButton::Primary;
     let key = Key::Char('3');
     let modifiers = Modifiers::default();
@@ -77,7 +71,7 @@ fn a_press_right_after_a_scope_switch_hits_the_grouping_control() {
     dashboard.dispatch(Event::PointerDown { pos, button }, &mut text);
     dashboard.prepare(window(), &mut text);
     dashboard.dispatch(Event::PointerUp { pos, button }, &mut text);
-    assert_eq!(dashboard.view.grouping, Grouping::Flat);
+    assert_eq!(dashboard.view.tab, Tab::Analytics);
 }
 
 #[test]
@@ -135,9 +129,19 @@ fn a_scope_switch_reaches_the_next_frame() {
     assert_next_frame_shows_the_rebuild(&mut dashboard, &mut text, &before);
 }
 
+/// The grouping control's last segment, on the analysis tab it is in.
+fn last_segment(dashboard: &Dashboard) -> Point {
+    let control = dashboard.registry.grouping_control.unwrap();
+    let origin = dashboard.tree.window_origin(control).unwrap();
+    let rect = dashboard.tree.layout(control).unwrap().rect;
+    Point::new(origin.x + rect.width - 12.0, origin.y + rect.height / 2.0)
+}
+
 #[test]
 fn a_grouping_change_reaches_the_next_frame() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    // The タイムライン groups its lanes.
+    super::tabs::show_tab(&mut dashboard, &mut text, Tab::Timeline);
     let before = frame_of(dashboard.display_list(), &text);
     let pos = last_segment(&dashboard);
     let button = PointerButton::Primary;

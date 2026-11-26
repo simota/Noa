@@ -154,7 +154,7 @@ fn assistive_technology_cannot_reach_under_the_help() {
     let top = rows_of(&dashboard)[0];
     let queue_open = row_button(&dashboard, top);
     let (drawer_open, _) = dashboard.registry.open_buttons[0];
-    let grouping = dashboard.grouping_control;
+    let scopes = dashboard.registry.scope_control.unwrap();
     let before = status_of(&dashboard);
 
     question_mark(&mut dashboard, &mut text);
@@ -164,14 +164,14 @@ fn assistive_technology_cannot_reach_under_the_help() {
         assistive(&mut dashboard, &mut text, node_of(id), Access::Click);
         assistive(&mut dashboard, &mut text, node_of(id), Access::Focus);
     }
-    let last_segment = access_item_id(grouping, Grouping::ALL.len() - 1).0;
+    let last_segment = access_item_id(scopes, Scope::ALL.len() - 1).0;
     assistive(&mut dashboard, &mut text, last_segment, Access::Click);
 
     assert!(dashboard.view.help, "the help stays open");
     assert!(focused_panes(&commands).is_empty(), "a pane was focused");
     assert_eq!(status_of(&dashboard), before);
     assert_eq!(dashboard.view.selected, Some(12));
-    assert_eq!(dashboard.view.grouping, Grouping::Orchestrator);
+    assert_eq!(dashboard.view.scope, Scope::Current);
     assert_eq!(dashboard.tree.focused(), None, "focus went under the help");
 
     // Closed, the help gives the screen back to assistive technology.
@@ -270,7 +270,8 @@ fn the_help_cancels_a_left_press_whatever_else_is_held() {
 #[test]
 fn a_cancelled_release_leaves_a_press_begun_since_alone() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
-    let control = dashboard.grouping_control;
+    super::tabs::show_tab(&mut dashboard, &mut text, Tab::Analytics);
+    let control = dashboard.registry.grouping_control.unwrap();
     let [x, y, width, height] = rect(&dashboard.tree, control);
     let last = Point::new(x + width - 12.0, y + height / 2.0);
     let (left, middle) = (PointerButton::Primary, PointerButton::Middle);

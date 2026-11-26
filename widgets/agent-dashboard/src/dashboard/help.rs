@@ -77,7 +77,9 @@ pub(super) fn build(tree: &mut UiTree, root: WidgetId) -> WidgetId {
             for key in row.keys {
                 tree.insert(Some(keys), Kbd::new([key]));
             }
-            tree.insert(Some(line), Label::new(row.title).font_size(12.0));
+            // Wrapped, so a long description (`/`'s) stays inside the
+            // help instead of running past its right edge.
+            tree.insert(Some(line), Label::new(row.title).font_size(12.0).wrap(true));
         }
     }
     // What a row is: a pane, which can be given more tasks.
@@ -92,7 +94,7 @@ pub(super) fn build(tree: &mut UiTree, root: WidgetId) -> WidgetId {
     );
     tree.insert(
         Some(footer),
-        Label::new("マウス: 詳細・開く・グループはクリックでも操作できます")
+        Label::new("マウス: 行のボタン・表示の切替・分析はクリックでも操作できます")
             .font_size(11.0)
             .color(Role::Muted),
     );

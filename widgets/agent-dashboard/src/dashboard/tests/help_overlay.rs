@@ -105,6 +105,42 @@ fn question_mark_opens_help_with_every_binding() {
     );
 }
 
+/// dashboard-worker-list AC10 (U5): the help names the scope keys, what
+/// `state:要対応` and `need:any` take, and the tabs by their new names.
+#[test]
+fn the_help_names_the_scopes_the_attention_filter_and_the_tabs() {
+    let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
+    typed(&mut dashboard, &mut text, "?");
+    let help = help_of(&dashboard.tree, overlay(&dashboard));
+    let (_, browse) = &help.sections[0];
+    let title_of = |key: &str| {
+        browse
+            .iter()
+            .find(|(keys, _)| keys.iter().any(|cap| cap == &[key.to_owned()]))
+            .map(|(_, title)| title.as_str())
+            .unwrap_or_else(|| panic!("no row for {key}"))
+    };
+    assert_eq!(title_of("1–3"), "表示の切替（現在・要対応・終了）");
+    let filter = title_of("/");
+    assert!(
+        filter.contains("state:要対応 = 承認・入力・失敗"),
+        "{filter}"
+    );
+    assert!(filter.contains("need:any = 通知・静止も含む"), "{filter}");
+    assert_eq!(
+        title_of("T"),
+        "タブを切り替え（一覧 / 統計 / マップ / タイムライン）"
+    );
+    assert_eq!(title_of("G"), "グループを切り替え（タイムラインの並び）");
+    // No row for 4 or 5: they are bound to nothing.
+    for key in ["4", "5", "1–5"] {
+        let named = browse
+            .iter()
+            .any(|(keys, _)| keys.iter().any(|cap| cap == &[key.to_owned()]));
+        assert!(!named, "{key} has a row");
+    }
+}
+
 /// AC5's footer: the note on the mouse and 閉じる side by side in one row,
 /// inside the overlay.
 #[test]
@@ -123,7 +159,7 @@ fn the_footer_note_and_close_share_a_row() {
         .expect("the footer's note");
     assert_eq!(
         tree.get::<Label>(note).unwrap().text(),
-        "マウス: 詳細・開く・グループはクリックでも操作できます"
+        "マウス: 行のボタン・表示の切替・分析はクリックでも操作できます"
     );
     assert!(kids.contains(&close), "閉じる is not in the footer row");
     let (note, close) = (rect(tree, note), rect(tree, close));
@@ -181,4 +217,37 @@ fn help_fits_the_smallest_window() {
     dashboard.prepare(size, &mut text);
     let r = rect(&dashboard.tree, overlay(&dashboard));
     assert!(inside(r, [0.0, 0.0, size.width, size.height]), "{r:?}");
+}
+
+/// Every label of the help (titles, headings, row descriptions, the note
+/// and the footer) lies inside the overlay, at the smallest window and a
+/// common one: the widths are those the layout measured with the test's
+/// `TextStore`, so this holds with whatever fonts the platform has.
+#[test]
+fn every_help_label_lies_inside_the_overlay() {
+    for size in [Size::new(1100.0, 700.0), Size::new(1440.0, 900.0)] {
+        let mut dashboard = Dashboard::new(Grouping::Orchestrator);
+        let mut text = TextStore::new(Default::default());
+        dashboard.prepare(size, &mut text);
+        dashboard.dispatch(Event::Text("?".to_owned()), &mut text);
+        dashboard.prepare(size, &mut text);
+        let root = overlay(&dashboard);
+        let tree = &dashboard.tree;
+        let outer = rect(tree, root);
+        let mut stack = vec![root];
+        let mut labels = 0;
+        while let Some(id) = stack.pop() {
+            stack.extend(tree.children(id).iter().copied());
+            if let Some(label) = tree.get::<Label>(id) {
+                labels += 1;
+                let r = rect(tree, id);
+                assert!(
+                    inside(r, outer),
+                    "{size:?}: {:?} at {r:?} leaves the help at {outer:?}",
+                    label.text()
+                );
+            }
+        }
+        assert!(labels >= 20, "{size:?}: {labels} labels");
+    }
 }

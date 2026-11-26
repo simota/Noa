@@ -48,7 +48,7 @@ pub(super) const CLOSED_PANE: &str = "ペインは閉じています（ctl の�
 pub(super) const DIFF: &str = "差分を見る";
 pub(super) const CLOSED_SEND_GUARD: &str = "ペインは閉じているため送信できません";
 pub(super) const PERMISSION_SEND_GUARD: &str =
-    "承認待ちのペインには安全のため送信できません（開く で直接操作してください）";
+    "承認待ちのペインには安全のため送信できません（承認画面へ で直接操作してください）";
 
 /// A worker's result file as the drawer shows it: its text, and whether it
 /// was cut short (`RESULT_MAX_BYTES`, `RESULT_MAX_LINES`); or why it could

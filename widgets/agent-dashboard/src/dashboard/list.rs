@@ -183,7 +183,7 @@ pub(super) fn scope_titles(counts: [usize; 3]) -> [String; 3] {
 }
 
 /// Builds the list into `body`: a panel with the toolbar (the scope switch,
-/// the out-of-filter notice, the pager's indicator) and the rows of
+/// the out-of-filter notice, the pager's indicator, 分析) and the rows of
 /// `view.scope`.
 pub(super) fn build(
     tree: &mut UiTree,
@@ -239,6 +239,10 @@ pub(super) fn build(
     }
     spacer(tree, toolbar);
     let indicator = indicator(tree, toolbar);
+    reg.analysis_button = Some(tree.insert(
+        Some(toolbar),
+        Button::new("分析").control_size(ControlSize::Small),
+    ));
 
     let list = card_list(tree, panel, ROW_GAP);
     let rows = rows(fleet, view.scope, filter);

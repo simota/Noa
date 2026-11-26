@@ -1,6 +1,7 @@
-//! AC4 (header): the header fits from 1100 to 1920 px, and drops its items
-//! in the order the spec gives (dashboard-worker-list U3: the グループ
-//! caption, then the title; no counts, 最長 or chips are left to drop).
+//! AC4 (header): the header fits from 1100 to 1920 px, and drops only its
+//! title when it must (dashboard-worker-list U5: the grouping control and
+//! its caption moved to the analysis tabs; no counts, 最長 or chips are
+//! left to drop).
 
 use std::time::Instant;
 
@@ -140,7 +141,6 @@ fn the_header_fits_from_1100_to_1920() {
                 ("status slot", slot),
                 ("filter field", header.filter_field),
                 ("? keycap", header.help_key),
-                ("grouping control", header.grouping_control),
             ];
             for (name, id) in never {
                 assert!(shown(&dashboard, id), "{what}: {name} is hidden");
@@ -181,14 +181,9 @@ fn descendants(tree: &UiTree, id: WidgetId) -> Vec<WidgetId> {
         .collect()
 }
 
-/// Which of the two droppable items are hidden, in drop order: the
-/// グループ caption, the title.
-fn dropped(dashboard: &Dashboard) -> [bool; 2] {
-    let header = &dashboard.header;
-    [
-        !shown(dashboard, header.group_caption),
-        !shown(dashboard, header.title),
-    ]
+/// Whether the header's one droppable item, the title, is hidden.
+fn dropped(dashboard: &Dashboard) -> bool {
+    !shown(dashboard, dashboard.header.title)
 }
 
 /// The narrowest width the filtering header fits at with nothing dropped,
@@ -197,7 +192,7 @@ fn dropped(dashboard: &Dashboard) -> [bool; 2] {
 fn widest_drop() -> u32 {
     let (mut dashboard, mut text) = at(1920.0, State::Filtering);
     let mut width = 1920;
-    while dropped(&dashboard) == [false; 2] {
+    while !dropped(&dashboard) {
         assert!(width > 400, "nothing drops down to {width} px");
         width -= 1;
         dashboard.prepare(size(width as f32), &mut text);
@@ -206,29 +201,28 @@ fn widest_drop() -> u32 {
 }
 
 #[test]
-fn the_drop_order_is_kept() {
-    // Narrowing one window from 1920 px in steps of 4 until both items
-    // went (or the never-dropped items alone fill the bar): each item goes
-    // only after the one before it and none comes back; the header fits at
-    // every width while anything is left to drop.
+fn the_title_goes_once_while_narrowing() {
+    // Narrowing one window from 1920 px in steps of 4 until the title went
+    // (or the never-dropped items alone fill the bar): once gone it does
+    // not come back, and the header fits at every width before.
     let (mut dashboard, mut text) = at(1920.0, State::Filtering);
     let mut previous = dropped(&dashboard);
-    assert_eq!(previous, [false; 2], "1920 px drops nothing");
+    assert!(!previous, "1920 px drops nothing");
     let mut width = 1916;
-    while previous != [true; 2] && width > 400 {
+    while !previous && width > 400 {
         dashboard.prepare(size(width as f32), &mut text);
         let now = dropped(&dashboard);
-        for (before, after) in previous.iter().zip(&now) {
-            assert!(!before || *after, "{width}: an item came back: {now:?}");
-        }
-        assert!(now[0] || !now[1], "{width}: the title went first: {now:?}");
-        if now != [true; 2] {
+        if !now {
             no_overlap(&dashboard, width as f32, &format!("{width} px narrowing"));
         }
         previous = now;
         width -= 4;
     }
-    assert_eq!(previous, [true; 2], "both go before 400 px");
+    assert!(previous, "the title goes before 400 px");
+    for width in (width - 40..=width).rev().step_by(4) {
+        dashboard.prepare(size(width as f32), &mut text);
+        assert!(dropped(&dashboard), "{width}: the title came back");
+    }
 }
 
 /// The shown children of the bar neither overlap nor leave [16, width - 16].
@@ -255,29 +249,25 @@ fn no_overlap(dashboard: &Dashboard, width: f32, what: &str) {
 fn dropped_items_come_back_when_the_window_widens() {
     let narrow = widest_drop() as f32 - 40.0;
     let (mut dashboard, mut text) = at(narrow, State::Filtering);
-    let caption = dashboard.header.group_caption;
-    assert!(!shown(&dashboard, caption));
+    assert!(dropped(&dashboard));
     dashboard.prepare(size(1920.0), &mut text);
     dashboard.prepare(size(1920.0), &mut text);
-    assert!(shown(&dashboard, caption));
     assert!(shown(&dashboard, dashboard.header.title));
     // And it settles: laying out again changes nothing.
     assert!(!dashboard.prepare(size(1920.0), &mut text));
 
-    // Widening one window to 1920 px: items come back in the reverse
-    // order and none goes again, and the header fits throughout.
+    // Widening one window to 1920 px: the title comes back and does not
+    // go again, and the header fits throughout.
     let (mut dashboard, mut text) = at(narrow, State::Filtering);
     let mut previous = dropped(&dashboard);
     for width in (narrow as u32 + 4..=1920).step_by(4) {
         dashboard.prepare(size(width as f32), &mut text);
         let now = dropped(&dashboard);
-        for (before, after) in previous.iter().zip(&now) {
-            assert!(*before || !after, "{width}: an item went again: {now:?}");
-        }
+        assert!(previous || !now, "{width}: the title went again");
         no_overlap(&dashboard, width as f32, &format!("{width} px widening"));
         previous = now;
     }
-    assert_eq!(previous, [false; 2]);
+    assert!(!previous);
 }
 
 #[test]
@@ -369,12 +359,9 @@ fn the_status_keeps_its_width_until_everything_else_is_dropped() {
                 .unwrap();
             let wanted = status_natural(&dashboard, &mut text).min(STATUS_MAX_WIDTH);
             if width_of(&dashboard, slot) < wanted - 0.5 {
-                // Every droppable item has gone.
-                let header = &dashboard.header;
-                let all_gone =
-                    !shown(&dashboard, header.group_caption) && !shown(&dashboard, header.title);
+                // The title has gone.
                 assert!(
-                    all_gone,
+                    dropped(&dashboard),
                     "{what}: the status shrank to {} before the rest went: {:?}",
                     width_of(&dashboard, slot),
                     dropped(&dashboard)

@@ -98,6 +98,11 @@ const CLOSE_HELP: &str = "ヘルプを閉じる";
 /// fits the smallest window. 4 and 5 are bound to nothing.
 const SCOPES: &str = "表示の切替（現在・要対応・終了）";
 
+/// `/`'s row: `state:要対応` is the list's 要対応 (approval, input,
+/// failure); `need:any` also takes notices and quiet panes.
+pub(super) const FILTER: &str =
+    "絞り込む（state:要対応 = 承認・入力・失敗 / need:any = 通知・静止も含む / parent: / -否定）";
+
 pub(super) const BINDINGS: &[Binding] = &[
     bind(Browse, K(Key::Char('j')), &["J"], Next, NEXT),
     bind(Browse, K(Key::ArrowDown), &["↓"], Next, NEXT),
@@ -161,22 +166,16 @@ pub(super) const BINDINGS: &[Binding] = &[
         K(Key::Char('g')),
         &["G"],
         CycleGrouping,
-        "グループを切り替え",
+        "グループを切り替え（タイムラインの並び）",
     ),
     bind(
         Browse,
         K(Key::Char('t')),
         &["T"],
         NextTab,
-        "タブを切り替え（運用 / 統計 / マップ / タイムライン）",
+        "タブを切り替え（一覧 / 統計 / マップ / タイムライン）",
     ),
-    bind(
-        Browse,
-        T("/"),
-        &["/"],
-        StartFilter,
-        "絞り込む（state: / need: / parent: / -否定 に対応）",
-    ),
+    bind(Browse, T("/"), &["/"], StartFilter, FILTER),
     bind(
         Browse,
         K(Key::Escape),

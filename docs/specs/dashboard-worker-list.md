@@ -754,8 +754,9 @@ Built as designed, with these choices and deviations:
   widths measured from the `TextStore` it runs with) and passes.
 
 Not verified here (needs a person at a window): the rows at 1440×900 and
-1100×700, emphasis, and that the drawer (384 px, right) covers the rows'
-time and 操作 columns while it is open.
+1100×700, and emphasis. (The item "the drawer covers the rows' time and
+操作 columns while it is open" is gone: U4 narrows the list beside the
+drawer.)
 
 ### Deleted or replaced tests (U3)
 
@@ -871,3 +872,98 @@ filter or send field no longer keeps it, and resets `pressed_in_filter`;
 tests `filtering::clicking_a_row_leaves_the_filter_field`,
 `list::clicking_the_row_leaves_the_send_field`; `cargo test` 367 passed, 0
 failed, 2 ignored.
+
+### U4: the drawer (2026-11-26, `orch/u4`, `e4f7fa7`)
+
+Built as designed (AC9), with one requirement added by the orchestrator:
+
+- The drawer reads, under the head row: 状態 (status title with its
+  qualifiers 閉じた / 結果あり / 出力未変化 N 分, the reason or latest
+  report, the wait or update, 親 from `Fleet::parent_name`), 操作, 結果・差分
+  (the result section and 差分を見る), then the `DisclosureGroup`s
+  指示と画面ログ (依頼 and 画面の末尾 with its コピー) and 実行情報 (model ·
+  effort, branch, cwd, pane ID, 時間). The tag row under the head is gone.
+- Both disclosures start collapsed; `View::drawer_open: [bool; 2]` keeps
+  them as the user left them across rebuilds and workers for the run, never
+  in prefs (`Registry::disclosures`, `Toggled` in `handle`).
+- The drawer's time labels are registered by role, `Pulse::Drawer(pane,
+  Slot)` with `Slot::{Qualifiers, Time, Started, Since, Took, Waited, …}`,
+  instead of found by child index in the 時間 column.
+- Added by the orchestrator: while the drawer is open the body narrows by
+  the drawer's width (`body_style(drawer)`), so every row's time and button
+  stay reachable by pointer. This removes U3's not-verified item "the
+  drawer covers the rows' 操作 column".
+- Deviation: of the rows' actions the drawer shows only 承認画面へ (in place
+  of 開く, for an approval) and 入力する (for an input); 確認する, 詳細 and
+  結果を見る would only open what is already open.
+- Tests (`tests/details.rs`): `the_drawer_sections_come_in_order`,
+  `the_disclosures_start_collapsed_and_hold_the_run_information`,
+  `an_expanded_disclosure_stays_expanded_across_rebuilds`,
+  `the_state_section_ticks_in_place`,
+  `a_collapsed_disclosure_takes_no_click_or_focus`,
+  `the_list_stays_usable_beside_the_drawer`,
+  `the_drawer_offers_the_rows_action`; drawer assertions elsewhere open the
+  disclosures first (`expand_drawer`). No test deleted.
+
+### U5: 分析 entry, help and docs (2026-11-27, `orch/u5`)
+
+Built as designed (AC10's 分析, help and docs), with these choices:
+
+- The footer keeps only the notice line; its tab switch is gone. The list
+  toolbar ends with 「分析」, which opens 統計. An analysis tab's body starts
+  with one row: 「一覧へ戻る」, a 統計 / マップ / タイムライン switch
+  (`Tab::ANALYSIS`) and, at its right end, the グループ caption and control,
+  moved out of the header. The row is built also when no worker is found,
+  so the way back stays on screen. The four controls live in `Registry`
+  (`analysis_button`, `back_button`, `tab_control`, `grouping_control`),
+  cleared with the body. `Tab::Operations.title()` is 一覧; `T` still
+  cycles 一覧 → 統計 → マップ → タイムライン; `--tab=` names are unchanged.
+- Header: with the grouping control gone, `header::fit` drops only the
+  title.
+- Help: `/` says 「state:要対応 = 承認・入力・失敗 / need:any = 通知・静止も含む」;
+  `T` names 一覧; `G` says 「グループを切り替え（タイムラインの並び）」 (only
+  `gantt::build` reads the grouping; 統計 and マップ ignore it); the mouse
+  note says 「行のボタン・表示の切替・分析はクリックでも操作できます」
+  (`help.rs`, outside U5's file list: its old text named the panels' 詳細・開く
+  and the header's グループ). A help row's description wraps (`help.rs`), so
+  the long `/` row stays inside the 520 px help;
+  `help_overlay::every_help_label_lies_inside_the_overlay` checks every label
+  of the help at 1100 x 700 and 1440 x 900.
+- U4 review leftovers: the permission send guard (`drawer.rs`) and the
+  live feed's refusal (`live.rs`) now say 「承認画面へ で直接
+  操作してください」 instead of 開く; the stale pager comment (`pager.rs`) is
+  fixed. `drawer.rs`, `pager.rs` and `live.rs`, like `help.rs`, were outside
+  U5's planned file list.
+- `docs/FEATURES.md`: the Agent Dashboard paragraph describes the list
+  (row = worker pane, not tasks or jobs), 現在 / 要対応 / 終了, the one
+  attention definition, the order, the row, the out-of-filter caption, the
+  connection texts, the drawer order, 分析, keys 1–3, and `need:any`; the
+  needs-you queue, panels, urgency counts and "1–5 toggle panels" are gone
+  (sparkline, freshness gauge and 最長 were not named there).
+- Tests added: `tabs::analysis_opens_the_statistics_and_back_returns_to_the_list`,
+  `tabs::the_analysis_switch_reaches_every_analysis_tab`,
+  `tabs::the_grouping_control_exists_only_in_analysis_tabs`,
+  `help_overlay::the_help_names_the_scopes_the_attention_filter_and_the_tabs`,
+  `help_overlay::every_help_label_lies_inside_the_overlay`,
+  `details::an_empty_task_says_so_inside_the_instructions`;
+  `tabs::t_key_cycles_through_all_four_tabs` also checks 一覧.
+- Replaced: `header_fit::the_drop_order_is_kept` →
+  `header_fit::the_title_goes_once_while_narrowing` (one droppable item
+  left); `rebuild::a_press_right_after_a_scope_switch_hits_the_grouping_control`
+  → `rebuild::a_press_right_after_a_scope_switch_hits_the_analysis_button`
+  (no grouping control on the list). Moved to an analysis tab or to the
+  scope switch, same names: `rebuild::a_grouping_change_reaches_the_next_frame`
+  (on タイムライン), `rebuild::a_grouping_change_releases_the_old_text_layouts`,
+  `hardening::a_cancelled_release_leaves_a_press_begun_since_alone`,
+  `hardening::assistive_technology_cannot_reach_under_the_help` (the scope
+  switch's last segment), `filtering::a_full_rebuild_keeps_the_query_and_focus`
+  (the scope switch), `actions::a_switch_takes_back_a_waiting_close`,
+  `selection::a_selection_outside_the_list_that_leaves_says_so` (both reach
+  tabs through `tabs::show_tab`: 分析, then the analysis switch).
+- Checks on Linux (`CARGO_NET_OFFLINE=true`): fmt and clippy clean;
+  `cargo test` 380 passed, 0 failed, 2 ignored. `scripts/verify.sh` not run
+  (the orchestrator waived it: on Linux it does not run the dashboard's
+  tests).
+
+Not verified (needs a person at a window): the analysis row at 1100 px
+next to the マップ's and タイムライン's own controls.

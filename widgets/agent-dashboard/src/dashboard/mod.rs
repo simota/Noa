@@ -6,8 +6,8 @@ use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, length, percent,
 };
 use noa_gpui_core::widgets::{
-    ButtonClicked, Container, ControlSize, Label, ScrollView, SegmentMode, SegmentedControl,
-    SelectionChanged, TextChanged, TextField, Toggled, Truncation,
+    Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SegmentMode,
+    SegmentedControl, SelectionChanged, TextChanged, TextField, Toggled, Truncation,
 };
 use noa_gpui_core::{
     Appearance, Dirty, Edge, Event, Message, OverlayOptions, Placement, PointerButton, Role, Style,
@@ -48,7 +48,7 @@ use pager::ListParts;
 use panel::empty;
 pub use prefs::{Prefs, PrefsStore, default_path as default_prefs_path};
 use select::Step;
-use style::{GUTTER, HEADER_HEIGHT, fill_remaining, gap, set_label};
+use style::{GUTTER, HEADER_HEIGHT, caption, fill_remaining, gap, set_label, spacer};
 
 /// What a rebuild carries over to the drawer it builds: the unsent
 /// messages (`Dashboard::drafts`, `Dashboard::send_caret`), so the drawer
@@ -74,9 +74,13 @@ pub enum Tab {
 impl Tab {
     pub const ALL: [Tab; 4] = [Tab::Operations, Tab::Analytics, Tab::MindMap, Tab::Timeline];
 
+    /// The analysis tabs, in the order their switch shows them (the list's
+    /// 分析 opens the first).
+    pub const ANALYSIS: [Tab; 3] = [Tab::Analytics, Tab::MindMap, Tab::Timeline];
+
     pub fn title(self) -> &'static str {
         match self {
-            Tab::Operations => "運用",
+            Tab::Operations => "一覧",
             Tab::Analytics => "統計",
             Tab::MindMap => "マップ",
             Tab::Timeline => "タイムライン",
@@ -377,6 +381,13 @@ pub struct Registry {
     /// The drawer's send input field and 送信 button.
     send_field: Option<(WidgetId, u64)>,
     send_button: Option<(WidgetId, u64)>,
+    /// The list toolbar's 分析 (dashboard-worker-list AC10).
+    analysis_button: Option<WidgetId>,
+    /// An analysis tab's first row: 一覧へ戻る, the 統計 / マップ /
+    /// タイムライン switch and the grouping control.
+    back_button: Option<WidgetId>,
+    tab_control: Option<WidgetId>,
+    grouping_control: Option<WidgetId>,
     /// Tab-local segmented controls (map axis, timeline scale).
     axis_control: Option<WidgetId>,
     scale_control: Option<WidgetId>,
@@ -395,15 +406,20 @@ impl Registry {
         self.scope_control = None;
         self.outside_note = None;
         self.clear_filter = None;
+        self.analysis_button = None;
+        self.back_button = None;
+        self.tab_control = None;
+        self.grouping_control = None;
         self.axis_control = None;
         self.scale_control = None;
     }
 }
 
-/// The footer bar under the list: left notice text (cut at available width)
-/// and right tab switcher (`運用 / 統計 / マップ / タイムライン`). Keeps its
-/// fixed height (`NOTICE_HEIGHT`) so switching notices moves nothing.
-fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed, tab: Tab) -> (WidgetId, WidgetId) {
+/// The footer bar under the body: the notice text, cut at the available
+/// width. Keeps its fixed height (`NOTICE_HEIGHT`) so switching notices
+/// moves nothing. The tabs are reached from the list's 分析 and switched in
+/// the analysis tabs' own row (`analysis_bar`).
+fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed) -> WidgetId {
     let line = tree.insert(
         Some(root),
         Container::new(Style {
@@ -427,20 +443,58 @@ fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed, tab: Tab) -> (Wid
         .border(1.0, Role::Separator),
     );
     let slot = tree.insert(Some(line), Container::new(fill_remaining()));
-    let notice = tree.insert(
+    tree.insert(
         Some(slot),
         Label::new(health::initial_notice(feed))
             .font_size(12.0)
             .truncation(Truncation::Tail),
+    )
+}
+
+/// An analysis tab's first row: 一覧へ戻る, the 統計 / マップ / タイムライン
+/// switch, and the grouping control (it orders the タイムライン only: the
+/// list has no groups, and 統計 and マップ do not read it).
+fn analysis_bar(tree: &mut UiTree, body: WidgetId, view: &View, reg: &mut Registry) {
+    let bar = tree.insert(
+        Some(body),
+        Container::new(Style {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::CENTER,
+            gap: gap(10.0),
+            flex_shrink: 0.0,
+            ..Default::default()
+        }),
     );
-    let selected = Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0);
-    let tab_control = tree.insert(
-        Some(line),
-        SegmentedControl::new(Tab::ALL.map(Tab::title), SegmentMode::SelectOne)
-            .with_selected(&[selected])
-            .control_size(ControlSize::Small),
+    reg.back_button = Some(tree.insert(
+        Some(bar),
+        Button::new("一覧へ戻る").control_size(ControlSize::Small),
+    ));
+    let tab = Tab::ANALYSIS
+        .iter()
+        .position(|t| *t == view.tab)
+        .unwrap_or(0);
+    reg.tab_control = Some(
+        tree.insert(
+            Some(bar),
+            SegmentedControl::new(Tab::ANALYSIS.map(Tab::title), SegmentMode::SelectOne)
+                .with_selected(&[tab])
+                .control_size(ControlSize::Small),
+        ),
     );
-    (notice, tab_control)
+    spacer(tree, bar);
+    caption(tree, bar, "グループ");
+    let grouping = Grouping::ALL
+        .iter()
+        .position(|g| *g == view.grouping)
+        .unwrap_or(0);
+    reg.grouping_control = Some(
+        tree.insert(
+            Some(bar),
+            SegmentedControl::new(Grouping::ALL.map(Grouping::title), SegmentMode::SelectOne)
+                .with_selected(&[grouping])
+                .control_size(ControlSize::Small),
+        ),
+    );
 }
 
 /// The body's layout: the window's width less the gutters, and less the
@@ -513,13 +567,10 @@ pub struct Dashboard {
     /// name it.
     #[cfg(test)]
     status: WidgetId,
-    grouping_control: WidgetId,
     /// The container the list is built in; a filter change refills it.
     body: WidgetId,
     /// The notice line at the foot of the window (`health::tick`).
     notice: WidgetId,
-    /// The tab switcher in the footer bar.
-    tab_control: WidgetId,
     /// The result file `view.result` shows, as read when 表示 was pressed:
     /// a rebuild shows it again without reading the file.
     preview: Option<(u64, PathBuf, drawer::Preview)>,
@@ -1187,9 +1238,9 @@ impl Dashboard {
             .background(Role::Background),
         );
         let registry = Registry::default();
-        let header = header::header(&mut tree, root, &feed, &view, &filter);
+        let header = header::header(&mut tree, root, &feed, &filter);
         let body = tree.insert(Some(root), Container::new(body_style(false)));
-        let (notice, tab_control) = notice_line(&mut tree, root, &feed, view.tab);
+        let notice = notice_line(&mut tree, root, &feed);
         if refocus {
             tree.set_focus(Some(header.filter_field));
         }
@@ -1200,11 +1251,9 @@ impl Dashboard {
             filter,
             #[cfg(test)]
             status: header.health.status,
-            grouping_control: header.grouping_control,
             header,
             body,
             notice,
-            tab_control,
             preview,
             drafts: drafts.text,
             send_caret: drafts.caret,
@@ -1258,6 +1307,9 @@ impl Dashboard {
         } else {
             "出力（行 / 間隔）"
         };
+        if view.tab != Tab::Operations {
+            analysis_bar(tree, body, &view, registry);
+        }
         match (nobody, view.tab) {
             (Some(link), _) => empty(tree, body, link),
             (None, Tab::Operations) => {
@@ -1659,6 +1711,12 @@ impl Dashboard {
         self.view = view;
         self.reselect(&old, Vanish::Neighbour);
         self.rebuilt(self.view, text);
+    }
+
+    /// Shows `tab` (分析, 一覧へ戻る).
+    fn show_tab(&mut self, tab: Tab, text: &mut TextStore) {
+        let view = View { tab, ..self.view };
+        self.change_view(view, text);
     }
 
     /// Shows the list of `scope`, from its top (keys 1–3, the switch).
@@ -2442,7 +2500,7 @@ impl Screen for Dashboard {
             // waiting for one, as keys 1–3 do (`act`). None of the
             // switches is in the drawer, which this relabels.
             self.disarm_close(text);
-            if message.source == self.grouping_control {
+            if self.registry.grouping_control == Some(message.source) {
                 let view = View {
                     grouping: Grouping::ALL[*index],
                     ..self.view
@@ -2454,9 +2512,9 @@ impl Screen for Dashboard {
                 self.set_scope(Scope::ALL[*index], text);
                 return;
             }
-            if message.source == self.tab_control {
+            if self.registry.tab_control == Some(message.source) {
                 let view = View {
-                    tab: Tab::ALL[*index],
+                    tab: Tab::ANALYSIS[*index],
                     ..self.view
                 };
                 self.change_view(view, text);
@@ -2548,6 +2606,10 @@ impl Dashboard {
             self.row_action(pane, action, text);
         } else if self.registry.clear_filter == Some(source) {
             self.clear_filter(text);
+        } else if self.registry.analysis_button == Some(source) {
+            self.show_tab(Tab::Analytics, text);
+        } else if self.registry.back_button == Some(source) {
+            self.show_tab(Tab::Operations, text);
         } else if let Some(pane) = button_pane(&self.registry.open_buttons, source) {
             self.open(pane);
             if self.view.selected != Some(pane) {

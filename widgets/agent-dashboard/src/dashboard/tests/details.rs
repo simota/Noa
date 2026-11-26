@@ -1136,6 +1136,43 @@ fn the_drawer_sections_come_in_order() {
     assert!(!outline.iter().any(|t| t == "結果なし"), "{outline:?}");
 }
 
+/// AC6 / AC9: a worker with no task says 作業内容未取得 under 依頼 inside
+/// 指示と画面ログ, never its label there; hidden until the group opens.
+#[test]
+fn an_empty_task_says_so_inside_the_instructions() {
+    let mut fleet = fleet::canned();
+    let worker = fleet.workers.iter_mut().find(|w| w.pane == 11).unwrap();
+    worker.task.clear();
+    worker.label = "x".to_owned();
+    let (mut dashboard, mut text) = live_of(fleet);
+    dashboard.set_detail(Some(11), &mut text);
+    dashboard.prepare(window(), &mut text);
+    let groups = dashboard.registry.disclosures.unwrap();
+    assert!(
+        !shows(&dashboard, "作業内容未取得"),
+        "shown while collapsed"
+    );
+
+    let pos = title_of(&dashboard, groups[0]);
+    click(&mut dashboard, &mut text, pos);
+    assert_eq!(dashboard.view.drawer_open, [true, false]);
+    let tree = &dashboard.tree;
+    let found: Vec<WidgetId> = shown_under(tree, drawer(&dashboard).unwrap())
+        .into_iter()
+        .filter(|id| text_of(tree, *id).as_deref() == Some("作業内容未取得"))
+        .collect();
+    assert_eq!(found.len(), 1, "作業内容未取得 shown once");
+    assert!(
+        tree.ancestors(found[0]).any(|a| a == groups[0]),
+        "作業内容未取得 is under 指示と画面ログ"
+    );
+    assert_eq!(
+        drawer_section(&dashboard, "依頼"),
+        ["作業内容未取得"],
+        "依頼 says only that"
+    );
+}
+
 /// AC9: both disclosures start collapsed, hiding their children; model,
 /// branch and cwd are under 実行情報 only, and shown once it is open.
 #[test]

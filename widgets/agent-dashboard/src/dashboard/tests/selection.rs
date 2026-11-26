@@ -284,12 +284,10 @@ fn a_selection_outside_the_list_that_leaves_says_so() {
             typed(&mut dashboard, &mut text, "branch:chore");
             key(&mut dashboard, &mut text, Key::Enter);
         }
-        let tabs = dashboard.tab_control;
-        let at = |tab: Tab| Tab::ALL.iter().position(|t| *t == tab).unwrap();
-        super::hardening::pick_segment(&mut dashboard, &mut text, tabs, at(Tab::Timeline));
+        super::tabs::show_tab(&mut dashboard, &mut text, Tab::Timeline);
         let pos = center(&dashboard.tree, lane(&dashboard, 17));
         click(&mut dashboard, &mut text, pos);
-        super::hardening::pick_segment(&mut dashboard, &mut text, tabs, at(Tab::Operations));
+        super::tabs::show_tab(&mut dashboard, &mut text, Tab::Operations);
         assert_eq!(dashboard.view.scope, Scope::Current, "{case}");
         assert!(!rows_of(&dashboard).contains(&17), "{case}: 17 is in 現在");
         assert_eq!(dashboard.view.selected, Some(17), "{case}");

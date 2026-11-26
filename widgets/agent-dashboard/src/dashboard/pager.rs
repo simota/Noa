@@ -485,7 +485,8 @@ pub(super) fn wheel(
         return false;
     };
     // The list must be what is drawn at `pos`: the hit is inside it, not in
-    // an overlay above it (the details drawer covers its right side).
+    // an overlay above it (the help). The details drawer lies beside the
+    // list, which narrows while it is open, so a wheel over it is not here.
     let Some(hit) = tree.hit_test(*pos) else {
         return false;
     };

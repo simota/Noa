@@ -214,12 +214,13 @@ fn a_full_rebuild_keeps_the_query_and_focus() {
     let (mut dashboard, mut text) = laid_out(Grouping::Orchestrator);
     slash(&mut dashboard, &mut text);
     typed(&mut dashboard, &mut text, "co");
-    let control = dashboard.grouping_control;
+    // The scope switch's last segment rebuilds the whole screen.
+    let control = dashboard.registry.scope_control.unwrap();
     let origin = dashboard.tree.window_origin(control).unwrap();
     let size = dashboard.tree.layout(control).unwrap().rect;
     let pos = Point::new(origin.x + size.width - 12.0, origin.y + size.height / 2.0);
     click(&mut dashboard, &mut text, pos);
-    assert_eq!(dashboard.view.grouping, Grouping::Flat);
+    assert_eq!(dashboard.view.scope, Scope::Ended);
     let new = dashboard.header.filter_field;
     assert_eq!(field(&dashboard).text(), "co");
     assert_eq!(dashboard.tree.focused(), Some(new));

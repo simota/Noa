@@ -51,6 +51,11 @@ jobs:
       - name: Verify
         run: scripts/verify.sh --full
 
+      - name: TEMP print verify summary
+        if: always()
+        shell: bash
+        run: grep -H -E "Finished|Running|test result" .verify/*.log | sed 's/\x1b\[[0-9;]*m//g' || true
+
       - name: Keep verify output
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -91,6 +96,11 @@ jobs:
 
       - name: Verify
         run: scripts/verify.sh --full
+
+      - name: TEMP print verify summary
+        if: always()
+        shell: bash
+        run: grep -H -E "Finished|Running|test result" .verify/*.log | sed 's/\x1b\[[0-9;]*m//g' || true
 
       - name: Keep verify output
         if: always()

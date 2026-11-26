@@ -9,6 +9,7 @@
 mod auto;
 mod chat;
 mod composer;
+mod controls;
 mod debate;
 mod map;
 mod minutes;
@@ -27,8 +28,8 @@ use noa_gpui_core::style::{
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Badge, Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SelectionChanged,
-    SplitPane, SplitView, StatusBar, Tag, TagStyle, Toast, Tone,
+    Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SelectionChanged, SplitPane,
+    SplitView, StatusBar, Tag, TagStyle, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
@@ -111,6 +112,10 @@ pub enum Action {
     Extend(RoundNo),
     /// Close every participant's pane of the ended discussion in Noa.
     ClosePanes,
+    /// Show or hide result tools and less frequent session controls.
+    ToggleTools,
+    /// Reveal why a timeline post cannot proceed.
+    ShowTimelineDetails,
 }
 
 /// The round counts the "+N ラウンド" buttons offer.
@@ -159,6 +164,18 @@ enum Source {
     Live(Channel),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusArea {
+    Start,
+    Issues,
+    Center,
+    Minutes,
+    Composer,
+    Tools,
+    StatusLeading,
+    StatusTrailing,
+}
+
 pub struct Discussion {
     tree: UiTree,
     source: Source,
@@ -193,6 +210,8 @@ pub struct Discussion {
     center_host: WidgetId,
     minutes_host: WidgetId,
     composer: composer::Parts,
+    tools_host: WidgetId,
+    tools_open: bool,
     status_leading: WidgetId,
     status_trailing: WidgetId,
 
@@ -306,6 +325,13 @@ impl Discussion {
         let composer = composer::insert(&mut tree, center_col);
         let minutes_host = tree.insert(Some(split), pane_column(Role::Surface));
 
+        let tools_host = tree.insert(
+            Some(root),
+            Container::column()
+                .gap(8.0)
+                .padding(12.0)
+                .background(Role::Surface),
+        );
         let status = StatusBar::insert(&mut tree, root);
         let installed = match source {
             Source::Live(_) => None,
@@ -335,6 +361,8 @@ impl Discussion {
             center_host,
             minutes_host,
             composer,
+            tools_host,
+            tools_open: false,
             status_leading: status.leading,
             status_trailing: status.trailing,
             actions: Vec::new(),
@@ -375,6 +403,7 @@ impl Discussion {
 
     /// Rebuilds every pane from the session and the view state.
     fn rebuild(&mut self, text: &mut TextStore) {
+        let focused = self.focused_action();
         self.built = Some((self.session_key(), self.link.clone()));
         self.actions.clear();
         // A filter or a debate whose issue is gone falls back.
@@ -392,8 +421,10 @@ impl Discussion {
         let started = self.session.is_some();
         self.tree.set_hidden(self.start.root, started);
         self.tree.set_hidden(self.meeting, !started);
-        self.tree
-            .set_hidden(self.composer.root, !started || self.read_only());
+        self.tree.set_hidden(
+            self.composer.root,
+            self.read_only() || self.session.as_ref().is_none_or(|session| session.closed),
+        );
         if started {
             self.rebuild_tree(text);
             self.rebuild_center(text);
@@ -412,9 +443,62 @@ impl Discussion {
                 text,
             );
         }
+        self.rebuild_tools(text);
         self.rebuild_status(text);
         if self.read_only() {
             self.strip_controls();
+        }
+        if self.tree.focused().is_none()
+            && let Some((area, action, nth)) = focused
+        {
+            self.restore_focus(area, &action, nth);
+        }
+    }
+
+    fn focus_area(&self, id: WidgetId) -> Option<FocusArea> {
+        let areas = [
+            (self.start.root, FocusArea::Start),
+            (self.tree_host, FocusArea::Issues),
+            (self.center_host, FocusArea::Center),
+            (self.minutes_host, FocusArea::Minutes),
+            (self.composer.root, FocusArea::Composer),
+            (self.tools_host, FocusArea::Tools),
+            (self.status_leading, FocusArea::StatusLeading),
+            (self.status_trailing, FocusArea::StatusTrailing),
+        ];
+        let mut ancestor = Some(id);
+        while let Some(id) = ancestor {
+            if let Some((_, area)) = areas.iter().find(|(root, _)| *root == id) {
+                return Some(*area);
+            }
+            ancestor = self.tree.parent(id);
+        }
+        None
+    }
+
+    /// An issue can be linked repeatedly in several panes. Updates must
+    /// keep focus on the same occurrence in the same pane, even when a
+    /// message adds another matching link before the minutes in tree order.
+    fn focused_action(&self) -> Option<(FocusArea, Action, usize)> {
+        let focused = self.tree.focused()?;
+        let area = self.focus_area(focused)?;
+        let at = self.actions.iter().position(|(id, _)| *id == focused)?;
+        let action = self.actions[at].1.clone();
+        let nth = self.actions[..at]
+            .iter()
+            .filter(|(id, candidate)| *candidate == action && self.focus_area(*id) == Some(area))
+            .count();
+        Some((area, action, nth))
+    }
+
+    fn restore_focus(&mut self, area: FocusArea, action: &Action, nth: usize) {
+        let mut candidates = self
+            .actions
+            .iter()
+            .filter(|(id, candidate)| candidate == action && self.focus_area(*id) == Some(area));
+        let first = candidates.clone().next().map(|(id, _)| *id);
+        if let Some(id) = candidates.nth(nth).map(|(id, _)| *id).or(first) {
+            self.tree.set_focus(Some(id));
         }
     }
 
@@ -514,7 +598,7 @@ impl Discussion {
                         Some(tabs),
                         Button::new(label)
                             .control_size(ControlSize::Small)
-                            .default_button(current),
+                            .selected(current),
                     );
                     self.actions.push((button, action));
                 }
@@ -558,14 +642,10 @@ impl Discussion {
         let Some(session) = &self.session else {
             return;
         };
-        let read_only = self.read_only();
-        let kinds = self.available_kinds();
         minutes::insert(
             &mut self.tree,
             self.minutes_host,
             session,
-            !read_only,
-            &kinds,
             &mut self.actions,
         );
     }
@@ -575,190 +655,15 @@ impl Discussion {
             return;
         };
         composer::sync(&mut self.tree, &mut self.composer, session, text);
-        self.actions.push((self.composer.send, Action::Send));
-    }
-
-    fn rebuild_status(&mut self, text: &mut TextStore) {
-        clear_children(&mut self.tree, self.status_leading, text);
-        clear_children(&mut self.tree, self.status_trailing, text);
-        let (badge, tone) = match (&self.source, &self.link) {
-            (Source::Demo, _) => ("DEMO", Tone::Accent),
-            (_, Link::Live) => ("LIVE", Tone::Success),
-            (_, Link::Connecting) => ("接続中", Tone::Warning),
-            (_, Link::Down(_)) => ("オフライン", Tone::Critical),
-            (_, Link::Stored(_)) => ("記録", Tone::Neutral),
-        };
-        self.tree
-            .insert(Some(self.status_leading), Badge::text(badge).tone(tone));
-        if let Link::Down(why) = &self.link {
-            // One line in the status bar: a long reason is cut, not spilled.
-            self.tree.insert(
-                Some(self.status_leading),
-                Label::new(why.clone())
-                    .font_size(11.0)
-                    .color(Role::Muted)
-                    .truncation(noa_gpui_core::widgets::Truncation::Tail),
-            );
-        }
-        let Some(session) = &self.session else {
-            return;
-        };
-        if let Some(status) = &self.timeline_state {
-            use crate::live::timeline::Status;
-            use noa_ipc::timeline_outbox::PublishState;
-            match status {
-                Status::Waiting { why } => {
-                    caption(
-                        &mut self.tree,
-                        self.status_leading,
-                        "タイムライン: 投稿待ち",
-                    );
-                    caption(&mut self.tree, self.status_leading, why.clone());
-                }
-                Status::Publish(state) => {
-                    let label = crate::live::timeline::label(state);
-                    match state {
-                        PublishState::Failed { message, .. } => {
-                            let button = self.tree.insert(
-                                Some(self.status_leading),
-                                Button::new(label)
-                                    .tooltip(message.clone())
-                                    .control_size(ControlSize::Small),
-                            );
-                            self.actions.push((button, Action::RetryTimeline));
-                        }
-                        PublishState::Published { post_id, .. } => {
-                            caption(
-                                &mut self.tree,
-                                self.status_leading,
-                                format!("{label} ({post_id})"),
-                            );
-                        }
-                        PublishState::Pending => {
-                            caption(&mut self.tree, self.status_leading, label);
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(round) = session.current_round() {
-            caption(
-                &mut self.tree,
-                self.status_leading,
-                format!("第 {} ラウンド · {}", round.no, phase_label(round.phase)),
-            );
-        }
-        let waits = session.waits_to_continue();
-        if waits {
-            self.tree.insert(
-                Some(self.status_leading),
-                Badge::text("一時停止中").tone(Tone::Warning),
-            );
-        }
-        if !session.closed && !self.read_only() {
-            let hold = self.tree.insert(
-                Some(self.status_trailing),
-                Button::new(if session.hold {
-                    "ラウンド後に停止: オン"
-                } else {
-                    "ラウンド後に停止: オフ"
-                })
-                .control_size(ControlSize::Small)
-                .tooltip("オンにすると、司会の要約のあと次のラウンドを始める前に止まります"),
-            );
-            self.actions.push((hold, Action::SetHold(!session.hold)));
-            if waits {
-                let go = self.tree.insert(
-                    Some(self.status_trailing),
-                    Button::new("次のラウンドへ")
-                        .default_button(true)
-                        .control_size(ControlSize::Small),
-                );
-                self.actions.push((go, Action::Continue));
-            }
-        }
-        // A stored discussion that ran all its rounds is resumed to go on.
-        if session.extendable().is_ok()
-            && (!self.read_only() || (session.closed && self.navigates()))
-        {
-            if let Some(max) = session.max_rounds {
-                caption(
-                    &mut self.tree,
-                    self.status_trailing,
-                    format!("上限 {max} ラウンド"),
-                );
-            }
-            for by in EXTEND_BY {
-                let more = self.tree.insert(
-                    Some(self.status_trailing),
-                    Button::new(format!("+{by}"))
-                        .control_size(ControlSize::Small)
-                        .tooltip(if self.read_only() {
-                            "再開してラウンドを追加します（エージェントが起動します）"
-                        } else {
-                            "ラウンド数の上限を増やします。終了していれば議論を続けます"
-                        }),
-                );
-                self.tree
-                    .set_accessible_label(more, format!("ラウンドを {by} 追加"));
-                self.actions.push((more, Action::Extend(by)));
-            }
-        }
-        if session.closed {
-            self.tree.insert(
-                Some(self.status_leading),
-                Badge::text("終了").tone(Tone::Neutral),
-            );
-            if !self.read_only() {
-                let close = self.tree.insert(
-                    Some(self.status_trailing),
-                    Button::new("ペインをすべて閉じる")
-                        .control_size(ControlSize::Small)
-                        .tooltip("司会とパネリストのペインを Noa でまとめて閉じます"),
-                );
-                self.actions.push((close, Action::ClosePanes));
-            }
-        } else if !self.read_only() {
-            let end = self.tree.insert(
-                Some(self.status_trailing),
-                Button::new("議論を終える").control_size(ControlSize::Small),
-            );
-            self.actions.push((end, Action::Close));
-        }
-        if self.read_only() {
-            caption(
-                &mut self.tree,
-                self.status_leading,
-                "読み取りのみ（エージェントは動いていません）",
-            );
-            if let (false, Link::Stored(dir), true) = (session.closed, &self.link, self.navigates())
-            {
-                let resume = self.tree.insert(
-                    Some(self.status_trailing),
-                    Button::new("再開").control_size(ControlSize::Small),
-                );
-                self.actions.push((resume, Action::Resume(dir.clone())));
-            }
-        }
-        if self.navigates() {
-            let new = self.tree.insert(
-                Some(self.status_trailing),
-                Button::new("新しい議論").control_size(ControlSize::Small),
-            );
-            self.tree
-                .set_accessible_label(new, "この議論を離れて開始画面に戻る");
-            self.actions.push((new, Action::NewDiscussion));
-        }
-        caption(
+        composer::set_send_default(
             &mut self.tree,
-            self.status_trailing,
-            format!(
-                "論点 {} · 発言 {} · 討論 {}",
-                session.issues.issues.len(),
-                session.messages.len(),
-                session.debates.len()
-            ),
+            &mut self.composer,
+            !session.waits_to_continue() && !session.closed,
+            text,
         );
+        if !session.closed {
+            self.actions.push((self.composer.send, Action::Send));
+        }
     }
 
     fn toast(&mut self, message: impl Into<String>) {
@@ -846,6 +751,7 @@ impl Discussion {
     fn switched(&mut self, to_start: bool) {
         self.auto.reset();
         self.filter = None;
+        self.tools_open = false;
         self.center = Center::Chat;
         self.shown_debates.clear();
         self.pending_intervention = None;
@@ -876,6 +782,14 @@ impl Discussion {
 
     fn run(&mut self, action: Action, text: &mut TextStore) {
         match action {
+            Action::ToggleTools => {
+                self.tools_open = !self.tools_open;
+                self.rebuild(text);
+            }
+            Action::ShowTimelineDetails => {
+                self.tools_open = true;
+                self.rebuild(text);
+            }
             Action::Filter(issue) => {
                 self.filter = (self.filter.as_ref() != Some(&issue)).then_some(issue);
                 self.center = Center::Chat;
@@ -1051,6 +965,9 @@ impl Discussion {
         let Some(session) = &self.session else {
             return;
         };
+        if session.closed || self.read_only() {
+            return;
+        }
         let body = composer::text(&self.tree, &self.composer);
         if body.is_empty() {
             self.toast("介入の本文が空です");
@@ -1449,14 +1366,14 @@ pub(crate) fn heading(tree: &mut UiTree, parent: WidgetId, title: &str) -> Widge
             ..Default::default()
         }),
     );
-    tree.insert(Some(row), Label::new(title).font_size(13.0).weight(600));
+    tree.insert(Some(row), Label::new(title).font_size(14.0).weight(600));
     row
 }
 
 pub(crate) fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) -> WidgetId {
     tree.insert(
         Some(parent),
-        Label::new(text).font_size(11.0).color(Role::Muted),
+        Label::new(text).font_size(12.0).color(Role::Muted),
     )
 }
 
@@ -1466,7 +1383,7 @@ pub(crate) fn note(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>)
     tree.insert(
         Some(parent),
         Label::new(text)
-            .font_size(11.0)
+            .font_size(12.0)
             .color(Role::Muted)
             .wrap(true),
     )
@@ -1511,14 +1428,14 @@ mod timeline_header_tests {
                 Status::Waiting {
                     why: NOT_REGISTERED.into(),
                 },
-                NOT_REGISTERED,
+                "タイムライン: 要確認",
             ),
             (
                 Status::Publish(PublishState::Published {
                     post_id: "po-001".into(),
                     seq: Seq(7),
                 }),
-                "タイムライン: 投稿済み #7 (po-001)",
+                "タイムライン: 投稿済み #7",
             ),
             (
                 Status::Publish(PublishState::Failed {
@@ -1539,6 +1456,11 @@ mod timeline_header_tests {
                         .tree
                         .get::<Label>(w)
                         .is_some_and(|l| l.text() == expected)
+                        || screen
+                            .tree
+                            .get::<noa_gpui_core::widgets::Badge>(w)
+                            .and_then(noa_gpui_core::widgets::Badge::label)
+                            .is_some_and(|label| label == expected)
                         || screen.tree.get::<Button>(w).is_some_and(|b| {
                             b.label() == expected
                                 && screen.actions.contains(&(w, Action::RetryTimeline))

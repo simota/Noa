@@ -14,12 +14,14 @@ use discussion::model::types::{MODERATOR_ID, PartId, Session};
 use super::{caption, clear_children, fill, gap, note, part_name};
 
 pub(super) struct Parts {
-    /// The whole composer, hidden while a stored discussion is shown.
+    /// Hidden for a stored or ended discussion; its draft survives an extension.
     pub(super) root: WidgetId,
     recipients_host: WidgetId,
     pub(super) recipients: WidgetId,
     pub(super) area: WidgetId,
     pub(super) send: WidgetId,
+    row: WidgetId,
+    send_is_default: bool,
     /// The session the recipient menu lists the panel of.
     built_for: Option<String>,
 }
@@ -78,16 +80,11 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(field),
         TextArea::new("議論に介入する（例: コスト面の制約も考慮してください）").min_lines(2),
     );
-    let send = tree.insert(
-        Some(row),
-        Button::new("送信")
-            .default_button(true)
-            .control_size(ControlSize::Small),
-    );
+    let send = tree.insert(Some(row), send_button(true));
     note(
         tree,
         root,
-        "介入はログに残り、次のラウンドのブリーフで全員に届きます。宛先は誰への発言かを示します",
+        "補足はログに残り、次のラウンドで全員に共有されます",
     );
     Parts {
         root,
@@ -95,7 +92,35 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         recipients,
         area,
         send,
+        row,
+        send_is_default: true,
         built_for: None,
+    }
+}
+
+fn send_button(default: bool) -> Button {
+    Button::new("送信")
+        .default_button(default)
+        .control_size(ControlSize::Small)
+        .tooltip("宛先は誰への発言かを示します。内容は次のラウンドのブリーフで全員に届きます")
+}
+
+/// Return advances a held discussion; otherwise it sends the draft.
+pub(super) fn set_send_default(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    default: bool,
+    text: &mut TextStore,
+) {
+    if parts.send_is_default == default {
+        return;
+    }
+    let focused = tree.focused() == Some(parts.send);
+    tree.remove(parts.send, text);
+    parts.send = tree.insert(Some(parts.row), send_button(default));
+    parts.send_is_default = default;
+    if focused {
+        tree.set_focus(Some(parts.send));
     }
 }
 

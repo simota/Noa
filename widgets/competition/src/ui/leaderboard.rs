@@ -21,6 +21,7 @@ pub(super) fn insert(
     selected_round: Option<RoundNo>,
     filter_part: Option<&PartId>,
     can_focus: bool,
+    expanded: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let focus_button = |tree: &mut UiTree, row: WidgetId, actions: &mut Vec<_>, part: &PartId| {
@@ -32,7 +33,19 @@ pub(super) fn insert(
             actions.push((btn, Action::FocusPane(part.clone())));
         }
     };
-    heading(tree, host, "リーダーボード");
+    let header = heading(tree, host, "順位・参加者");
+    spacer(tree, header);
+    let details = tree.insert(
+        Some(header),
+        Button::new(if expanded {
+            "詳細を閉じる"
+        } else {
+            "スコアの詳細"
+        })
+        .control_size(ControlSize::Small)
+        .selected(expanded),
+    );
+    actions.push((details, Action::ToggleScoreDetails));
     let list = scroll_column(tree, host, 10.0);
     keep_scroll(tree, list, session, "leaderboard");
 
@@ -79,7 +92,7 @@ pub(super) fn insert(
         };
         tree.insert(
             Some(top),
-            Label::new(rank_label).font_size(13.0).weight(600),
+            Label::new(rank_label).font_size(14.0).weight(600),
         );
         spacer(tree, top);
         let score_hist = session.score_history(part);
@@ -89,14 +102,14 @@ pub(super) fn insert(
             caption(tree, card, setup);
         }
         if session.is_panel() {
-            panel_scores(tree, top, card, session, part, &score_hist);
+            panel_scores(tree, top, card, session, part, &score_hist, expanded);
         } else if let Some(&(_, score)) = score_hist.last() {
-            tag(tree, top, format!("{score} pt"), Tone::Accent);
+            tag(tree, top, format!("{score} pt"), Tone::Neutral);
         } else {
             tag(tree, top, "未採点", Tone::Neutral);
         }
 
-        if !session.is_panel() && !score_hist.is_empty() {
+        if expanded && !session.is_panel() && !score_hist.is_empty() {
             let mut line = String::with_capacity(score_hist.len() * 10);
             for (i, (r, s)) in score_hist.iter().enumerate() {
                 if i > 0 {
@@ -113,7 +126,7 @@ pub(super) fn insert(
         if brief.is_some() || can_focus {
             let row = tree.insert(
                 Some(card),
-                Container::row().align_items(AlignItems::CENTER).gap(6.0),
+                Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
             );
             if let Some((no, brief)) = brief {
                 let (status_text, tone) = super::progress::delivery(&brief.receipt);
@@ -124,7 +137,8 @@ pub(super) fn insert(
             let btn = tree.insert(
                 Some(row),
                 Button::new(if is_selected { "解除" } else { "絞込" })
-                    .control_size(ControlSize::Small),
+                    .control_size(ControlSize::Small)
+                    .selected(is_selected),
             );
             let action = if is_selected {
                 Action::ClearPartFilter
@@ -187,7 +201,7 @@ pub(super) fn insert(
             Some(list),
             Button::new(label)
                 .control_size(ControlSize::Small)
-                .default_button(is_active),
+                .selected(is_active),
         );
         actions.push((btn, Action::SelectRound(round.no)));
     }
@@ -203,6 +217,7 @@ fn panel_scores(
     session: &Session,
     part: &PartId,
     score_hist: &[(RoundNo, u8)],
+    expanded: bool,
 ) {
     let label = |no: RoundNo| {
         session
@@ -213,12 +228,14 @@ fn panel_scores(
         tag(tree, top, "未採点", Tone::Neutral);
         return;
     };
-    tag(tree, top, format!("{} pt", label(last)), Tone::Accent);
-    let hist: Vec<String> = score_hist
-        .iter()
-        .map(|(no, _)| format!("R{no}:{}", label(*no)))
-        .collect();
-    super::note(tree, card, hist.join(" → "));
+    tag(tree, top, format!("{} pt", label(last)), Tone::Neutral);
+    if expanded {
+        let hist: Vec<String> = score_hist
+            .iter()
+            .map(|(no, _)| format!("R{no}:{}", label(*no)))
+            .collect();
+        super::note(tree, card, hist.join(" → "));
+    }
     if let Some(panel) = session.panel_scores(last, part) {
         if panel.spread() >= SPREAD_WARN {
             // The spread as its own tag: a whole line would not fit.
@@ -226,9 +243,11 @@ fn panel_scores(
                 Some(card),
                 Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
             );
-            super::note(tree, row, judge_scores(&panel));
+            if expanded {
+                super::note(tree, row, judge_scores(&panel));
+            }
             tag(tree, row, format!("⚠ 差 {}", panel.spread()), Tone::Warning);
-        } else {
+        } else if expanded {
             super::note(tree, card, judge_line(&panel));
         }
     }
@@ -300,10 +319,13 @@ fn judge_card(
         Some(setup) => format!("{name} · {} ({setup})", judge.kind.command()),
         None => format!("{name} · {}", judge.kind.command()),
     };
-    tree.insert(Some(card), Label::new(label).font_size(12.5).weight(600));
+    tree.insert(
+        Some(card),
+        Label::new(label).font_size(13.0).weight(600).wrap(true),
+    );
     let row = tree.insert(
         Some(card),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
     if let Some(cur) = session.current_round()
         && let Some(brief) = judge_status_brief(session, cur, judge)

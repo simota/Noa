@@ -4,7 +4,7 @@
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
-use noa_gpui_core::widgets::{Container, ControlSize, Label, ProgressBar, Tone};
+use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, ProgressBar, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use review::model::types::{Brief, Millis, Phase, Receipt, Round, Session};
@@ -86,13 +86,19 @@ fn rounds_done(session: &Session) -> (u32, Option<u32>) {
     (done, Some(session.max_rounds))
 }
 
-pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: Millis) {
+pub(super) fn insert(
+    tree: &mut UiTree,
+    host: WidgetId,
+    session: &Session,
+    now: Millis,
+    expanded: bool,
+) -> WidgetId {
     let strip = tree.insert(
         Some(host),
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             flex_shrink: 0.0,
-            gap: gap(6.0),
+            gap: gap(8.0),
             padding: LayoutRect {
                 left: length(12.0),
                 right: length(12.0),
@@ -107,95 +113,154 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
         })
         .background(Role::SurfaceAlt),
     );
-
-    // Wraps, so the steps move under the round label in a narrow pane
-    // instead of running past its edge.
     let top = tree.insert(
         Some(strip),
         Container::wrapping_row(8.0, 6.0).align_items(AlignItems::CENTER),
     );
     let (done, max) = rounds_done(session);
     let current = session.current_round();
-    let round_label = match (current, max) {
-        (Some(r), _) if session.closed && r.outcome.is_none() => {
-            format!("終了 · R{} で中断", r.no)
-        }
+    let round_label = match current {
+        Some(r) if session.closed && r.outcome.is_none() => format!("終了 · R{} で中断", r.no),
         _ if session.closed => format!("終了 · 全{}ラウンド", session.rounds.len()),
-        (Some(r), Some(max)) => format!("ラウンド {} / {max} · {}", r.no, r.kind.label()),
-        (Some(r), None) => format!("ラウンド {}（上限なし）", r.no),
-        (None, _) => "開始準備中".to_owned(),
+        Some(r) => format!("ラウンド {} / {}", r.no, session.max_rounds),
+        None => "開始準備中".to_owned(),
     };
     tree.insert(
         Some(top),
         Label::new(round_label).font_size(13.0).weight(600),
     );
+    if let Some(round) = current.filter(|_| !session.closed) {
+        let (phase, tone) = if session.waits_to_continue() {
+            ("一時停止中", Tone::Warning)
+        } else {
+            match round.phase {
+                Phase::Briefing => ("配信中", Tone::Neutral),
+                Phase::Reviewing => ("レビュー中", Tone::Accent),
+                Phase::Consolidating => ("取りまとめ中", Tone::Accent),
+                Phase::Closed => ("ラウンド完了", Tone::Success),
+            }
+        };
+        tag(tree, top, phase, tone);
+        let submitted = round
+            .briefs
+            .iter()
+            .filter(|b| b.receipt.replied.is_some())
+            .count();
+        caption(
+            tree,
+            top,
+            format!("提出 {submitted}/{}", round.briefs.len()),
+        );
+    }
+    spacer(tree, top);
+    let toggle = tree.insert(
+        Some(top),
+        Button::new(if expanded {
+            "進捗を閉じる"
+        } else {
+            "進捗の詳細"
+        })
+        .control_size(ControlSize::Small)
+        .selected(expanded)
+        .tooltip("ラウンドの段階と参加者ごとの進捗を表示します"),
+    );
+    tree.set_accessible_label(
+        toggle,
+        if expanded {
+            "進捗の詳細を閉じる"
+        } else {
+            "進捗の詳細を表示"
+        },
+    );
+
+    // Failures and rejected replies need attention even when details are closed.
+    if let Some(round) = current {
+        for brief in round.briefs.iter().chain(&round.lead_brief) {
+            if let Some(why) = &brief.receipt.failed {
+                attention(
+                    tree,
+                    strip,
+                    "失敗",
+                    &format!("{}: {why}", brief.to),
+                    Tone::Critical,
+                );
+            } else if let Some(why) = brief
+                .receipt
+                .rejected
+                .as_ref()
+                .filter(|_| brief.receipt.replied.is_none())
+            {
+                attention(
+                    tree,
+                    strip,
+                    "修正依頼中",
+                    &format!("{}: {why}", brief.to),
+                    Tone::Warning,
+                );
+            }
+        }
+    }
+    if !expanded {
+        return toggle;
+    }
+
+    let detail = tree.insert(Some(strip), Container::column().gap(8.0));
+    let rounds = tree.insert(
+        Some(detail),
+        Container::wrapping_row(8.0, 6.0).align_items(AlignItems::CENTER),
+    );
+    if let Some(round) = current {
+        caption(tree, rounds, round.kind.label());
+    }
     if let Some(max) = max.filter(|m| *m > 0) {
         let value = done.min(max);
         tree.insert(
-            Some(top),
+            Some(rounds),
             ProgressBar::new(BAR_WIDTH)
                 .value(f64::from(value), f64::from(max))
                 .control_size(ControlSize::Small),
         );
-        caption(tree, top, format!("{value}/{max} 完了"));
+        caption(tree, rounds, format!("{value}/{max} ラウンド完了"));
     }
-    spacer(tree, top);
-    if let Some(round) = current {
-        steps(tree, top, round, session.closed);
-    }
-
-    let Some(round) = current.filter(|_| !session.closed) else {
-        return;
+    let Some(round) = current else {
+        return toggle;
     };
-    let mid = tree.insert(
-        Some(strip),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+    let phases = tree.insert(
+        Some(detail),
+        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
-    let submitted = round
-        .briefs
-        .iter()
-        .filter(|b| b.receipt.replied.is_some())
-        .count();
-    let total = round.briefs.len();
-    caption(tree, mid, format!("R{} 返答", round.no));
-    if total > 0 {
-        tree.insert(
-            Some(mid),
-            ProgressBar::new(BAR_WIDTH)
-                .value(submitted as f64, total as f64)
-                .control_size(ControlSize::Small),
-        );
-    }
-    caption(tree, mid, format!("{submitted}/{total}"));
-
-    let parts = tree.insert(Some(strip), Container::wrapping_row(6.0, 6.0));
+    steps(tree, phases, round, session.closed);
+    let parts = tree.insert(Some(detail), Container::wrapping_row(6.0, 6.0));
     for brief in &round.briefs {
-        part_chip(tree, parts, brief.to.as_str(), Some(brief), now);
-    }
-    match &round.lead_brief {
-        Some(brief) => part_chip(tree, parts, "リード", Some(brief), now),
-        None => part_chip(tree, parts, "リード", None, now),
-    }
-    if session.waits_to_continue() {
-        let row = tree.insert(
-            Some(strip),
-            Container::row().align_items(AlignItems::CENTER),
+        part_chip(
+            tree,
+            parts,
+            brief.to.as_str(),
+            Some(brief),
+            now,
+            session.closed,
         );
-        tag(tree, row, "停止中（次のラウンドへ で再開）", Tone::Warning);
     }
+    if round.lead_brief.is_some() || !session.closed {
+        part_chip(
+            tree,
+            parts,
+            "リード",
+            round.lead_brief.as_ref(),
+            now,
+            session.closed,
+        );
+    }
+    toggle
+}
 
-    for brief in round.briefs.iter().chain(&round.lead_brief) {
-        if let Some(why) = &brief.receipt.failed {
-            caption(tree, strip, format!("✗ {}: {why}", brief.to));
-        } else if let Some(why) = brief
-            .receipt
-            .rejected
-            .as_ref()
-            .filter(|_| brief.receipt.replied.is_none())
-        {
-            caption(tree, strip, format!("↻ {}: 修正依頼中 — {why}", brief.to));
-        }
-    }
+fn attention(tree: &mut UiTree, parent: WidgetId, label: &str, message: &str, tone: Tone) {
+    let row = tree.insert(
+        Some(parent),
+        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+    );
+    tag(tree, row, label, tone);
+    tree.insert(Some(row), Label::new(message).font_size(12.5).wrap(true));
 }
 
 fn steps(tree: &mut UiTree, parent: WidgetId, round: &Round, closed: bool) {
@@ -220,7 +285,14 @@ fn steps(tree: &mut UiTree, parent: WidgetId, round: &Round, closed: bool) {
     }
 }
 
-fn part_chip(tree: &mut UiTree, parent: WidgetId, name: &str, brief: Option<&Brief>, now: Millis) {
+fn part_chip(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    name: &str,
+    brief: Option<&Brief>,
+    now: Millis,
+    closed: bool,
+) {
     let chip = tree.insert(
         Some(parent),
         Container::row()
@@ -241,7 +313,11 @@ fn part_chip(tree: &mut UiTree, parent: WidgetId, name: &str, brief: Option<&Bri
     };
     let (label, tone) = delivery(&brief.receipt);
     tag(tree, chip, label, tone);
-    if let Some(time) = elapsed(&brief.receipt, now) {
+    // A reply fixes its duration. Unanswered work has no end timestamp,
+    // so reopening a closed review must not count time after it stopped.
+    if (!closed || brief.receipt.replied.is_some())
+        && let Some(time) = elapsed(&brief.receipt, now)
+    {
         caption(tree, chip, time);
     }
     if brief.receipt.retries > 0 {
@@ -301,5 +377,45 @@ mod tests {
         assert!(has_running(&session));
         session.rounds[last].briefs[0].receipt = receipt(Some(0), None, true);
         assert!(!has_running(&session));
+    }
+
+    #[test]
+    fn closed_progress_does_not_count_time_after_unanswered_work_stopped() {
+        let mut session = crate::demo::held();
+        let round = session.rounds.last_mut().unwrap();
+        round.phase = Phase::Reviewing;
+        round.outcome = None;
+        round.briefs[0].receipt = receipt(Some(0), None, false);
+        round.briefs[1].receipt = receipt(Some(0), Some(3 * 60_000), false);
+        session.closed = true;
+
+        let shown = |session: &Session, now| {
+            let mut tree = UiTree::new();
+            let host = tree.insert(None, Container::column());
+            insert(&mut tree, host, session, now, true);
+            let mut labels = Vec::new();
+            let mut stack = vec![host];
+            while let Some(id) = stack.pop() {
+                if let Some(label) = tree.get::<Label>(id) {
+                    labels.push(label.text().to_owned());
+                }
+                stack.extend(tree.children(id).iter().rev());
+            }
+            labels
+        };
+        let later = shown(&session, 24 * 60 * 60_000);
+        assert_eq!(shown(&session, 10 * 60_000), later);
+        assert!(
+            later.iter().any(|text| text == "3分"),
+            "completed durations remain available"
+        );
+        assert!(!later.iter().any(|text| text == "24時間0分"));
+
+        session.closed = false;
+        assert!(
+            shown(&session, 10 * 60_000)
+                .iter()
+                .any(|text| text == "10分")
+        );
     }
 }

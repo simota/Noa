@@ -191,14 +191,70 @@ pub(super) fn summary(
         tree.set_accessible_label(chip, format!("ファイル {path} の絞り込みを解除"));
         actions.push((chip, Action::FilterFile(None)));
     }
-    chip(
-        tree,
-        row,
-        "条件をすべて解除".into(),
-        false,
-        Action::ClearFilters,
-        actions,
-    );
+    if has_constraints(filters) {
+        chip(
+            tree,
+            row,
+            "条件をすべて解除".into(),
+            false,
+            Action::ClearFilters,
+            actions,
+        );
+    }
+}
+
+fn has_constraints(filters: &Filters) -> bool {
+    !filters.severities.is_empty()
+        || detail_count(filters) > 0
+        || filters.reviewer.is_some()
+        || filters.path.is_some()
+        || !filters.query.trim().is_empty()
+}
+
+fn detail_count(filters: &Filters) -> usize {
+    usize::from(!filters.lenses.is_empty())
+        + usize::from(!filters.statuses.is_empty())
+        + usize::from(!filters.agreements.is_empty())
+}
+
+fn detail_summary(session: &Session, filters: &Filters) -> String {
+    let mut labels = Vec::new();
+    if !filters.lenses.is_empty() {
+        labels.push(format!(
+            "観点: {}",
+            filters
+                .lenses
+                .iter()
+                .map(|id| session.category_label(id))
+                .collect::<Vec<_>>()
+                .join("・")
+        ));
+    }
+    if filters.statuses == Filters::default().statuses {
+        labels.push("状態: 対応中の指摘".to_owned());
+    } else if !filters.statuses.is_empty() {
+        labels.push(format!(
+            "状態: {}",
+            FindingStatus::ALL
+                .iter()
+                .filter(|s| filters.statuses.contains(&status_key(**s)))
+                .map(|s| s.label())
+                .collect::<Vec<_>>()
+                .join("・")
+        ));
+    }
+    if !filters.agreements.is_empty() {
+        labels.push(format!(
+            "合意度: {}",
+            Agreement::ALL
+                .iter()
+                .filter(|a| filters.agreements.contains(&agreement_key(**a)))
+                .map(|a| a.label())
+                .collect::<Vec<_>>()
+                .join("・")
+        ));
+    }
+    labels.join("  /  ")
 }
 
 pub(super) fn insert(
@@ -207,6 +263,7 @@ pub(super) fn insert(
     session: &Session,
     filters: &Filters,
     selected: Option<&str>,
+    expanded: bool,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     // The filters head the scrolled list, so a short pane gives its height
@@ -241,51 +298,79 @@ pub(super) fn insert(
             actions,
         );
     }
-    let row = filter_row(tree, bar, "観点");
-    let mut lenses: Vec<String> = session
-        .panel_lenses()
-        .iter()
-        .map(|l| l.id().to_owned())
-        .collect();
-    for f in &session.findings {
-        if !lenses.contains(&f.category) {
-            lenses.push(f.category.clone());
+    let controls = tree.insert(
+        Some(bar),
+        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+    );
+    let groups = detail_count(filters);
+    let label = if expanded {
+        "詳細条件を閉じる".to_owned()
+    } else if groups > 0 {
+        format!("詳細条件 · {groups} 適用")
+    } else {
+        "詳細条件".to_owned()
+    };
+    chip(
+        tree,
+        controls,
+        label,
+        expanded,
+        Action::ToggleFilterDetails,
+        actions,
+    );
+    if !expanded {
+        let summary = detail_summary(session, filters);
+        if !summary.is_empty() {
+            note(tree, bar, summary);
         }
     }
-    for id in lenses {
-        let on = filters.lenses.contains(&id);
-        chip(
-            tree,
-            row,
-            session.category_label(&id),
-            on,
-            Action::ToggleLens(id),
-            actions,
-        );
-    }
-    let row = filter_row(tree, bar, "状態");
-    for s in FindingStatus::ALL {
-        let n = only(&|f| f.statuses = [status_key(s)].into());
-        chip(
-            tree,
-            row,
-            format!("{} {n}", s.label()),
-            filters.statuses.contains(&status_key(s)),
-            Action::ToggleStatus(s),
-            actions,
-        );
-    }
-    let row = filter_row(tree, bar, "合意度");
-    for a in Agreement::ALL {
-        let n = only(&|f| f.agreements = [agreement_key(a)].into());
-        chip(
-            tree,
-            row,
-            format!("{} {n}", a.label()),
-            filters.agreements.contains(&agreement_key(a)),
-            Action::ToggleAgreement(a),
-            actions,
-        );
+    if expanded {
+        let row = filter_row(tree, bar, "観点");
+        let mut lenses: Vec<String> = session
+            .panel_lenses()
+            .iter()
+            .map(|l| l.id().to_owned())
+            .collect();
+        for f in &session.findings {
+            if !lenses.contains(&f.category) {
+                lenses.push(f.category.clone());
+            }
+        }
+        for id in lenses {
+            let on = filters.lenses.contains(&id);
+            chip(
+                tree,
+                row,
+                session.category_label(&id),
+                on,
+                Action::ToggleLens(id),
+                actions,
+            );
+        }
+        let row = filter_row(tree, bar, "状態");
+        for s in FindingStatus::ALL {
+            let n = only(&|f| f.statuses = [status_key(s)].into());
+            chip(
+                tree,
+                row,
+                format!("{} {n}", s.label()),
+                filters.statuses.contains(&status_key(s)),
+                Action::ToggleStatus(s),
+                actions,
+            );
+        }
+        let row = filter_row(tree, bar, "合意度");
+        for a in Agreement::ALL {
+            let n = only(&|f| f.agreements = [agreement_key(a)].into());
+            chip(
+                tree,
+                row,
+                format!("{} {n}", a.label()),
+                filters.agreements.contains(&agreement_key(a)),
+                Action::ToggleAgreement(a),
+                actions,
+            );
+        }
     }
 
     let shown = shown(session, filters);
@@ -350,28 +435,15 @@ pub(super) fn insert(
             Some(c),
             Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
         );
-        tree.insert(
-            Some(top),
-            Label::new(f.id.clone()).font_size(12.5).weight(700),
-        );
         tag(tree, top, f.severity.label(), severity_tone(f.severity));
-        tag(
-            tree,
-            top,
-            session.category_label(&f.category),
-            Tone::Neutral,
-        );
+        caption(tree, top, f.id.clone());
+        super::spacer(tree, top);
         tag(tree, top, f.status.label(), status_tone(f.status));
-        let tally = session.tally(f);
-        caption(
-            tree,
-            top,
-            format!("{} · {}", tally.label(), tally.agreement.label()),
-        );
         tree.insert(
             Some(c),
             Label::new(f.claim.clone())
-                .font_size(12.5)
+                .font_size(14.0)
+                .weight(500)
                 .wrap(true)
                 .max_lines(2)
                 .truncation(Truncation::Tail),
@@ -381,16 +453,41 @@ pub(super) fn insert(
             Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
         );
         match &f.location {
-            Some(loc) => caption(tree, bottom, loc.to_string()),
+            Some(loc) => {
+                let location = loc.to_string();
+                let label = tree.insert(
+                    Some(bottom),
+                    Label::new(short_path(&location))
+                        .font_size(12.0)
+                        .color(Role::Muted),
+                );
+                tree.set_accessible_label(label, location);
+            }
             None => caption(tree, bottom, "対象全体"),
         }
+        caption(tree, bottom, session.category_label(&f.category));
         if !f.in_target {
             tag(tree, bottom, "対象外", Tone::Warning);
         } else if f.in_diff == Some(false) {
             tag(tree, bottom, "差分外", Tone::Neutral);
         }
-        let origins: Vec<String> = f.origins().iter().map(|p| p.to_string()).collect();
-        caption(tree, bottom, format!("提起: {}", origins.join(", ")));
+        let tally = session.tally(f);
+        if tally.agreement == Agreement::Split {
+            tag(tree, bottom, tally.agreement.label(), Tone::Warning);
+        }
+        if is_selected {
+            let origins: Vec<String> = f.origins().iter().map(|p| p.to_string()).collect();
+            note(
+                tree,
+                c,
+                format!(
+                    "{} · {} · 提起: {}",
+                    tally.label(),
+                    tally.agreement.label(),
+                    origins.join(", ")
+                ),
+            );
+        }
     }
     unplaced(tree, list, session);
 }

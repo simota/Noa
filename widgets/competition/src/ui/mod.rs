@@ -11,6 +11,7 @@ mod progress;
 mod start;
 mod timeline;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command as OsCommand;
 use std::sync::Arc;
@@ -32,8 +33,7 @@ use noa_gpui_text::TextStore;
 
 use competition::model::export;
 use competition::model::types::{
-    AgentChoice, AgentKind, AgentSetup, MAX_PANEL, Millis, PartId, Phase, RoundKind, RoundNo,
-    Session,
+    AgentChoice, AgentKind, AgentSetup, MAX_PANEL, Millis, PartId, Phase, RoundNo, Session,
 };
 use competition::store;
 
@@ -59,6 +59,11 @@ pub enum Action {
     ShowCompare,
     ShowTimeline,
     ShowMap,
+    ToggleProgressDetails,
+    ToggleScoreDetails,
+    ToggleTools,
+    ToggleJudgeDetails(RoundNo),
+    ToggleEntryDetails(PartId),
     SelectRound(RoundNo),
     FilterPart(PartId),
     ClearPartFilter,
@@ -139,6 +144,11 @@ pub struct Competition {
     tab: CenterTab,
     selected_round: Option<RoundNo>,
     filter_part: Option<PartId>,
+    progress_expanded: bool,
+    scores_expanded: bool,
+    tools_expanded: bool,
+    judge_details: BTreeSet<RoundNo>,
+    entry_details: BTreeSet<PartId>,
     pending_intervention: Option<String>,
     file_dialogs: Vec<FileDialogRequest>,
     /// The session on screen was read from its log: no runner drives it,
@@ -174,6 +184,7 @@ pub struct Competition {
     progress_host: WidgetId,
     center_host: WidgetId,
     right_host: WidgetId,
+    tools_host: Option<WidgetId>,
     composer: composer::Parts,
     status_leading: WidgetId,
     status_trailing: WidgetId,
@@ -341,6 +352,11 @@ impl Competition {
             tab: CenterTab::Compare,
             selected_round: None,
             filter_part: None,
+            progress_expanded: false,
+            scores_expanded: false,
+            tools_expanded: false,
+            judge_details: BTreeSet::new(),
+            entry_details: BTreeSet::new(),
             pending_intervention: None,
             file_dialogs: Vec::new(),
             read_only: false,
@@ -360,6 +376,7 @@ impl Competition {
             progress_host,
             center_host,
             right_host,
+            tools_host: None,
             composer,
             status_leading: status.leading,
             status_trailing: status.trailing,
@@ -385,6 +402,11 @@ impl Competition {
 
     fn rebuild(&mut self, text: &mut TextStore) {
         self.built = Some(self.built_key());
+        let focused_action = self
+            .actions
+            .iter()
+            .find(|(id, _)| self.tree.focused() == Some(*id))
+            .map(|(_, action)| action.clone());
         self.actions.clear();
 
         let started = self.session.is_some();
@@ -419,6 +441,11 @@ impl Competition {
             );
         }
         self.rebuild_status(text);
+        if let Some(action) = focused_action
+            && let Some((id, _)) = self.actions.iter().find(|(_, next)| *next == action)
+        {
+            self.tree.set_focus(Some(*id));
+        }
     }
 
     /// Lists the past competitions under the store root (the demo's
@@ -466,6 +493,11 @@ impl Competition {
         self.tab = CenterTab::Compare;
         self.selected_round = None;
         self.filter_part = None;
+        self.progress_expanded = false;
+        self.scores_expanded = false;
+        self.tools_expanded = false;
+        self.judge_details.clear();
+        self.entry_details.clear();
         self.pending_intervention = None;
         // A draft written for this competition must not reach the next.
         composer::reset(&mut self.tree, &mut self.composer);
@@ -517,16 +549,40 @@ impl Competition {
             self.selected_round,
             self.filter_part.as_ref(),
             !self.read_only,
+            self.scores_expanded,
             &mut self.actions,
         );
     }
 
     fn rebuild_progress(&mut self, text: &mut TextStore) {
+        let was_focused = self.actions.iter().any(|(id, action)| {
+            *action == Action::ToggleProgressDetails && self.tree.focused() == Some(*id)
+        });
         clear_children(&mut self.tree, self.progress_host, text);
         let Some(session) = &self.session else {
             return;
         };
-        progress::insert(&mut self.tree, self.progress_host, session, system_now());
+        let toggle = progress::insert(
+            &mut self.tree,
+            self.progress_host,
+            session,
+            system_now(),
+            self.progress_expanded,
+        );
+        // Minute ticks rebuild only this strip. Replace the old control in
+        // place so its removed widget cannot remain in the action registry.
+        if let Some((id, _)) = self
+            .actions
+            .iter_mut()
+            .find(|(_, action)| *action == Action::ToggleProgressDetails)
+        {
+            *id = toggle;
+        } else {
+            self.actions.push((toggle, Action::ToggleProgressDetails));
+        }
+        if was_focused {
+            self.tree.set_focus(Some(toggle));
+        }
     }
 
     fn rebuild_center(&mut self, text: &mut TextStore) {
@@ -538,6 +594,7 @@ impl Competition {
             Some(self.center_host),
             Container::new(Style {
                 flex_direction: FlexDirection::Row,
+                flex_wrap: noa_gpui_core::style::FlexWrap::Wrap,
                 align_items: AlignItems::CENTER,
                 flex_shrink: 0.0,
                 gap: gap(6.0),
@@ -567,7 +624,7 @@ impl Competition {
                 Some(tabs),
                 Button::new(label)
                     .control_size(ControlSize::Small)
-                    .default_button(current),
+                    .selected(current),
             );
             self.actions.push((btn, action));
         }
@@ -579,13 +636,6 @@ impl Competition {
             );
             self.actions.push((clear, Action::ClearPartFilter));
         }
-        spacer(&mut self.tree, tabs);
-        let open_viewer = self.tree.insert(
-            Some(tabs),
-            Button::new("ブラウザ比較ビューアー…").control_size(ControlSize::Small),
-        );
-        self.actions.push((open_viewer, Action::OpenViewer));
-
         match self.tab {
             CenterTab::Compare => compare::insert(
                 &mut self.tree,
@@ -594,6 +644,7 @@ impl Competition {
                 self.selected_round,
                 self.filter_part.as_ref(),
                 !self.read_only,
+                &self.entry_details,
                 &mut self.actions,
             ),
             CenterTab::Timeline => timeline::insert(
@@ -616,25 +667,29 @@ impl Competition {
         let Some(session) = &self.session else {
             return;
         };
-        judge::insert(
+        self.tools_host = judge::insert(
             &mut self.tree,
             self.right_host,
             session,
             !self.read_only,
             &self.detection.available(),
+            self.tools_expanded,
+            &self.judge_details,
             &mut self.actions,
         );
     }
 
     fn rebuild_composer(&mut self, text: &mut TextStore) {
-        self.tree.set_hidden(self.composer.root, self.read_only);
+        let hide = self.read_only || self.session.as_ref().is_none_or(|s| s.closed);
+        self.tree.set_hidden(self.composer.root, hide);
+        self.tree.set_enabled(self.composer.send, !hide);
         let Some(session) = &self.session else {
             return;
         };
-        if self.read_only {
+        composer::sync(&mut self.tree, &mut self.composer, session, text);
+        if hide {
             return;
         }
-        composer::sync(&mut self.tree, &mut self.composer, session, text);
         composer::sync_hint(&mut self.tree, &self.composer, session);
         if let Some(pending) = &self.pending_intervention
             && session
@@ -689,9 +744,12 @@ impl Competition {
                                 self.actions.push((button, Action::RetryTimeline));
                             }
                             PublishState::Published { post_id, .. } => {
-                                caption(
-                                    &mut self.tree,
-                                    self.status_leading,
+                                let published = self.tree.insert(
+                                    Some(self.status_leading),
+                                    Label::new(label.clone()).font_size(12.0).color(Role::Muted),
+                                );
+                                self.tree.set_accessible_label(
+                                    published,
                                     format!("{label} ({post_id})"),
                                 );
                             }
@@ -705,17 +763,13 @@ impl Competition {
             let phase_text = if session.closed {
                 "終了".to_owned()
             } else if let Some(r) = session.current_round() {
-                let kind = match r.kind {
-                    RoundKind::Blind => "🔒ブラインド",
-                    RoundKind::Reveal => "👁相互閲覧",
-                };
                 let phase = match r.phase {
                     Phase::Briefing => "ブリーフ配信中",
                     Phase::Competing => "制作中",
                     Phase::Judging => "審判採点中",
                     Phase::Closed => "完了",
                 };
-                format!("R{} ({kind}) · {phase}", r.no)
+                format!("R{} · {phase}", r.no)
             } else {
                 "準備中".to_owned()
             };
@@ -742,12 +796,9 @@ impl Competition {
             if !self.read_only && !session.closed {
                 let hold = self.tree.insert(
                     Some(self.status_trailing),
-                    small(if session.hold {
-                        "ラウンド後に停止: オン"
-                    } else {
-                        "ラウンド後に停止: オフ"
-                    })
-                    .tooltip("オンにすると、審判の採点のあと次のラウンドを始める前に止まります"),
+                    small("ラウンド後に停止").selected(session.hold).tooltip(
+                        "オンにすると、審判の採点のあと次のラウンドを始める前に止まります",
+                    ),
                 );
                 self.actions.push((hold, Action::SetHold(!session.hold)));
                 if waits {
@@ -759,7 +810,8 @@ impl Competition {
                 }
             }
             // A stored competition that ran all its rounds is resumed to go on.
-            if session.extendable().is_ok()
+            if let Some(tools) = self.tools_host
+                && session.extendable().is_ok()
                 && (!self.read_only
                     || (session.closed
                         && self.stored_dir.is_some()
@@ -767,16 +819,12 @@ impl Competition {
                         && !self.extending))
             {
                 if let Some(max) = session.max_rounds {
-                    caption(
-                        &mut self.tree,
-                        self.status_trailing,
-                        format!("上限 {max} ラウンド"),
-                    );
+                    caption(&mut self.tree, tools, format!("上限 {max} ラウンド"));
                 }
                 for by in EXTEND_BY {
                     let more = self.tree.insert(
-                        Some(self.status_trailing),
-                        small(&format!("+{by}")).tooltip(if self.read_only {
+                        Some(tools),
+                        small(&format!("+{by} ラウンド")).tooltip(if self.read_only {
                             "再開してラウンドを追加します（エージェントが起動します）"
                         } else {
                             "ラウンド上限を増やします。上限で終了していればコンペを続けます"
@@ -787,15 +835,6 @@ impl Competition {
                     self.actions.push((more, Action::Extend(by)));
                 }
             }
-            let new = self
-                .tree
-                .insert(Some(self.status_trailing), small("新しいコンペ"));
-            self.actions.push((new, Action::NewCompetition));
-            let rematch = self
-                .tree
-                .insert(Some(self.status_trailing), small("同じ設定でリマッチ"));
-            self.actions.push((rematch, Action::Rematch));
-
             if !self.read_only
                 && !session.closed
                 && session
@@ -808,16 +847,22 @@ impl Competition {
                 );
                 self.actions.push((retry, Action::Retry));
             }
-            if !self.read_only && !session.closed {
+            if let Some(tools) = self.tools_host
+                && !self.read_only
+                && !session.closed
+            {
                 let close = self.tree.insert(
-                    Some(self.status_trailing),
+                    Some(tools),
                     Button::new("コンペを終了").control_size(ControlSize::Small),
                 );
                 self.actions.push((close, Action::Close));
             }
-            if !self.read_only && session.closed {
+            if let Some(tools) = self.tools_host
+                && !self.read_only
+                && session.closed
+            {
                 let close = self.tree.insert(
-                    Some(self.status_trailing),
+                    Some(tools),
                     small("ペインをすべて閉じる")
                         .tooltip("審判と参加者のペインを Noa でまとめて閉じます"),
                 );
@@ -1038,6 +1083,30 @@ impl Competition {
                 self.tab = CenterTab::Map;
                 self.rebuild(text);
             }
+            Action::ToggleProgressDetails => {
+                self.progress_expanded = !self.progress_expanded;
+                self.rebuild(text);
+            }
+            Action::ToggleScoreDetails => {
+                self.scores_expanded = !self.scores_expanded;
+                self.rebuild(text);
+            }
+            Action::ToggleTools => {
+                self.tools_expanded = !self.tools_expanded;
+                self.rebuild(text);
+            }
+            Action::ToggleJudgeDetails(round) => {
+                if !self.judge_details.remove(&round) {
+                    self.judge_details.insert(round);
+                }
+                self.rebuild(text);
+            }
+            Action::ToggleEntryDetails(part) => {
+                if !self.entry_details.remove(&part) {
+                    self.entry_details.insert(part);
+                }
+                self.rebuild(text);
+            }
             Action::SelectRound(no) => {
                 self.selected_round = Some(no);
                 self.rebuild(text);
@@ -1095,6 +1164,9 @@ impl Competition {
                 let Some(session) = &self.session else {
                     return;
                 };
+                if self.read_only || session.closed {
+                    return;
+                }
                 let body = composer::text(&self.tree, &self.composer);
                 if body.is_empty() {
                     return;
@@ -1230,7 +1302,7 @@ mod timeline_header_tests {
                     post_id: "po-001".into(),
                     seq: Seq(7),
                 }),
-                "タイムライン: 投稿済み #7 (po-001)",
+                "タイムライン: 投稿済み #7",
             ),
             (
                 Status::Publish(PublishState::Failed {
@@ -1425,10 +1497,14 @@ fn pane_column(bg: Role) -> Container {
     .background(bg)
 }
 
-pub(super) fn heading(tree: &mut UiTree, parent: WidgetId, text: &str) {
+pub(super) fn heading(tree: &mut UiTree, parent: WidgetId, text: &str) -> WidgetId {
     let bar = tree.insert(
         Some(parent),
         Container::new(Style {
+            flex_direction: FlexDirection::Row,
+            flex_wrap: noa_gpui_core::style::FlexWrap::Wrap,
+            align_items: AlignItems::CENTER,
+            gap: gap(6.0),
             flex_shrink: 0.0,
             padding: LayoutRect {
                 left: length(12.0),
@@ -1440,12 +1516,13 @@ pub(super) fn heading(tree: &mut UiTree, parent: WidgetId, text: &str) {
         }),
     );
     tree.insert(Some(bar), Label::new(text).font_size(14.0).weight(600));
+    bar
 }
 
 pub(super) fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) {
     tree.insert(
         Some(parent),
-        Label::new(text.into()).font_size(11.0).color(Role::Muted),
+        Label::new(text.into()).font_size(12.0).color(Role::Muted),
     );
 }
 
@@ -1453,7 +1530,7 @@ pub(super) fn note(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>)
     tree.insert(
         Some(parent),
         Label::new(text.into())
-            .font_size(11.5)
+            .font_size(13.0)
             .color(Role::Muted)
             .wrap(true),
     );
@@ -1515,6 +1592,255 @@ pub(super) fn clear_children(tree: &mut UiTree, parent: WidgetId, text: &mut Tex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tools_open_in_view_after_scrolling_the_judging_history() {
+        let mut screen = Competition::demo_panel();
+        let mut text = TextStore::new(Default::default());
+        let size = Size::new(MIN_WINDOW.0 as f32, MIN_WINDOW.1 as f32);
+        screen.prepare(size, &mut text);
+        let judge_scroll = |screen: &Competition| {
+            screen
+                .tree
+                .children(screen.right_host)
+                .iter()
+                .copied()
+                .find(|&id| screen.tree.get::<ScrollView>(id).is_some())
+                .unwrap()
+        };
+        let scroll = judge_scroll(&screen);
+        screen
+            .tree
+            .update::<ScrollView, _>(scroll, |view, cx| view.set_offset(cx, 700.0));
+        screen.prepare(size, &mut text);
+        assert!(screen.tree.get::<ScrollView>(scroll).unwrap().offset() > 0.0);
+        screen
+            .tree
+            .set_focus(widget_for(&screen, &Action::ToggleTools));
+        screen.dispatch(
+            noa_gpui_core::Event::KeyDown {
+                key: noa_gpui_core::Key::Space,
+                modifiers: Default::default(),
+            },
+            &mut text,
+        );
+        screen.prepare(size, &mut text);
+        let scroll = judge_scroll(&screen);
+        assert!(screen.tree.get::<ScrollView>(scroll).unwrap().offset() > 0.0);
+        let history = screen.tree.window_rect(scroll).unwrap();
+        for action in [
+            Action::OpenViewer,
+            Action::ExportReport,
+            Action::NewCompetition,
+            Action::Close,
+        ] {
+            let rect = screen
+                .tree
+                .window_rect(widget_for(&screen, &action).unwrap())
+                .unwrap();
+            assert!(
+                rect.y >= 0.0 && rect.bottom() <= history.y && rect.right() <= size.width,
+                "{action:?}: {rect:?}, history: {history:?}"
+            );
+        }
+        assert!(history.height >= 200.0, "{history:?}");
+    }
+
+    #[test]
+    fn closing_a_competition_disables_the_composer_and_return() {
+        let (channel, link) = Channel::fake();
+        let mut screen = Competition::live(channel, installed_all());
+        let mut text = TextStore::new(Default::default());
+        let mut session = crate::demo::session();
+        session.hold = false;
+        session.closed = false;
+        let send = |session: &Session| {
+            link.snapshots
+                .send(Snapshot {
+                    link: Link::Live,
+                    session: Some(Arc::new(session.clone())),
+                    artifact_root: None,
+                    generation: 0,
+                })
+                .unwrap();
+        };
+        send(&session);
+        screen.poll_live(&mut text);
+        screen.tree.update::<noa_gpui_core::widgets::TextArea, _>(
+            screen.composer.area,
+            |area, cx| {
+                area.set_text(cx, "公開前に比較してください");
+            },
+        );
+        session.closed = true;
+        session.rev += 1;
+        send(&session);
+        screen.poll_live(&mut text);
+        screen.prepare(
+            Size::new(MIN_WINDOW.0 as f32, MIN_WINDOW.1 as f32),
+            &mut text,
+        );
+        assert!(screen.tree.is_hidden(screen.composer.root));
+        assert!(!screen.tree.is_enabled(screen.composer.send));
+        assert!(widget_for(&screen, &Action::Send).is_none());
+        screen.tree.set_focus(None);
+        screen.dispatch(
+            noa_gpui_core::Event::KeyDown {
+                key: noa_gpui_core::Key::Enter,
+                modifiers: Default::default(),
+            },
+            &mut text,
+        );
+        screen.handle_action(Action::Send, &mut text);
+        assert!(
+            commands(&link).is_empty(),
+            "no intervention is sent after closing"
+        );
+
+        session.closed = false;
+        session.rev += 1;
+        send(&session);
+        screen.poll_live(&mut text);
+        assert!(!screen.tree.is_hidden(screen.composer.root));
+        assert!(screen.tree.is_enabled(screen.composer.send));
+        screen.dispatch(
+            noa_gpui_core::Event::KeyDown {
+                key: noa_gpui_core::Key::Enter,
+                modifiers: Default::default(),
+            },
+            &mut text,
+        );
+        assert!(matches!(commands(&link).as_slice(),
+            [Command::Intervene { body, .. }] if body == "公開前に比較してください"));
+    }
+
+    #[test]
+    fn compact_views_keep_decisions_and_alerts_visible() {
+        let screen = Competition::demo_panel();
+        let progress = texts_under(&screen.tree, screen.progress_host);
+        assert!(progress.iter().any(|t| t == "採点 3/3"));
+        assert!(progress.iter().any(|t| t == "採点完了 · 最終講評待ち"));
+        assert!(!progress.iter().any(|t| t == "審判 (judge-2)"));
+        let scores = texts_under(&screen.tree, screen.left_host);
+        assert!(scores.iter().any(|t| t == "93.7 pt"));
+        assert!(scores.iter().any(|t| t == "⚠ 差 20"));
+        assert!(!scores.iter().any(|t| t.starts_with("R1:")));
+        let judge = texts_under(&screen.tree, screen.right_host);
+        assert!(judge.iter().any(|t| t == "codex · 審判間の差 20"));
+        assert!(judge.iter().any(|t| t == "最終講評を待っています（judge）"));
+        assert!(!judge.iter().any(|t| t == "審判別スコア"));
+
+        let mut session = crate::demo::panel_session();
+        let round = session.rounds.last_mut().unwrap();
+        round.outcome = None;
+        round.verdict_brief = None;
+        round
+            .scorecards
+            .retain(|judge, _| judge.as_str() == JUDGE_ID);
+        round.co_judge_briefs[0].receipt.replied = None;
+        round.co_judge_briefs[0].receipt.failed = Some("返答がありません".into());
+        round.co_judge_briefs[1].receipt.replied = None;
+        round.co_judge_briefs[1].receipt.rejected = Some("根拠が必要です".into());
+        let screen = Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        let progress = texts_under(&screen.tree, screen.progress_host);
+        assert!(progress.iter().any(|t| t == "採点 1/3"));
+        assert!(progress.iter().any(|t| t == "✗ judge-2: 返答がありません"));
+        assert!(
+            progress
+                .iter()
+                .any(|t| t == "↻ judge-3: 修正依頼中 — 根拠が必要です")
+        );
+        assert!(actions(&screen).contains(&Action::Retry));
+        assert!(!actions(&screen).contains(&Action::Close));
+    }
+
+    #[test]
+    fn disclosures_preserve_draft_selection_and_keyboard_focus() {
+        let mut screen = Competition::demo_panel();
+        let mut text = TextStore::new(Default::default());
+        screen.tree.update::<noa_gpui_core::widgets::TextArea, _>(
+            screen.composer.area,
+            |area, cx| {
+                area.set_text(cx, "採用前に可読性を確認してください");
+            },
+        );
+        screen.handle_action(Action::FilterPart(PartId::new("claude")), &mut text);
+        screen.handle_action(Action::SelectRound(6), &mut text);
+        for action in [
+            Action::ToggleProgressDetails,
+            Action::ToggleScoreDetails,
+            Action::ToggleTools,
+            Action::ToggleJudgeDetails(6),
+            Action::ToggleEntryDetails(PartId::new("claude")),
+        ] {
+            let button = widget_for(&screen, &action).expect("disclosure button");
+            screen.tree.set_focus(Some(button));
+            screen.handle_action(action.clone(), &mut text);
+            assert_eq!(screen.tree.focused(), widget_for(&screen, &action));
+        }
+        assert!(screen.progress_expanded && screen.scores_expanded && screen.tools_expanded);
+        assert!(
+            texts_under(&screen.tree, screen.progress_host)
+                .iter()
+                .any(|t| t == "講評 (judge)")
+        );
+        assert!(
+            texts_under(&screen.tree, screen.right_host)
+                .iter()
+                .any(|t| t == "審判別スコア")
+        );
+        assert!(
+            texts_under(&screen.tree, screen.center_host)
+                .iter()
+                .any(|t| t == "提出レポート")
+        );
+        assert!(actions(&screen).contains(&Action::ExportReport));
+        assert!(actions(&screen).contains(&Action::Close));
+        assert_eq!(
+            screen.filter_part.as_ref().map(PartId::as_str),
+            Some("claude")
+        );
+        assert_eq!(screen.selected_round, Some(6));
+        assert_eq!(
+            composer::text(&screen.tree, &screen.composer),
+            "採用前に可読性を確認してください"
+        );
+
+        let mut next = screen.session.as_deref().unwrap().clone();
+        next.rev += 1;
+        screen.session = Some(Arc::new(next));
+        screen.rebuild_if_changed(&mut text);
+        assert!(screen.progress_expanded && screen.scores_expanded && screen.tools_expanded);
+        assert!(screen.judge_details.contains(&6));
+        assert!(screen.entry_details.contains(&PartId::new("claude")));
+
+        screen.handle_action(Action::ToggleTools, &mut text);
+        assert!(!actions(&screen).contains(&Action::ExportReport));
+        assert!(!actions(&screen).contains(&Action::Close));
+        screen.handle_action(Action::NewCompetition, &mut text);
+        assert!(!screen.progress_expanded && !screen.scores_expanded && !screen.tools_expanded);
+        assert!(screen.judge_details.is_empty() && screen.entry_details.is_empty());
+    }
+
+    #[test]
+    fn compact_progress_leaves_room_for_content_at_the_minimum_size() {
+        let mut screen = Competition::demo_panel();
+        let mut text = TextStore::new(Default::default());
+        let size = Size::new(MIN_WINDOW.0 as f32, MIN_WINDOW.1 as f32);
+        screen.prepare(size, &mut text);
+        let progress = screen.tree.window_rect(screen.progress_host).unwrap();
+        let center = screen.tree.window_rect(screen.center_host).unwrap();
+        assert!(progress.height < 120.0, "{progress:?}");
+        assert!(center.height > 300.0, "{center:?}");
+        for action in [Action::ToggleProgressDetails, Action::ToggleTools] {
+            let button = widget_for(&screen, &action).unwrap();
+            let rect = screen.tree.window_rect(button).unwrap();
+            assert!(
+                rect.x >= 0.0 && rect.right() <= size.width && rect.bottom() <= size.height,
+                "{action:?}: {rect:?}"
+            );
+        }
+    }
 
     #[test]
     fn demo_screen_prepares_without_panic() {
@@ -1592,6 +1918,12 @@ mod tests {
         assert_eq!(
             screen.tree.children(screen.right_host),
             right_before.as_slice()
+        );
+        let toggle = widget_for(&screen, &Action::ToggleProgressDetails).unwrap();
+        click(&mut screen, toggle, &mut text);
+        assert!(
+            screen.progress_expanded,
+            "the minute tick keeps a working detail control"
         );
     }
 
@@ -1757,6 +2089,7 @@ mod tests {
         assert_eq!(screen.artifact_root.as_deref(), Some(dir.as_path()));
         assert!(screen.tree.is_hidden(screen.start.root));
         assert!(screen.tree.is_hidden(screen.composer.root));
+        open_tools(&mut screen, &mut text);
         let acts = actions(&screen);
         assert!(acts.contains(&Action::NewCompetition));
         assert!(acts.contains(&Action::Rematch));
@@ -2518,6 +2851,14 @@ mod tests {
             .map(|(id, _)| *id)
     }
 
+    fn open_tools(screen: &mut Competition, text: &mut TextStore) {
+        if !screen.tools_expanded {
+            let toggle = widget_for(screen, &Action::ToggleTools).expect("操作");
+            click(screen, toggle, text);
+            assert!(screen.tools_expanded);
+        }
+    }
+
     /// The generation the screen's commands go out in (what the runner
     /// they start stamps its snapshots and notices with).
     fn generation(screen: &Competition) -> u64 {
@@ -2550,6 +2891,7 @@ mod tests {
         };
         send(&session);
         screen.poll_live(&mut text);
+        open_tools(&mut screen, &mut text);
         assert!(widget_for(&screen, &Action::ClosePanes).is_none());
 
         // Ended at its round limit, so "+N" is offered beside it: the whole
@@ -2599,6 +2941,7 @@ mod tests {
         let toggle = widget_for(&screen, &Action::SetHold(false)).expect("the toggle");
         click(&mut screen, toggle, &mut text);
         assert_eq!(commands(&link), [Command::SetHold { hold: false }]);
+        open_tools(&mut screen, &mut text);
         let more = widget_for(&screen, &Action::Extend(3)).expect("+3");
         click(&mut screen, more, &mut text);
         assert_eq!(commands(&link), [Command::Extend { by: 3 }]);
@@ -2625,8 +2968,10 @@ mod tests {
     fn rounds_are_offered_only_where_they_can_be_added() {
         // The rounds each "+N" shown adds: all of them, or none.
         let offered = |session: Session| {
-            let screen =
+            let mut screen =
                 Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+            let mut text = TextStore::new(Default::default());
+            open_tools(&mut screen, &mut text);
             let shown: Vec<RoundNo> = actions(&screen)
                 .into_iter()
                 .filter_map(|a| match a {
@@ -2674,6 +3019,7 @@ mod tests {
         screen.handle_action(Action::OpenPast(dir.clone()), &mut text);
         assert!(screen.read_only);
         let _ = commands(&link);
+        open_tools(&mut screen, &mut text);
         let more = widget_for(&screen, &Action::Extend(3)).expect("+3 on the stored view");
         click(&mut screen, more, &mut text);
         assert_eq!(
@@ -2711,6 +3057,7 @@ mod tests {
         let dir = stored_competition_of(&root, 1);
         let (mut screen, link, mut text) = live_on(&root);
         screen.handle_action(Action::OpenPast(dir.clone()), &mut text);
+        open_tools(&mut screen, &mut text);
         screen.handle_action(Action::Extend(1), &mut text);
         // The runner could not open it: its notice, then its last snapshot.
         link.notices
@@ -2751,6 +3098,7 @@ mod tests {
                 .any(|a| matches!(a, Action::ExtendPast(..)))
         );
         screen.handle_action(Action::OpenPast(dir), &mut text);
+        open_tools(&mut screen, &mut text);
         assert!(screen.read_only);
         assert!(widget_for(&screen, &Action::Extend(1)).is_none());
         drop(held);
@@ -2768,6 +3116,7 @@ mod tests {
                 .any(|a| matches!(a, Action::ExtendPast(..)))
         );
         screen.handle_action(Action::OpenPast(dir), &mut text);
+        open_tools(&mut screen, &mut text);
         assert!(widget_for(&screen, &Action::Extend(1)).is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -2996,7 +3345,9 @@ mod tests {
 
     #[test]
     fn the_leaderboard_shows_each_judges_score_and_the_spread() {
-        let screen = Competition::demo_panel();
+        let mut screen = Competition::demo_panel();
+        let mut text = TextStore::new(Default::default());
+        screen.handle_action(Action::ToggleScoreDetails, &mut text);
         let texts = texts_under(&screen.tree, screen.left_host);
         for want in [
             "93.7 pt",
@@ -3027,7 +3378,9 @@ mod tests {
 
     #[test]
     fn the_judge_board_lists_scores_by_judge() {
-        let screen = Competition::demo_panel();
+        let mut screen = Competition::demo_panel();
+        let mut text = TextStore::new(Default::default());
+        screen.handle_action(Action::ToggleJudgeDetails(6), &mut text);
         let texts = texts_under(&screen.tree, screen.right_host);
         for want in [
             "#1 claude(93.7) · #2 agy(88.7) · #3 codex(87.0)",
@@ -3060,7 +3413,9 @@ mod tests {
 
     #[test]
     fn the_progress_strip_has_a_chip_per_judge_and_the_verdict() {
-        let screen = Competition::demo_panel();
+        let mut screen = Competition::demo_panel();
+        let mut text = TextStore::new(Default::default());
+        screen.handle_action(Action::ToggleProgressDetails, &mut text);
         let texts = texts_under(&screen.tree, screen.progress_host);
         for want in [
             "● 採点 3/3",
@@ -3084,7 +3439,9 @@ mod tests {
         round.co_judge_briefs[0].receipt.replied = None;
         round.co_judge_briefs[0].receipt.failed = Some("返答がありません".into());
         round.co_judge_briefs[1].receipt.replied = None;
-        let screen = Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        let mut screen =
+            Competition::build(Source::Demo, Link::Live, Some(Arc::new(session)), None);
+        screen.handle_action(Action::ToggleProgressDetails, &mut text);
         let texts = texts_under(&screen.tree, screen.progress_host);
         for want in ["● 採点 1/3", "✗ judge-2: 返答がありません"] {
             assert!(texts.iter().any(|t| t == want), "{want:?} in {texts:?}");
@@ -3093,7 +3450,8 @@ mod tests {
         // The retry button is offered for the failed judge.
         assert!(actions(&screen).contains(&Action::Retry));
 
-        let single = Competition::demo();
+        let mut single = Competition::demo();
+        single.handle_action(Action::ToggleProgressDetails, &mut text);
         let texts = texts_under(&single.tree, single.progress_host);
         let judges: Vec<&String> = texts.iter().filter(|t| t.contains("(judge")).collect();
         assert_eq!(judges, ["審判 (judge)"]);

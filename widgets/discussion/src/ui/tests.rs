@@ -2318,6 +2318,34 @@ mod auto_assign {
     }
 
     #[test]
+    fn a_removed_and_re_added_row_refuses_the_fill_though_the_values_match() {
+        let mut h = form();
+        // The last two rows share a kind on the default setup, so a row
+        // added after removing the last holds the same values.
+        let last = h.screen.start.panel.len() - 1;
+        h.screen.run(Action::RemovePanelRow(last), &mut h.text);
+        h.screen.run(Action::AddPanelRow, &mut h.text);
+        let jobs = h.fake_planner();
+        h.choose(0);
+        let planned = start::read(&h.screen.tree, &h.screen.start);
+        assert_eq!(planned.panel[last - 1], planned.panel[last]);
+        h.screen.run(Action::RemovePanelRow(last), &mut h.text);
+        h.screen.run(Action::AddPanelRow, &mut h.text);
+        let edited = start::read(&h.screen.tree, &h.screen.start);
+        // The new row holds the removed row's default kind and setup.
+        assert_eq!(edited.panel, planned.panel);
+        answer(jobs.try_recv().unwrap());
+        h.poll();
+        assert!(note_of(&h)[0].contains("選択が変わったため反映しませんでした"));
+        let after = start::read(&h.screen.tree, &h.screen.start);
+        assert_eq!(
+            (after.moderator, after.panel),
+            (edited.moderator, edited.panel)
+        );
+        assert!(h.drain().is_empty());
+    }
+
+    #[test]
     fn cancel_and_manual_start_discard_outstanding_results() {
         let mut h = form();
         let jobs = h.fake_planner();

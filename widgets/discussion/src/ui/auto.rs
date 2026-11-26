@@ -15,6 +15,7 @@ use noa_gpui_core::widgets::{
 };
 use noa_gpui_core::{Message, UiTree, WidgetId};
 use noa_gpui_text::TextStore;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::Ordering, mpsc::TryRecvError};
 
@@ -26,6 +27,9 @@ struct Running {
     planning: Planning,
     moderator: AgentChoice,
     panel: Vec<AgentChoice>,
+    /// Each panel row's host at planning time: a row removed and re-added
+    /// with the same values is still a change.
+    rows: Vec<WidgetId>,
 }
 
 impl Drop for Running {
@@ -156,6 +160,18 @@ fn choice(pick: &Pick) -> AgentChoice {
             effort: pick.effort.clone(),
         },
     }
+}
+
+/// The planner's working directory: the typed one, else a non-empty home,
+/// else `/`.
+fn planner_cwd(workdir: Option<PathBuf>, home: Option<OsString>) -> PathBuf {
+    workdir
+        .or_else(|| home.filter(|h| !h.is_empty()).map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+fn hosts(parts: &start::Parts) -> Vec<WidgetId> {
+    parts.panel.iter().map(|row| row.host).collect()
 }
 
 /// The panel position a pick was made for; `None` for the moderator.
@@ -320,14 +336,7 @@ impl Discussion {
             self.render_auto(text);
             return;
         };
-        let Some(cwd) = workdir.or_else(|| std::env::var_os("HOME").map(PathBuf::from)) else {
-            self.auto.state = State::failure(
-                PlanError::Spawn("ホームディレクトリが分かりません".into()),
-                planner,
-            );
-            self.render_auto(text);
-            return;
-        };
+        let cwd = planner_cwd(workdir, std::env::var_os("HOME"));
         let planning = (self.auto.spawn)(
             job(planner, &form, cwd, self.start.available.clone()),
             channel.wake.clone(),
@@ -337,6 +346,7 @@ impl Discussion {
             planning,
             moderator: form.moderator,
             panel: form.panel,
+            rows: hosts(&self.start),
         });
         self.render_auto(text);
         self.poll_auto(text); // A thread-start failure is delivered synchronously.
@@ -363,7 +373,10 @@ impl Discussion {
         self.auto.state = match result {
             Ok(assignment) => {
                 let form = start::read(&self.tree, &self.start);
-                if form.moderator != run.moderator || form.panel != run.panel {
+                if form.moderator != run.moderator
+                    || form.panel != run.panel
+                    || hosts(&self.start) != run.rows
+                {
                     State::Failed("割り当て中にエージェントの選択が変わったため反映しませんでした。もう一度「自動で割り当て」を押してください".into())
                 } else {
                     let mut choices = assignment.picks.iter().map(choice);
@@ -378,7 +391,7 @@ impl Discussion {
                     self.auto.filled = Some(Filled {
                         assignment,
                         at: SystemClock.now(),
-                        rows: self.start.panel.iter().map(|row| row.host).collect(),
+                        rows: hosts(&self.start),
                     });
                     State::Idle
                 }
@@ -386,5 +399,27 @@ impl Discussion {
             Err(err) => State::failure(err, run.planner),
         };
         self.rebuild(text); // A fill replaced the panel's remove buttons.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::planner_cwd;
+    use std::path::PathBuf;
+
+    #[test]
+    fn planner_cwd_falls_back_to_a_non_empty_home_then_root() {
+        let typed = PathBuf::from("/work");
+        assert_eq!(
+            planner_cwd(Some(typed.clone()), Some("/home/a".into())),
+            typed
+        );
+        assert_eq!(planner_cwd(Some(typed.clone()), None), typed);
+        assert_eq!(
+            planner_cwd(None, Some("/home/a".into())),
+            PathBuf::from("/home/a")
+        );
+        assert_eq!(planner_cwd(None, Some("".into())), PathBuf::from("/"));
+        assert_eq!(planner_cwd(None, None), PathBuf::from("/"));
     }
 }

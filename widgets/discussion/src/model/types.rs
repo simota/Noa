@@ -785,6 +785,8 @@ pub struct ModeratorOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<crate::auto_assign::AutoRecord>,
     pub id: SessionId,
     pub topic: String,
     /// The directory (or repository) the agents run in, when the user named
@@ -1120,6 +1122,7 @@ mod tests {
             verdict: None,
         };
         let mut session = Session {
+            auto: None,
             id: SessionId::new("s"),
             topic: "t".into(),
             workdir: None,

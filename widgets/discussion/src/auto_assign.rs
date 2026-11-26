@@ -24,9 +24,6 @@ use serde_json::Value;
 
 /// Wall clock a planner gets from its spawn, login shell start-up included.
 pub const PLAN_TIMEOUT: Duration = Duration::from_secs(180);
-/// agy's own print-mode limit: a little under [`PLAN_TIMEOUT`], so agy ends
-/// with its own message first.
-const AGY_PRINT_TIMEOUT_SECS: u64 = 170;
 const POLL: Duration = Duration::from_millis(20);
 /// How long the output is waited for after the shell exited (a background
 /// job of an rc file may hold the pipe open).
@@ -210,7 +207,7 @@ pub struct Planner {
 }
 
 impl Planner {
-    /// `claude (sonnet · medium)`, or `agy (gemini-4-argon-medium)`.
+    /// `claude (sonnet · medium)`, or `claude (sonnet)` without an effort.
     pub fn label(&self) -> String {
         match self.effort {
             Some(effort) => format!("{} ({} · {effort})", self.agent, self.model),
@@ -221,7 +218,11 @@ impl Planner {
 
 /// The planners, in preference order: the first installed is the default.
 /// The models and efforts are what `+ctl spawn --tier standard` adds.
-pub const PLANNERS: [Planner; 3] = [
+///
+/// agy is not one (spec Q9): its print mode runs tools whatever `--mode`
+/// or `--sandbox` says, and the content may hold text others wrote (an
+/// issue body). It can still be assigned to a slot as a worker.
+pub const PLANNERS: [Planner; 2] = [
     Planner {
         agent: "claude",
         model: "sonnet",
@@ -232,14 +233,9 @@ pub const PLANNERS: [Planner; 3] = [
         model: "gpt-6.2-sol",
         effort: Some("medium"),
     },
-    Planner {
-        agent: "agy",
-        model: "gemini-4-argon-medium",
-        effort: None,
-    },
 ];
 
-/// The planner of the agent `agent` (`claude`, `codex`, `agy`).
+/// The planner of the agent `agent` (`claude`, `codex`); `None` for agy.
 pub fn planner(agent: &str) -> Option<Planner> {
     PLANNERS.into_iter().find(|p| p.agent == agent)
 }
@@ -330,8 +326,7 @@ pub fn prompt(req: &Request) -> String {
 /// `--strict-mcp-config` (with no `--mcp-config`) the MCP servers too,
 /// claude.ai connectors included. codex's read-only sandbox holds only with
 /// `approval_policy=never`: under a person's `on-request` policy a refused
-/// command is escalated, and an automatic reviewer may approve it. agy
-/// runs tools in print mode whatever `--mode` or `--sandbox` says.
+/// command is escalated, and an automatic reviewer may approve it.
 pub fn script(p: &Planner) -> String {
     let model = p.model;
     match p.agent {
@@ -354,16 +349,6 @@ pub fn script(p: &Planner) -> String {
                 "exec codex exec --skip-git-repo-check --sandbox read-only \
                  -c approval_policy=never --ephemeral -m {model}{effort} \
                  -o \"${OUT_VAR}\" -- \"${PROMPT_VAR}\""
-            )
-        }
-        "agy" => {
-            let effort = p
-                .effort
-                .map(|e| format!(" --effort {e}"))
-                .unwrap_or_default();
-            format!(
-                "exec agy --model {model}{effort} --disable-slash-commands --output-format text \
-                 --print-timeout {AGY_PRINT_TIMEOUT_SECS}s \"--print=${PROMPT_VAR}\""
             )
         }
         _ => "exit 127".to_owned(),
@@ -862,16 +847,25 @@ mod tests {
     fn planners_follow_the_preference_order_and_the_standard_tier() {
         assert_eq!(
             PLANNERS.map(|p| p.label()),
-            [
-                "claude (sonnet · medium)",
-                "codex (gpt-6.2-sol · medium)",
-                "agy (gemini-4-argon-medium)"
-            ]
+            ["claude (sonnet · medium)", "codex (gpt-6.2-sol · medium)",]
         );
         assert_eq!(planner("codex"), Some(PLANNERS[1]));
         assert_eq!(planner("vim"), None);
+        // agy runs tools in print mode: never a planner, even installed.
+        assert_eq!(planner("agy"), None);
         let agents = |list: Vec<Planner>| list.iter().map(|p| p.agent).collect::<Vec<_>>();
-        assert_eq!(agents(planners(&["agy", "claude"])), ["claude", "agy"]);
+        assert_eq!(agents(planners(&["agy", "claude"])), ["claude"]);
+        assert_eq!(
+            agents(planners(&["agy", "codex", "claude"])),
+            ["claude", "codex"]
+        );
+        assert!(planners(&["agy"]).is_empty());
+        let bare = Planner {
+            agent: "claude",
+            model: "sonnet",
+            effort: None,
+        };
+        assert_eq!(bare.label(), "claude (sonnet)");
         assert_eq!(agents(planners(&["codex", "nope"])), ["codex"]);
         assert!(planners(&[]).is_empty());
     }
@@ -957,16 +951,15 @@ mod tests {
             script(&PLANNERS[1]),
             r#"exec codex exec --skip-git-repo-check --sandbox read-only -c approval_policy=never --ephemeral -m gpt-6.2-sol -c model_reasoning_effort=medium -o "$NOA_ASSIGN_OUT" -- "$NOA_ASSIGN_PROMPT""#
         );
-        assert_eq!(
-            script(&PLANNERS[2]),
-            r#"exec agy --model gemini-4-argon-medium --disable-slash-commands --output-format text --print-timeout 170s "--print=$NOA_ASSIGN_PROMPT""#
-        );
-        let stray = Planner {
-            agent: "vim",
-            model: "x",
-            effort: None,
-        };
-        assert_eq!(script(&stray), "exit 127");
+        // Not a planner: a hand-made agy planner gets the failing script.
+        for agent in ["agy", "vim"] {
+            let stray = Planner {
+                agent,
+                model: "gemini-4-argon-medium",
+                effort: None,
+            };
+            assert_eq!(script(&stray), "exit 127", "{agent}");
+        }
     }
 
     /// The script depends on the planner alone, and holds only plain words:
@@ -1205,6 +1198,28 @@ mod tests {
             raw("reviewer-1", "codex", None, None),
         ];
         assert!(validate(picks, &req, &claude(), &accept).is_ok());
+    }
+
+    /// agy is no planner, but a planner may still give it a slot.
+    #[test]
+    fn agy_can_be_assigned_as_a_worker() {
+        let mut req = request();
+        req.candidates.push(Candidate {
+            agent: "agy".into(),
+            models: strings(&["gemini-4-neon-high"]),
+            efforts: strings(&["high"]),
+        });
+        let picks = vec![
+            raw("lead", "claude", Some("opus"), Some("high")),
+            raw(
+                "reviewer-1",
+                "agy",
+                Some("gemini-4-neon-high"),
+                Some("high"),
+            ),
+        ];
+        let got = validate(picks, &req, &claude(), &accept).unwrap();
+        assert_eq!(got.picks[1].agent, "agy");
     }
 
     #[test]

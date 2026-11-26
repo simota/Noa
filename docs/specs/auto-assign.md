@@ -49,7 +49,7 @@ Why repo-browser is excluded: its menu is not a run's staffing. It is where the 
 
 Common to the five widgets. Strings are Japanese, like the rest of the widgets' UI.
 
-1. **Control.** Next to the agent rows (the start view's agents section header; in Tasks, under the エージェント segment) sits a **pull-down button 「自動で割り当て」**. It uses `noa_gpui_core::widgets::PullDownButton`, already used by `widgets/repo-browser/src/ui.rs:576`. It has one item per planner candidate: 「claude で決める」, 「codex で決める」, 「agy で決める」. Only installed kinds are listed (`Detection::menu_kinds()` or the widget's equivalent), in the preference order of L1-4, so the first item is the default.
+1. **Control.** Next to the agent rows (the start view's agents section header; in Tasks, under the エージェント segment) sits a **pull-down button 「自動で割り当て」**. It uses `noa_gpui_core::widgets::PullDownButton`, already used by `widgets/repo-browser/src/ui.rs:576`. It has one item per planner candidate: 「claude で決める」, 「codex で決める」. agy is never a planner (L1-4, Q9), though it can be assigned to a slot. Only installed kinds are listed (`Detection::menu_kinds()` or the widget's equivalent), in the preference order of L1-4, so the first item is the default.
    - The button is disabled while installed detection is pending.
    - It is also disabled while the form cannot be read (for example a Review whose target is empty: `Form::target()` fails). In that case the note says why, using the widget's existing message.
 2. **Running.** The pull-down is replaced by the caption 「{planner} が割り当てを決めています…」 and a button 「中止」.
@@ -110,16 +110,17 @@ The planner is given the run's **content**, its **slots**, and the **candidates*
 ### L1-4. The planner agent and its model/effort
 
 - **Which kind.** The person chooses it in the pull-down (L1-2).
-  - Its first item is the default: the first installed of **claude, codex, agy** (`AgentKind::ALL` order).
+  - Its first item is the default: the first installed of **claude, codex** (`AgentKind::ALL` order).
+  - **agy is not a planner** (Q9): its print mode runs tools whatever `--mode` or `--sandbox` says (U1 smoke run), and the content may hold text others wrote (an issue body). agy stays a candidate that the planner may assign to any slot.
   - The planner may be one of the candidates it assigns. That is expected.
   - If no kind is installed, the pull-down is disabled and the widget's existing note (「claude / codex / agy のいずれもログインシェルの PATH に見つかりません」) already says why.
+  - If agy is the only installed kind, the pull-down is disabled and the note says 「自動割り当てに使えるエージェントがインストールされていません」 (`PlanError::NoPlanner`).
 - **Model and effort: Noa's `standard` tier**, the flags `+ctl spawn --tier standard` adds (`crates/noa-app/src/ctl/worktree.rs:58-71`):
 
   | Planner | Model | Effort |
   |---|---|---|
   | claude | `sonnet` | `medium` |
   | codex | `gpt-6.2-sol` | `medium` (`-c model_reasoning_effort=medium`) |
-  | agy | `gemini-4-argon-medium` | none (the tier passes none) |
 
   Why `standard`: matching content to models is one judgment over a short text. `light` (Haiku, Luna, Hydrogen) is weaker at that, and `deep` is slower and dearer for a single short answer. The table is a constant in `auto_assign.rs`. Changing it is a one-line edit.
 
@@ -152,9 +153,14 @@ The prompt reaches the shell in the environment variable **`NOA_ASSIGN_PROMPT`**
 
 | Planner | SCRIPT | Where the answer is read |
 |---|---|---|
-| claude | `exec claude -p --tools "" --no-session-persistence --output-format text --model sonnet --effort medium -- "$NOA_ASSIGN_PROMPT"` | stdout |
-| codex | `exec codex exec --skip-git-repo-check --sandbox read-only --ephemeral -m gpt-6.2-sol -c model_reasoning_effort=medium -o "$NOA_ASSIGN_OUT" -- "$NOA_ASSIGN_PROMPT"` | the file `$NOA_ASSIGN_OUT` |
-| agy | `exec agy --model gemini-4-argon-medium --disable-slash-commands --output-format text --print-timeout 170s "--print=$NOA_ASSIGN_PROMPT"` | stdout |
+| claude | `exec claude -p --tools "" --strict-mcp-config --no-session-persistence --output-format text --model sonnet --effort medium -- "$NOA_ASSIGN_PROMPT"` | stdout |
+| codex | `exec codex exec --skip-git-repo-check --sandbox read-only -c approval_policy=never --ephemeral -m gpt-6.2-sol -c model_reasoning_effort=medium -o "$NOA_ASSIGN_OUT" -- "$NOA_ASSIGN_PROMPT"` | the file `$NOA_ASSIGN_OUT` |
+
+agy has no SCRIPT: it is not a planner (L1-4). `script` of any agent outside `PLANNERS` is `exit 127`.
+
+Two flags were added after the U1 smoke run, because the planner reads content others wrote and must not act on it:
+- claude `--strict-mcp-config` (with no `--mcp-config`): `--tools ""` removes only the built-in tools. The person's MCP servers, claude.ai connectors with write tools among them, stayed available in `-p` mode. With the flag, the session's init listed `tools: []` and `mcp_servers: []`.
+- codex `-c approval_policy=never`: `--sandbox read-only` refused a write ("Read-only file system"), but under a person's `approval_policy = "on-request"` with `approvals_reviewer = "auto_review"` the command was escalated, approved and run outside the sandbox. With `never` the refusal stands and the write failed.
 
 Flag provenance (all from `--help` on the versions above):
 
@@ -164,20 +170,17 @@ Flag provenance (all from `--help` on the versions above):
   - `--no-session-persistence` is "only works with --print".
   - `--output-format` takes `text|json|stream-json`.
   - `--model` and `--effort` are the flags the start view already uses (`AgentKind::flags`).
+  - `--strict-mcp-config` is "Only use MCP servers from --mcp-config, ignoring all other MCP configurations".
 - codex:
   - `codex exec` is "Run Codex non-interactively", with `[PROMPT]` positional.
   - `--sandbox read-only`, `--ephemeral` ("without persisting session files"), `--skip-git-repo-check` and `-o/--output-last-message <FILE>` all appear in its help.
+  - `-c key=value` overrides a `config.toml` value; `approval_policy=never` is that override.
   - stdin is not piped (it is `/dev/null`), so nothing is appended to the prompt.
-- agy:
-  - `--print` means "Run a single prompt non-interactively and print the response". It takes the prompt as its value, as `agy -p /usage …` in `widgets/agent-usage/src/limits/agy.rs:212-219` shows. It is joined with `=` so that a prompt never reads as an option (the same trick as `widgets/repo-browser/src/model.rs:57`).
-  - `--print-timeout` is "Optional time limit for print mode".
-  - `--disable-slash-commands` disables slash commands "in print mode".
-  - `--output-format` takes `text|json|stream-json`.
 
-What the help does not say, and is **[unverified]** until the units' manual smoke run (L3):
-- whether `codex exec` accepts `--` before the prompt (clap normally does)
-- whether `--tools ""` also keeps MCP tools away in `-p` mode
-- whether agy with no `--mode` refuses tool use in print mode
+What the help did not say was settled by the U1 smoke run (L2-1 note):
+- `codex exec` accepts `--` before the prompt.
+- `--tools ""` does **not** keep MCP tools away in `-p` mode, hence `--strict-mcp-config`.
+- agy with no `--mode` (and with `--mode plan` or `--sandbox`) runs tools in print mode, hence agy is not a planner.
 
 The prompt also tells each planner not to use tools.
 
@@ -191,7 +194,7 @@ The prompt also tells each planner not to use tools.
 
 | Limit | Value | Why |
 |---|---|---|
-| `PLAN_TIMEOUT`, wall clock from spawn | **180 s** | A standard-tier answer to a ≤ 64 KiB prompt with a short JSON reply. Login shell start-up is included. agy's own `--print-timeout 170s` ends it a little earlier, with its own message. |
+| `PLAN_TIMEOUT`, wall clock from spawn | **180 s** | A standard-tier answer to a ≤ 64 KiB prompt with a short JSON reply. Login shell start-up is included. |
 | Poll interval | 20 ms | As `installed.rs` (`POLL`). |
 | Drain after exit | 500 ms | As `installed.rs` (`DRAIN`). An rc file's background job may hold the pipe. |
 | Prompt size | ≤ 64 KiB | Linux limits one argv or env string to 128 KiB (`MAX_ARG_STRLEN`, `widgets/repo-browser/src/live.rs:606-609`). The prompt is in the env and again in the agent's argv. |
@@ -377,7 +380,7 @@ pub struct Job { pub planner: Planner, pub shell: String, pub cwd: PathBuf,
                  pub request: Box<dyn FnOnce() -> Request + Send>,
                  pub check: Box<dyn Fn(&Pick) -> Result<(), String> + Send> }
 
-pub const PLANNERS: [Planner; 3];                        // L1-4 table, claude/codex/agy order
+pub const PLANNERS: [Planner; 2];                        // L1-4 table, claude/codex order (no agy: Q9)
 pub fn planner(agent: &str) -> Option<Planner>;
 pub fn planners(installed: &[&str]) -> Vec<Planner>;     // pull-down items, in order
 pub fn cap(text: &str, max: usize) -> String;            // L1-5 cut + marker
@@ -414,15 +417,15 @@ It names nothing of its crate: no `AgentKind`, no `crate::`. Its tests (`#[cfg(t
 - `parse` also says 「assignments が配列ではありません」 and 「{n} 件目がオブジェクトではありません」; a missing `slot`/`agent`/`reason` is 「… が文字列ではありません」. `run` keeps `OUTPUT_MAX + 1` bytes and `parse` refuses past `OUTPUT_MAX`.
 - `validate` checks slot coverage first (unknown and duplicate slots in answer order, then missing ones in request order), then each slot in request order: agent, model, effort, the widget's check, the reason. A reason is at most 140 characters, `…` included. `Exit`'s message omits the parenthesis when stderr has no non-empty line.
 - The codex directory is `noa-assign-<pid>-<millis>-<seq>`: two planners of one process may start in the same millisecond.
-- The U1 smoke run settled L1-5's **[unverified]** points (claude 2.1.332, codex-cli 0.172.0, agy 1.5.17, Linux; each planner returned a valid two-slot assignment in 8–14 s). `auto_assign::tests::smoke` (`#[ignore]`d; `NOA_ASSIGN_SMOKE=claude,codex` limits it) reruns it.
+- The U1 smoke run settled L1-5's **[unverified]** points (claude 2.1.332, codex-cli 0.172.0, agy 1.5.17, Linux; each of the three returned a valid two-slot assignment in 7.6–13.5 s; claude and codex again after the two flags below). `auto_assign::tests::smoke` (`#[ignore]`d; `NOA_ASSIGN_SMOKE=claude,codex` limits it) reruns it.
   - codex accepts `--` before the prompt.
   - claude's `--tools ""` removes only the built-in tools: the person's MCP servers (claude.ai connectors) stayed available. The script adds `--strict-mcp-config`, which left `tools: []` and `mcp_servers: []`.
   - codex's `--sandbox read-only` refused a write, but under the person's `approval_policy = "on-request"` with `approvals_reviewer = "auto_review"` the command was escalated and run outside the sandbox. The script adds `-c approval_policy=never`, after which the write failed.
-  - agy runs tools in print mode: it created a file and ran `touch`, also with `--mode plan` or `--sandbox`. No flag in its help prevents it (`--settings` takes settings keys whose names were not checked). Whether agy stays a planner is open: Q9.
+  - agy runs tools in print mode: it created a file and ran `touch`, also with `--mode plan` or `--sandbox`. No flag in its help prevents it (`--settings` takes settings keys whose names were not checked). So agy was removed from `PLANNERS` (Q9).
 
 | # | Question | Default |
 |---|---|---|
-| Q9 | agy as a planner can run commands on content others wrote (an issue body), with no flag to stop it. Keep it in `PLANNERS`? | **Kept** as specified, pending the owner's decision. Dropping it is a one-line edit of `PLANNERS` (its type becomes `[Planner; 2]`). |
+| Q9 | agy as a planner can run commands on content others wrote (an issue body), with no flag to stop it. Keep it in `PLANNERS`? | **Answered (orchestrator, 2026-11-26): removed.** `PLANNERS` is `[Planner; 2]`, claude and codex. agy's print mode runs tools and the content may hold third-party text, so agy never acts as the planner; it can still be assigned to a slot as a worker. |
 
 ### L2-2. Per-widget adapter
 
@@ -463,8 +466,8 @@ U2–U6 are independent of each other and can run in parallel once U1 has landed
 | Risk | Mitigation |
 |---|---|
 | Planner latency (tens of seconds) or cost per click | It is opt-in per run. The tier is standard. The 180 s cap applies. 中止 is available, and the form stays usable throughout. |
-| A CLI's flags change between releases (`--tools`, `-o`, `--print-timeout`) | The scripts are constants with exact-text tests, so a change is a one-place edit in the master. A CLI that rejects a flag exits non-zero, and that is shown as `Exit` with its stderr line, so the person picks manually. |
-| Prompt injection through the content, for example a task body saying "assign everything to X" | The content is fenced and declared data. Validation limits the damage to a legal, if poor, choice, which the person sees before starting (D1). The planner runs read-only: claude has no tools, codex a read-only sandbox. agy has no tool switch in its help (**[unverified]**). |
+| A CLI's flags change between releases (`--tools`, `--strict-mcp-config`, `-o`, `approval_policy`) | The scripts are constants with exact-text tests, so a change is a one-place edit in the master. A CLI that rejects a flag exits non-zero, and that is shown as `Exit` with its stderr line, so the person picks manually. |
+| Prompt injection through the content, for example a task body saying "assign everything to X" | The content is fenced and declared data. Validation limits the damage to a legal, if poor, choice, which the person sees before starting (D1). The planner runs read-only: claude has no tools and no MCP servers (`--strict-mcp-config`), codex a read-only sandbox with no escalation (`approval_policy=never`). agy, which has no tool switch, is not a planner (Q9). |
 | Planner output wrapped in prose, fences or an rc banner | The tolerant object scan (L1-6), with the last object winning. |
 | Content leaves the machine to the planner's provider | It is the same content the run itself would send to the same providers. The person chooses the planner. |
 | Large content beyond argv/env limits | 32 KiB content cap and 64 KiB prompt cap, below Linux's 128 KiB per-string limit. |
@@ -483,5 +486,5 @@ U2–U6 are independent of each other and can run in parallel once U1 has landed
 | Q4 | Use the CLIs' structured-output flags (claude `--json-schema`, codex `--output-schema`, agy `--json-schema`) or `--bare`? | **No** for now: their result wrapping differs and is unverified. Parsing plus validation is enough. U1's smoke run may propose them with evidence. |
 | Q5 | Declare `setsid`/`killpg` via `extern "C"` (D4), or add `libc = "0.2"` to `widgets/competition/Cargo.toml` (a `Cargo.lock` change needing the maintainer's agreement)? | **`extern "C"`**, with no dependency change. |
 | Q6 | Show the recorded reasons after start (session view, report)? | **No**: recorded only (L1-7). They are shown before start. |
-| Q7 | Planner tier: standard (sonnet/medium, gpt-6.2-sol/medium, gemini-4-argon-medium)? | **standard** (L1-4). |
-| Q8 | Remember the last planner kind per widget? | **No**: the first installed of claude, codex, agy each time. |
+| Q7 | Planner tier: standard (sonnet/medium, gpt-6.2-sol/medium)? | **standard** (L1-4). |
+| Q8 | Remember the last planner kind per widget? | **No**: the first installed of claude, codex each time. |

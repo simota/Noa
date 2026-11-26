@@ -18,6 +18,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # One target directory for the workspace and every widget crate. The
+  # widgets live outside the workspace, each with a target/ of its own, so
+  # without this each one compiles the same noa-gpui stack from scratch; with
+  # it, Cargo reuses what an earlier build left (artifacts are keyed by
+  # version and features, so differing lockfiles still build apart).
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
 jobs:
   build-and-test:

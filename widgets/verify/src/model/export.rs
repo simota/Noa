@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::model::recheck;
 use crate::model::rules::{Check, History};
 use crate::model::types::{
     CRITERIA_ROUND, CriteriaEdit, CrossOutcome, Defect, Evidence, EvidenceBody, EvidenceKey,
@@ -107,6 +108,7 @@ pub fn report_markdown(session: &Session, base: Option<&Path>) -> String {
     }
     write_head(&mut out, session);
     write_verdict(&mut out, session);
+    write_recheck(&mut out, session);
     write_criteria(&mut out, session, base);
     write_defects(&mut out, session, base);
     write_cross_checks(&mut out, session);
@@ -115,6 +117,68 @@ pub fn report_markdown(session: &Session, base: Option<&Path>) -> String {
     write_gaps(&mut out, session);
     write_rounds(&mut out, session);
     out
+}
+
+/// Includes the uncommitted patch and untracked files, so two captures
+/// of the same HEAD with different local edits have different versions.
+fn target_version(rebuild: &crate::model::types::Rebuild) -> String {
+    let bytes = serde_json::to_vec(rebuild).expect("a rebuild recipe is serializable");
+    format!(
+        "{} / {:016x}",
+        short_id(&rebuild.head_sha, 12),
+        crate::capture::digest_bytes(&bytes)
+    )
+}
+
+fn write_recheck(out: &mut String, session: &Session) {
+    let Some(previous) = &session.recheck else {
+        return;
+    };
+    let _ = writeln!(out, "## 前回との比較\n");
+    let _ = writeln!(out, "- 前回の検証: `{}`", cell(previous.parent.as_str()));
+    let _ = writeln!(
+        out,
+        "- 前回の対象: `{}`",
+        cell(&previous.target.repo.display().to_string())
+    );
+    let _ = writeln!(
+        out,
+        "- 前回の対象版（HEAD / 構成識別子）: `{}`",
+        target_version(&previous.rebuild)
+    );
+    let _ = writeln!(
+        out,
+        "- 今回の対象版（HEAD / 構成識別子）: `{}`",
+        target_version(&session.rebuild)
+    );
+    if let Some(spec) = &previous.spec {
+        let _ = writeln!(
+            out,
+            "- 引き継いだ基準の仕様出典: `{}`（{:016x}）",
+            cell(&spec.path),
+            spec.digest
+        );
+    }
+    out.push_str("\n基準のID・内容・確認方法・優先度・出典を引き継いで、新しい対象を検証しています。前回の判定や証跡は今回の合格根拠には使いません。構成識別子には未コミット差分と未追跡ファイルも含みます。\n\n");
+    out.push_str("| 基準 | 内容 | 前回の判定 | 今回の判定 | 変化 |\n|---|---|---|---|---|\n");
+    for row in recheck::compare(session) {
+        let changes = row
+            .changes
+            .iter()
+            .map(|c| c.label())
+            .collect::<Vec<_>>()
+            .join("・");
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} |",
+            cell(&row.id),
+            cell(&row.statement),
+            row.before.map_or("未判定", RulingKind::label),
+            row.after.map_or("未判定", RulingKind::label),
+            changes,
+        );
+    }
+    out.push_str("\n「解消」は同じ基準が不合格から検証済になった場合です。「新規失敗」は前回に不合格判定がなく今回にある場合で、変更による退行と断定するものではありません。「検証可能化」は前回に実行結果がなく、今回に pass/fail の結果が得られた基準です。基準を変更・削除した場合は解消として数えません。\n\n");
 }
 
 fn write_head(out: &mut String, session: &Session) {
@@ -774,7 +838,16 @@ fn write_changes(out: &mut String, session: &Session) {
         let what = if added.contains(&c.id.as_str()) {
             "追加"
         } else if c.edited {
-            "編集"
+            if session.recheck.is_some()
+                && !session
+                    .criteria_edits
+                    .iter()
+                    .any(|(edit, _)| matches!(edit, CriteriaEdit::Edit { id, .. } if *id == c.id))
+            {
+                "前回までに編集"
+            } else {
+                "編集"
+            }
         } else {
             continue;
         };
@@ -783,7 +856,16 @@ fn write_changes(out: &mut String, session: &Session) {
     }
     for c in &session.removed_criteria {
         any = true;
-        let _ = writeln!(out, "- 削除: {} {}（{}）", c.id, c.statement, c.source);
+        let what = if session
+            .recheck
+            .as_ref()
+            .is_some_and(|previous| previous.removed_criteria.iter().any(|old| old.id == c.id))
+        {
+            "前回までに削除"
+        } else {
+            "削除"
+        };
+        let _ = writeln!(out, "- {what}: {} {}（{}）", c.id, c.statement, c.source);
     }
     if session
         .criteria_edits

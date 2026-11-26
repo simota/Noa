@@ -751,8 +751,8 @@ fn ac22_the_matrix_shows_the_latest_result_per_cell_with_rerun_and_cross_check_m
             "必須",
             "新しいタブはフォーカス中のペインの作業ディレクトリで開く",
             "✗ ↻",
-            "✗ ↻ ⇄",
-            "✓ ≠ ⇄",
+            "✗ ↻ ⇄✓",
+            "✓ ≠ ⇄✗",
             "不合格"
         ],
         "{shown:#?}"
@@ -760,7 +760,7 @@ fn ac22_the_matrix_shows_the_latest_result_per_cell_with_rerun_and_cross_check_m
     // AC-5: claude's latest is its round-2 update, not its R1 not_tested.
     let at = shown.iter().position(|l| l == "AC-5").unwrap();
     assert_eq!(shown[at + 3], "✓ ↻");
-    assert_eq!(shown[at + 4], "✓ ↻ ⇄");
+    assert_eq!(shown[at + 4], "✓ ↻ ⇄✓");
     assert_eq!(shown[at + 5], "⊘");
     // A click on a row selects its criterion; the thread follows.
     let row = widget_for(&screen, &Action::SelectCriterion(Some("AC-1".into()))).unwrap();
@@ -811,7 +811,7 @@ fn ac22_a_cross_check_on_an_earlier_result_marks_not_the_latest_one() {
     assert_eq!(matrix::cell(&session, &claude, "AC-1").text(), "✓");
     // A check of R3 is about the R2 pass, the result the cell shows.
     session.cross_checks[0].round = 3;
-    assert_eq!(matrix::cell(&session, &claude, "AC-1").text(), "✓ ⇄");
+    assert_eq!(matrix::cell(&session, &claude, "AC-1").text(), "✓ ⇄✓");
 }
 
 #[test]
@@ -823,6 +823,148 @@ fn the_matrix_and_the_criteria_tab_fit_the_smallest_window() {
         assert_eq!(cut_off(&screen, screen.header_host), vec![]);
         assert_eq!(cut_off(&screen, screen.tabs_host), vec![]);
     }
+}
+
+#[test]
+fn a_result_cell_opens_its_exact_evidence_and_returns_to_the_same_filters_and_focus() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    type_draft(&mut screen, "追試では画面も確認してください");
+    screen.evidence_filters.kind = Some(evidence::Kind::Image);
+    let filters = screen.evidence_filters.clone();
+    act(
+        &mut screen,
+        Action::FilterCriteria(matrix::Filter::Differed),
+    );
+    let action = Action::ShowResultEvidence(PartId::new("claude-2"), "AC-1".into());
+    let keys = screen
+        .session
+        .as_ref()
+        .unwrap()
+        .latest_result(&PartId::new("claude-2"), "AC-1")
+        .unwrap()
+        .evidence
+        .clone();
+    press_button(&mut screen, &action);
+    assert_eq!(screen.tab, CenterTab::Evidence);
+    assert_eq!(screen.evidence_focus.as_ref().unwrap().keys, keys);
+    assert_eq!(screen.evidence_filters, filters);
+    assert_eq!(
+        screen.tree.focused(),
+        widget_for(&screen, &Action::LeaveEvidenceFocus)
+    );
+    assert_eq!(draft(&screen), "追試では画面も確認してください");
+    let mut next = crate::demo::held();
+    next.rev += 1;
+    link.snapshots.send(snapshot(next, None, 0)).unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert_eq!(screen.evidence_focus.as_ref().unwrap().keys, keys);
+    press_button(&mut screen, &Action::LeaveEvidenceFocus);
+    assert_eq!(screen.tab, CenterTab::Criteria);
+    assert_eq!(screen.criteria_filter, matrix::Filter::Differed);
+    assert_eq!(screen.evidence_filters, filters);
+    assert_eq!(screen.tree.focused(), widget_for(&screen, &action));
+    assert_eq!(draft(&screen), "追試では画面も確認してください");
+}
+
+#[test]
+fn latest_ruling_precedes_results_and_its_evidence_is_actionable() {
+    let mut screen = Verify::demo();
+    act(&mut screen, Action::SelectCriterion(Some("AC-1".into())));
+    let text = all_text(&screen);
+    assert!(text.find("最新の判定").unwrap() < text.find("検証者の結果").unwrap());
+    let latest = screen.session.as_ref().unwrap().ruling("AC-1").unwrap();
+    let key = latest
+        .evidence
+        .iter()
+        .find(|key| {
+            screen
+                .session
+                .as_ref()
+                .unwrap()
+                .evidence_item(key)
+                .is_some_and(|item| item.media().is_none())
+        })
+        .unwrap()
+        .clone();
+    assert!(acts(&screen).contains(&Action::ShowEvidence(key)));
+    let toggle = Action::ToggleHistory("rulings-AC-1".into());
+    press_button(&mut screen, &toggle);
+    assert!(screen.expanded_history.contains("rulings-AC-1"));
+    assert_eq!(screen.tree.focused(), widget_for(&screen, &toggle));
+    act(&mut screen, Action::ShowTab(CenterTab::Report));
+    assert!(screen.expanded_history.contains("rulings-AC-1"));
+}
+
+#[test]
+fn verdict_and_report_references_keep_filters_when_inspecting_their_targets() {
+    let mut screen = Verify::demo();
+    assert!(acts(&screen).contains(&Action::InspectCriterion("AC-1".into())));
+    act(&mut screen, Action::FilterCriteria(matrix::Filter::Blocked));
+    press_button(&mut screen, &Action::InspectCriterion("AC-1".into()));
+    assert_eq!(screen.criteria_filter, matrix::Filter::Blocked);
+    assert_eq!(
+        screen.shown_selection(),
+        Some(&Selected::Criterion("AC-1".into()))
+    );
+    act(&mut screen, Action::ShowTab(CenterTab::Report));
+    assert!(acts(&screen).contains(&Action::InspectDefect("D1".into())));
+    let key = EvidenceKey::new("claude/r1/e1");
+    assert!(acts(&screen).contains(&Action::ShowEvidence(key.clone())));
+    press_button(&mut screen, &Action::ShowEvidence(key.clone()));
+    assert_eq!(screen.evidence_focus.as_ref().unwrap().keys, vec![key]);
+    press_button(&mut screen, &Action::LeaveEvidenceFocus);
+    assert_eq!(screen.tab, CenterTab::Report);
+    assert_eq!(screen.criteria_filter, matrix::Filter::Blocked);
+}
+
+#[test]
+fn collapsed_progress_keeps_failures_rejections_and_resume_visible() {
+    let mut session = crate::demo::held();
+    let round = session.rounds.last_mut().unwrap();
+    round.briefs[0].receipt.failed = Some("worker disconnected".into());
+    round.briefs[1].receipt.replied = None;
+    round.briefs[1].receipt.rejected = Some("missing evidence".into());
+    let (mut screen, _) = live_with(session);
+    assert!(!screen.progress_expanded);
+    let strip = labels_under(&screen.tree, screen.progress_host).join("\n");
+    for warning in [
+        "worker disconnected",
+        "missing evidence",
+        "停止中",
+        "再実行相違",
+    ] {
+        assert!(strip.contains(warning), "{warning}: {strip}");
+    }
+    assert!(acts(&screen).contains(&Action::Continue));
+    press_button(&mut screen, &Action::ToggleProgress);
+    assert_eq!(
+        screen.tree.focused(),
+        widget_for(&screen, &Action::ToggleProgress)
+    );
+    assert!(screen.progress_expanded);
+}
+
+#[test]
+fn supplemental_actions_are_disclosed_without_hiding_retry_or_primary_actions() {
+    let mut screen = Verify::demo_held();
+    assert!(acts(&screen).contains(&Action::Continue));
+    assert!(!acts(&screen).contains(&Action::CopyReport));
+    press_button(&mut screen, &Action::ToggleActions);
+    for action in [
+        Action::CopyReport,
+        Action::SaveReport,
+        Action::ExportBundle,
+        Action::NewVerification,
+    ] {
+        assert!(acts(&screen).contains(&action));
+    }
+    assert_eq!(
+        screen.tree.focused(),
+        widget_for(&screen, &Action::ToggleActions)
+    );
+    press_button(&mut screen, &Action::ToggleActions);
+    assert!(!acts(&screen).contains(&Action::CopyReport));
+    assert!(acts(&screen).contains(&Action::Continue));
 }
 
 fn shown_keys(screen: &Verify) -> Vec<String> {
@@ -1134,7 +1276,8 @@ fn the_report_tab_is_provisional_until_a_verdict() {
 
 #[test]
 fn the_progress_strip_names_the_round_steps_and_re_runs() {
-    let held = Verify::demo_held();
+    let mut held = Verify::demo_held();
+    act(&mut held, Action::ToggleProgress);
     let strip = labels_under(&held.tree, held.progress_host);
     for expected in [
         "ラウンド 1 / 2 · 独立検証",
@@ -1146,7 +1289,8 @@ fn the_progress_strip_names_the_round_steps_and_re_runs() {
         assert!(strip.iter().any(|l| l == expected), "{expected}: {strip:?}");
     }
     assert!(!strip.iter().any(|l| l == "完了"), "{strip:?}");
-    let confirming = Verify::demo_criteria();
+    let mut confirming = Verify::demo_criteria();
+    act(&mut confirming, Action::ToggleProgress);
     let strip = labels_under(&confirming.tree, confirming.progress_host);
     assert!(strip.iter().any(|l| l == "基準確認待ち"), "{strip:?}");
     assert!(
@@ -1866,7 +2010,6 @@ fn ac06_each_criteria_change_is_sent_as_one_edit() {
         .tree
         .update::<TextArea, _>(h, |a, cx| a.set_text(cx, "三つ開いて一つ閉じ、残りで pwd"));
     act(&mut screen, Action::AddCriterion);
-    act(&mut screen, Action::StartVerify);
     let sent: Vec<Command> = commands(&link);
     assert_eq!(
         sent,
@@ -1895,7 +2038,6 @@ fn ac06_each_criteria_change_is_sent_as_one_edit() {
                     priority: Priority::Must,
                 }
             },
-            Command::StartVerify,
         ]
     );
     assert!(
@@ -1903,6 +2045,96 @@ fn ac06_each_criteria_change_is_sent_as_one_edit() {
             .iter()
             .any(|t| t.contains("AC-2 に変更はありません"))
     );
+}
+
+#[test]
+fn starting_collects_unsaved_criteria_and_the_addition_after_switching_tabs() {
+    let (mut screen, link) = live_with(crate::demo::criteria_held());
+    let statement = row(&screen, "AC-1").statement;
+    let how = row(&screen, "AC-2").how;
+    screen.tree.update::<TextField, _>(statement, |f, cx| f.set_text(cx, "新しい基準の文"));
+    screen.tree.update::<TextArea, _>(how, |a, cx| a.set_text(cx, "新しい確かめ方"));
+    let add = screen.editor.add.as_ref().unwrap();
+    let (s, h) = (add.statement, add.how);
+    screen.tree.update::<TextField, _>(s, |f, cx| f.set_text(cx, "追加欄の基準"));
+    screen.tree.update::<TextArea, _>(h, |a, cx| a.set_text(cx, "追加欄の確かめ方"));
+    let session = screen.session.clone().unwrap();
+    screen.editor.update_pending(&mut screen.tree, &session);
+    assert!(labels_under(&screen.tree, screen.center_host).iter().any(|text| text.contains("未保存の変更 3件")));
+    act(&mut screen, Action::ShowTab(CenterTab::Evidence));
+    act(&mut screen, Action::StartVerify);
+    assert_eq!(commands(&link), [Command::StartVerify {
+        edits: vec![
+            CriteriaEdit::Edit {
+                id: "AC-1".into(),
+                statement: Some("新しい基準の文".into()),
+                how: None,
+                priority: None,
+            },
+            CriteriaEdit::Edit {
+                id: "AC-2".into(),
+                statement: None,
+                how: Some("新しい確かめ方".into()),
+                priority: None,
+            },
+            CriteriaEdit::Add {
+                statement: "追加欄の基準".into(),
+                how: "追加欄の確かめ方".into(),
+                priority: Priority::Must,
+            },
+        ],
+    }]);
+    assert_eq!(screen.editor.pending_count(&screen.tree, &session), 3, "keep drafts until the saved snapshot arrives");
+}
+
+#[test]
+fn invalid_unsaved_criteria_return_to_the_field_without_sending_any_edit() {
+    let (mut screen, link) = live_with(crate::demo::criteria_held());
+    let statement = row(&screen, "AC-1").statement;
+    let how = row(&screen, "AC-2").how;
+    screen.tree.update::<TextField, _>(statement, |f, cx| f.set_text(cx, "保存を待つ文"));
+    screen.tree.update::<TextArea, _>(how, |a, cx| a.set_text(cx, ""));
+    act(&mut screen, Action::ShowTab(CenterTab::Evidence));
+    act(&mut screen, Action::StartVerify);
+    assert!(commands(&link).is_empty());
+    assert_eq!(screen.tab, CenterTab::Criteria);
+    assert_eq!(screen.tree.focused(), Some(row(&screen, "AC-2").how));
+    assert_eq!(screen.tree.get::<TextField>(row(&screen, "AC-1").statement).unwrap().text(), "保存を待つ文");
+    assert!(toasts(&screen).iter().any(|text| text.contains("AC-2: 確かめ方")));
+}
+
+#[test]
+fn an_unfinished_addition_blocks_start_and_keeps_what_was_written() {
+    for (statement, how, focus_statement) in [("追加の基準", "", false), ("", "追加の確かめ方", true)] {
+        let (mut screen, link) = live_with(crate::demo::criteria_held());
+        let add = screen.editor.add.as_ref().unwrap();
+        let (s, h) = (add.statement, add.how);
+        screen.tree.update::<TextField, _>(s, |f, cx| f.set_text(cx, statement));
+        screen.tree.update::<TextArea, _>(h, |a, cx| a.set_text(cx, how));
+        act(&mut screen, Action::ShowTab(CenterTab::Report));
+        act(&mut screen, Action::StartVerify);
+        assert!(commands(&link).is_empty());
+        let add = screen.editor.add.as_ref().unwrap();
+        assert_eq!(screen.tree.focused(), Some(if focus_statement { add.statement } else { add.how }));
+        assert_eq!(screen.tree.get::<TextField>(add.statement).unwrap().text(), statement);
+        assert_eq!(screen.tree.get::<TextArea>(add.how).unwrap().text(), how);
+        assert!(toasts(&screen).iter().any(|text| text.contains("追加する基準:")));
+    }
+}
+
+#[test]
+fn reverting_a_draft_then_leaving_the_tab_does_not_save_the_abandoned_text() {
+    let (mut screen, link) = live_with(crate::demo::criteria_held());
+    let original = screen.session.as_ref().unwrap().criterion("AC-1").unwrap().statement.clone();
+    let statement = row(&screen, "AC-1").statement;
+    screen.tree.update::<TextField, _>(statement, |f, cx| f.set_text(cx, "取り消す編集"));
+    act(&mut screen, Action::ShowTab(CenterTab::Evidence));
+    act(&mut screen, Action::ShowTab(CenterTab::Criteria));
+    let statement = row(&screen, "AC-1").statement;
+    screen.tree.update::<TextField, _>(statement, |f, cx| f.set_text(cx, original));
+    act(&mut screen, Action::ShowTab(CenterTab::Evidence));
+    act(&mut screen, Action::StartVerify);
+    assert_eq!(commands(&link), [Command::StartVerify { edits: Vec::new() }]);
 }
 
 #[test]
@@ -1997,7 +2229,7 @@ fn the_criteria_wait_for_confirmation_with_their_sources_and_a_start_button() {
         "出典: 依頼",
         "出典: 推定",
         "変更済",
-        "基準を確定して検証を開始",
+        "変更を保存して検証を開始",
     ] {
         assert!(shown.iter().any(|l| l == expected), "{expected}: {shown:?}");
     }
@@ -2538,13 +2770,11 @@ fn verifying_again_fills_the_start_view_with_the_frozen_criteria_and_the_verdict
     assert_eq!(form.judge.kind, session.judge.kind);
     assert_eq!(form.max_rounds, session.max_rounds);
     assert_eq!(form.isolation, session.isolation);
-    // The frozen criteria as the person's, word for word.
-    let statements: Vec<&str> = session
-        .criteria
-        .iter()
-        .map(|c| c.statement.as_str())
-        .collect();
-    assert_eq!(form.user_criteria(), statements);
+    // The full criteria stay structured; their sources do not become
+    // user-authored simply because this is a recheck.
+    assert_eq!(form.recheck.as_ref().unwrap().criteria, session.criteria);
+    assert_eq!(form.user_criteria(), session.user_criteria);
+    assert!(form.confirm);
     // The request keeps what was asked and adds the verdict and blocking.
     assert!(form.request.starts_with(session.request.trim_end()));
     assert!(
@@ -2581,6 +2811,7 @@ fn starting_the_filled_form_starts_the_same_verification_in_two_steps() {
             target,
             panel,
             user_criteria,
+            recheck,
             isolation,
             ..
         },
@@ -2590,7 +2821,8 @@ fn starting_the_filled_form_starts_the_same_verification_in_two_steps() {
     };
     assert_eq!(**target, session.target);
     assert_eq!(*panel, panel_of(&session));
-    assert_eq!(user_criteria.len(), session.criteria.len());
+    assert_eq!(*user_criteria, session.user_criteria);
+    assert_eq!(recheck.as_ref().unwrap().criteria, session.criteria);
     assert_eq!(*isolation, session.isolation);
     let _ = std::fs::remove_dir_all(repo);
 }
@@ -2600,6 +2832,41 @@ fn a_verification_without_a_verdict_keeps_its_request_as_it_was() {
     let session = crate::demo::held();
     assert!(session.verdict().is_none());
     assert_eq!(start::Form::from_session(&session).request, session.request);
+}
+
+#[test]
+fn rechecking_keeps_edited_methods_sources_priorities_and_order_until_confirmation() {
+    let repo = temp("again-structured");
+    let mut session = demo_in(&repo);
+    session.confirm = false;
+    session.criteria[0].how = "前回と同じ専用の手順".into();
+    session.criteria[0].priority = Priority::Should;
+    session.criteria[0].source = verify::model::types::CriterionSource::Spec { line: 12 };
+    session.criteria[0].edited = true;
+    session.criteria.reverse();
+    let (mut screen, link) = live_with(session.clone());
+    act(&mut screen, Action::VerifyAgain(None));
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.recheck.as_ref().unwrap().criteria, session.criteria);
+    assert!(form.confirm);
+    assert!(!screen.tree.is_enabled(screen.start.criteria));
+    assert!(!screen.tree.is_enabled(screen.start.confirm));
+    act(&mut screen, Action::Start);
+    let sent = commands(&link);
+    let Some(Command::Start {
+        recheck, confirm, ..
+    }) = sent.iter().find(|c| matches!(c, Command::Start { .. }))
+    else {
+        panic!("{sent:?}");
+    };
+    assert!(*confirm);
+    assert_eq!(recheck.as_ref().unwrap().criteria, session.criteria);
+    act(&mut screen, Action::NewVerification);
+    let clean = start::read(&screen.tree, &screen.start);
+    assert!(clean.recheck.is_none());
+    assert!(screen.tree.is_enabled(screen.start.criteria));
+    assert!(screen.tree.is_enabled(screen.start.confirm));
+    let _ = std::fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -2923,6 +3190,41 @@ fn focus_on_the_second_of_two_alike_buttons_stays_on_the_second() {
     link.snapshots.send(snapshot(next, None, 0)).unwrap();
     screen.poll_live(&mut TextStore::new(Default::default()));
     assert_eq!(screen.tree.focused(), Some(alike(&screen)[1]));
+}
+
+#[test]
+fn a_new_report_reference_does_not_steal_focus_from_the_same_key_in_the_thread() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    act(&mut screen, Action::ShowTab(CenterTab::Report));
+    act(&mut screen, Action::InspectCriterion("AC-1".into()));
+    let key = screen
+        .session
+        .as_ref()
+        .unwrap()
+        .ruling("AC-1")
+        .unwrap()
+        .evidence[0]
+        .clone();
+    let action = Action::ShowEvidence(key.clone());
+    let right_links = |screen: &Verify| -> Vec<WidgetId> {
+        screen
+            .actions
+            .iter()
+            .filter(|(id, a)| *a == action && screen.focus_scope(*id) == screen.right_host)
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    let links = right_links(&screen);
+    assert!(!links.is_empty());
+    let last = links.len() - 1;
+    screen.tree.set_focus(Some(links[last]));
+    let mut next = crate::demo::held();
+    next.request
+        .push_str(&format!("\n{key} も確認してください"));
+    next.rev += 1;
+    link.snapshots.send(snapshot(next, None, 0)).unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert_eq!(screen.tree.focused(), Some(right_links(&screen)[last]));
 }
 
 #[test]

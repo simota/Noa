@@ -89,6 +89,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
         verifiers: verifiers.clone(),
         confirm: *confirm,
         auto: auto.clone(),
+        recheck: None,
         criteria_brief: None,
         criteria_accepted: false,
         criteria_summary: String::new(),
@@ -564,6 +565,28 @@ fn apply_one(session: &mut Session, event: &Event) -> Result<(), ReduceError> {
             session.criteria_accepted = true;
             session.criteria_summary = summary.clone();
             session.criteria = criteria.clone();
+        }
+        Event::CriteriaReused { previous } => {
+            if session.recheck.is_some()
+                || session.criteria_accepted
+                || session.criteria_brief.is_some()
+                || session.frozen_at.is_some()
+                || !session.rounds.is_empty()
+                || previous.parent == session.id
+            {
+                return err("criteria reused outside a new verification");
+            }
+            previous.check().map_err(ReduceError)?;
+            session.confirm = true;
+            session.criteria_accepted = true;
+            session.criteria_summary = format!(
+                "{} の基準を引き継ぎました。今回の対象に合うか確認してください。出典は基準が作られたときの対象・仕様を指します。",
+                previous.parent
+            );
+            session.criteria = previous.criteria.clone();
+            session.removed_criteria = previous.removed_criteria.clone();
+            session.user_criteria = previous.user_criteria.clone();
+            session.recheck = Some((**previous).clone());
         }
         Event::CriteriaEdited { edit, at } => {
             if !session.criteria_accepted || session.frozen_at.is_some() {

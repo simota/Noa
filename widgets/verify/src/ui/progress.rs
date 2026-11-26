@@ -5,14 +5,15 @@
 use noa_gpui_core::style::{
     AlignItems, FlexDirection, Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
-use noa_gpui_core::widgets::{Container, ControlSize, Label, ProgressBar, Tone};
+use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, ProgressBar, Tone};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use verify::model::types::{
-    Brief, BriefKind, Evidence, EvidenceBody, Isolation, Millis, Phase, Receipt, Round, Session,
+    Brief, BriefKind, Evidence, EvidenceBody, Isolation, Millis, Phase, Receipt, Rerun, Round,
+    Session,
 };
 
-use super::{caption, gap, spacer, tag};
+use super::{Action, caption, gap, spacer, tag};
 
 const BAR_WIDTH: f32 = 140.0;
 
@@ -120,7 +121,14 @@ pub(super) fn reruns(session: &Session, round: &Round) -> (usize, usize) {
     (done, asked.len())
 }
 
-pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: Millis) {
+pub(super) fn insert(
+    tree: &mut UiTree,
+    host: WidgetId,
+    session: &Session,
+    now: Millis,
+    expanded: bool,
+    actions: &mut Vec<(WidgetId, Action)>,
+) {
     let strip = tree.insert(
         Some(host),
         Container::new(Style {
@@ -175,7 +183,23 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
         caption(tree, top, format!("{value}/{max} 完了"));
     }
     spacer(tree, top);
-    steps(tree, top, session);
+    let details = tree.insert(
+        Some(top),
+        Button::new(if expanded {
+            "進捗の内訳を閉じる"
+        } else {
+            "進捗の内訳"
+        })
+        .control_size(ControlSize::Small)
+        .selected(expanded),
+    );
+    actions.push((details, Action::ToggleProgress));
+    if expanded {
+        let phases = tree.insert(Some(strip), Container::wrapping_row(6.0, 4.0));
+        steps(tree, phases, session);
+    } else if !session.closed {
+        caption(tree, strip, session.phase().label());
+    }
 
     if session.closed {
         return;
@@ -210,19 +234,40 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
                     mid,
                     format!("再実行 {reran} / {asked}"),
                     if reran == asked {
-                        Tone::Success
+                        Tone::Neutral
                     } else {
                         Tone::Accent
                     },
                 );
             }
-            for brief in &round.briefs {
-                let rerun = round.brief(&brief.to, BriefKind::Rerun);
-                part_chip(tree, parts, brief.to.as_str(), Some(brief), rerun, now);
+            let mut warnings = [0; 3];
+            for item in session
+                .evidence
+                .iter()
+                .filter(|e| e.key.split().is_some_and(|(_, r, _)| r == round.no))
+            {
+                match item.rerun {
+                    Some(Rerun::Differed { .. }) => warnings[0] += 1,
+                    Some(Rerun::TimedOut { .. }) => warnings[1] += 1,
+                    Some(Rerun::NotRun { .. }) => warnings[2] += 1,
+                    _ => {}
+                }
             }
-            part_chip(tree, parts, "判定役", round.judge_brief.as_ref(), None, now);
+            for (label, count) in ["相違", "時間切れ", "未実行"].into_iter().zip(warnings)
+            {
+                if count > 0 {
+                    tag(tree, mid, format!("再実行{label} {count}"), Tone::Warning);
+                }
+            }
+            if expanded {
+                for brief in &round.briefs {
+                    let rerun = round.brief(&brief.to, BriefKind::Rerun);
+                    part_chip(tree, parts, brief.to.as_str(), Some(brief), rerun, now);
+                }
+                part_chip(tree, parts, "判定役", round.judge_brief.as_ref(), None, now);
+            }
         }
-        None => part_chip(
+        None if expanded => part_chip(
             tree,
             parts,
             "判定役",
@@ -230,6 +275,7 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session, now: 
             None,
             now,
         ),
+        None => {}
     }
     if session.waits_to_continue() {
         let row = tree.insert(

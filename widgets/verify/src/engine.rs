@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::auto_assign::AutoRecord;
 use crate::model::brief;
+use crate::model::recheck::Recheck;
 use crate::model::reduce::{self, ReduceError};
 use crate::model::rules;
 use crate::model::types::{
@@ -115,8 +116,10 @@ pub enum Input {
         edit: CriteriaEdit,
         at: Millis,
     },
-    /// 検証を開始: freezes the criteria and starts round 1.
+    /// Saves every pending edit together, freezes the criteria and starts
+    /// round 1. A refused edit leaves all criteria unfrozen and unchanged.
     UserStartVerify {
+        edits: Vec<CriteriaEdit>,
         at: Millis,
     },
     /// A [`Effect::MakeWorktrees`] worktree was built and checked.
@@ -692,6 +695,27 @@ impl Engine {
         ))
     }
 
+    /// Seed a just-created run before its first batch is stored. Keeping
+    /// creation and reuse in one batch means a crash cannot resume this
+    /// run as a fresh criteria-generation request.
+    pub fn with_recheck(
+        mut self,
+        mut output: Output,
+        previous: Recheck,
+    ) -> Result<(Engine, Output), EngineError> {
+        if output.batches.len() != 1
+            || !output.effects.is_empty()
+            || reduce::create(&output.batches[0])? != self.session
+        {
+            return rejected("基準の引き継ぎは新しい検証の作成時だけ行えます");
+        }
+        output.batches[0].push(Event::CriteriaReused {
+            previous: Box::new(previous),
+        });
+        self.session = reduce::create(&output.batches[0])?;
+        Ok((self, output))
+    }
+
     pub fn resume(session: Session, dir: &Path, config: Config) -> Engine {
         Engine {
             session,
@@ -846,12 +870,8 @@ impl Engine {
                 self.advance(&mut out)?;
             }
             Input::CriteriaEdit { edit, at } => self.edit_criteria(&mut out, edit, at)?,
-            Input::UserStartVerify { at } => {
-                if self.session.phase() != Phase::Confirming {
-                    return rejected("基準確認待ちではありません");
-                }
-                self.commit(&mut out, vec![Event::CriteriaFrozen { at }])?;
-                self.start_next(&mut out, at, false)?;
+            Input::UserStartVerify { edits, at } => {
+                self.confirm_criteria(&mut out, edits, at)?;
             }
             Input::WorktreeMade { part, path } => {
                 if !self.session.is_verifier(&part) {
@@ -1085,6 +1105,9 @@ impl Engine {
             return Ok(());
         }
         if self.session.frozen_at.is_none() {
+            if self.session.recheck.is_some() {
+                out.effects.push(Effect::WriteReport);
+            }
             return Ok(());
         }
         let Some(round) = self.session.current_round().cloned() else {
@@ -1655,6 +1678,48 @@ impl Engine {
                 at,
             }],
         )
+    }
+
+    fn confirm_criteria(
+        &mut self,
+        out: &mut Output,
+        edits: Vec<CriteriaEdit>,
+        at: Millis,
+    ) -> Result<(), EngineError> {
+        if self.session.phase() != Phase::Confirming {
+            return rejected("基準確認待ちではありません");
+        }
+        // Validate against the preceding edits too (an addition can hit
+        // the limit). Nothing reaches the session or its log on failure.
+        let mut checked = self.clone();
+        let mut checks = Output::default();
+        for edit in edits {
+            checked.edit_criteria(&mut checks, edit, at)?;
+        }
+        if !(1..=MAX_CRITERIA).contains(&checked.session.criteria.len()) {
+            return rejected(format!("基準は1〜{MAX_CRITERIA}件にしてください"));
+        }
+        for criterion in &checked.session.criteria {
+            let n = criterion.statement.trim().chars().count();
+            if !(1..=MAX_STATEMENT).contains(&n) || criterion.statement.contains('\n') {
+                return rejected(format!("{}: 基準は1行・{MAX_STATEMENT}文字までです", criterion.id));
+            }
+            if criterion.how.trim().is_empty() {
+                return rejected(format!("{}: {HOW_EMPTY}", criterion.id));
+            }
+        }
+        let mut batch: Vec<Event> = checks.batches.into_iter().flatten().collect();
+        batch.push(Event::CriteriaFrozen { at });
+        // Edits and freezing occupy one log line. Build round 1 against
+        // that revision, not against the temporary per-edit revisions.
+        let mut next = self.clone();
+        let mut staged = Output::default();
+        next.commit(&mut staged, batch)?;
+        next.start_next(&mut staged, at, false)?;
+        *self = next;
+        out.batches.extend(staged.batches);
+        out.effects.extend(staged.effects);
+        Ok(())
     }
 
     fn edit_criteria(

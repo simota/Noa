@@ -557,7 +557,7 @@ pub(super) fn play() -> Run {
         run.feed(Input::CriteriaEdit { edit, at });
     }
     let at = run.at();
-    run.feed(Input::UserStartVerify { at });
+    run.feed(Input::UserStartVerify { edits: Vec::new(), at });
     for part in VERIFIERS {
         let path = verify::worktree::path_for(
             Path::new(REPO),

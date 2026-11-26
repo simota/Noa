@@ -17,6 +17,7 @@ mod criteria;
 mod defects;
 mod evidence;
 mod fix;
+mod layout;
 mod matrix;
 mod progress;
 mod report;
@@ -37,8 +38,8 @@ use noa_gpui_core::style::{
     Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Alert, AlertResponse, AlertStyle, Container, Label, MenuChosen, ScrollView, SelectionChanged,
-    SplitPane, SplitView, StatusBar, Tag, TextChanged, Toast, Tone,
+    Alert, AlertResponse, AlertStyle, Button, Container, ControlSize, Label, MenuChosen,
+    ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, TextChanged, Toast, Tone,
 };
 use noa_gpui_core::{
     DragData, Event as UiEvent, Message as UiMessage, Role, Style, Theme, UiTree, WidgetId,
@@ -65,10 +66,7 @@ pub(crate) use start::Form as StartForm;
 const LEFT_WIDTH: f32 = 280.0;
 const RIGHT_WIDTH: f32 = 340.0;
 const CENTER_MIN: f32 = 520.0;
-pub(crate) const MIN_WINDOW: (f64, f64) = (
-    (LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH + 2.0 * noa_gpui_core::widgets::DIVIDER) as f64,
-    640.0,
-);
+pub(crate) const MIN_WINDOW: (f64, f64) = (720.0, 640.0);
 
 /// The shortest time between two looks at a stored verification on screen
 /// (its log and its lock). The look is taken when the window wakes: on
@@ -85,6 +83,8 @@ pub enum Action {
     AutoAssign(AgentKind),
     /// 中止 on the planner deciding.
     AutoCancel,
+    ToggleStartSettings,
+    CompactPane(usize),
     AddPanelRow,
     RemovePanelRow(usize),
     /// Opens a panel to choose the spec file.
@@ -101,6 +101,18 @@ pub enum Action {
     ShowTab(CenterTab),
     SelectCriterion(Option<String>),
     SelectDefect(Option<String>),
+    InspectCriterion(String),
+    InspectDefect(String),
+    FilterCriteria(matrix::Filter),
+    /// A result's exact citations, with a way back to the current view.
+    ShowResultEvidence(PartId, String),
+    /// A report's evidence reference, including observations and missing files.
+    ShowEvidence(EvidenceKey),
+    LeaveEvidenceFocus,
+    /// Expands one older ruling or round-summary section.
+    ToggleHistory(String),
+    ToggleActions,
+    ToggleProgress,
     ToggleSeverity(Severity),
     ToggleCategory(String),
     ToggleStatus(DefectStatus),
@@ -254,7 +266,15 @@ pub struct Verify {
     tab: CenterTab,
     defect_filters: defects::Filters,
     evidence_filters: evidence::Filters,
+    criteria_filter: matrix::Filter,
+    evidence_focus: Option<evidence::Focus>,
+    evidence_return: Option<(CenterTab, Option<FocusAnchor>)>,
+    expanded_history: BTreeSet<String>,
+    actions_expanded: bool,
+    progress_expanded: bool,
     selected: Option<Selected>,
+    /// A report or verdict link can show a detail outside the current filters.
+    reference_selection: bool,
     /// An intervention sent and not yet seen in the log.
     pending_intervention: Option<PendingIntervention>,
     file_dialogs: Vec<FileDialogRequest>,
@@ -316,6 +336,14 @@ pub struct Verify {
     start: start::Parts,
     editor: criteria::Editor,
     board: WidgetId,
+    split: WidgetId,
+    navigation: WidgetId,
+    navigation_buttons: [WidgetId; 3],
+    pane_roots: [WidgetId; 3],
+    compact: bool,
+    compact_pane: usize,
+    applied_pane: Option<usize>,
+    wide_sizes: (f32, f32),
     left_host: WidgetId,
     header_host: WidgetId,
     progress_host: WidgetId,
@@ -479,7 +507,21 @@ impl Verify {
         );
         let body = tree.insert(Some(root), Container::new(fill()));
         let start = start::insert(&mut tree, body);
-        let board = tree.insert(Some(body), Container::new(fill()));
+        let board = tree.insert(
+            Some(body),
+            Container::new(Style {
+                flex_direction: FlexDirection::Column,
+                ..fill()
+            }),
+        );
+        let navigation = tree.insert(Some(board), Container::wrapping_row(6.0, 4.0).padding(8.0));
+        let navigation_buttons = ["対象・パネル", "基準・結果", "選択の詳細"].map(|label| {
+            tree.insert(
+                Some(navigation),
+                Button::new(label).control_size(ControlSize::Small),
+            )
+        });
+        tree.set_hidden(navigation, true);
         let split = tree.insert(
             Some(board),
             SplitView::horizontal()
@@ -518,7 +560,14 @@ impl Verify {
             tab: CenterTab::Criteria,
             defect_filters: defects::Filters::default(),
             evidence_filters: evidence::Filters::default(),
+            criteria_filter: matrix::Filter::default(),
+            evidence_focus: None,
+            evidence_return: None,
+            expanded_history: BTreeSet::new(),
+            actions_expanded: false,
+            progress_expanded: false,
             selected: None,
+            reference_selection: false,
             pending_intervention: None,
             file_dialogs: Vec::new(),
             dialog_purposes: VecDeque::new(),
@@ -555,6 +604,14 @@ impl Verify {
             start,
             editor: criteria::Editor::default(),
             board,
+            split,
+            navigation,
+            navigation_buttons,
+            pane_roots: [left_host, center_col, right_col],
+            compact: false,
+            compact_pane: 1,
+            applied_pane: None,
+            wide_sizes: (LEFT_WIDTH, RIGHT_WIDTH),
             left_host,
             header_host,
             progress_host,
@@ -591,29 +648,58 @@ impl Verify {
         let focused = self.focused_action();
         self.rebuild_widgets(text);
         if self.tree.focused().is_none()
-            && let Some((action, nth)) = focused
+            && let Some((action, scope, nth)) = focused
         {
-            self.focus_action(&action, nth);
+            self.focus_action_in(&action, Some(scope), nth);
         }
     }
 
     /// The action of the widget with keyboard focus, and which of the
     /// widgets carrying it (in tree order) that is.
-    fn focused_action(&self) -> Option<(Action, usize)> {
+    fn focused_action(&self) -> Option<FocusAnchor> {
         let focused = self.tree.focused()?;
         let at = self.actions.iter().position(|(id, _)| *id == focused)?;
         let action = self.actions[at].1.clone();
+        let scope = self.focus_scope(focused);
         let nth = self.actions[..at]
             .iter()
-            .filter(|(_, a)| *a == action)
+            .filter(|(id, a)| *a == action && self.focus_scope(*id) == scope)
             .count();
-        Some((action, nth))
+        Some((action, scope, nth))
+    }
+
+    fn focus_scope(&self, id: WidgetId) -> WidgetId {
+        let scopes = [
+            self.start.root,
+            self.left_host,
+            self.header_host,
+            self.progress_host,
+            self.tabs_host,
+            self.center_host,
+            self.right_host,
+            self.status_leading,
+            self.status_trailing,
+        ];
+        let mut at = Some(id);
+        while let Some(node) = at {
+            if scopes.contains(&node) {
+                return node;
+            }
+            at = self.tree.parent(node);
+        }
+        self.board
     }
 
     /// Focuses the `nth` widget that carries `action` (the first, when
     /// there are fewer now).
     fn focus_action(&mut self, action: &Action, nth: usize) {
-        let mut carrying = self.actions.iter().filter(|(_, a)| a == action);
+        self.focus_action_in(action, None, nth);
+    }
+
+    fn focus_action_in(&mut self, action: &Action, scope: Option<WidgetId>, nth: usize) {
+        let mut carrying = self.actions.iter().filter(|(id, a)| {
+            a == action && scope.is_none_or(|scope| self.focus_scope(*id) == scope)
+        });
         let first = carrying.clone().next().map(|(id, _)| *id);
         if let Some(id) = carrying.nth(nth).map(|(id, _)| *id).or(first) {
             self.tree.set_focus(Some(id));
@@ -627,6 +713,9 @@ impl Verify {
         self.tree.set_hidden(self.start.root, started);
         self.tree.set_hidden(self.board, !started);
         if started {
+            for (index, button) in self.navigation_buttons.into_iter().enumerate() {
+                self.actions.push((button, Action::CompactPane(index)));
+            }
             self.rebuild_left(text);
             self.rebuild_header(text);
             self.rebuild_progress(text);
@@ -714,7 +803,14 @@ impl Verify {
         self.tab = CenterTab::Criteria;
         self.defect_filters = defects::Filters::default();
         self.evidence_filters = evidence::Filters::default();
+        self.criteria_filter = matrix::Filter::default();
+        self.evidence_focus = None;
+        self.evidence_return = None;
+        self.expanded_history.clear();
+        self.actions_expanded = false;
+        self.progress_expanded = false;
         self.selected = None;
+        self.reference_selection = false;
         self.pending_intervention = None;
         self.editor.reset();
         self.close_log();
@@ -777,11 +873,26 @@ impl Verify {
     }
 
     fn rebuild_progress(&mut self, text: &mut TextStore) {
+        let focused = self.focused_action();
+        self.actions
+            .retain(|(_, action)| *action != Action::ToggleProgress);
         clear_children(&mut self.tree, self.progress_host, text);
         let Some(session) = &self.session else {
             return;
         };
-        progress::insert(&mut self.tree, self.progress_host, session, system_now());
+        progress::insert(
+            &mut self.tree,
+            self.progress_host,
+            session,
+            system_now(),
+            self.progress_expanded,
+            &mut self.actions,
+        );
+        if self.tree.focused().is_none()
+            && let Some((action, scope, nth)) = focused
+        {
+            self.focus_action_in(&action, Some(scope), nth);
+        }
     }
 
     /// 証跡を追加 can be used: the verification has started round 1 and
@@ -919,6 +1030,7 @@ impl Verify {
                 self.center_host,
                 &session,
                 selected_criterion,
+                self.criteria_filter,
                 &mut self.actions,
             ),
             CenterTab::Evidence | CenterTab::Gallery => evidence::insert(
@@ -926,6 +1038,7 @@ impl Verify {
                 self.center_host,
                 &session,
                 &self.evidence_filters,
+                self.evidence_focus.as_ref(),
                 self.tab == CenterTab::Gallery,
                 can_attach,
                 &mut self.actions,
@@ -938,7 +1051,12 @@ impl Verify {
                 selected_defect,
                 &mut self.actions,
             ),
-            CenterTab::Report => report::insert(&mut self.tree, self.center_host, &session),
+            CenterTab::Report => report::insert(
+                &mut self.tree,
+                self.center_host,
+                &session,
+                &mut self.actions,
+            ),
         }
     }
 
@@ -957,6 +1075,7 @@ impl Verify {
         let cx = thread::Context {
             offer: offer.as_ref(),
             can_attach: self.can_attach(),
+            expanded: &self.expanded_history,
         };
         thread::insert(
             &mut self.tree,
@@ -1314,6 +1433,10 @@ impl Verify {
             // Drafts typed for another verification's criteria go.
             if snapshot.session.as_ref().map(|s| &s.id) != self.session.as_ref().map(|s| &s.id) {
                 self.editor.reset();
+                self.evidence_focus = None;
+                self.evidence_return = None;
+                self.expanded_history.clear();
+                self.reference_selection = false;
             }
             self.session = snapshot.session;
             self.drop_hidden_selection();
@@ -1346,10 +1469,15 @@ impl Verify {
         let session = self.session.as_ref()?;
         let selected = self.selected.as_ref()?;
         let shown = match selected {
-            Selected::Criterion(id) => session.criterion(id).is_some(),
-            Selected::Defect(id) => session
-                .defect(id)
-                .is_some_and(|d| defects::passes(session, &self.defect_filters, d)),
+            Selected::Criterion(id) => session.criterion(id).is_some_and(|c| {
+                self.reference_selection
+                    || self.tab != CenterTab::Criteria
+                    || session.rounds.is_empty()
+                    || self.criteria_filter.passes(session, c)
+            }),
+            Selected::Defect(id) => session.defect(id).is_some_and(|d| {
+                self.reference_selection || defects::passes(session, &self.defect_filters, d)
+            }),
         };
         shown.then_some(selected)
     }
@@ -1361,6 +1489,7 @@ impl Verify {
     }
 
     fn refilter(&mut self, text: &mut TextStore) {
+        self.reference_selection = false;
         self.drop_hidden_selection();
         self.rebuild(text);
     }
@@ -1404,6 +1533,17 @@ impl Verify {
             Some(root) => self.open(Open::File(store::target_dir(root))),
             None => self.toast("デモ表示には実体ファイルがありません"),
         }
+    }
+
+    fn show_evidence_focus(&mut self, focus: evidence::Focus, text: &mut TextStore) {
+        if self.evidence_focus.is_none() {
+            self.evidence_return = Some((self.tab, self.focused_action()));
+        }
+        self.evidence_focus = Some(focus);
+        self.tab = CenterTab::Evidence;
+        self.close_log();
+        self.rebuild(text);
+        self.focus_action(&Action::LeaveEvidenceFocus, 0);
     }
 
     /// The stored copy of `key` and where it lives, or why there is none.
@@ -1644,16 +1784,87 @@ impl Verify {
                 self.rebuild(text);
             }
             Action::ShowTab(tab) => {
+                self.compact_pane = 1;
+                if !matches!(tab, CenterTab::Evidence | CenterTab::Gallery) {
+                    self.evidence_focus = None;
+                    self.evidence_return = None;
+                }
                 self.tab = tab;
                 self.close_log();
                 self.rebuild(text);
             }
             Action::SelectCriterion(id) => {
+                self.compact_pane = if id.is_some() { 2 } else { 1 };
                 self.selected = id.map(Selected::Criterion);
+                self.reference_selection = false;
                 self.rebuild(text);
             }
             Action::SelectDefect(id) => {
+                self.compact_pane = if id.is_some() { 2 } else { 1 };
                 self.selected = id.map(Selected::Defect);
+                self.reference_selection = false;
+                self.rebuild(text);
+            }
+            Action::InspectCriterion(id) => {
+                self.selected = Some(Selected::Criterion(id));
+                self.reference_selection = true;
+                self.rebuild(text);
+            }
+            Action::InspectDefect(id) => {
+                self.selected = Some(Selected::Defect(id));
+                self.reference_selection = true;
+                self.rebuild(text);
+            }
+            Action::FilterCriteria(filter) => {
+                self.criteria_filter = filter;
+                self.refilter(text);
+            }
+            Action::ShowResultEvidence(part, criterion) => {
+                let Some(result) = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.latest_result(&part, &criterion))
+                else {
+                    return;
+                };
+                let focus = evidence::Focus {
+                    title: format!("{criterion} · {part} · R{} の引用した証跡", result.round),
+                    keys: result.evidence.clone(),
+                };
+                self.selected = Some(Selected::Criterion(criterion));
+                self.show_evidence_focus(focus, text);
+            }
+            Action::ShowEvidence(key) => {
+                self.show_evidence_focus(
+                    evidence::Focus {
+                        title: format!("証跡 {key}"),
+                        keys: vec![key],
+                    },
+                    text,
+                );
+            }
+            Action::LeaveEvidenceFocus => {
+                self.evidence_focus = None;
+                self.close_log();
+                let back = self.evidence_return.take();
+                if let Some((tab, _)) = &back {
+                    self.tab = *tab;
+                }
+                self.rebuild(text);
+                if let Some((_, Some((action, scope, nth)))) = back {
+                    self.focus_action_in(&action, Some(scope), nth);
+                }
+            }
+            Action::ToggleHistory(id) => {
+                toggle(&mut self.expanded_history, id);
+                self.rebuild(text);
+            }
+            Action::ToggleActions => {
+                self.actions_expanded = !self.actions_expanded;
+                self.rebuild(text);
+            }
+            Action::ToggleProgress => {
+                self.progress_expanded = !self.progress_expanded;
                 self.rebuild(text);
             }
             Action::ToggleSeverity(s) => {
@@ -1763,8 +1974,29 @@ impl Verify {
                     Err(why) => self.toast(why),
                 }
             }
-            Action::StartVerify => self.send_cmd(Command::StartVerify),
+            Action::StartVerify => {
+                let Some(session) = self.session.clone() else {
+                    return;
+                };
+                match self.editor.pending(&self.tree, &session) {
+                    Ok(edits) => self.send_cmd(Command::StartVerify { edits }),
+                    Err(error) => {
+                        self.tab = CenterTab::Criteria;
+                        self.close_log();
+                        self.rebuild(text);
+                        self.editor.focus_error(&mut self.tree, &error);
+                        self.toast(error.reason);
+                    }
+                }
+            }
             Action::OpenSnapshot => self.open_snapshot(),
+            Action::ToggleStartSettings => start::toggle_settings(&mut self.tree, &mut self.start),
+            Action::CompactPane(index) => {
+                self.compact_pane = index.min(2);
+                self.applied_pane = None;
+                self.tree
+                    .update::<Container, _>(self.board, |_, cx| cx.request_layout());
+            }
             Action::OpenWorktree(part) => {
                 let path = self
                     .session
@@ -2005,6 +2237,7 @@ impl Verify {
             target: Box::new(target),
             isolation: form.isolation,
             user_criteria: form.user_criteria(),
+            recheck: form.recheck.clone(),
             confirm: form.confirm,
             max_rounds: form.max_rounds,
             round_cap: form.round_cap,
@@ -2074,6 +2307,11 @@ fn rerun_log(rerun: &Rerun) -> Option<&Stored> {
 }
 
 impl Screen for Verify {
+    fn prepare(&mut self, viewport: noa_gpui_scene::Size, text: &mut TextStore) -> bool {
+        self.adapt_layout(viewport.width);
+        self.tree.prepare(viewport, text).is_some()
+    }
+
     fn tree(&self) -> &UiTree {
         &self.tree
     }
@@ -2145,6 +2383,14 @@ impl Screen for Verify {
             evidence::search_log(&mut self.tree, &self.log, &query);
             return;
         }
+        if message.downcast_ref::<TextChanged>().is_some()
+            && self.editor.edits_field(message.source)
+        {
+            if let Some(session) = &self.session {
+                self.editor.update_pending(&mut self.tree, session);
+            }
+            return;
+        }
         if let Some(MenuChosen(index)) = message.downcast_ref::<MenuChosen>()
             && Some(message.source) == self.auto.menu()
         {
@@ -2199,6 +2445,7 @@ impl Screen for Verify {
                 .cloned()
         {
             let had_focus = self.tree.focused() == Some(message.source);
+            let scope = self.focus_scope(message.source);
             let again = pressed_again(&action, self.selected.as_ref());
             self.handle_action(action, text);
             // A toggle pressed from the keyboard now carries another
@@ -2208,7 +2455,7 @@ impl Screen for Verify {
                 && self.tree.focused().is_none()
                 && let Some(again) = again
             {
-                self.focus_action(&again, 0);
+                self.focus_action_in(&again, Some(scope), 0);
             }
         }
     }
@@ -2277,6 +2524,8 @@ impl PendingIntervention {
 }
 
 type BuiltKey = (Option<(String, u64)>, Link, Option<Millis>);
+/// Repeated references retain both their pane and occurrence on updates.
+type FocusAnchor = (Action, WidgetId, usize);
 
 fn system_now() -> Millis {
     std::time::SystemTime::now()

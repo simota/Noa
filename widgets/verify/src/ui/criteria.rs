@@ -1,9 +1,9 @@
 //! The 基準 tab before round 1 (L1-2): the judge's criteria held for the
 //! person to confirm, editable — statement, how and priority changed, a
 //! criterion added, removed (an `inferred` or `request` one only) or moved
-//! — each change sent as one `CriteriaEdit`; 基準を確定して検証を開始
-//! freezes them. What is typed and not yet saved survives the rebuilds a
-//! new state of the verification makes.
+//! — each change can be saved on its own. Starting saves every remaining
+//! edit and freezes the criteria together. What is typed and not yet saved
+//! survives the rebuilds a new state of the verification makes.
 
 use std::collections::BTreeMap;
 
@@ -62,6 +62,13 @@ pub(super) struct Editor {
     pub(super) drafts: BTreeMap<String, (String, String)>,
     /// Statement, how and priority chosen in the add row.
     add_draft: AddDraft,
+    pending_label: Option<WidgetId>,
+}
+
+pub(super) struct ConfirmationError {
+    criterion: Option<String>,
+    statement: bool,
+    pub(super) reason: String,
 }
 
 /// What the add row holds while it is not sent.
@@ -107,6 +114,8 @@ impl Editor {
             let now = (field_text(tree, row.statement), area_text(tree, row.how));
             if now != row.built {
                 self.drafts.insert(row.id.clone(), now);
+            } else {
+                self.drafts.remove(&row.id);
             }
         }
         if let Some(add) = &self.add {
@@ -118,6 +127,7 @@ impl Editor {
         }
         self.rows.clear();
         self.add = None;
+        self.pending_label = None;
     }
 
     /// Forgets every draft (another verification is shown).
@@ -137,6 +147,117 @@ impl Editor {
     pub(super) fn priority(&self, tree: &UiTree, id: &str) -> Option<Priority> {
         let row = self.rows.iter().find(|r| r.id == id)?;
         Some(priority_of(tree, row.priority))
+    }
+
+    fn values(&self, tree: &UiTree, criterion: &Criterion) -> (String, String) {
+        if let Some(row) = self.rows.iter().find(|row| row.id == criterion.id) {
+            return (field_text(tree, row.statement), area_text(tree, row.how));
+        }
+        self.drafts
+            .get(&criterion.id)
+            .cloned()
+            .unwrap_or_else(|| (criterion.statement.clone(), criterion.how.clone()))
+    }
+
+    fn addition_draft(&self, tree: &UiTree) -> AddDraft {
+        self.add.as_ref().map_or_else(
+            || self.add_draft.clone(),
+            |add| AddDraft {
+                statement: field_text(tree, add.statement),
+                how: area_text(tree, add.how),
+                priority: priority_of(tree, add.priority),
+            },
+        )
+    }
+
+    pub(super) fn pending_count(&self, tree: &UiTree, session: &Session) -> usize {
+        let changed = session
+            .criteria
+            .iter()
+            .filter(|criterion| {
+                let (statement, how) = self.values(tree, criterion);
+                statement.trim() != criterion.statement || how.trim() != criterion.how
+            })
+            .count();
+        let add = self.addition_draft(tree);
+        changed + usize::from(!add.statement.trim().is_empty() || !add.how.trim().is_empty())
+    }
+
+    pub(super) fn update_pending(&self, tree: &mut UiTree, session: &Session) {
+        if let Some(label) = self.pending_label {
+            let count = self.pending_count(tree, session);
+            let message = if count == 0 {
+                "変更は保存済みです".to_owned()
+            } else {
+                format!("未保存の変更 {count}件（検証を始めるときにまとめて保存します）")
+            };
+            tree.update::<Label, _>(label, |label, cx| label.set_text(cx, message));
+        }
+    }
+
+    pub(super) fn edits_field(&self, source: WidgetId) -> bool {
+        self.rows.iter().any(|row| source == row.statement || source == row.how)
+            || self.add.as_ref().is_some_and(|add| source == add.statement || source == add.how)
+    }
+
+    /// Collects the current fields, including drafts from another tab.
+    /// A partly written addition must be completed or cleared, never lost
+    /// when the existing criteria are frozen.
+    pub(super) fn pending(
+        &self,
+        tree: &UiTree,
+        session: &Session,
+    ) -> Result<Vec<CriteriaEdit>, ConfirmationError> {
+        let mut edits = Vec::new();
+        for criterion in &session.criteria {
+            let (statement, how) = self.values(tree, criterion);
+            let statement = statement.trim().to_owned();
+            let how = how.trim().to_owned();
+            check(&statement, &how).map_err(|reason| ConfirmationError {
+                criterion: Some(criterion.id.clone()),
+                statement: !valid_statement(&statement),
+                reason: format!("{}: {reason}", criterion.id),
+            })?;
+            let statement = (statement != criterion.statement).then_some(statement);
+            let how = (how != criterion.how).then_some(how);
+            if statement.is_some() || how.is_some() {
+                edits.push(CriteriaEdit::Edit {
+                    id: criterion.id.clone(),
+                    statement,
+                    how,
+                    priority: None,
+                });
+            }
+        }
+        let add = self.addition_draft(tree);
+        let statement = add.statement.trim().to_owned();
+        let how = add.how.trim().to_owned();
+        if !statement.is_empty() || !how.is_empty() {
+            check(&statement, &how).map_err(|reason| ConfirmationError {
+                criterion: None,
+                statement: !valid_statement(&statement),
+                reason: format!("追加する基準: {reason}（追加しない場合は入力を消してください）"),
+            })?;
+            if session.criteria.len() >= MAX_CRITERIA {
+                return Err(ConfirmationError {
+                    criterion: None,
+                    statement: true,
+                    reason: format!("基準は{MAX_CRITERIA}件までです。追加欄を空にするか、不要な基準を削除してください"),
+                });
+            }
+            edits.push(CriteriaEdit::Add { statement, how, priority: add.priority });
+        }
+        Ok(edits)
+    }
+
+    pub(super) fn focus_error(&self, tree: &mut UiTree, error: &ConfirmationError) {
+        let fields = match &error.criterion {
+            Some(id) => self.rows.iter().find(|row| &row.id == id).map(|row| (row.statement, row.how)),
+            None => self.add.as_ref().map(|add| (add.statement, add.how)),
+        };
+        if let Some((statement, how)) = fields {
+            tree.set_focus(Some(if error.statement { statement } else { how }));
+        }
     }
 
     /// The edit 変更を保存 sends for criterion `id`: the fields that
@@ -204,6 +325,10 @@ impl Editor {
 
 /// L1-2's limits on what the person writes: a statement of 1–300
 /// characters, and a way to check it.
+fn valid_statement(statement: &str) -> bool {
+    (1..=MAX_STATEMENT).contains(&statement.chars().count()) && !statement.contains('\n')
+}
+
 fn check(statement: &str, how: &str) -> Result<(), String> {
     let n = statement.chars().count();
     if n == 0 {
@@ -211,6 +336,9 @@ fn check(statement: &str, how: &str) -> Result<(), String> {
     }
     if n > MAX_STATEMENT {
         return Err(format!("基準の文は{MAX_STATEMENT}文字までです（{n}文字）"));
+    }
+    if statement.contains('\n') {
+        return Err("基準の文は1行で入力してください".into());
     }
     if how.is_empty() {
         return Err("確かめ方を入力してください".into());
@@ -251,8 +379,11 @@ pub(super) fn insert(
     note(
         tree,
         list,
-        "判定役の基準を確かめ、必要なら直してから検証を始めます。変更はすべて記録され、レポートの「基準の変更」に載ります。検証が始まると基準は固定されます。",
+        "判定役の基準を確かめ、必要なら直してから検証を始めます。未保存の変更と追加欄の基準も、開始時にまとめて保存します。変更はレポートの「基準の変更」に記録され、検証が始まると基準は固定されます。",
     );
+    if editable {
+        editor.pending_label = Some(tree.insert(Some(list), Label::new("").font_size(12.0).wrap(true)));
+    }
     if !session.criteria_summary.is_empty() {
         let c = card(tree, list, true);
         caption(tree, c, "判定役のまとめ");
@@ -397,7 +528,8 @@ pub(super) fn insert(
     });
     let go = tree.insert(
         Some(list),
-        Button::new("基準を確定して検証を開始").default_button(true),
+        Button::new("変更を保存して検証を開始").default_button(true),
     );
     actions.push((go, Action::StartVerify));
+    editor.update_pending(tree, session);
 }

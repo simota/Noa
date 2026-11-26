@@ -18,8 +18,8 @@ use noa_gpui_core::widgets::{
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
 use verify::model::types::{
-    Evidence, EvidenceBody, MAX_CAPTION, MAX_MARKS, Mark, Media, Rerun, RoundNo, Session, Subject,
-    USER_EVIDENCE_OWNER,
+    Evidence, EvidenceBody, EvidenceKey, MAX_CAPTION, MAX_MARKS, Mark, Media, Rerun, RoundNo,
+    Session, Subject, USER_EVIDENCE_OWNER,
 };
 
 use super::defects::filter_row;
@@ -125,6 +125,13 @@ pub struct Filters {
     pub kind: Option<Kind>,
     pub criterion: Option<String>,
     pub rerun: Option<RerunKind>,
+}
+
+/// A result or report reference opened temporarily. The ordinary evidence
+/// filters remain intact and are restored when this view is left.
+pub(super) struct Focus {
+    pub title: String,
+    pub keys: Vec<EvidenceKey>,
 }
 
 impl Filters {
@@ -419,6 +426,7 @@ pub(super) fn insert(
     host: WidgetId,
     session: &Session,
     filters: &Filters,
+    focus: Option<&Focus>,
     gallery: bool,
     can_attach: bool,
     actions: &mut Vec<(WidgetId, Action)>,
@@ -428,8 +436,34 @@ pub(super) fn insert(
         tree,
         list,
         session,
-        if gallery { "gallery" } else { "evidence" },
+        if focus.is_some() {
+            "evidence-reference"
+        } else if gallery {
+            "gallery"
+        } else {
+            "evidence"
+        },
     );
+    if let Some(focus) = focus {
+        let top = tree.insert(Some(list), Container::wrapping_row(6.0, 4.0));
+        tree.insert(
+            Some(top),
+            Label::new(focus.title.clone())
+                .font_size(13.0)
+                .weight(600)
+                .wrap(true),
+        );
+        let back = tree.insert(
+            Some(top),
+            Button::new("元の表示に戻る").control_size(ControlSize::Small),
+        );
+        actions.push((back, Action::LeaveEvidenceFocus));
+        note(
+            tree,
+            list,
+            "この参照が引用した証跡を表示しています。元の絞り込み条件は保持しています",
+        );
+    }
     let top = tree.insert(
         Some(list),
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
@@ -451,7 +485,15 @@ pub(super) fn insert(
         ));
     }
     spacer(tree, top);
-    let shown: Vec<&Evidence> = shown(session, filters)
+    let items = match focus {
+        Some(focus) => focus
+            .keys
+            .iter()
+            .filter_map(|key| session.evidence_item(key))
+            .collect(),
+        None => shown(session, filters),
+    };
+    let shown: Vec<&Evidence> = items
         .into_iter()
         .filter(|e| !gallery || e.media().is_some())
         .collect();
@@ -465,11 +507,13 @@ pub(super) fn insert(
         session.evidence.len()
     };
     caption(tree, top, format!("表示 {} / 全 {all}", shown.len()));
-    let clear = tree.insert(
-        Some(top),
-        Button::new("条件をすべて解除").control_size(ControlSize::Small),
-    );
-    actions.push((clear, Action::ClearEvidenceFilters));
+    if focus.is_none() {
+        let clear = tree.insert(
+            Some(top),
+            Button::new("条件をすべて解除").control_size(ControlSize::Small),
+        );
+        actions.push((clear, Action::ClearEvidenceFilters));
+    }
     if can_attach {
         let attach = tree.insert(
             Some(top),
@@ -479,7 +523,9 @@ pub(super) fn insert(
         );
         actions.push((attach, Action::AttachEvidence));
     }
-    filter_bar(tree, list, session, filters, gallery, actions);
+    if focus.is_none() {
+        filter_bar(tree, list, session, filters, gallery, actions);
+    }
     if session.evidence.is_empty() {
         note(
             tree,
@@ -489,7 +535,15 @@ pub(super) fn insert(
         return;
     }
     if shown.is_empty() {
-        note(tree, list, "条件に合う証跡はありません。");
+        note(
+            tree,
+            list,
+            if focus.is_some() {
+                "この参照には表示できる証跡がありません。ギャラリーでは画像・動画だけを表示します"
+            } else {
+                "条件に合う証跡はありません。"
+            },
+        );
         return;
     }
     if gallery {

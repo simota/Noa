@@ -202,6 +202,21 @@ impl Verify {
         button(
             &mut self.tree,
             buttons,
+            small(if self.actions_expanded {
+                "操作を閉じる"
+            } else {
+                "操作"
+            })
+            .selected(self.actions_expanded),
+            Action::ToggleActions,
+            &mut self.actions,
+        );
+        if !self.actions_expanded {
+            return;
+        }
+        button(
+            &mut self.tree,
+            buttons,
             small("コピー"),
             Action::CopyReport,
             &mut self.actions,
@@ -306,7 +321,7 @@ impl Verify {
                 button(
                     tree,
                     trailing,
-                    small("検証を開始").tooltip("基準を確定して R1 を始めます"),
+                    small("変更を保存して検証を開始").tooltip("未保存の変更と追加欄をまとめて保存し、基準を確定して R1 を始めます"),
                     Action::StartVerify,
                     actions,
                 );

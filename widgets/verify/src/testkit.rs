@@ -533,7 +533,7 @@ pub fn accept_default_criteria(rig: &mut Rig) {
 pub fn start_round_one(rig: &mut Rig) {
     if rig.phase() == Phase::Confirming {
         let at = rig.tick();
-        rig.feed(Input::UserStartVerify { at });
+        rig.feed(Input::UserStartVerify { edits: Vec::new(), at });
     }
     make_worktrees(rig);
     assert_eq!(rig.round(), 1, "round 1 started");

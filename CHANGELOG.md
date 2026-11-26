@@ -7,12 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.18] - 2026-11-26
+
+Automatic worker assignment in the agent widgets, a durable board timeline
+of worker results, and links from a task to everything done for it.
+
 ### Added
 
 - Review, Verify, Discussion, Competition and Tasks: 「自動で割り当て」 lets
   claude or codex pick the agent, model and effort for every worker slot from
   the run's content, with a reason per slot, shown in the form before the run
-  starts and recorded in the run's log.
+  starts and recorded in the run's log. (#265)
+- Board timeline: each board keeps a durable, append-only feed of what its
+  workers did (summary, outcome, checks, open issues, artifacts) that
+  outlives the pane, the board and Noa. People read it in `+ctl board`,
+  agents through `+ctl timeline` and the `noa.timeline.*` JSON-RPC methods
+  (advertised as `boardTimelineV1` in `noa.hello`); workers post explicitly
+  and the Tasks, Review, Verify, Discussion and Competition widgets post at
+  confirmed results. Posting never starts work. (#266)
+- Tasks: a task's detail gains 「関連成果」, which lists its runs, the
+  versions of its change (v1, v2, …), every Review and Verify session with
+  the version it checked and its outcome, the latest version's missing
+  checks (「未登録」) and its PRs, and opens each of them. Review and Verify
+  windows link back to the task they came from. (#261)
+
+### Fixed
+
+- Agent widgets: a failed 「自動で割り当て」 showed 「…終了しました（logout）」,
+  the line an interactive login bash prints as it exits, instead of the
+  planner's error; the trailing `logout` is now skipped. (#267)
+- Tasks: the same code marker text in two files could select the wrong
+  marker; a marker is now selected by key and path. (#261)
 
 ## [0.9.17] - 2026-11-25
 

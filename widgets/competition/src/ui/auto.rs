@@ -7,6 +7,7 @@
 //! or left behind is dropped with it (and told to stop), so a stale result
 //! never reaches the form.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -107,7 +108,9 @@ pub(super) struct Auto {
 enum State {
     Idle,
     Running(Running),
-    /// The note to show: a planner's failure, or why it could not start.
+    /// The note to show: a planner's failure, or rows changed while it
+    /// ran. Why the form keeps it from running is not kept here: each
+    /// render works that out afresh.
     Failed(String),
 }
 
@@ -308,8 +311,15 @@ impl Competition {
         } else if form.request.is_empty() {
             Some(NO_REQUEST.to_owned())
         } else {
-            None
+            // The start's own check of the folder, with its message.
+            start::workdir(&form.workdir).err()
         };
+        // A form the planner cannot read supersedes the last run's
+        // failure: the note says what to fix, and once it is fixed no
+        // stale failure is left.
+        if blocker.is_some() && matches!(self.auto.state, State::Failed(_)) {
+            self.auto.state = State::Idle;
+        }
         let usable = matches!(self.source, Source::Live(_))
             && self.session.is_none()
             && !kinds.is_empty()
@@ -365,26 +375,19 @@ impl Competition {
         };
         let wake = Arc::clone(&channel.wake);
         let form = start::read(&self.tree, &self.start);
-        if form.request.is_empty() {
-            self.auto.state = State::Failed(NO_REQUEST.into());
-            return self.render_auto(text);
-        }
         // The start's own check of the folder, so planning runs where the
-        // competition would.
+        // competition would. The pull-down is off while the form cannot be
+        // read, but the folder may have gone since the last edit: the
+        // render then says so and turns the pull-down off.
         let workdir = match start::workdir(&form.workdir) {
-            Ok(workdir) => workdir,
-            Err(why) => {
-                self.auto.state = State::Failed(why);
-                return self.render_auto(text);
-            }
+            Ok(workdir) if !form.request.is_empty() => workdir,
+            _ => return self.render_auto(text),
         };
         let rows = rows(&form, &self.start);
         let slots = rows.iter().map(|row| slot(&row.slot)).collect();
         let candidates = candidates(self.start.kinds());
         let content = content(&form.request, workdir.as_deref());
-        let cwd = workdir
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .unwrap_or_default();
+        let cwd = planner_cwd(workdir, std::env::var_os("HOME"));
         let job = Job {
             planner,
             shell: crate::session::runner::login_shell(),
@@ -499,6 +502,14 @@ impl Competition {
     }
 }
 
+/// Where the planner runs: the 参照ディレクトリ, else a non-empty `HOME`,
+/// else `/` (an empty path would fail the spawn).
+fn planner_cwd(workdir: Option<PathBuf>, home: Option<OsString>) -> PathBuf {
+    workdir
+        .or_else(|| home.filter(|h| !h.is_empty()).map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
 fn slot(id: &str) -> Slot {
     let role = if id == "judge-1" {
         "lead judge: scores every round, decides early finish and writes the final review"
@@ -532,4 +543,21 @@ fn content(request: &str, workdir: Option<&std::path::Path>) -> String {
         |w| w.display().to_string(),
     );
     format!("Request (依頼内容):\n{request}\n\nReference directory (参照ディレクトリ): {workdir}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_planner_runs_in_the_workdir_else_a_non_empty_home_else_root() {
+        let home = || Some(OsString::from("/home/me"));
+        assert_eq!(
+            planner_cwd(Some("/work".into()), home()),
+            PathBuf::from("/work")
+        );
+        assert_eq!(planner_cwd(None, home()), PathBuf::from("/home/me"));
+        assert_eq!(planner_cwd(None, Some(OsString::new())), PathBuf::from("/"));
+        assert_eq!(planner_cwd(None, None), PathBuf::from("/"));
+    }
 }

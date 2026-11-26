@@ -3729,6 +3729,95 @@ mod tests {
         );
     }
 
+    /// Empties `field` and types `typed` into it, key by key, so each edit
+    /// reaches the screen as the person's would.
+    fn retype(screen: &mut Competition, field: WidgetId, typed: &str, text: &mut TextStore) {
+        screen.tree.set_focus(Some(field));
+        let erase = screen
+            .tree
+            .get::<noa_gpui_core::widgets::TextField>(field)
+            .map_or(0, |f| f.text().chars().count());
+        for _ in 0..erase {
+            screen.dispatch(
+                noa_gpui_core::Event::KeyDown {
+                    key: noa_gpui_core::Key::Backspace,
+                    modifiers: Default::default(),
+                },
+                text,
+            );
+        }
+        if !typed.is_empty() {
+            screen.dispatch(noa_gpui_core::Event::Text(typed.into()), text);
+        }
+        let form = start::read(&screen.tree, &screen.start);
+        assert_eq!(form.workdir, typed);
+    }
+
+    /// Whether the pull-down is on, and the auto note.
+    fn auto_control(screen: &Competition) -> (bool, Vec<String>) {
+        (screen.tree.is_enabled(screen.auto.menu), auto_notes(screen))
+    }
+
+    #[test]
+    fn an_unreadable_workdir_turns_the_pull_down_off_until_it_is_fixed() {
+        const RELATIVE: &str = "foo は絶対パスではありません";
+        let (mut screen, _link, queue, mut text) = auto_screen(&[AgentKind::Claude]);
+        let field = screen.start.workdir;
+        assert_eq!(auto_control(&screen), (true, vec![]));
+        // A relative path: off, with the start's own message.
+        retype(&mut screen, field, "foo", &mut text);
+        assert_eq!(auto_control(&screen), (false, vec![RELATIVE.to_owned()]));
+        // Asked anyway: no planner, and the message once.
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert!(queue.borrow().is_empty());
+        assert_eq!(auto_control(&screen), (false, vec![RELATIVE.to_owned()]));
+        // Cleared: on again, nothing left over.
+        retype(&mut screen, field, "", &mut text);
+        assert_eq!(auto_control(&screen), (true, vec![]));
+
+        // A folder that is not there, then made: on again once it is.
+        let root = temp_root("auto-workdir");
+        let path = root.to_str().unwrap().to_owned();
+        retype(&mut screen, field, &path, &mut text);
+        assert_eq!(
+            auto_control(&screen),
+            (false, vec![format!("{path} はディレクトリではありません")])
+        );
+        std::fs::create_dir_all(&root).unwrap();
+        retype(&mut screen, field, "", &mut text);
+        retype(&mut screen, field, &path, &mut text);
+        assert_eq!(auto_control(&screen), (true, vec![]));
+        // The planner runs there.
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert_eq!(queue.borrow()[0].job.cwd, root);
+
+        // A planner's failure gives way to the form's message, and fixing
+        // the form leaves neither.
+        fail(&mut screen, &queue, PlanError::Timeout(180), &mut text);
+        let (on, notes) = auto_control(&screen);
+        assert!(on);
+        assert!(
+            matches!(&notes[..], [n] if n.starts_with("自動割り当てに失敗しました: ")),
+            "{notes:?}"
+        );
+        retype(&mut screen, field, "foo", &mut text);
+        assert_eq!(auto_control(&screen), (false, vec![RELATIVE.to_owned()]));
+        retype(&mut screen, field, &path, &mut text);
+        assert_eq!(auto_control(&screen), (true, vec![]));
+
+        // An empty request asked anyway: its message once, gone once one
+        // is typed.
+        set_request(&mut screen, "", &mut text);
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert_eq!(
+            auto_control(&screen),
+            (false, vec!["依頼内容を入力してください".to_owned()])
+        );
+        set_request(&mut screen, REQUEST, &mut text);
+        assert_eq!(auto_control(&screen), (true, vec![]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_later_planning_run_keeps_the_applied_assignment_until_the_start() {
         let (mut screen, link, queue, mut text) = five_rows();

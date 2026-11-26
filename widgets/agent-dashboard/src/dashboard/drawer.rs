@@ -1,8 +1,10 @@
 //! The details drawer for any worker (AC8). `Dashboard` opens it on
 //! `View::detail`, reopens it after a rebuild, moves it with the selection,
 //! closes it when the worker goes, and asks the feed for its screen tail;
-//! this module fills the overlay with the worker's state, pane, task, screen
-//! tail, result file (read only when asked, `read_result`) and times.
+//! this module fills the overlay in the order of dashboard-worker-list AC9:
+//! the worker's state, what can be done, its result file (read only when
+//! asked, `read_result`) and worktree, then, collapsed, its task and screen
+//! tail, and its run information and times.
 
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -13,7 +15,8 @@ use noa_gpui_core::style::{AlignItems, Rect as LayoutRect, Size as LayoutSize, a
 use noa_gpui_core::text_edit::TextEditor;
 use noa_gpui_core::widget::{MeasureCx, PaintCx, Widget};
 use noa_gpui_core::widgets::{
-    Button, Container, ControlSize, Label, ScrollView, Tag, TagStyle, TextField, Tone, Truncation,
+    Button, Container, ControlSize, DisclosureGroup, Label, ScrollView, Tag, TagStyle, TextField,
+    Tone, Truncation,
 };
 use noa_gpui_core::{Key, MeasureInput, Modifiers, Role, Style, UiTree, WidgetId, accesskit};
 use noa_gpui_scene::{Point, Size};
@@ -22,9 +25,10 @@ use noa_gpui_text::TextStore;
 use crate::fleet::{Phase, State, Worker, minutes_text};
 
 use super::graph::mark;
-use super::style::{caption, fill_remaining, gap, phase_color, set_label, spacer};
+use super::list::{NO_TASK, RowAction, qualifiers, time_text};
+use super::style::{caption, fill_remaining, gap, phase_color, set_label, spacer, status_color};
 use super::{Feed, Pulse, Registry};
-use crate::live::{ALONE, Link};
+use crate::live::Link;
 
 /// What the drawer says where a worker has no screen tail yet: the feed
 /// fetches it (live), or there is none to fetch (demo).
@@ -99,8 +103,11 @@ const NOT_REGULAR: &str = "通常のファイルではありません";
 
 /// The drawer's interactive controls.
 pub(super) struct DrawerButtons {
-    /// 開く and ペインを閉じる; neither for a closed worker.
+    /// 開く (承認画面へ for an approval) and ペインを閉じる; neither for a
+    /// closed worker.
     pub(super) open: Option<WidgetId>,
+    /// 入力する, for a worker waiting for input.
+    pub(super) start_send: Option<WidgetId>,
     pub(super) close_pane: Option<WidgetId>,
     /// まとめて閉じる, when the filter shows ended workers.
     pub(super) close_ended: Option<WidgetId>,
@@ -113,16 +120,8 @@ pub(super) struct DrawerButtons {
     pub(super) tail_copy: Option<WidgetId>,
     pub(super) send_field: Option<WidgetId>,
     pub(super) send_button: Option<WidgetId>,
-}
-
-fn state_title(state: State) -> &'static str {
-    match state {
-        State::Running => "作業中",
-        State::Permission => "承認待ち",
-        State::Input => "入力待ち",
-        State::Finished => "完了",
-        State::Error => "失敗",
-    }
+    /// 指示と画面ログ and 実行情報 (`DISCLOSURES`).
+    pub(super) disclosures: [WidgetId; 2],
 }
 
 fn started_text(worker: &Worker) -> String {
@@ -536,6 +535,29 @@ fn time_label(tree: &mut UiTree, parent: WidgetId, text: &str) -> WidgetId {
     tree.insert(Some(parent), Label::new(text).font_size(12.0))
 }
 
+/// A drawer label that time changes, updated in place by [`refresh`]
+/// (`Pulse::Drawer`): which of the worker's texts it shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Slot {
+    /// 状態's qualifiers (a quiet worker's 出力未変化 N 分).
+    Qualifiers,
+    /// 状態's wait or last update (`list::time_text`).
+    Time,
+    /// 時間's start.
+    Started,
+    /// 時間's `since`.
+    Since,
+    /// 時間's 所要.
+    Took,
+    /// 時間's 人待ち合計.
+    Waited,
+    /// 時間's row of one phase (its swatch and its label).
+    Phase(Phase),
+}
+
+/// The two collapsed parts of the drawer (`View::drawer_open`), in order.
+pub(super) const DISCLOSURES: [&str; 2] = ["指示と画面ログ", "実行情報"];
+
 /// Inputs for building the details drawer.
 pub(super) struct DrawerInput<'a> {
     pub(super) worker: &'a Worker,
@@ -548,12 +570,55 @@ pub(super) struct DrawerInput<'a> {
     /// and whether a first press armed their close; `None` when there are
     /// none.
     pub(super) close_ended: Option<(usize, bool)>,
+    /// Whether 指示と画面ログ and 実行情報 are expanded (`DISCLOSURES`).
+    pub(super) expanded: [bool; 2],
 }
 
-/// Fills the drawer overlay `root` for `input.worker`, its result file shown as
-/// `input.preview` when one was read. The time rows register `Pulse::Drawer(pane)`
-/// in `reg.pulses`: the labels of the "時間" column (started, since, took,
-/// waited, in that order) and each phase's row.
+/// A muted wrapped label (`text_line`).
+fn muted_line(tree: &mut UiTree, parent: WidgetId, text: &str, lines: u32) -> WidgetId {
+    let id = text_line(tree, parent, text, lines);
+    tree.update::<Label, _>(id, |l, cx| l.set_color(cx, Role::Muted));
+    id
+}
+
+fn small_button(tree: &mut UiTree, parent: WidgetId, label: &str, selected: bool) -> WidgetId {
+    tree.insert(
+        Some(parent),
+        Button::new(label)
+            .control_size(ControlSize::Small)
+            .selected(selected),
+    )
+}
+
+/// A collapsible part of the drawer: a box like a section's holding a
+/// [`DisclosureGroup`], whose children are hidden (and neither drawn, hit
+/// nor focused) while it is collapsed. Returns the group.
+fn disclosure(tree: &mut UiTree, parent: WidgetId, title: &str, expanded: bool) -> WidgetId {
+    let column = tree.insert(
+        Some(parent),
+        Container::new(Style {
+            flex_direction: noa_gpui_core::style::FlexDirection::Column,
+            padding: LayoutRect {
+                left: length(8.0),
+                right: length(12.0),
+                top: length(8.0),
+                bottom: length(8.0),
+            },
+            ..Default::default()
+        })
+        .background(Role::SurfaceAlt)
+        .border(1.0, Role::Separator)
+        .radius(8.0),
+    );
+    tree.insert(Some(column), DisclosureGroup::new(title).expanded(expanded))
+}
+
+/// Fills the drawer overlay `root` for `input.worker`, its result file
+/// shown as `input.preview` when one was read (dashboard-worker-list AC9):
+/// the head (mark, label, kind), then 状態, 操作, 結果・差分, and the
+/// collapsed 指示と画面ログ and 実行情報; まとめて閉じる and 閉じる stay below
+/// the scrolling content. What time changes registers `Pulse::Drawer` in
+/// `reg.pulses`, each label with its [`Slot`].
 pub(super) fn build(
     tree: &mut UiTree,
     root: WidgetId,
@@ -568,8 +633,12 @@ pub(super) fn build(
         send_caret,
         confirm_close,
         close_ended,
+        expanded,
     } = input;
     let pane = worker.pane;
+    let pulse = |reg: &mut Registry, id: WidgetId, slot: Slot| {
+        reg.pulses.push((id, Pulse::Drawer(pane, slot)));
+    };
     let scroll = tree.insert(
         Some(root),
         ScrollView::new(Style {
@@ -616,89 +685,264 @@ pub(super) fn build(
             .shrink(KIND_SHRINK),
     );
 
-    // The model and the branch as the cards show them, each cut to the
-    // drawer's width when it is longer.
-    let tags = tree.insert(
-        Some(scroll),
-        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
-    );
-    if worker.is_agent() {
-        tree.insert(Some(tags), FitTag::new(worker.model_line()));
-    }
-    if !worker.branch.is_empty() {
-        tree.insert(
-            Some(tags),
-            FitTag::new(worker.branch.as_str()).style(TagStyle::Outlined),
-        );
-    }
-    if worker.is_closed() {
-        tree.insert(
-            Some(tags),
-            Tag::new(super::list::CLOSED_TAG).style(TagStyle::Outlined),
-        );
-    }
-    if worker.has_result {
-        tree.insert(Some(tags), Tag::new("結果あり").tone(Tone::Success));
-    } else {
-        tree.insert(Some(tags), Tag::new("結果なし").style(TagStyle::Outlined));
-    }
-
+    // 1. 状態: the row's status and qualifiers, the reason or the latest
+    // report, the wait or last update, the parent.
     let state = section(tree, scroll, "状態");
-    text_line(tree, state, state_title(worker.state), 1);
+    let status_row = tree.insert(
+        Some(state),
+        Container::wrapping_row(8.0, 2.0).align_items(AlignItems::CENTER),
+    );
+    let status = worker.status();
+    let mut title = Label::new(status.title()).font_size(14.0);
+    title = match status_color(status) {
+        Some(color) => title.weight(700).color(color),
+        None => title.color(Role::Muted),
+    };
+    tree.insert(Some(status_row), title);
+    let qualifiers = qualifiers(worker);
+    let qualifier = tree.insert(
+        Some(status_row),
+        Label::new(qualifiers.as_str())
+            .font_size(12.0)
+            .color(Role::Muted),
+    );
+    tree.set_hidden(qualifier, qualifiers.is_empty());
+    pulse(reg, qualifier, Slot::Qualifiers);
     if !worker.detail.is_empty() {
         text_line(tree, state, &worker.detail, 3);
     }
+    let time = muted_line(tree, state, &time_text(worker), 1);
+    tree.set_hidden(time, worker.since.is_empty());
+    pulse(reg, time, Slot::Time);
+    let parent = format!("親 {}", feed.fleet.parent_name(worker));
+    muted_line(tree, state, &parent, 2);
 
-    let pane_section = section(tree, scroll, "ペイン");
-    let parent = match worker.parent {
-        Some(pane) => feed
-            .fleet
-            .worker(pane)
-            .map_or_else(|| format!("ペイン {pane}"), |w| one_line(&w.label)),
-        None if worker.orchestrator_pane == Some(worker.pane) || worker.orchestrator == ALONE => {
-            "なし".to_owned()
-        }
-        None if worker.orchestrator.is_empty() => "不明".to_owned(),
-        None => one_line(&worker.orchestrator),
-    };
-    let id = worker.closed_pane.unwrap_or(pane);
-    text_line(tree, pane_section, &format!("ID {id} · 親 {parent}"), 2);
-    if !worker.cwd.is_empty() {
-        let cwd = text_line(tree, pane_section, &one_line(&worker.cwd), 2);
-        tree.update::<Label, _>(cwd, |l, cx| l.set_color(cx, Role::Muted));
-    }
+    // 2. 操作: the row's action where it does more than this drawer shows
+    // (承認画面へ in place of 開く, 入力する), 開く, ペインを閉じる, and the
+    // send field with its guards and hints.
+    let actions = section(tree, scroll, "操作");
+    let (mut open, mut start_send, mut close_pane) = (None, None, None);
     if worker.is_closed() {
-        let note = text_line(tree, pane_section, CLOSED_PANE, 2);
-        tree.update::<Label, _>(note, |l, cx| l.set_color(cx, Role::Muted));
-    } else if feed.link.as_ref() == Some(&Link::Live) && !feed.can_focus {
-        let hint = text_line(tree, pane_section, NEEDS_CONTROL, 4);
-        tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
+        muted_line(tree, actions, CLOSED_PANE, 2);
+    } else {
+        let row = tree.insert(Some(actions), Container::wrapping_row(6.0, 6.0));
+        let action = RowAction::of(worker);
+        if action == RowAction::StartSend {
+            start_send = Some(small_button(tree, row, action.title(status), true));
+        }
+        let open_label = match action {
+            RowAction::OpenPane => action.title(status),
+            _ => "開く",
+        };
+        let primary = action == RowAction::OpenPane;
+        open = Some(small_button(tree, row, open_label, primary));
+        let close_label = if confirm_close {
+            "本当に閉じる"
+        } else {
+            "ペインを閉じる"
+        };
+        close_pane = Some(small_button(tree, row, close_label, confirm_close));
+        if feed.link.as_ref() == Some(&Link::Live) && !feed.can_focus {
+            muted_line(tree, actions, NEEDS_CONTROL, 4);
+        }
+    }
+    let (send_field, send_button) = if worker.is_closed() {
+        muted_line(tree, actions, CLOSED_SEND_GUARD, 2);
+        (None, None)
+    } else if worker.state == State::Permission {
+        muted_line(tree, actions, PERMISSION_SEND_GUARD, 3);
+        (None, None)
+    } else {
+        let row = tree.insert(
+            Some(actions),
+            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        );
+        let field = tree.insert(
+            Some(row),
+            TextField::new("メッセージを入力（Enter で送信）", 268.0),
+        );
+        let caret = send_caret.min(draft.len());
+        tree.update::<TextField, _>(field, |f, cx| {
+            f.set_text(cx, draft);
+            f.select(cx, caret..caret);
+        });
+        let send = small_button(tree, row, "送信", true);
+        if feed.link.as_ref() == Some(&Link::Live) && !feed.can_input {
+            muted_line(tree, actions, NEEDS_INPUT, 3);
+        } else if feed.link.as_ref() == Some(&Link::Live) && !feed.safe_send {
+            muted_line(tree, actions, crate::live::UNSAFE_SEND, 3);
+        }
+        (Some(field), Some(send))
+    };
+
+    // 3. 結果・差分: the result file and 差分を見る.
+    let results = section(tree, scroll, "結果・差分");
+    let (result, result_reload, result_copy) = match worker.result.as_ref() {
+        Some(_) => {
+            let (toggle, reload, copy) = result_section(tree, results, preview);
+            (Some(toggle), reload, copy)
+        }
+        None => {
+            muted_line(tree, results, NO_RESULT_FILE, 2);
+            (None, None, None)
+        }
+    };
+    // Open or closed, a worker with a known cwd has a worktree to look at.
+    let diff = (!worker.cwd.is_empty()).then(|| {
+        let row = tree.insert(Some(results), Container::row().gap(6.0));
+        small_button(tree, row, DIFF, false)
+    });
+
+    // 4. 指示と画面ログ (collapsed): the task and the screen tail.
+    let instructions = disclosure(tree, scroll, DISCLOSURES[0], expanded[0]);
+    let task = tree.insert(
+        Some(instructions),
+        Container::new(Style {
+            flex_direction: noa_gpui_core::style::FlexDirection::Column,
+            gap: gap(4.0),
+            ..Default::default()
+        }),
+    );
+    caption(tree, task, "依頼");
+    if worker.task.is_empty() {
+        muted_line(tree, task, NO_TASK, 1);
+    } else {
+        text_line(tree, task, &worker.task, 6);
+    }
+    let tail_copy = screen_tail(tree, instructions, worker, feed);
+
+    // 5. 実行情報 (collapsed): model, branch, cwd, pane ID, times.
+    let run = disclosure(tree, scroll, DISCLOSURES[1], expanded[1]);
+    if worker.is_agent() || !worker.branch.is_empty() {
+        // The model and the branch, each cut to the drawer's width when it
+        // is longer.
+        let tags = tree.insert(
+            Some(run),
+            Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+        );
+        if worker.is_agent() {
+            tree.insert(Some(tags), FitTag::new(worker.model_line()));
+        }
+        if !worker.branch.is_empty() {
+            tree.insert(
+                Some(tags),
+                FitTag::new(worker.branch.as_str()).style(TagStyle::Outlined),
+            );
+        }
+    }
+    let id = worker.closed_pane.unwrap_or(pane);
+    text_line(tree, run, &format!("ペイン ID {id}"), 1);
+    if !worker.cwd.is_empty() {
+        muted_line(tree, run, &worker.cwd, 2);
+    }
+    let times = tree.insert(
+        Some(run),
+        Container::new(Style {
+            flex_direction: noa_gpui_core::style::FlexDirection::Column,
+            gap: gap(5.0),
+            ..Default::default()
+        }),
+    );
+    caption(tree, times, "時間");
+    let started = time_label(tree, times, &started_text(worker));
+    pulse(reg, started, Slot::Started);
+    let since = time_label(tree, times, &worker.since);
+    tree.set_hidden(since, worker.since.is_empty());
+    pulse(reg, since, Slot::Since);
+    let took_text = took_text(worker);
+    let took = time_label(tree, times, took_text.as_deref().unwrap_or_default());
+    tree.set_hidden(took, took_text.is_none());
+    pulse(reg, took, Slot::Took);
+    let waited = time_label(tree, times, &waited_text(worker));
+    pulse(reg, waited, Slot::Waited);
+    for phase in Phase::LEGEND {
+        let (text, shown) = phase_text(worker, phase);
+        let row = tree.insert(
+            Some(times),
+            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        );
+        tree.insert(
+            Some(row),
+            Container::row()
+                .width(10.0)
+                .height(10.0)
+                .background(phase_color(phase))
+                .radius(2.0),
+        );
+        time_label(tree, row, &text);
+        tree.set_hidden(row, !shown);
+        pulse(reg, row, Slot::Phase(phase));
     }
 
-    let task = section(tree, scroll, "依頼");
-    let task_text = if worker.task.is_empty() {
-        "不明"
-    } else {
-        worker.task.as_str()
-    };
-    text_line(tree, task, task_text, 6);
+    // The bulk close acts on the filter's workers, not this one: a row of
+    // its own above the drawer's 閉じる.
+    let close_ended = close_ended.map(|(count, armed)| {
+        let row = tree.insert(
+            Some(root),
+            Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        );
+        spacer(tree, row);
+        let label = if armed {
+            format!("本当にまとめて閉じる（{count} 件）")
+        } else {
+            format!("完了・失敗をまとめて閉じる（{count} 件）")
+        };
+        small_button(tree, row, &label, armed)
+    });
 
+    // 閉じる stays below the scrolling content, always reachable.
+    let buttons = tree.insert(
+        Some(root),
+        Container::new(Style {
+            flex_direction: noa_gpui_core::style::FlexDirection::Row,
+            align_items: AlignItems::CENTER,
+            gap: gap(8.0),
+            padding: LayoutRect {
+                left: length(0.0),
+                right: length(0.0),
+                top: length(8.0),
+                bottom: length(0.0),
+            },
+            ..Default::default()
+        }),
+    );
+    spacer(tree, buttons);
+    let close = small_button(tree, buttons, "閉じる", false);
+    DrawerButtons {
+        open,
+        start_send,
+        close_pane,
+        close_ended,
+        diff,
+        close,
+        result,
+        result_reload,
+        result_copy,
+        tail_copy,
+        send_field,
+        send_button,
+        disclosures: [instructions, run],
+    }
+}
+
+/// What 結果・差分 says of a worker with no result file to read.
+pub(super) const NO_RESULT_FILE: &str = "表示できる結果ファイルはありません";
+
+/// The screen tail's box under `parent`: its caption and コピー (when
+/// there is a tail), and its lines or why there are none. Returns コピー.
+fn screen_tail(
+    tree: &mut UiTree,
+    parent: WidgetId,
+    worker: &Worker,
+    feed: &Feed,
+) -> Option<WidgetId> {
     let tail = tree.insert(
-        Some(scroll),
+        Some(parent),
         Container::new(Style {
             flex_direction: noa_gpui_core::style::FlexDirection::Column,
             gap: gap(6.0),
-            padding: LayoutRect {
-                left: length(12.0),
-                right: length(12.0),
-                top: length(10.0),
-                bottom: length(10.0),
-            },
             ..Default::default()
-        })
-        .background(Role::SurfaceAlt)
-        .border(1.0, Role::Separator)
-        .radius(8.0),
+        }),
     );
     let tail_head = tree.insert(
         Some(tail),
@@ -706,12 +950,8 @@ pub(super) fn build(
     );
     caption(tree, tail_head, "画面の末尾");
     spacer(tree, tail_head);
-    let tail_copy = (!worker.screen_tail.is_empty()).then(|| {
-        tree.insert(
-            Some(tail_head),
-            Button::new("コピー").control_size(ControlSize::Small),
-        )
-    });
+    let tail_copy =
+        (!worker.screen_tail.is_empty()).then(|| small_button(tree, tail_head, "コピー", false));
     if worker.screen_tail.is_empty() {
         let empty = if worker.is_closed() {
             TAIL_NONE
@@ -749,179 +989,16 @@ pub(super) fn build(
             );
         }
     }
-
-    let (result, result_reload, result_copy) = match worker.result.as_ref() {
-        Some(_) => {
-            let (toggle, reload, copy) = result_section(tree, scroll, preview);
-            (Some(toggle), reload, copy)
-        }
-        None => (None, None, None),
-    };
-
-    let times = section(tree, scroll, "時間");
-    let started = time_label(tree, times, &started_text(worker));
-    let since = time_label(tree, times, &worker.since);
-    tree.set_hidden(since, worker.since.is_empty());
-    let took_text = took_text(worker);
-    let took = time_label(tree, times, took_text.as_deref().unwrap_or_default());
-    tree.set_hidden(took, took_text.is_none());
-    let waited = time_label(tree, times, &waited_text(worker));
-    for id in [started, since, took, waited] {
-        reg.pulses.push((id, Pulse::Drawer(pane)));
-    }
-    for phase in Phase::LEGEND {
-        let (text, shown) = phase_text(worker, phase);
-        let row = tree.insert(
-            Some(times),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
-        );
-        tree.insert(
-            Some(row),
-            Container::row()
-                .width(10.0)
-                .height(10.0)
-                .background(phase_color(phase))
-                .radius(2.0),
-        );
-        time_label(tree, row, &text);
-        tree.set_hidden(row, !shown);
-        reg.pulses.push((row, Pulse::Drawer(pane)));
-    }
-
-    let send_section = section(tree, scroll, "指示・返信");
-    let (send_field, send_button) = if worker.is_closed() {
-        let hint = text_line(tree, send_section, CLOSED_SEND_GUARD, 2);
-        tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
-        (None, None)
-    } else if worker.state == State::Permission {
-        let hint = text_line(tree, send_section, PERMISSION_SEND_GUARD, 3);
-        tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
-        (None, None)
-    } else {
-        let row = tree.insert(
-            Some(send_section),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
-        );
-        let field = tree.insert(
-            Some(row),
-            TextField::new("メッセージを入力（Enter で送信）", 268.0),
-        );
-        let caret = send_caret.min(draft.len());
-        tree.update::<TextField, _>(field, |f, cx| {
-            f.set_text(cx, draft);
-            f.select(cx, caret..caret);
-        });
-        let send = tree.insert(
-            Some(row),
-            Button::new("送信")
-                .control_size(ControlSize::Small)
-                .selected(true),
-        );
-        if feed.link.as_ref() == Some(&Link::Live) && !feed.can_input {
-            let hint = text_line(tree, send_section, NEEDS_INPUT, 3);
-            tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
-        } else if feed.link.as_ref() == Some(&Link::Live) && !feed.safe_send {
-            let hint = text_line(tree, send_section, crate::live::UNSAFE_SEND, 3);
-            tree.update::<Label, _>(hint, |l, cx| l.set_color(cx, Role::Muted));
-        }
-        (Some(field), Some(send))
-    };
-
-    // The bulk close acts on the filter's workers, not this one: a row of
-    // its own above this worker's buttons.
-    let close_ended = close_ended.map(|(count, armed)| {
-        let row = tree.insert(
-            Some(root),
-            Container::row().align_items(AlignItems::CENTER).gap(8.0),
-        );
-        spacer(tree, row);
-        let label = if armed {
-            format!("本当にまとめて閉じる（{count} 件）")
-        } else {
-            format!("完了・失敗をまとめて閉じる（{count} 件）")
-        };
-        tree.insert(
-            Some(row),
-            Button::new(label)
-                .control_size(ControlSize::Small)
-                .selected(armed),
-        )
-    });
-
-    // The buttons stay below the scrolling content, always reachable.
-    let buttons = tree.insert(
-        Some(root),
-        Container::new(Style {
-            flex_direction: noa_gpui_core::style::FlexDirection::Row,
-            align_items: AlignItems::CENTER,
-            gap: gap(8.0),
-            padding: LayoutRect {
-                left: length(0.0),
-                right: length(0.0),
-                top: length(8.0),
-                bottom: length(0.0),
-            },
-            ..Default::default()
-        }),
-    );
-    // A closed worker has no pane to go to or to close.
-    let open_pane = !worker.is_closed();
-    let open = open_pane.then(|| {
-        tree.insert(
-            Some(buttons),
-            Button::new("開く")
-                .control_size(ControlSize::Small)
-                .selected(true),
-        )
-    });
-    let close_pane_label = if confirm_close {
-        "本当に閉じる"
-    } else {
-        "ペインを閉じる"
-    };
-    let close_pane = open_pane.then(|| {
-        tree.insert(
-            Some(buttons),
-            Button::new(close_pane_label)
-                .control_size(ControlSize::Small)
-                .selected(confirm_close),
-        )
-    });
-    // Open or closed, a worker with a known cwd has a worktree to look at.
-    let diff = (!worker.cwd.is_empty()).then(|| {
-        tree.insert(
-            Some(buttons),
-            Button::new(DIFF).control_size(ControlSize::Small),
-        )
-    });
-    spacer(tree, buttons);
-    let close = tree.insert(
-        Some(buttons),
-        Button::new("閉じる").control_size(ControlSize::Small),
-    );
-    DrawerButtons {
-        open,
-        close_pane,
-        close_ended,
-        diff,
-        close,
-        result,
-        result_reload,
-        result_copy,
-        tail_copy,
-        send_field,
-        send_button,
-    }
+    tail_copy
 }
 
-/// The result file: a 表示 button, or what was read with 隠す, 再読込 and
-/// コピー buttons.
+/// The result file under `column` (結果・差分): what was read, if it was,
+/// and a 表示 button, or 隠す, 再読込 and コピー buttons.
 fn result_section(
     tree: &mut UiTree,
-    parent: WidgetId,
+    column: WidgetId,
     preview: Option<&Preview>,
 ) -> (WidgetId, Option<WidgetId>, Option<WidgetId>) {
-    let column = section(tree, parent, "結果");
     match preview {
         None => {}
         Some(Err(reason)) => {
@@ -962,61 +1039,45 @@ fn result_section(
     } else {
         "表示"
     };
-    let toggle = tree.insert(
-        Some(row),
-        Button::new(label).control_size(ControlSize::Small),
-    );
-    let reload = preview.is_some().then(|| {
-        tree.insert(
-            Some(row),
-            Button::new("再読込").control_size(ControlSize::Small),
-        )
-    });
-    let copy = matches!(preview, Some(Ok(_))).then(|| {
-        tree.insert(
-            Some(row),
-            Button::new("コピー").control_size(ControlSize::Small),
-        )
-    });
+    let toggle = small_button(tree, row, label, false);
+    let reload = preview
+        .is_some()
+        .then(|| small_button(tree, row, "再読込", false));
+    let copy = matches!(preview, Some(Ok(_))).then(|| small_button(tree, row, "コピー", false));
     (toggle, reload, copy)
 }
 
-/// Brings one of the drawer's time rows up to date (`Pulse::Drawer`): `id`
-/// is a label of the "時間" column (told apart by its place there) or a
-/// phase's row (told apart by its place among the phase rows).
-pub(super) fn refresh(tree: &mut UiTree, id: WidgetId, worker: &Worker) {
-    let Some(parent) = tree.parent(id) else {
-        return;
-    };
-    let Some(index) = tree.children(parent).iter().position(|child| *child == id) else {
-        return;
-    };
-    // The column's first child is its caption.
-    let index = index.saturating_sub(1);
-    if tree.get::<Label>(id).is_some() {
-        match index {
-            0 => set_label(tree, id, started_text(worker)),
-            1 => {
-                set_label(tree, id, worker.since.clone());
-                tree.set_hidden(id, worker.since.is_empty());
-            }
-            2 => {
-                let text = took_text(worker);
-                tree.set_hidden(id, text.is_none());
-                if let Some(text) = text {
-                    set_label(tree, id, text);
-                }
-            }
-            _ => set_label(tree, id, waited_text(worker)),
+/// Brings the drawer label `id` up to date: the text of its `slot`.
+pub(super) fn refresh(tree: &mut UiTree, id: WidgetId, slot: Slot, worker: &Worker) {
+    match slot {
+        Slot::Qualifiers => {
+            let text = qualifiers(worker);
+            tree.set_hidden(id, text.is_empty());
+            set_label(tree, id, text);
         }
-    } else if let Some(phase) = index
-        .checked_sub(4)
-        .and_then(|i| Phase::LEGEND.get(i).copied())
-    {
-        let (text, shown) = phase_text(worker, phase);
-        tree.set_hidden(id, !shown);
-        if let Some(label) = tree.children(id).get(1).copied() {
-            set_label(tree, label, text);
+        Slot::Time => {
+            tree.set_hidden(id, worker.since.is_empty());
+            set_label(tree, id, time_text(worker));
+        }
+        Slot::Started => set_label(tree, id, started_text(worker)),
+        Slot::Since => {
+            set_label(tree, id, worker.since.clone());
+            tree.set_hidden(id, worker.since.is_empty());
+        }
+        Slot::Took => {
+            let text = took_text(worker);
+            tree.set_hidden(id, text.is_none());
+            if let Some(text) = text {
+                set_label(tree, id, text);
+            }
+        }
+        Slot::Waited => set_label(tree, id, waited_text(worker)),
+        Slot::Phase(phase) => {
+            let (text, shown) = phase_text(worker, phase);
+            tree.set_hidden(id, !shown);
+            if let Some(label) = tree.children(id).get(1).copied() {
+                set_label(tree, label, text);
+            }
         }
     }
 }

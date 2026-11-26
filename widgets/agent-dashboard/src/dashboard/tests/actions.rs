@@ -240,6 +240,8 @@ fn drawer_copies_screen_tail_and_reloads_and_copies_result() {
     dashboard.prepare(window(), &mut text);
     dashboard.set_detail(Some(17), &mut text);
     dashboard.prepare(window(), &mut text);
+    // The tail is under 指示と画面ログ, collapsed at first.
+    expand_drawer(&mut dashboard, &mut text);
 
     // Copy screen tail.
     let tail_copy = dashboard.registry.tail_copy.expect("tail copy button");

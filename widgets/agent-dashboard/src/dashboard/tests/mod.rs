@@ -1,5 +1,5 @@
 use noa_gpui_core::Key;
-use noa_gpui_core::widgets::{Label, Tag};
+use noa_gpui_core::widgets::{DisclosureGroup, Label, Tag};
 use noa_gpui_core::{Event, Modifiers, PointerButton};
 use noa_gpui_scene::{Border, DisplayList, DrawCommand, Point, Size};
 
@@ -153,6 +153,22 @@ fn inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
 }
 
 const LONG_LABEL: &str = "noa-gpui ウィジェットによるUI拡張案とその検証作業のまとめ";
+
+/// Expands the drawer's 指示と画面ログ and 実行情報 as assistive technology
+/// clicks their titles: the screen handles the `Toggled` each one sends.
+fn expand_drawer(dashboard: &mut Dashboard, text: &mut TextStore) {
+    let groups = dashboard.registry.disclosures.expect("the drawer is open");
+    // Each toggle is handled in place: the ids stay.
+    for id in groups {
+        let group = dashboard.tree.get::<DisclosureGroup>(id).unwrap();
+        if !group.is_expanded() {
+            let node = noa_gpui_core::access_id(id).0;
+            let click = noa_gpui_core::accesskit::Action::Click;
+            hardening::assistive(dashboard, text, node, click);
+        }
+    }
+    assert_eq!(dashboard.view.drawer_open, [true; 2]);
+}
 
 /// A key pressed with no modifier, then the next frame's layout.
 fn key(dashboard: &mut Dashboard, text: &mut TextStore, key: Key) {

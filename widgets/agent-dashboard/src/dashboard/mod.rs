@@ -7,7 +7,7 @@ use noa_gpui_core::style::{
 };
 use noa_gpui_core::widgets::{
     ButtonClicked, Container, ControlSize, Label, ScrollView, SegmentMode, SegmentedControl,
-    SelectionChanged, TextChanged, TextField, Truncation,
+    SelectionChanged, TextChanged, TextField, Toggled, Truncation,
 };
 use noa_gpui_core::{
     Appearance, Dirty, Edge, Event, Message, OverlayOptions, Placement, PointerButton, Role, Style,
@@ -120,6 +120,10 @@ struct View {
     anchor: Option<u64>,
     /// The pane the pager must bring into view (AC3): the user's own move.
     reveal: Option<u64>,
+    /// Whether the drawer's 指示と画面ログ and 実行情報 are expanded
+    /// (`drawer::DISCLOSURES`): kept across rebuilds and workers for the
+    /// run, never saved.
+    drawer_open: [bool; 2],
 }
 
 impl View {
@@ -138,6 +142,7 @@ impl View {
             first: 0,
             anchor: None,
             reveal: None,
+            drawer_open: [false; 2],
         }
     }
 
@@ -308,14 +313,14 @@ enum Pulse {
     /// A quiet row's qualifiers, which say how long its output stood still
     /// (`list::qualifiers`).
     RowQuiet(u64),
-    /// A time label in the details drawer (`drawer::refresh`).
-    Drawer(u64),
+    /// A label in the details drawer that time changes (`drawer::refresh`).
+    Drawer(u64, drawer::Slot),
 }
 
 impl Pulse {
     /// Lives outside the body, so a body refill keeps it.
     fn outside_body(self) -> bool {
-        matches!(self, Pulse::Drawer(_))
+        matches!(self, Pulse::Drawer(..))
     }
 }
 
@@ -335,8 +340,12 @@ enum Mark {
 #[derive(Default)]
 pub struct Registry {
     pulses: Vec<(WidgetId, Pulse)>,
-    /// The drawer's 開く.
+    /// The drawer's 開く (承認画面へ for an approval).
     open_buttons: Vec<(WidgetId, u64)>,
+    /// The drawer's 入力する.
+    start_send_button: Option<(WidgetId, u64)>,
+    /// The drawer's 指示と画面ログ and 実行情報 (`drawer::DISCLOSURES`).
+    disclosures: Option<[WidgetId; 2]>,
     marks: Vec<(WidgetId, u64, Mark)>,
     /// The worker list's rows, which the pager pages.
     list: Option<ListParts>,
@@ -432,6 +441,26 @@ fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed, tab: Tab) -> (Wid
             .control_size(ControlSize::Small),
     );
     (notice, tab_control)
+}
+
+/// The body's layout: the window's width less the gutters, and less the
+/// drawer's width too while the `drawer` is open: the drawer lies beside
+/// the list, so every row's time and button stay in reach.
+fn body_style(drawer: bool) -> Style {
+    let right = if drawer {
+        DRAWER_WIDTH + GUTTER
+    } else {
+        GUTTER
+    };
+    Style {
+        flex_direction: FlexDirection::Column,
+        gap: gap(GUTTER),
+        padding: LayoutRect {
+            right: length(right),
+            ..LayoutRect::length(GUTTER)
+        },
+        ..fill_remaining()
+    }
 }
 
 /// The scroll views under `id`, depth first.
@@ -1023,7 +1052,7 @@ impl Dashboard {
             match pulse {
                 Pulse::RowTime(pane) => set_label(tree, id, list::time_text(worker(pane))),
                 Pulse::RowQuiet(pane) => set_label(tree, id, list::qualifiers(worker(pane))),
-                Pulse::Drawer(pane) => drawer::refresh(tree, id, worker(pane)),
+                Pulse::Drawer(pane, slot) => drawer::refresh(tree, id, slot, worker(pane)),
             }
         }
         self.paint_selection();
@@ -1159,15 +1188,7 @@ impl Dashboard {
         );
         let registry = Registry::default();
         let header = header::header(&mut tree, root, &feed, &view, &filter);
-        let body = tree.insert(
-            Some(root),
-            Container::new(Style {
-                flex_direction: FlexDirection::Column,
-                gap: gap(GUTTER),
-                padding: LayoutRect::length(GUTTER),
-                ..fill_remaining()
-            }),
-        );
+        let body = tree.insert(Some(root), Container::new(body_style(false)));
         let (notice, tab_control) = notice_line(&mut tree, root, &feed, view.tab);
         if refocus {
             tree.set_focus(Some(header.filter_field));
@@ -1437,6 +1458,7 @@ impl Dashboard {
                 },
                 confirm_close,
                 close_ended,
+                expanded: self.view.drawer_open,
             },
             &mut self.registry,
         );
@@ -1453,6 +1475,17 @@ impl Dashboard {
         self.registry.tail_copy = buttons.tail_copy;
         self.registry.send_field = buttons.send_field.map(|id| (id, pane));
         self.registry.send_button = buttons.send_button.map(|id| (id, pane));
+        self.registry.start_send_button = buttons.start_send.map(|id| (id, pane));
+        self.registry.disclosures = Some(buttons.disclosures);
+        self.fit_body();
+    }
+
+    /// Narrows the body by the drawer's width while it is open, so the
+    /// drawer lies beside the list, not over its rows' times and buttons.
+    fn fit_body(&mut self) {
+        let style = body_style(self.registry.drawer.is_some());
+        self.tree
+            .update::<Container, _>(self.body, |c, cx| c.set_style(cx, style));
     }
 
     fn close_drawer(&mut self, text: &mut TextStore) {
@@ -1469,9 +1502,12 @@ impl Dashboard {
         self.registry.tail_copy = None;
         self.registry.send_field = None;
         self.registry.send_button = None;
+        self.registry.start_send_button = None;
+        self.registry.disclosures = None;
         self.registry
             .pulses
-            .retain(|(_, pulse)| !matches!(pulse, Pulse::Drawer(_)));
+            .retain(|(_, pulse)| !matches!(pulse, Pulse::Drawer(..)));
+        self.fit_body();
     }
 
     /// Builds the drawer again. Under an open help (a live update or a
@@ -2390,6 +2426,17 @@ impl Screen for Dashboard {
             self.send_caret = Some((pane, caret));
             return;
         }
+        if let Some(Toggled(expanded)) = message.downcast_ref::<Toggled>()
+            && let Some(at) = self
+                .registry
+                .disclosures
+                .and_then(|ids| ids.iter().position(|id| *id == message.source))
+        {
+            // The group shows or hides its children itself; the view keeps
+            // which is open for the next drawer.
+            self.view.drawer_open[at] = *expanded;
+            return;
+        }
         if let Some(SelectionChanged(index)) = message.downcast_ref::<SelectionChanged>() {
             // A switch is not the confirming press: it takes back a close
             // waiting for one, as keys 1–3 do (`act`). None of the
@@ -2443,11 +2490,21 @@ impl Screen for Dashboard {
         // the drawer is relabelled first, as a key does (`act`), so what the
         // row's button opens is not built again under it — 入力する's
         // focused send field would lose its focus.
-        let in_row = self
+        // The drawer's 入力する, like a row's button, focuses a send field
+        // that relabelling after it would build again unfocused: it acts
+        // after the relabel, on the pane it names (the relabel gives the
+        // drawer's buttons new ids).
+        let start_send = self
             .registry
-            .row_actions
-            .iter()
-            .any(|(id, _, _)| *id == source);
+            .start_send_button
+            .filter(|(id, _)| *id == source)
+            .map(|(_, pane)| pane);
+        let in_row = start_send.is_some()
+            || self
+                .registry
+                .row_actions
+                .iter()
+                .any(|(id, _, _)| *id == source);
         let confirms = self
             .registry
             .close_pane_button
@@ -2470,6 +2527,10 @@ impl Screen for Dashboard {
         };
         if in_row && relabels(self.view.detail) {
             self.reopen_drawer(text);
+        }
+        if let Some(pane) = start_send {
+            self.start_send(pane, text);
+            return;
         }
         self.click(source, text);
         if !in_row && relabels(self.view.detail) {

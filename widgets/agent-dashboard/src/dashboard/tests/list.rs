@@ -526,8 +526,7 @@ fn clicking_the_row_leaves_the_send_field() {
 }
 
 /// `pane`'s row button pressed by assistive technology, which acts on the
-/// button directly: an open drawer covers the rows' 操作 column from the
-/// pointer.
+/// button directly (a pointer reaches it too: `details::the_list_stays_usable_beside_the_drawer`).
 fn press_row_button_for_assistive(dashboard: &mut Dashboard, text: &mut TextStore, pane: u64) {
     let node = noa_gpui_core::access_id(row_button(dashboard, pane)).0;
     super::hardening::assistive(dashboard, text, node, Access::Click);

@@ -132,10 +132,8 @@ fn the_drawer_names_the_pane_and_what_opening_it_needs() {
     let file = TempFile::new("scopes.md", b"ok\n");
     let (dashboard, _text) = drawer_on_result(file.0.clone(), false);
     let texts = drawer_texts(&dashboard);
-    assert!(
-        texts.iter().any(|t| t.starts_with("ID 17 · 親 ")),
-        "{texts:?}"
-    );
+    assert!(texts.iter().any(|t| t == "ペイン ID 17"), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("親 ")), "{texts:?}");
     assert!(
         texts.contains(&drawer::NEEDS_CONTROL.to_owned()),
         "{texts:?}"
@@ -207,7 +205,7 @@ fn the_drawer_names_the_direct_parent() {
     dashboard.set_detail(Some(14), &mut text);
     let parent = label_of(&dashboard, 11).to_owned();
     let texts = drawer_texts(&dashboard);
-    assert!(texts.contains(&format!("ID 14 · 親 {parent}")), "{texts:?}");
+    assert!(texts.contains(&format!("親 {parent}")), "{texts:?}");
 }
 
 /// The result path swapped back and forth between a regular file and a
@@ -314,7 +312,7 @@ fn a_root_agent_has_no_parent_in_the_drawer() {
     dashboard.prepare(window(), &mut text);
     dashboard.set_detail(Some(11), &mut text);
     let texts = drawer_texts(&dashboard);
-    assert!(texts.contains(&"ID 11 · 親 なし".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"親 なし".to_owned()), "{texts:?}");
 }
 
 #[test]
@@ -373,7 +371,7 @@ fn a_lone_agent_has_no_parent_in_the_drawer() {
     dashboard.prepare(window(), &mut text);
     dashboard.set_detail(Some(11), &mut text);
     let texts = drawer_texts(&dashboard);
-    assert!(texts.contains(&"ID 11 · 親 なし".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"親 なし".to_owned()), "{texts:?}");
 }
 
 #[test]

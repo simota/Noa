@@ -95,7 +95,7 @@ fn nothing_reaches_the_pane_of_a_closed_worker() {
     let drawer = dashboard.drawer.unwrap().0;
     let labels = labels_under(&dashboard.tree, drawer);
     assert!(
-        labels.iter().any(|l| l == "ID 21 · 親 perf-wish"),
+        labels.iter().any(|l| l == "ペイン ID 21") && labels.iter().any(|l| l == "親 perf-wish"),
         "{labels:?}"
     );
     assert!(

@@ -84,6 +84,17 @@ impl Verify {
         }
     }
 
+    /// The active pane's own hidden flag is already cleared, but a
+    /// collapsed SplitView child stays hidden until the layout pass.
+    pub(super) fn awaits_pane_layout(&self, id: WidgetId) -> bool {
+        self.session.is_some()
+            && self.pane_roots.iter().enumerate().any(|(index, root)| {
+                (!self.compact || index == self.compact_pane)
+                    && self.tree.is_hidden(*root)
+                    && self.within(id, *root)
+            })
+    }
+
     fn within(&self, mut id: WidgetId, root: WidgetId) -> bool {
         loop {
             if id == root {

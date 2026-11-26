@@ -347,6 +347,8 @@ pub struct Verify {
     compact: bool,
     compact_pane: usize,
     applied_pane: Option<usize>,
+    /// A focus target in a pane that SplitView will reveal at the next layout.
+    layout_focus: Option<FocusAnchor>,
     wide_sizes: (f32, f32),
     viewport_width: f32,
     left_host: WidgetId,
@@ -617,6 +619,7 @@ impl Verify {
             compact: false,
             compact_pane: 1,
             applied_pane: None,
+            layout_focus: None,
             wide_sizes: (LEFT_WIDTH, RIGHT_WIDTH),
             viewport_width: LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH + 12.0,
             left_host,
@@ -710,6 +713,11 @@ impl Verify {
         let first = carrying.clone().next().map(|(id, _)| *id);
         if let Some(id) = carrying.nth(nth).map(|(id, _)| *id).or(first) {
             self.tree.set_focus(Some(id));
+            if self.tree.focused() == Some(id) {
+                self.layout_focus = None;
+            } else if self.awaits_pane_layout(id) {
+                self.layout_focus = Some((action.clone(), self.focus_scope(id), nth));
+            }
         }
     }
 
@@ -810,6 +818,7 @@ impl Verify {
         self.extending = false;
         self.tab = CenterTab::Criteria;
         self.compact_pane = 1;
+        self.layout_focus = None;
         self.defect_filters = defects::Filters::default();
         self.evidence_filters = evidence::Filters::default();
         self.criteria_filter = matrix::Filter::default();
@@ -1447,6 +1456,7 @@ impl Verify {
             // Drafts typed for another verification's criteria go.
             if snapshot.session.as_ref().map(|s| &s.id) != self.session.as_ref().map(|s| &s.id) {
                 self.compact_pane = 1;
+                self.layout_focus = None;
                 self.editor.reset();
                 self.evidence_focus = None;
                 self.evidence_return = None;
@@ -2333,7 +2343,16 @@ fn rerun_log(rerun: &Rerun) -> Option<&Stored> {
 impl Screen for Verify {
     fn prepare(&mut self, viewport: noa_gpui_scene::Size, text: &mut TextStore) -> bool {
         self.adapt_layout(viewport.width);
-        self.tree.prepare(viewport, text).is_some()
+        let changed = self.tree.prepare(viewport, text).is_some();
+        if let Some((action, scope, nth)) = self.layout_focus.take() {
+            // SplitView synchronizes hidden children during prepare, so a
+            // newly revealed pane can take focus only after that first pass.
+            self.focus_action_in(&action, Some(scope), nth);
+            self.layout_focus = None;
+            let refocused = self.tree.prepare(viewport, text).is_some();
+            return changed || refocused;
+        }
+        changed
     }
 
     fn tree(&self) -> &UiTree {

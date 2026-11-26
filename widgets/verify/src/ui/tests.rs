@@ -903,6 +903,7 @@ fn narrow_references_show_the_destination_and_return_to_the_origin_pane() {
     let mut text = TextStore::new(Default::default());
     lay_out_with_text(&mut screen, SMALLEST, &mut text);
     screen.handle_action(Action::InspectCriterion("AC-1".into()), &mut text);
+    lay_out_with_text(&mut screen, SMALLEST, &mut text);
     assert_eq!(screen.compact_pane, 2);
     assert!(!screen.tree.is_hidden(screen.right_host));
     let action = screen
@@ -911,9 +912,15 @@ fn narrow_references_show_the_destination_and_return_to_the_origin_pane() {
         .find_map(|(_, action)| matches!(action, Action::ShowEvidence(_)).then(|| action.clone()))
         .expect("criterion ruling has cited evidence");
     press_button_with_text(&mut screen, &action, &mut text);
+    lay_out_with_text(&mut screen, SMALLEST, &mut text);
     assert_eq!(screen.compact_pane, 1);
     assert!(!screen.tree.is_hidden(screen.center_host));
+    assert_eq!(
+        screen.tree.focused(),
+        widget_for(&screen, &Action::LeaveEvidenceFocus)
+    );
     press_button_with_text(&mut screen, &Action::LeaveEvidenceFocus, &mut text);
+    lay_out_with_text(&mut screen, SMALLEST, &mut text);
     assert_eq!(screen.compact_pane, 2);
     assert!(!screen.tree.is_hidden(screen.right_host));
     assert_eq!(screen.tree.focused(), widget_for(&screen, &action));

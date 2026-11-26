@@ -33,9 +33,17 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
+  # macOS runs --full as two jobs side by side, one per part of
+  # scripts/verify.sh: the runner has 3 vCPUs, which the checks keep busy, so
+  # only a second machine shortens the wait. The core part keeps the job's
+  # old name, which branch protection may require.
   build-and-test:
-    name: Build and test
+    name: Build and test${{ matrix.part == 'widgets' && ' (widgets)' || '' }}
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [core, widgets]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -59,6 +67,9 @@ jobs:
       # (their sources are newer than any cached artifact), so the key only
       # follows what decides the dependencies: the toolchain, the lockfiles
       # and the manifests (the widgets set per-package profiles there).
+      # Each part builds different crates, so each keeps a cache of its own;
+      # failing that, it starts from any macOS cache (the other part's, or
+      # one from before the split).
       - name: Restore build cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -68,12 +79,14 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'widgets/*/Cargo.lock', 'widgets/*/Cargo.toml') }}
-          restore-keys: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-${{ matrix.part }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'widgets/*/Cargo.lock', 'widgets/*/Cargo.toml') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-${{ matrix.part }}-
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-
 
       # The checks live in scripts/verify.sh; CI lists none of its own.
       - name: Verify
-        run: scripts/verify.sh --full
+        run: scripts/verify.sh --full --part ${{ matrix.part }}
 
       # Only main saves, so pull requests restore main's cache and never
       # evict it from the repository's 10 GB quota with their own.
@@ -96,7 +109,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: verify-output-macos
+          name: verify-output-macos-${{ matrix.part }}
           include-hidden-files: true
           path: .verify/
 

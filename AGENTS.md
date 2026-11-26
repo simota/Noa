@@ -58,7 +58,8 @@ when no GPU adapter is available.
   dependents. A change to the workspace manifests, `Cargo.lock`, `vendor/`,
   `.github/` or the script itself runs everything.
 - Before a pull request: `scripts/verify.sh --full`. CI runs exactly this on
-  macOS and Linux; clippy (`-D warnings`) and desktop-file validation run only
+  macOS and Linux (on macOS as two jobs, `--full --part core` and
+  `--full --part widgets`, which together are `--full`); clippy (`-D warnings`) and desktop-file validation run only
   on Linux, as before. It also builds `widgets/agent-dashboard`,
   `widgets/repo-browser`, `widgets/discussion`, `widgets/competition`,
   `widgets/review`, `widgets/verify`, `widgets/tasks` and `widgets/agent-usage`, crates outside the workspace, with their tests; the tests run only on macOS (some expect the

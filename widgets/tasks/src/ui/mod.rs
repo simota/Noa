@@ -20,6 +20,8 @@ pub mod columns;
 pub mod dates;
 pub mod detail;
 pub mod forms;
+mod organizer;
+mod planning;
 pub mod style;
 pub mod views;
 
@@ -131,6 +133,10 @@ pub enum Intent {
 pub trait Feed {
     /// A new View when anything changed; never blocks.
     fn poll(&mut self) -> Option<View>;
+    /// Personal planning state; demos and recording feeds keep it in memory.
+    fn workspace_path(&self) -> Option<PathBuf> {
+        None
+    }
     /// Outcomes come back as View.notice.
     fn act(&mut self, intent: Intent);
     /// Each task's 関連成果, as of the last View `poll` gave (a feed that
@@ -224,6 +230,7 @@ pub struct Tasks {
     layout_scroll: Option<((Layout, i32), WidgetId)>,
     /// How 実行's 「自動で割り当て」 starts a planner, and its clock.
     auto_hooks: auto::Hooks,
+    planning: planning::Planning,
 }
 
 impl Tasks {
@@ -255,7 +262,8 @@ impl Tasks {
         );
         style::spacer(&mut tree, header);
         let notice = tree.insert(Some(header), Label::new("").font_size(12.0));
-        let new_button = tree.insert(Some(header), Button::new("新規 (N)"));
+        let new_button = tree.insert(Some(header), Button::new("新規 (C)"));
+        let palette_button = tree.insert(Some(header), Button::new("コマンド ⌘K"));
         let refresh_button = tree.insert(Some(header), Button::new("再取得 (R)"));
         style::hairline(&mut tree, root);
 
@@ -283,10 +291,11 @@ impl Tasks {
         );
         let text = tree.insert(
             Some(filters),
-            TextField::new("タイトル・ID・#番号で絞り込み（/）", 300.0),
+            TextField::new("タイトル・本文・属性を検索（/）", 260.0),
         );
         style::hairline(&mut tree, root);
 
+        let toolbar_host = style::bar(&mut tree, root, 8.0);
         let github = style::bar(&mut tree, root, 10.0);
         tree.insert(
             Some(github),
@@ -307,6 +316,19 @@ impl Tasks {
                 gap: gap(GUTTER),
                 ..style::fill()
             }),
+        );
+        let nav_host = tree.insert(
+            Some(body),
+            Container::new(Style {
+                size: noa_gpui_core::style::Size {
+                    width: length(180.0),
+                    height: noa_gpui_core::style::percent(1.0),
+                },
+                flex_shrink: 0.0,
+                ..Default::default()
+            })
+            .background(Role::Surface)
+            .radius(8.0),
         );
         let columns_host = tree.insert(
             Some(body),
@@ -333,9 +355,25 @@ impl Tasks {
             .radius(10.0)
             .clip(true),
         );
+        let properties_host = tree.insert(
+            Some(side),
+            Container::new(Style {
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
+                gap: gap(6.0),
+                ..Default::default()
+            }),
+        );
         let detail_host = tree.insert(Some(side), Container::new(style::fill()));
         let form_host = tree.insert(Some(side), Container::new(style::fill()));
 
+        let planning = planning::Planning::new(
+            feed.as_ref(),
+            nav_host,
+            properties_host,
+            toolbar_host,
+            palette_button,
+        );
         let mut screen = Tasks {
             tree,
             feed,
@@ -382,6 +420,7 @@ impl Tasks {
             month_buttons: None,
             layout_scroll: None,
             auto_hooks,
+            planning,
         };
         // Nothing is laid out yet: any store serves the first build.
         let mut text = TextStore::new(Default::default());
@@ -400,6 +439,9 @@ impl Tasks {
         };
         let r = task.r#ref.clone();
         self.filter = Filter::default();
+        self.planning.section = "all".into();
+        self.planning.checked.clear();
+        self.sync_filter_controls();
         self.rebuild(text);
         self.select_ref(&r);
         self.open_detail(r, text);
@@ -409,6 +451,8 @@ impl Tasks {
     /// Shows the tasks in `layout` (`v`, the layout control, `--layout`).
     pub fn set_layout(&mut self, layout: Layout, text: &mut TextStore) {
         self.layout = layout;
+        self.mark_preferences_dirty();
+        self.persist_preferences();
         let at = Layout::ALL.iter().position(|l| *l == layout).unwrap_or(0);
         self.tree
             .update::<SegmentedControl, _>(self.layout_control, |c, cx| c.set_selected(cx, &[at]));
@@ -435,7 +479,7 @@ impl Tasks {
     }
 
     fn column_refs(&self) -> [Vec<TaskRef>; 4] {
-        lists(&self.view, &self.filter)
+        self.planning_lists()
             .map(|list| list.iter().map(|c| c.task.r#ref.clone()).collect())
     }
 
@@ -468,17 +512,34 @@ impl Tasks {
 
         if self.layout != Layout::Board {
             self.rebuild_layout(text);
+            self.rebuild_planning(text);
             self.rebuild_detail(text);
             return;
         }
         self.month_buttons = None;
+        self.planning.row_controls = organizer::Controls::default();
         // A rebuild (a new View each minute, a key) keeps where the reader
         // was in each column.
         let kept = self
             .column_scrolls
             .map(|ids| ids.map(|id| scroll_position(&self.tree, id)));
         clear(&mut self.tree, self.columns_host, text);
-        let lists = lists(&self.view, &self.filter);
+        let view = self.view.clone();
+        let refs = self.column_refs();
+        let tasks: std::collections::BTreeMap<_, _> = all_tasks(&view)
+            .into_iter()
+            .map(|task| (task.r#ref.clone(), task))
+            .collect();
+        let lists: [Vec<Card<'_>>; 4] = refs.map(|refs| {
+            refs.into_iter()
+                .filter_map(|r| {
+                    tasks.get(&r).copied().map(|task| Card {
+                        task,
+                        last: last_run(&view, &r),
+                    })
+                })
+                .collect()
+        });
         let built = columns::build(
             &mut self.tree,
             self.columns_host,
@@ -494,11 +555,13 @@ impl Tasks {
             }
         }
         self.column_scrolls = Some(built.scrolls);
+        self.rebuild_planning(text);
         self.rebuild_detail(text);
     }
 
     /// The list, timeline or calendar in place of the columns.
     fn rebuild_layout(&mut self, text: &mut TextStore) {
+        self.planning.row_controls = organizer::Controls::default();
         let which = (self.layout, self.month);
         let kept = self
             .layout_scroll
@@ -514,10 +577,51 @@ impl Tasks {
                 ..style::fill()
             }),
         );
-        let cards = flat(&self.view, &self.filter);
+        let view = self.view.clone();
+        let refs: Vec<_> = self
+            .planning_cards(false)
+            .into_iter()
+            .map(|c| c.task.r#ref.clone())
+            .collect();
+        let tasks: std::collections::BTreeMap<_, _> = all_tasks(&view)
+            .into_iter()
+            .map(|task| (task.r#ref.clone(), task))
+            .collect();
+        let cards: Vec<_> = refs
+            .iter()
+            .filter_map(|r| {
+                tasks.get(r).copied().map(|task| Card {
+                    task,
+                    last: last_run(&view, r),
+                })
+            })
+            .collect();
         let now = self.view.now;
         let built = match self.layout {
-            Layout::List => views::list(&mut self.tree, pane, &cards, self.selected.as_ref(), now),
+            Layout::List => {
+                let rows: Vec<_> = cards
+                    .iter()
+                    .map(|c| organizer::Row {
+                        task: c.task,
+                        last: c.last,
+                        meta: self.planning.workspace.meta(&c.task.r#ref),
+                    })
+                    .collect();
+                let built = organizer::list(
+                    &mut self.tree,
+                    pane,
+                    &rows,
+                    self.selected.as_ref(),
+                    &self.planning.checked,
+                    now,
+                );
+                self.planning.row_controls = built.controls;
+                views::Built {
+                    scroll: built.scroll,
+                    rows: built.rows,
+                    months: None,
+                }
+            }
             Layout::Timeline => views::timeline(
                 &mut self.tree,
                 pane,
@@ -559,6 +663,7 @@ impl Tasks {
             .own_notice
             .clone()
             .or_else(|| self.view.notice.clone())
+            .or_else(|| self.planning.notice.clone())
             .unwrap_or_default();
         self.tree
             .update::<Label, _>(self.notice, |l, cx| l.set_text(cx, notice));
@@ -575,6 +680,16 @@ impl Tasks {
             .collect();
         let labels: Vec<String> = labels.into_iter().collect();
         if labels == self.label_choices {
+            let at = self
+                .filter
+                .label
+                .as_ref()
+                .and_then(|label| labels.iter().position(|value| value == label))
+                .map_or(0, |i| i + 1);
+            self.tree
+                .update::<PopUpButton, _>(self.label_popup, |control, cx| {
+                    control.set_selected(cx, at)
+                });
             return;
         }
         let at = self
@@ -594,6 +709,7 @@ impl Tasks {
     }
 
     fn rebuild_detail(&mut self, text: &mut TextStore) {
+        self.rebuild_properties(text);
         // The same task's detail rebuilt keeps its position; another's starts
         // at the top.
         let kept = self
@@ -603,8 +719,9 @@ impl Tasks {
             .map(|(_, id)| scroll_position(&self.tree, id));
         clear(&mut self.tree, self.detail_host, text);
         self.detail_actions.clear();
-        let shown =
-            self.form.is_none() && self.detail.as_ref().is_some_and(|r| self.task(r).is_some());
+        let shown = self.form.is_none()
+            && !self.planning.form_open()
+            && self.detail.as_ref().is_some_and(|r| self.task(r).is_some());
         if shown && let Some(r) = self.detail.clone() {
             let task = self.task(&r).cloned();
             if let Some(task) = task {
@@ -634,9 +751,14 @@ impl Tasks {
             }
         }
         self.tree.set_hidden(self.detail_host, !shown);
-        self.tree.set_hidden(self.form_host, self.form.is_none());
-        self.tree
-            .set_hidden(self.side, !shown && self.form.is_none());
+        self.tree.set_hidden(
+            self.form_host,
+            self.form.is_none() && !self.planning.form_open(),
+        );
+        self.tree.set_hidden(
+            self.side,
+            !shown && self.form.is_none() && !self.planning.form_open(),
+        );
     }
 
     /// Keeps the selection on a card that is shown: the same task when it
@@ -678,6 +800,7 @@ impl Tasks {
     // ------------------------------------------------------------ actions
 
     fn act(&mut self, intent: Intent) {
+        self.record_source_change(&intent);
         self.feed.act(intent);
     }
 
@@ -694,6 +817,9 @@ impl Tasks {
     }
 
     fn open_form(&mut self, mut form: Form, text: &mut TextStore) {
+        if self.planning.form_open() {
+            self.close_planning_form(text);
+        }
         clear(&mut self.tree, self.form_host, text);
         form.insert(&mut self.tree, self.form_host);
         self.form = Some(form);
@@ -709,6 +835,11 @@ impl Tasks {
     /// 実行 on the selected task: the form, unless it is running or no
     /// agent is known.
     fn run_form(&mut self, task: &Task, text: &mut TextStore) {
+        if let Some(why) = self.blocked_reason(&task.r#ref) {
+            self.own_notice = Some(why);
+            self.show_notice();
+            return;
+        }
         // The rule the detail's 実行 button and the run itself follow.
         if let Err(why) = tasks::runs::may_start(task, self.last_run(&task.r#ref)) {
             self.own_notice = Some(why);
@@ -730,6 +861,9 @@ impl Tasks {
 
     /// A shortcut; whether it was one.
     fn press(&mut self, key: &Key, text: &mut TextStore) -> bool {
+        if self.planning_key(key, text) {
+            return true;
+        }
         if self.layout != Layout::Board
             && let Some(taken) = self.press_in_layout(key, text)
         {
@@ -920,6 +1054,10 @@ impl Tasks {
     /// Escape: closes the form, else leaves the filter, else closes the
     /// detail.
     fn escape(&mut self, text: &mut TextStore) -> bool {
+        if self.planning.form_open() {
+            self.close_planning_form(text);
+            return true;
+        }
         if self.form.is_some() {
             self.close_form(text);
         } else if self.tree.focused() == Some(self.text) {
@@ -935,6 +1073,7 @@ impl Tasks {
     /// Whether keys go to a text input: one has focus, or a form is open.
     fn typing(&self) -> bool {
         self.form.is_some()
+            || self.planning.form_open()
             || self.tree.focused().is_some_and(|id| {
                 self.tree.get::<TextField>(id).is_some() || self.tree.get::<TextArea>(id).is_some()
             })
@@ -966,54 +1105,6 @@ fn last_run<'a>(view: &'a View, r: &TaskRef) -> Option<&'a RunView> {
         .iter()
         .filter(|v| &v.run.task == r)
         .max_by_key(|v| v.run.started)
-}
-
-/// Every task `filter` lets through, old 完了 ones too, newest activity
-/// first: the list's, timeline's and calendar's tasks.
-fn flat<'a>(view: &'a View, filter: &Filter) -> Vec<Card<'a>> {
-    let mut cards: Vec<Card<'a>> = all_tasks(view)
-        .into_iter()
-        .filter(|t| matches(t, filter))
-        .map(|task| Card {
-            task,
-            last: last_run(view, &task.r#ref),
-        })
-        .collect();
-    let activity = |c: &Card<'_>| c.task.updated.max(c.last.map_or(0, |v| v.run.started));
-    cards.sort_by(|a, b| {
-        activity(b)
-            .cmp(&activity(a))
-            .then_with(|| a.task.r#ref.cmp(&b.task.r#ref))
-    });
-    cards
-}
-
-/// The cards of each column, `filter` applied, newest activity first;
-/// 完了 only for the last [`DONE_DAYS`].
-fn lists<'a>(view: &'a View, filter: &Filter) -> [Vec<Card<'a>>; 4] {
-    let now = view.now;
-    let mut lists: [Vec<Card<'a>>; 4] = Default::default();
-    for task in all_tasks(view) {
-        if !matches(task, filter) {
-            continue;
-        }
-        let last = last_run(view, &task.r#ref);
-        let col = column(task, last);
-        let since = task.closed.unwrap_or(task.updated);
-        if col == Column::Done && now.saturating_sub(since) > DONE_DAYS * DAY_MS {
-            continue;
-        }
-        lists[col as usize].push(Card { task, last });
-    }
-    let activity = |c: &Card<'_>| c.task.updated.max(c.last.map_or(0, |v| v.run.started));
-    for list in &mut lists {
-        list.sort_by(|a, b| {
-            activity(b)
-                .cmp(&activity(a))
-                .then_with(|| a.task.r#ref.cmp(&b.task.r#ref))
-        });
-    }
-    lists
 }
 
 /// Whether `id` (`t-…`, `#N`, a marker's `path`, or `code:<key>:<path>`:
@@ -1071,6 +1162,15 @@ impl Screen for Tasks {
     }
 
     fn woken(&mut self, text: &mut TextStore) {
+        self.persist_preferences();
+        match self.planning.workspace.reload() {
+            Ok(true) => self.rebuild(text),
+            Ok(false) => {}
+            Err(error) => {
+                self.planning.notice = Some(error);
+                self.show_notice();
+            }
+        }
         if let Some(form) = &mut self.form {
             form.poll_auto(&mut self.tree, (self.auto_hooks.clock)());
         }
@@ -1080,6 +1180,7 @@ impl Screen for Tasks {
                 self.own_notice = None;
             }
             self.view = view;
+            self.sync_source_changes();
             self.rebuild(text);
             if let Some(id) = self.select_later.take()
                 && !self.select(&id, text)
@@ -1108,6 +1209,13 @@ impl Screen for Tasks {
                 return;
             }
             Event::KeyDown { .. } if self.in_overlay() => {}
+            Event::KeyDown { key, modifiers }
+                if (modifiers.command || modifiers.meta || modifiers.ctrl)
+                    && !modifiers.alt
+                    && self.planning_command_key(key, text) =>
+            {
+                return;
+            }
             Event::KeyDown {
                 key: Key::Escape, ..
             } if self.escape(text) => return,
@@ -1138,6 +1246,9 @@ impl Screen for Tasks {
     }
 
     fn handle(&mut self, message: Message, text: &mut TextStore) {
+        if self.planning_message(&message, text) {
+            return;
+        }
         if let Some(form) = &mut self.form {
             let env = auto::Env {
                 hooks: &self.auto_hooks,
@@ -1151,6 +1262,18 @@ impl Screen for Tasks {
                     return;
                 }
                 FormOutcome::Submit(intent) => {
+                    if let Intent::Run { task, .. } = &intent {
+                        if let Err(error) = self.planning.workspace.reload() {
+                            self.own_notice = Some(error);
+                            self.show_notice();
+                            return;
+                        }
+                        if let Some(why) = self.blocked_reason(task) {
+                            self.own_notice = Some(why);
+                            self.show_notice();
+                            return;
+                        }
+                    }
                     self.close_form(text);
                     self.act(intent);
                     return;
@@ -1161,25 +1284,28 @@ impl Screen for Tasks {
         if let Some(SelectionChanged(i)) = message.downcast_ref::<SelectionChanged>() {
             if source == self.layout_control {
                 if let Some(layout) = Layout::ALL.get(*i) {
-                    self.layout = *layout;
-                    self.rebuild(text);
+                    self.set_layout(*layout, text);
                 }
             } else if source == self.source {
                 self.filter.source = SOURCES.get(*i).and_then(|(_, s)| *s);
+                self.mark_preferences_dirty();
                 self.rebuild(text);
             } else if source == self.label_popup {
                 self.filter.label = i
                     .checked_sub(1)
                     .and_then(|i| self.label_choices.get(i).cloned());
+                self.mark_preferences_dirty();
                 self.rebuild(text);
             }
         } else if let Some(TextChanged(typed)) = message.downcast_ref::<TextChanged>() {
             if source == self.text {
                 self.filter.text = typed.clone();
+                self.mark_preferences_dirty();
                 self.rebuild(text);
             }
         } else if message.downcast_ref::<TextSubmitted>().is_some() {
             if source == self.text {
+                self.persist_preferences();
                 self.tree.set_focus(None);
             }
         } else if message.downcast_ref::<ButtonClicked>().is_some() {
@@ -1233,15 +1359,18 @@ impl Tasks {
     }
 }
 
-/// Shortcuts are plain keys; Shift is allowed on a letter, as a capital
-/// types it, but not on a symbol: Shift + `/` types `?`, not `/`.
+/// Shortcuts are plain keys; Shift is allowed on letters and `?` for
+/// help, but Shift + `/` must not also trigger the search shortcut.
 fn shortcut_modifiers(key: &Key, m: &Modifiers) -> bool {
-    let shifted_symbol = m.shift && matches!(key, Key::Char(c) if !c.is_alphabetic());
+    let shifted_symbol = m.shift && matches!(key, Key::Char(c) if !c.is_alphabetic() && *c != '?');
     !(m.ctrl || m.alt || m.meta || m.command || shifted_symbol)
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod planning_tests;
 
 /// Where the scroll view `id` is scrolled to; the top when it is gone.
 fn scroll_position(tree: &UiTree, id: WidgetId) -> noa_gpui_scene::Point {

@@ -13,7 +13,6 @@ use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Pressable, S
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Color;
 
-use tasks::model::column::column;
 use tasks::model::types::{AgentState, Liveness, Millis, ResultFact, RunView, Task, TaskRef};
 
 use super::columns::{Card, age};
@@ -51,7 +50,7 @@ impl Layout {
 
     pub fn label(self) -> &'static str {
         match self {
-            Layout::Board => "カンバン",
+            Layout::Board => "実行ボード",
             Layout::List => "リスト",
             Layout::Timeline => "タイムライン",
             Layout::Calendar => "カレンダー",
@@ -173,74 +172,6 @@ fn title(tree: &mut UiTree, parent: WidgetId, task: &Task, size: f32) {
         Some(host),
         Label::new(task.title.clone()).font_size(size).max_lines(1),
     );
-}
-
-/// リスト: one row per task, in the board's order of activity: source,
-/// column, title, labels, the last run and when the task last changed.
-pub(super) fn list(
-    tree: &mut UiTree,
-    host: WidgetId,
-    cards: &[Card<'_>],
-    selected: Option<&TaskRef>,
-    now: Millis,
-) -> Built {
-    let scroll = scroll(tree, host, 6.0);
-    let mut rows = Vec::new();
-    if cards.is_empty() {
-        tree.insert(
-            Some(scroll),
-            Label::new("タスクがありません").color(Role::Muted),
-        );
-    }
-    for card in cards {
-        let task = card.task;
-        let is_selected = selected == Some(&task.r#ref);
-        let frame = row_frame(tree, scroll, is_selected);
-        let row = pressable_row(tree, frame, task, is_selected);
-        badge(tree, row, task);
-        let col = column(task, card.last);
-        tree.insert(
-            Some(row),
-            Tag::new(col.label()).tone(style::column_tone(col)),
-        );
-        title(tree, row, task, 13.0);
-        for label in task.labels.iter().take(3) {
-            tree.insert(Some(row), Tag::new(label.clone()));
-        }
-        if let Some(problem) = &task.problem {
-            tree.insert(
-                Some(row),
-                Label::new(problem.clone())
-                    .font_size(11.0)
-                    .max_lines(1)
-                    .color(REVIEW),
-            );
-        }
-        let last = match card.last {
-            Some(run) => format!(
-                "{} · {}",
-                run.run.agent.command(),
-                age(now, run.run.started)
-            ),
-            None => "実行なし".to_owned(),
-        };
-        tree.insert(
-            Some(row),
-            Label::new(last).font_size(11.0).color(Role::Muted),
-        );
-        tree.insert(
-            Some(row),
-            Label::new(format!("更新 {}", age(now, task.updated)))
-                .font_size(11.0)
-                .color(Role::Muted),
-        );
-        rows.push((row, task.r#ref.clone()));
-    }
-    Built {
-        scroll,
-        rows,
-        months: None,
-    }
 }
 
 /// A bar's colour: blue while the agent works, orange once it ended with

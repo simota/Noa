@@ -301,9 +301,11 @@ type Calls = Arc<Mutex<Vec<Vec<String>>>>;
 
 struct Fake {
     calls: Calls,
-    /// Replies in order of `issue list`; `repo view` and `issue view` are fixed.
+    /// Failures in order of `issue list`; successful open listings can change.
     fail_lists: Arc<Mutex<VecDeque<GhFailure>>>,
     view_fails: Arc<Mutex<VecDeque<GhFailure>>>,
+    open_list: Arc<Mutex<String>>,
+    detail: Arc<Mutex<String>>,
 }
 
 impl GhRun for Fake {
@@ -316,11 +318,15 @@ impl GhRun for Fake {
                 if let Some(f) = self.fail_lists.lock().unwrap().pop_front() {
                     return Err(f);
                 }
-                Ok(if *state == "open" { OPEN } else { CLOSED }.to_owned())
+                Ok(if *state == "open" {
+                    self.open_list.lock().unwrap().clone()
+                } else {
+                    CLOSED.to_owned()
+                })
             }
             ["issue", "view", ..] => match self.view_fails.lock().unwrap().pop_front() {
                 Some(f) => Err(f),
-                None => Ok(VIEW.to_owned()),
+                None => Ok(self.detail.lock().unwrap().clone()),
             },
             other => panic!("unexpected gh call {other:?}"),
         }
@@ -334,6 +340,8 @@ struct Rig {
     wakes: Arc<AtomicU64>,
     fail_lists: Arc<Mutex<VecDeque<GhFailure>>>,
     view_fails: Arc<Mutex<VecDeque<GhFailure>>>,
+    open_list: Arc<Mutex<String>>,
+    detail: Arc<Mutex<String>>,
     cache: PathBuf,
 }
 
@@ -346,6 +354,8 @@ fn rig_with(dir: &Path, wake_delay: Duration) -> Rig {
     let calls: Calls = Arc::default();
     let fail_lists: Arc<Mutex<VecDeque<GhFailure>>> = Arc::default();
     let view_fails: Arc<Mutex<VecDeque<GhFailure>>> = Arc::default();
+    let open_list = Arc::new(Mutex::new(OPEN.to_owned()));
+    let detail = Arc::new(Mutex::new(VIEW.to_owned()));
     let clock = Arc::new(AtomicU64::new(1_000_000));
     let wakes = Arc::new(AtomicU64::new(0));
     let cache = dir.join("noa").join("github.json");
@@ -357,6 +367,8 @@ fn rig_with(dir: &Path, wake_delay: Duration) -> Rig {
             calls: Arc::clone(&calls),
             fail_lists: Arc::clone(&fail_lists),
             view_fails: Arc::clone(&view_fails),
+            open_list: Arc::clone(&open_list),
+            detail: Arc::clone(&detail),
         }),
         Arc::new(move || c.load(Ordering::SeqCst)),
         Arc::new(move || {
@@ -371,6 +383,8 @@ fn rig_with(dir: &Path, wake_delay: Duration) -> Rig {
         wakes,
         fail_lists,
         view_fails,
+        open_list,
+        detail,
         cache,
     }
 }
@@ -623,6 +637,93 @@ fn ac25_load_detail_fetches_a_number_once_and_retries_a_failure() {
             "--repo",
             "noa-dev/noa"
         ]
+    );
+}
+
+#[test]
+fn changed_issues_reload_opened_details_without_reopening_them() {
+    let dir = scratch("changed-detail");
+    let mut rig = rig(&dir);
+    wait("first fetch", || rig.feed.view().fetched.is_some());
+    rig.feed.load_detail(42);
+    rig.feed.load_detail(7);
+    wait("both details", || rig.feed.view().details.len() == 2);
+    let before = rig.feed.view().details[&7].clone();
+
+    *rig.open_list.lock().unwrap() = OPEN.replace("2026-11-24T22:39:25Z", "2026-11-25T22:39:25Z");
+    *rig.detail.lock().unwrap() = VIEW.replace("Steps:", "Updated steps:");
+    rig.feed.refresh();
+    wait(
+        "updated detail",
+        || matches!(rig.feed.view().details.get(&42), Some(Ok(d)) if d.body.starts_with("Updated steps:")),
+    );
+    assert_eq!(rig.feed.view().details[&7], before);
+    let views = |number: &str| {
+        rig.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c[..3] == ["issue", "view", number])
+            .count()
+    };
+    assert_eq!(views("42"), 2);
+    assert_eq!(views("7"), 1, "an unchanged detail stays cached");
+}
+
+#[test]
+fn unchanged_listings_and_failed_refreshes_keep_opened_details() {
+    let dir = scratch("unchanged-detail");
+    let mut rig = rig(&dir);
+    wait("first fetch", || rig.feed.view().fetched.is_some());
+    rig.feed.load_detail(42);
+    wait("detail", || rig.feed.view().details.contains_key(&42));
+    let before = rig.feed.view().details[&42].clone();
+
+    rig.fail_lists
+        .lock()
+        .unwrap()
+        .push_back(GhFailure::NotAuthenticated);
+    rig.feed.refresh();
+    wait("failed listing", || rig.feed.view().failure.is_some());
+    assert_eq!(rig.feed.view().details[&42], before);
+
+    rig.feed.refresh();
+    wait("recovered listing", || rig.feed.view().failure.is_none());
+    assert_eq!(rig.feed.view().details[&42], before);
+    assert_eq!(
+        rig.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c[..2] == ["issue", "view"])
+            .count(),
+        1,
+        "the unchanged detail is not fetched again"
+    );
+}
+
+#[test]
+fn a_failed_changed_detail_is_reported_and_can_be_retried() {
+    let dir = scratch("changed-detail-failure");
+    let mut rig = rig(&dir);
+    wait("first fetch", || rig.feed.view().fetched.is_some());
+    rig.feed.load_detail(42);
+    wait("detail", || rig.feed.view().details.contains_key(&42));
+    *rig.open_list.lock().unwrap() = OPEN.replace("2026-11-24T22:39:25Z", "2026-11-25T22:39:25Z");
+    rig.view_fails.lock().unwrap().push_back(GhFailure::Timeout);
+    rig.feed.refresh();
+    wait("failed changed detail", || {
+        matches!(
+            rig.feed.view().details.get(&42),
+            Some(Err(GhFailure::Timeout))
+        )
+    });
+
+    *rig.detail.lock().unwrap() = VIEW.replace("Steps:", "Retried steps:");
+    rig.feed.load_detail(42);
+    wait(
+        "retried changed detail",
+        || matches!(rig.feed.view().details.get(&42), Some(Ok(d)) if d.body.starts_with("Retried steps:")),
     );
 }
 

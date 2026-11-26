@@ -194,6 +194,12 @@ fn press(screen: &mut Verify, key: noa_gpui_core::Key) {
 /// Presses the visible button carrying `action` from the keyboard (focus,
 /// then Space), as a person would.
 fn press_button(screen: &mut Verify, action: &Action) {
+    press_button_with_text(screen, action, &mut TextStore::new(Default::default()));
+}
+
+/// Once laid out, widgets keep text-layout ids from that window's store.
+/// Later input and layout passes must keep using the same store.
+fn press_button_with_text(screen: &mut Verify, action: &Action, text: &mut TextStore) {
     let id = widget_for(screen, action).unwrap_or_else(|| panic!("no button for {action:?}"));
     assert!(!screen.tree.is_hidden(id), "{action:?} is hidden");
     screen.tree.set_focus(Some(id));
@@ -202,7 +208,14 @@ fn press_button(screen: &mut Verify, action: &Action) {
         Some(id),
         "{action:?} cannot take focus"
     );
-    press(screen, noa_gpui_core::Key::Space);
+    Screen::dispatch(
+        screen,
+        UiEvent::KeyDown {
+            key: noa_gpui_core::Key::Space,
+            modifiers: Default::default(),
+        },
+        text,
+    );
 }
 
 /// The smallest window the app allows, in logical pixels.
@@ -211,8 +224,12 @@ const SMALLEST: (f32, f32) = (MIN_WINDOW.0 as f32, MIN_WINDOW.1 as f32);
 /// Lays `screen` out in a window of `size`, as `--snapshot` does.
 fn lay_out(screen: &mut Verify, size: (f32, f32)) {
     let mut text = TextStore::new(Default::default());
+    lay_out_with_text(screen, size, &mut text);
+}
+
+fn lay_out_with_text(screen: &mut Verify, size: (f32, f32), text: &mut TextStore) {
     let viewport = noa_gpui_scene::Size::new(size.0, size.1);
-    Screen::prepare(screen, viewport, &mut text);
+    Screen::prepare(screen, viewport, text);
 }
 
 /// What under `host` reaches past its right edge: cut off where the pane
@@ -835,18 +852,19 @@ fn the_matrix_and_the_criteria_tab_fit_the_smallest_window() {
 #[test]
 fn compact_panes_keep_drafts_and_restore_the_wide_layout() {
     let mut screen = Verify::demo_criteria();
-    lay_out(&mut screen, (1440.0, 900.0));
+    let mut text = TextStore::new(Default::default());
+    lay_out_with_text(&mut screen, (1440.0, 900.0), &mut text);
     let statement = row(&screen, "AC-1").statement;
     screen.tree.update::<TextField, _>(statement, |field, cx| {
         field.set_text(cx, "画面幅を変えても残る基準")
     });
     screen.tree.set_focus(Some(statement));
-    lay_out(&mut screen, SMALLEST);
+    lay_out_with_text(&mut screen, SMALLEST, &mut text);
     assert_eq!(screen.tree.focused(), Some(statement));
     assert!(!screen.tree.is_hidden(screen.navigation));
     for pane in 0..3 {
-        press_button(&mut screen, &Action::CompactPane(pane));
-        lay_out(&mut screen, SMALLEST);
+        press_button_with_text(&mut screen, &Action::CompactPane(pane), &mut text);
+        lay_out_with_text(&mut screen, SMALLEST, &mut text);
         for (index, root) in screen.pane_roots.iter().enumerate() {
             assert_eq!(screen.tree.is_hidden(*root), index != pane);
         }
@@ -860,7 +878,7 @@ fn compact_panes_keep_drafts_and_restore_the_wide_layout() {
             "画面幅を変えても残る基準"
         );
     }
-    lay_out(&mut screen, (1440.0, 900.0));
+    lay_out_with_text(&mut screen, (1440.0, 900.0), &mut text);
     assert!(screen.tree.is_hidden(screen.navigation));
     assert!(
         screen
@@ -882,8 +900,9 @@ fn compact_panes_keep_drafts_and_restore_the_wide_layout() {
 #[test]
 fn narrow_references_show_the_destination_and_return_to_the_origin_pane() {
     let mut screen = Verify::demo();
-    lay_out(&mut screen, SMALLEST);
-    act(&mut screen, Action::InspectCriterion("AC-1".into()));
+    let mut text = TextStore::new(Default::default());
+    lay_out_with_text(&mut screen, SMALLEST, &mut text);
+    screen.handle_action(Action::InspectCriterion("AC-1".into()), &mut text);
     assert_eq!(screen.compact_pane, 2);
     assert!(!screen.tree.is_hidden(screen.right_host));
     let action = screen
@@ -891,10 +910,10 @@ fn narrow_references_show_the_destination_and_return_to_the_origin_pane() {
         .iter()
         .find_map(|(_, action)| matches!(action, Action::ShowEvidence(_)).then(|| action.clone()))
         .expect("criterion ruling has cited evidence");
-    press_button(&mut screen, &action);
+    press_button_with_text(&mut screen, &action, &mut text);
     assert_eq!(screen.compact_pane, 1);
     assert!(!screen.tree.is_hidden(screen.center_host));
-    press_button(&mut screen, &Action::LeaveEvidenceFocus);
+    press_button_with_text(&mut screen, &Action::LeaveEvidenceFocus, &mut text);
     assert_eq!(screen.compact_pane, 2);
     assert!(!screen.tree.is_hidden(screen.right_host));
     assert_eq!(screen.tree.focused(), widget_for(&screen, &action));

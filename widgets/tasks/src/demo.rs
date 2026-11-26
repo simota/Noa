@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::mpsc;
 
+use tasks::auto_assign::{Assignment, Cancel, Job, Pick, Planning};
 use tasks::model::types::{
     AgentKind, AgentState, Comment, GitHubView, IssueDetail, Liveness, Millis, Report, ResultFact,
     Run, RunId, RunView, State, Task, TaskRef,
@@ -15,6 +17,7 @@ use tasks::model::types::{
 use tasks::related::{self, Related};
 use tasks::task_links::{LinkEvent, MatchedBy, SessionKind, TaskKey};
 
+use crate::ui::auto::PlanFn;
 use crate::ui::{Feed, Intent, View};
 
 /// The demo's clock: 2026-11-25 10:00 JST.
@@ -353,8 +356,40 @@ pub fn related_of(view: &View) -> BTreeMap<TaskRef, Related> {
     related::fold(&runs, &link_events(view))
 }
 
-/// The demo's [`Feed`]: [`view`], with 完了にする / 再開 applied in memory
-/// and every other intent answered with a notice.
+/// The reason the demo's 「自動で割り当て」 gives.
+pub const PLANNED: &str = "デモの割り当てです（エージェントは起動していません）";
+
+/// 「自動で割り当て」 in the demo: no CLI starts. The planner picks its own
+/// agent (an installed one, so one of the form's) for every slot, and the
+/// answer is on the channel before this returns: the demo has no waker.
+fn canned_plan(job: Job) -> Planning {
+    let request = (job.request)();
+    let picks = request
+        .slots
+        .iter()
+        .map(|slot| Pick {
+            slot: slot.id.clone(),
+            agent: job.planner.agent.to_owned(),
+            model: None,
+            effort: None,
+            reason: PLANNED.to_owned(),
+        })
+        .collect();
+    let (tx, rx) = mpsc::channel();
+    tx.send(Ok(Assignment {
+        planner: job.planner.label(),
+        picks,
+    }))
+    .expect("the receiver is held here");
+    Planning {
+        rx,
+        cancel: Cancel::default(),
+    }
+}
+
+/// The demo's [`Feed`]: [`view`], with 完了にする / 再開 applied in memory,
+/// 「自動で割り当て」 answered by [`canned_plan`], and every other intent
+/// answered with a notice.
 pub struct DemoFeed {
     view: View,
     related: BTreeMap<TaskRef, Related>,
@@ -401,5 +436,9 @@ impl Feed for DemoFeed {
 
     fn related(&self) -> Option<&BTreeMap<TaskRef, Related>> {
         Some(&self.related)
+    }
+
+    fn planner(&self) -> Option<Box<PlanFn>> {
+        Some(Box::new(|job, _wake| canned_plan(job)))
     }
 }

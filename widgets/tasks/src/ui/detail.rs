@@ -107,6 +107,7 @@ pub(super) fn insert(
                 // The form chooses both.
                 agent: AgentKind::Claude,
                 isolation: Isolation::Worktree,
+                auto: None,
             },
         );
     }

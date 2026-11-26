@@ -1265,6 +1265,8 @@ impl Tally {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<crate::auto_assign::AutoRecord>,
     pub id: SessionId,
     /// What the user told the reviewers about the target; may be empty.
     pub request: String,

@@ -7,6 +7,7 @@
 //! the latest [`Snapshot`] and sends [`Command`]s. What it keeps is view
 //! state: the tab, the filters, the selected finding, the composer text.
 
+mod auto;
 mod board;
 mod cards;
 mod composer;
@@ -186,8 +187,8 @@ use noa_gpui_core::style::{
 };
 use noa_gpui_core::widgets::{
     Alert, AlertResponse, AlertStyle, Button, ButtonClicked, Container, ControlSize, Label,
-    ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, TextChanged, TextField,
-    Toast, Tone,
+    MenuChosen, ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, TextChanged,
+    TextField, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Shortcut, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
@@ -227,6 +228,8 @@ const EXTEND_BY: [RoundNo; 2] = [1, 3];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Start,
+    AutoAssign(usize),
+    CancelAuto,
     AddPanelRow,
     RemovePanelRow(usize),
     /// Shows a stored review read-only (no runner, no agents).
@@ -424,6 +427,7 @@ pub struct Review {
     /// that arrives later is not applied.
     noa_version: Option<(u64, String)>,
 
+    auto: auto::Auto,
     start: start::Parts,
     board: WidgetId,
     left_host: WidgetId,
@@ -624,6 +628,7 @@ impl Review {
             detection: start::Detection::all_installed(),
             installed: None,
             noa_version: None,
+            auto: auto::Auto::default(),
             start,
             board,
             left_host,
@@ -716,6 +721,7 @@ impl Review {
                     text,
                 );
             }
+            self.render_auto(text);
             start::actions(&self.start, &mut self.actions);
             start::rebuild_past(
                 &mut self.tree,
@@ -756,6 +762,7 @@ impl Review {
     /// Leaves whatever review is on screen: its runner stops (an unfinished
     /// one stays resumable from the list).
     fn leave(&mut self) {
+        self.auto.reset();
         if let Source::Live(channel) = &self.source {
             channel.leave();
             if !self.read_only && self.session.as_ref().is_some_and(|s| !s.closed) {
@@ -1378,6 +1385,7 @@ impl Review {
 
     fn poll_live(&mut self, text: &mut TextStore) {
         self.poll_installed(text);
+        self.poll_auto(text);
         if matches!(self.source, Source::Live(_)) {
             self.recheck_stored();
         }
@@ -1421,6 +1429,7 @@ impl Review {
         }
         if refused_start {
             self.starting = false;
+            self.render_auto(text);
             start::show_refusal(&mut self.tree, &self.start, notices.last().unwrap(), text);
         }
         if released && self.session.is_none() {
@@ -1447,6 +1456,7 @@ impl Review {
                 }
             }
             if snapshot.session.is_some() {
+                self.auto.reset();
                 self.starting = false;
             }
             self.session = snapshot.session;
@@ -1559,6 +1569,11 @@ impl Review {
 
     fn handle_action(&mut self, action: Action, text: &mut TextStore) {
         match action {
+            Action::AutoAssign(i) => self.begin_auto(i, text),
+            Action::CancelAuto => {
+                self.auto.cancel_running();
+                self.render_auto(text);
+            }
             Action::Start => {
                 if !self.detection.startable() {
                     let why = self.detection.blocked_reason();
@@ -1577,7 +1592,10 @@ impl Review {
                     start::show_refusal(&mut self.tree, &self.start, &why, text);
                     return;
                 }
+                let auto = self.auto.record(&form);
+                self.auto.cancel_running();
                 self.starting = true;
+                self.render_auto(text);
                 start::rebuild_note(
                     &mut self.tree,
                     &self.start,
@@ -1586,6 +1604,7 @@ impl Review {
                     text,
                 );
                 self.send_cmd(Command::Start {
+                    auto,
                     request: form.request,
                     target: Box::new(target),
                     max_rounds: form.max_rounds,
@@ -1818,6 +1837,7 @@ impl Review {
                         Err(why) => return self.toast(why),
                     },
                 };
+                self.auto.reset();
                 let form = start::Form::from_session(&session);
                 if self.session.is_some() {
                     self.leave();
@@ -1917,14 +1937,26 @@ impl Screen for Review {
             }
             return;
         }
-        if message.downcast_ref::<SelectionChanged>().is_some() {
-            if message.source == self.start.lead {
-                start::lead_kind_changed(&mut self.tree, &mut self.start, text);
+        if self.session.is_none() {
+            if self.auto.control == Some(message.source) {
+                if let Some(MenuChosen(i)) = message.downcast_ref() {
+                    self.handle_action(Action::AutoAssign(*i), text);
+                } else if message.downcast_ref::<ButtonClicked>().is_some() {
+                    self.handle_action(Action::CancelAuto, text);
+                }
                 return;
             }
-            if start::target_kind_changed(&mut self.tree, &self.start, message.source)
-                || start::row_changed(&mut self.tree, &mut self.start, message.source, text)
-            {
+            if message.downcast_ref::<SelectionChanged>().is_some() {
+                if message.source == self.start.lead {
+                    start::lead_kind_changed(&mut self.tree, &mut self.start, text);
+                } else if !start::target_kind_changed(&mut self.tree, &self.start, message.source) {
+                    start::row_changed(&mut self.tree, &mut self.start, message.source, text);
+                }
+                self.render_auto(text);
+                return;
+            }
+            if message.downcast_ref::<TextChanged>().is_some() {
+                self.render_auto(text);
                 return;
             }
         }
@@ -1957,12 +1989,13 @@ impl Screen for Review {
         std::mem::take(&mut self.file_dialogs)
     }
 
-    fn file_dialog_finished(&mut self, result: FileDialogResult, _text: &mut TextStore) {
+    fn file_dialog_finished(&mut self, result: FileDialogResult, text: &mut TextStore) {
         // Only 選択… opens a panel; レポート保存… saves.
         if let FileDialogResult::Opened(paths) = &result
             && let Some(path) = paths.first()
         {
             start::set_document_file(&mut self.tree, &self.start, path);
+            self.render_auto(text);
             return;
         }
         if let FileDialogResult::Saved(path) = result

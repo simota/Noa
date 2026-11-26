@@ -90,6 +90,7 @@ pub(crate) use input_ops::ime_trace_enabled;
 mod ipc;
 mod lifecycle;
 mod linux_tabs;
+mod orchestration_chrome;
 mod overview;
 mod pane_drag;
 mod pane_drag_render;

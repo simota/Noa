@@ -337,6 +337,16 @@ in a pane of its own, `+ctl board` follows that pane's orchestrator, or every
 worker when it has none; `--of PANE` picks one. It needs a terminal on stdin
 and stdout and exits 1 without one: from a script, use `board --open`.
 
+A pane that opens a board or successfully starts a worker gains a colored
+`Orchestrator` role strip. Boards opened through orchestration have their own
+`Board` strip. The label stays visible whether the pane has focus and remains
+until that pane closes, even when its last worker has closed. The strip
+reserves a row above the terminal
+instead of covering output; clicking it focuses the pane. In a narrow pane
+the labels shorten to `ORCH`, `O` or `B`. A floating worker that delegates to
+its own workers shows the role in its existing title strip. Restored ordinary
+shells start without a role label.
+
 The board has three parts. At the top, a queue of the workers that need you
 (an approval prompt, an error or a command that exited with a non-zero code,
 then a question or an unread notification, the longest-waiting first within
@@ -385,6 +395,55 @@ is in the queue too, named after its parent); `Space` on a subtree of the work
 under way folds it, and anywhere else lists the finished and exited workers or
 folds them again. Closing a worker closes the workers it started. The board pane is not a worker: it does not count toward
 `--max-children` and `close --children` leaves it alone.
+
+### Following the delegation flow
+
+Press `v` on the board to switch between the worker list and a workflow view.
+`Noa +ctl board --workflow` starts in this view directly; `--of PANE` or
+`--of self` chooses the orchestrator as it does for the list. `--workflow`
+runs in the current terminal and cannot be combined with `--open`,
+`--timeline` or `--board-id`.
+The workflow follows the real delegation relationship: the orchestrator,
+the workers it started, and any workers they started. These connections show
+who delegated the work; they do not imply task dependencies or an execution
+order.
+
+Each worker keeps its usual number, state word and status mark. The overview
+counts workers needing attention, work in progress, and finished work. Wide
+panes show the delegation path across the screen; narrow panes show the
+delegation path above a full-width worker card. The workflow includes workers
+hidden by a folded subtree or the finished section in the list, so they can
+still be selected there.
+
+The existing controls work in the workflow: `j`/`k` or `↑`/`↓` select,
+the worker's number selects it directly, `n` finds the next worker needing
+attention, `Enter` opens its detail, and `g` opens its pane. `s` and `x` keep
+the same send and close confirmations as the list. `Esc` from a worker detail
+returns to the view it was opened from. `t` opens the timeline; pressing `t`
+again returns to the previous worker view with its selection intact.
+`o` focuses the board's live orchestrator from the list, workflow, detail or
+timeline, without changing the selected worker.
+
+### Reading the board timeline
+
+`t` on the board opens its durable timeline, newest posts first. `Enter`
+opens the selected post and `Esc` returns to the timeline. Use `/` to search
+the title, summary and body, and `f` to filter by worker, agent, post kind or
+outcome. `F` clears both search and filters in one step.
+
+Press `c` in the post list to switch between detailed cards and a compact,
+one-post-per-line list. The compact list prioritizes the outcome mark, post
+kind and title; wider panes also show the post number, outcome word, author
+and time. The
+selected post stays selected when changing density. The header shows the
+selection and loaded count, such as `2/30`; a trailing `+` means older posts
+remain to be loaded, not a count of all posts on the board.
+
+New posts wait while you are reading older ones, with their count in the
+header. `G` merges them and selects the newest post. `g` opens a post's live
+worker pane and `w` shows that worker's detail when it still belongs to this
+board. `v` switches to the workflow. Archived posts remain readable after
+their worker closes. `?` shows the full key reference in any view.
 
 ### A skill for the orchestrating agent
 

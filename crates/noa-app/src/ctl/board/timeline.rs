@@ -141,6 +141,8 @@ pub(crate) struct Timeline {
     /// filter that lists fewer posts does not take back.
     seen_max: u64,
     selected: usize,
+    /// One line per post, leaving more of a busy timeline in view.
+    compact: bool,
     /// The first item drawn; set right as the list is drawn.
     scroll: Cell<usize>,
     detail_scroll: usize,
@@ -188,6 +190,7 @@ impl Timeline {
             visit_known: false,
             seen_max: 0,
             selected: 0,
+            compact: false,
             scroll: Cell::new(0),
             detail_scroll: 0,
             detail_reach: Cell::new(0),
@@ -692,6 +695,16 @@ impl Timeline {
                 });
                 None
             }
+            Key::Char('c') if self.detail.is_none() => {
+                self.compact = !self.compact;
+                None
+            }
+            Key::Char('F') if self.filter_set() || self.query.is_some() => {
+                self.filter = Filter::default();
+                self.query = None;
+                self.detail = None;
+                self.reload_now()
+            }
             Key::Char('G') => {
                 let mut pending = std::mem::take(&mut self.pending);
                 pending.append(&mut self.posts);
@@ -975,6 +988,15 @@ impl Timeline {
             .plain(" ")
             .bold(self.lang.pick("タイムライン", "TIMELINE"))
             .plain("  ");
+        if self.loaded && self.detail.is_none() {
+            let selected = if self.posts.is_empty() {
+                0
+            } else {
+                self.selected + 1
+            };
+            let more = if self.older.is_some() { "+" } else { "" };
+            title.fg(DIM, &format!("{selected}/{}{more}  ", self.posts.len()));
+        }
         let name = self.board_name();
         title.fg(DIM, &fit(&name, cols.saturating_sub(title.width + 1)));
 
@@ -1012,6 +1034,14 @@ impl Timeline {
         } else if self.loaded {
             let n = self.live.len();
             status.push((DIM, l(format!("ライブ {n}"), format!("{n} live"))));
+        }
+        if self.loaded && self.detail.is_none() {
+            let mode = if self.compact {
+                self.lang.pick("コンパクト (c)", "compact (c)")
+            } else {
+                self.lang.pick("カード (c)", "cards (c)")
+            };
+            status.push((DIM, mode.to_string()));
         }
         if self.filter_set() {
             status.push((
@@ -1121,10 +1151,17 @@ impl Timeline {
                     line.fg(ORANGE, &fit(&clean(message), room));
                 }
                 None => {
-                    let hint = self.lang.pick(
-                        "t でワーカー一覧へ  ·  ? キー一覧",
-                        "t back to the workers  ·  ? keys",
-                    );
+                    let hint = if self.filter_set() || self.query.is_some() {
+                        self.lang.pick(
+                            "F で検索・絞り込みを解除  ·  ? キー一覧",
+                            "F clear search and filters  ·  ? keys",
+                        )
+                    } else {
+                        self.lang.pick(
+                            "t で前の表示へ  ·  ? キー一覧",
+                            "t back to the previous view  ·  ? keys",
+                        )
+                    };
                     line.fg(DIM, &fit(hint, room));
                 }
             },
@@ -1146,7 +1183,9 @@ impl Timeline {
             .enumerate()
             .map(|(at, post)| {
                 let selected = at == self.selected;
-                if compact {
+                if self.compact {
+                    vec![self.dense_line(post, cols, selected)]
+                } else if compact {
                     vec![self.compact_line(post, cols, selected)]
                 } else {
                     self.item_lines(post, cols, selected)
@@ -1168,7 +1207,7 @@ impl Timeline {
         let mut out: Vec<String> = Vec::new();
         let mut shown = start;
         // Whether the selected post is shown in part only.
-        let mut cut = compact;
+        let mut cut = compact && !self.compact;
         for item in &items[start..] {
             if out.len() + item.len() > body {
                 // A selected item taller than the pane is cut (its blank
@@ -1218,6 +1257,67 @@ impl Timeline {
         line.fg(DIM, &format!("#{} ", post.seq.0));
         let room = cols.saturating_sub(line.width);
         line.bold(&fit(&clean(&post.title), room));
+        line.finish(cols)
+    }
+
+    /// A chosen compact view keeps the outcome and kind before the title.
+    /// Extra width buys the sequence number, author and time, in that order;
+    /// the title always keeps at least twelve columns when an author fits.
+    fn dense_line(&self, post: &PostSummary, cols: usize, selected: bool) -> String {
+        let mut line = Line::default();
+        if selected {
+            line.fg(BLUE, "▌ ");
+        } else {
+            line.plain("  ");
+        }
+        if cols >= 48 {
+            line.fg(DIM, &format!("#{} ", post.seq.0));
+        }
+        let mark = match post.outcome {
+            Outcome::Succeeded => "✓",
+            Outcome::Partial => "~",
+            Outcome::Failed => "×",
+            Outcome::Cancelled => "-",
+            Outcome::Unknown => "?",
+        };
+        line.fg(outcome_color(post.outcome), mark).plain(" ");
+        if cols >= 70 {
+            line.fg(
+                outcome_color(post.outcome),
+                outcome_label(post.outcome, self.lang),
+            )
+            .plain(" ");
+        }
+        let kind_color = if post.kind == PostKind::Blocker {
+            ORANGE
+        } else {
+            DIM
+        };
+        line.fg(kind_color, kind_label(post.kind, self.lang))
+            .plain(" ");
+
+        let remaining = cols.saturating_sub(line.width);
+        let author = if cols >= 60 {
+            let who = self.who(post);
+            let width = (remaining / 3).min(24);
+            let author = fit(&who, width);
+            (!author.is_empty() && remaining >= author.width() + 15).then_some(author)
+        } else {
+            None
+        };
+        let time = (cols >= 100).then(|| self.time_text(&post.created_at));
+        let suffix = author.as_ref().map_or(0, |author| author.width() + 3)
+            + time.as_ref().map_or(0, |time| time.width() + 2);
+        let title_width = remaining.saturating_sub(suffix);
+        let title = fit(&clean(&post.title), title_width);
+        line.bold(&title)
+            .plain(&" ".repeat(title_width.saturating_sub(title.width())));
+        if let Some(author) = author {
+            line.fg(BORDER, " · ").fg(DIM, &author);
+        }
+        if let Some(time) = time {
+            line.plain("  ").fg(DIM, &time);
+        }
         line.finish(cols)
     }
 
@@ -1570,18 +1670,23 @@ impl Timeline {
                 ("j/k", l("スクロール", "scroll"), l("スクロール", "scroll")),
                 ("g", l("移動", "go"), l("移動", "go")),
                 ("w", l("ワーカー", "worker"), l("ワーカー", "worker")),
-                ("t", l("ワーカー一覧", "workers"), l("一覧", "workers")),
+                ("F", l("条件解除", "clear filters"), l("解除", "clear")),
+                ("t", l("前の表示", "back"), l("戻る", "back")),
+                ("v", l("フロー", "workflow"), l("フロー", "flow")),
                 ("q", l("終了", "quit"), l("終了", "quit")),
             ],
             None => vec![
                 ("Enter", l("開く", "open"), l("開く", "open")),
                 ("j/k", l("選択", "select"), l("選択", "select")),
+                ("c", l("表示切替", "density"), l("表示", "density")),
                 ("/", l("検索", "search"), l("検索", "search")),
                 ("f", l("絞り込み", "filter"), l("絞込", "filter")),
+                ("F", l("条件解除", "clear filters"), l("解除", "clear")),
                 ("G", l("最新へ", "newest"), l("最新", "newest")),
                 ("g", l("移動", "go"), l("移動", "go")),
                 ("w", l("ワーカー", "worker"), l("ワーカー", "worker")),
-                ("t", l("ワーカー一覧", "workers"), l("一覧", "workers")),
+                ("t", l("前の表示", "back"), l("戻る", "back")),
+                ("v", l("フロー", "workflow"), l("フロー", "flow")),
                 ("q", l("終了", "quit"), l("終了", "quit")),
             ],
         }
@@ -1832,6 +1937,212 @@ pub(crate) fn write_visit(path: &Path, board_id: &str, seq: u64) -> io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn post(seq: u64, title: &str) -> PostSummary {
+        serde_json::from_value(serde_json::json!({
+            "artifacts": 0,
+            "author": {"agentKind": "claude", "label": "api", "role": "worker", "workerId": "wk-0000000000000001"},
+            "checks": {"failed": 0, "inconclusive": 0, "notRun": 0, "passed": 0},
+            "createdAt": "2026-11-26T05:03:07Z",
+            "kind": "summary",
+            "occurredAt": null,
+            "openIssues": 0,
+            "outcome": "succeeded",
+            "postId": format!("po-{seq:016x}"),
+            "producer": {"id": "wk-0000000000000001", "kind": "worker"},
+            "provenance": "registered",
+            "runId": null,
+            "seq": seq.to_string(),
+            "sourceNamespace": "worker",
+            "summary": format!("{title} summary"),
+            "supersedesPostId": null,
+            "taskRef": null,
+            "title": title,
+            "workerId": "wk-0000000000000001",
+        }))
+        .unwrap()
+    }
+
+    fn page(posts: Vec<PostSummary>, head: u64) -> PageResult {
+        PageResult {
+            has_more: false,
+            head_seq: Seq(head),
+            next_after_seq: posts.iter().map(|post| post.seq).max(),
+            next_before_seq: posts.iter().map(|post| post.seq).min(),
+            posts,
+        }
+    }
+
+    fn timeline(n: u64) -> Timeline {
+        let mut tl = Timeline::new(Lang::Ja, |_| 0);
+        tl.set_board_id(Some("bd-0000000000000001".to_string()));
+        tl.take_reload().unwrap();
+        tl.on_page(page(
+            (1..=n)
+                .rev()
+                .map(|seq| post(seq, &format!("item {seq}")))
+                .collect(),
+            n,
+        ));
+        tl
+    }
+
+    fn visible(line: &str) -> String {
+        let mut plain = String::new();
+        let mut chars = line.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(ch);
+            }
+        }
+        plain
+    }
+
+    #[test]
+    fn compact_posts_keep_selection_and_show_more_of_the_timeline() {
+        let mut tl = timeline(8);
+        tl.key(Key::Down);
+        tl.key(Key::Down);
+        let selected = tl.current().unwrap().post_id.clone();
+        let cards = visible(&tl.list_lines(69, 12).join("\n"));
+        assert_eq!(tl.key(Key::Char('c')), None);
+        let compact = visible(&tl.list_lines(69, 12).join("\n"));
+        let shown = |text: &str| {
+            (1..=8)
+                .filter(|seq| text.contains(&format!("item {seq}")))
+                .count()
+        };
+        assert!(shown(&compact) > shown(&cards), "{cards}\n{compact}");
+        assert_eq!(tl.current().unwrap().post_id, selected);
+        tl.key(Key::Char('c'));
+        assert_eq!(tl.current().unwrap().post_id, selected);
+        assert!(!tl.compact);
+        tl.key(Key::Enter);
+        tl.key(Key::Char('c'));
+        assert!(!tl.compact, "the full post is not a density toggle");
+    }
+
+    #[test]
+    fn compact_posts_keep_pending_updates_and_the_visit_boundary() {
+        let mut tl = timeline(8);
+        tl.set_visit_boundary(3);
+        tl.key(Key::Char('c'));
+        tl.key(Key::Down);
+        let selected = tl.current().unwrap().post_id.clone();
+        tl.on_changes(page(vec![post(9, "new post")], 9));
+        tl.key(Key::Char('c'));
+        assert_eq!(tl.current().unwrap().post_id, selected);
+        assert_eq!(tl.pending.len(), 1);
+        assert_eq!(tl.since_last_visit(), 6);
+        tl.key(Key::Char('c'));
+        tl.key(Key::Char('G'));
+        assert!(tl.pending.is_empty());
+        assert_eq!(tl.current().unwrap().seq, Seq(9));
+        assert_eq!(tl.since_last_visit(), 6);
+    }
+
+    #[test]
+    fn compact_posts_page_older_history_and_advance_selection() {
+        let mut tl = timeline(3);
+        let mut first = page(vec![post(5, "five"), post(4, "four")], 5);
+        first.has_more = true;
+        tl.on_page(first);
+        tl.key(Key::Char('c'));
+        tl.key(Key::Down);
+        let Some(TlAction::Page(request)) = tl.key(Key::Down) else {
+            panic!("the last compact item requests older posts");
+        };
+        assert_eq!(request.before_seq, Some(Seq(4)));
+        tl.on_page(page(vec![post(3, "three"), post(2, "two")], 5));
+        assert_eq!(tl.current().unwrap().seq, Seq(3));
+        assert_eq!(tl.posts.len(), 4);
+    }
+
+    #[test]
+    fn clearing_search_and_filters_reloads_once_and_keeps_a_matching_selection() {
+        let mut tl = timeline(5);
+        tl.key(Key::Down);
+        let selected = tl.current().unwrap().post_id.clone();
+        tl.filter.kinds.push(PostKind::Summary);
+        tl.query = Some("item".to_string());
+        tl.key(Key::Enter);
+        let Some(TlAction::Page(request)) = tl.key(Key::Char('F')) else {
+            panic!("clearing conditions requests the unfiltered head page");
+        };
+        assert_eq!(request.filter, None);
+        assert_eq!(request.query, None);
+        assert_eq!(request.before_seq, None);
+        assert_eq!(tl.detail(), None);
+        tl.on_page(page(
+            (1..=5)
+                .rev()
+                .map(|seq| post(seq, &format!("item {seq}")))
+                .collect(),
+            5,
+        ));
+        assert_eq!(tl.current().unwrap().post_id, selected);
+        assert_eq!(tl.key(Key::Char('F')), None);
+        assert_eq!(tl.take_reload(), None);
+    }
+
+    #[test]
+    fn density_and_clear_shortcuts_are_text_inside_search() {
+        let mut tl = timeline(3);
+        tl.filter.kinds.push(PostKind::Summary);
+        tl.key(Key::Char('/'));
+        tl.key(Key::Char('c'));
+        tl.key(Key::Char('F'));
+        assert!(!tl.compact);
+        let Some(TlAction::Page(request)) = tl.key(Key::Enter) else {
+            panic!("the query line searches its literal input");
+        };
+        assert_eq!(request.query.as_deref(), Some("cF"));
+        assert_eq!(request.filter.unwrap().kinds, vec![PostKind::Summary]);
+    }
+
+    #[test]
+    fn compact_rows_show_outcomes_kinds_and_titles_without_overflow() {
+        let mut tl = timeline(0);
+        let mut p = post(u64::MAX, "日本語の長いタイトル\x1b]2;unsafe\x07");
+        p.author.label = Some("実装担当の長いラベル\x07".to_string());
+        p.kind = PostKind::Handoff;
+        for lang in [Lang::Ja, Lang::En] {
+            tl.lang = lang;
+            for outcome in OUTCOMES {
+                p.outcome = outcome;
+                for cols in [24, 31, 48, 60, 69, 70, 99, 100, 140] {
+                    let line = tl.dense_line(&p, cols, true);
+                    assert!(!line.contains('\x07') && !line.contains("\x1b]2"));
+                    let plain = visible(&line);
+                    assert_eq!(plain.width(), cols, "{cols}: {plain}");
+                    assert!(plain.contains(kind_label(p.kind, lang)), "{plain}");
+                    assert!(plain.contains("日本"), "{cols}: {plain}");
+                    if cols >= 70 {
+                        assert!(plain.contains(outcome_label(outcome, lang)), "{plain}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_position_reports_loaded_posts_and_remaining_history() {
+        let mut tl = timeline(3);
+        tl.head_seq = 100;
+        tl.older = Some(1);
+        tl.key(Key::Down);
+        let title = visible(&tl.header(80, Instant::now())[0]);
+        assert!(title.contains("2/3+"), "{title}");
+        let empty = timeline(0);
+        let title = visible(&empty.header(80, Instant::now())[0]);
+        assert!(title.contains("0/0"), "{title}");
+    }
 
     #[test]
     fn times_are_read_as_utc_and_shown_local() {

@@ -17,6 +17,7 @@ use super::{EXIT_OK, Failure, HOLD_BANNER, SUBMIT_DELAY, journal};
 
 mod insight;
 mod timeline;
+mod workflow;
 
 use insight::{FileState, Insight, ResultFile, Task};
 use timeline::{PostId, TlAction};
@@ -360,6 +361,8 @@ pub(crate) struct Report {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum View {
     List,
+    /// The live delegation paths, from the orchestrator to its workers.
+    Workflow,
     Detail(u64),
     /// The board's timeline (`docs/specs/board-timeline.md` AC-3).
     Timeline,
@@ -520,6 +523,8 @@ pub(crate) struct Board {
     digit: Option<(usize, Instant)>,
     selected: Option<u64>,
     pub(crate) view: View,
+    /// The overview to return to after inspecting a worker.
+    overview: View,
     pub(crate) mode: Mode,
     /// A one-line result of the last action.
     pub(crate) message: Option<Notice>,
@@ -600,6 +605,7 @@ impl Board {
             digit: None,
             selected: None,
             view: View::List,
+            overview: View::List,
             mode: Mode::Normal,
             message: None,
             offline: None,
@@ -868,13 +874,13 @@ impl Board {
         if let View::Detail(pane) = self.view
             && !live.contains(&pane)
         {
-            self.view = View::List;
+            self.view = self.overview.clone();
         }
         // The worker view `t` goes back to, while the timeline is shown.
         if let View::Detail(pane) = self.worker_view
             && !live.contains(&pane)
         {
-            self.worker_view = View::List;
+            self.worker_view = self.overview.clone();
         }
         // The keys typed next were meant for that worker: none may act on
         // the one selected now until the person has seen it went (Esc).
@@ -1027,11 +1033,12 @@ impl Board {
         if self.selected.is_some_and(|pane| !shown.contains(&pane)) {
             self.selected = None;
         }
+        let overview = self.overview.clone();
         for view in [&mut self.view, &mut self.worker_view] {
             if let View::Detail(pane) = view
                 && !shown.contains(pane)
             {
-                *view = View::List;
+                *view = overview.clone();
             }
         }
         if let Mode::Send(pane, _) | Mode::ConfirmClose(pane) = self.mode
@@ -1275,6 +1282,16 @@ impl Board {
     /// echoes and the folded subtrees. The finished and exited ones count
     /// while folded, so `j` past the last row opens them.
     fn picks(&self) -> Vec<u64> {
+        if self.view == View::Workflow
+            || (matches!(self.view, View::Detail(_)) && self.overview == View::Workflow)
+        {
+            return self
+                .lead()
+                .into_iter()
+                .chain(self.workers())
+                .map(|panel| panel.pane_id.0)
+                .collect();
+        }
         self.layout()
             .iter()
             .filter(|entry| !entry.echo)
@@ -1395,7 +1412,7 @@ impl Board {
     /// heads the queue), and the selected one, which is previewed.
     pub(crate) fn wanted_screens(&self) -> Vec<u64> {
         match self.view {
-            View::List => self
+            View::List | View::Workflow => self
                 .lead()
                 .into_iter()
                 .chain(self.workers())
@@ -1422,7 +1439,7 @@ impl Board {
         match self.view {
             View::Detail(pane) => Some(pane),
             View::Timeline | View::PostDetail(_) => None,
-            View::List => self.selected,
+            View::List | View::Workflow => self.selected,
         }
     }
 
@@ -1459,7 +1476,7 @@ impl Board {
         if workers.is_empty() {
             // Nothing to select: j/k scroll the closed section, as far as
             // its title and entries go.
-            if self.view == View::List {
+            if matches!(self.view, View::List | View::Workflow) {
                 let reach = 1 + self.gone.len();
                 self.past = self.past.saturating_add_signed(step).min(reach);
             }
@@ -1756,6 +1773,8 @@ impl Board {
                 match key {
                     Key::Char('q') | Key::CtrlC => return self.quit_pressed(),
                     Key::Char('t') => self.open_timeline(),
+                    Key::Char('v') => self.toggle_workflow(),
+                    Key::Char('o') => return self.focus_orchestrator(),
                     Key::Char('?') => {
                         self.help = true;
                         self.help_scroll = 0;
@@ -1796,7 +1815,10 @@ impl Board {
                         }
                     }
                     Key::Esc | Key::Char('h') | Key::Left => {
-                        self.view = View::List;
+                        if self.view == View::Workflow {
+                            self.overview = View::List;
+                        }
+                        self.view = self.overview.clone();
                         self.result_shown = false;
                         self.result_scroll = 0;
                     }
@@ -1900,6 +1922,11 @@ impl Board {
                     self.leave_timeline(to);
                     return None;
                 }
+                Key::Char('v') => {
+                    self.open_workflow();
+                    return None;
+                }
+                Key::Char('o') => return self.focus_orchestrator(),
                 Key::Char('s' | 'x') => {
                     let hint = self.lang.pick("w でワーカーへ", "w goes to the worker");
                     self.message = Some(Notice::ok(hint.to_string()));
@@ -2716,6 +2743,7 @@ impl Board {
                 lines
             }
             (false, View::List) => self.render_list(cols, rows, now),
+            (false, View::Workflow) => self.render_workflow(cols, rows, now),
             (false, View::Detail(pane)) => self.render_detail(*pane, cols, rows, now),
             (false, View::Timeline | View::PostDetail(_)) => {
                 let mut lines = self.timeline.render(cols, rows, now);
@@ -2950,10 +2978,18 @@ impl Board {
                     line.fg(color, &fit(&clean(&notice.text), room));
                 }
                 (None, None) => {
-                    let hint = self.lang.pick(
+                    let mut hint = self.lang.pick(
                         format!("{BACK_TO_BOARD} ワーカーをたたんでボードへ  ·  ? キー一覧"),
                         format!("{BACK_TO_BOARD} fold an opened worker, back here  ·  ? keys"),
                     );
+                    let switch = if self.view == View::Workflow {
+                        self.lang.pick("  ·  v 一覧", "  ·  v list")
+                    } else {
+                        self.lang.pick("  ·  v フロー", "  ·  v flow")
+                    };
+                    if hint.width() + switch.width() <= room {
+                        hint.push_str(switch);
+                    }
                     line.fg(DIM, &fit(&hint, room));
                 }
             },
@@ -2977,7 +3013,7 @@ impl Board {
             );
         let mut lines = vec![Line::default().finish(cols)];
         let l = |ja, en| self.lang.pick(ja, en);
-        let keys: [(&str, &str); 24] = [
+        let keys = [
             ("j k ↑ ↓", l("ワーカーを選ぶ", "select a worker")),
             (
                 "1–20",
@@ -3014,7 +3050,10 @@ impl Board {
                     "in details: switch between the screen and the result file (j/k scroll it)",
                 ),
             ),
-            ("Esc h ←", l("一覧に戻る", "back to the list")),
+            (
+                "Esc h ←",
+                l("前の一覧・フローに戻る", "back to the list or flow"),
+            ),
             (
                 "g",
                 l(
@@ -3053,8 +3092,22 @@ impl Board {
             (
                 "t",
                 l(
-                    "タイムラインとワーカー一覧を切り替える",
-                    "switch between the timeline and the workers",
+                    "タイムラインと前のワーカービューを切り替える",
+                    "switch between the timeline and the previous worker view",
+                ),
+            ),
+            (
+                "v",
+                l(
+                    "一覧と委譲フローを切り替える(指揮 → ワーカー → 子ワーカー)",
+                    "switch between the list and delegation flow (lead → worker → child)",
+                ),
+            ),
+            (
+                "o",
+                l(
+                    "オーケストレーターのペインへ移動",
+                    "go to the orchestrator's pane",
                 ),
             ),
             ("", ""),
@@ -3091,6 +3144,17 @@ impl Board {
                     "投稿したワーカーへ移動 / その詳細へ",
                     "go to the post's worker / to its details",
                 ),
+            ),
+            (
+                "c",
+                l(
+                    "カード表示 / コンパクト表示を切り替える",
+                    "switch between cards and compact posts",
+                ),
+            ),
+            (
+                "F",
+                l("検索と絞り込みを解除", "clear the search and filters"),
             ),
         ];
         // A description too long for the pane goes on under itself (U11).
@@ -3155,10 +3219,16 @@ impl Board {
             format!("workers {n} · synced {synced} "),
         );
         // A narrow pane gets the short title before the count is cut.
-        const LONG: &str = "NOA / CONTROL";
+        let long = if self.view == View::Workflow {
+            "NOA / WORKFLOW"
+        } else {
+            "NOA / CONTROL"
+        };
         const SCOPE_ROOM: usize = 8;
-        let name = if 1 + LONG.width() + 2 + SCOPE_ROOM + count.width() <= cols {
-            LONG
+        let name = if 1 + long.width() + 2 + SCOPE_ROOM + count.width() <= cols {
+            long
+        } else if self.view == View::Workflow {
+            self.lang.pick("フロー", "Flow")
         } else {
             self.lang.pick("ボード", "Board")
         };
@@ -4043,7 +4113,11 @@ impl Board {
         head.plain(" ")
             .fg(
                 DIM,
-                self.lang.pick("← 一覧 (Esc)  /  ", "← list (Esc)  /  "),
+                if self.overview == View::Workflow {
+                    self.lang.pick("← フロー (Esc)  /  ", "← flow (Esc)  /  ")
+                } else {
+                    self.lang.pick("← 一覧 (Esc)  /  ", "← list (Esc)  /  ")
+                },
             )
             .bold(&fit(&worker_name(panel), cols / 3));
         let kind = worker_kind(panel);
@@ -4420,6 +4494,11 @@ impl Board {
     fn footer(&self, cols: usize, help_cut: bool) -> String {
         let mut line = Line::default();
         let l = |ja, en| self.lang.pick(ja, en);
+        let back = if self.overview == View::Workflow {
+            l("フロー", "flow")
+        } else {
+            l("一覧", "list")
+        };
         // (key, what, what when the line is tight), most important first.
         let keys: Vec<(&str, &str, &str)> = match &self.mode {
             Mode::Send(..) => vec![
@@ -4480,7 +4559,7 @@ impl Board {
                     ("q", l("終了", "quit"), l("終了", "quit")),
                 ]);
                 match self.view {
-                    View::List => {
+                    View::List | View::Workflow => {
                         keys.extend([
                             ("Enter", l("詳細", "details"), l("詳細", "details")),
                             ("n", l("次の要対応", "next"), l("次", "next")),
@@ -4488,7 +4567,9 @@ impl Board {
                         ]);
                         // What Space does: to the subtree the selection is
                         // in, else to the finished and exited workers.
-                        if let Some(folded) = self.space_folded() {
+                        if self.view == View::List
+                            && let Some(folded) = self.space_folded()
+                        {
                             let what = match (self.space_target().is_some(), folded) {
                                 (true, true) => l("開く", "open"),
                                 (true, false) => l("たたむ", "fold"),
@@ -4499,12 +4580,12 @@ impl Board {
                         }
                     }
                     View::Detail(_) if self.result_shown => keys.extend([
-                        ("Esc", l("一覧", "list"), l("一覧", "list")),
+                        ("Esc", back, back),
                         ("r", l("画面", "screen"), l("画面", "screen")),
                         ("j/k", l("スクロール", "scroll"), l("スクロール", "scroll")),
                     ]),
                     View::Detail(_) => keys.extend([
-                        ("Esc", l("一覧", "list"), l("一覧", "list")),
+                        ("Esc", back, back),
                         ("r", l("結果", "result"), l("結果", "result")),
                         ("j/k", l("前後", "prev/next"), l("前後", "prev/next")),
                     ]),
@@ -4542,6 +4623,24 @@ impl Board {
         for (key, long, brief) in &keys[..n] {
             let what = if short { brief } else { long };
             line.plain(key).fg(DIM, &format!(" {what}{gap}"));
+        }
+        // View changes use spare room only. They must not shorten the
+        // approval guidance or displace close, quit, and result scrolling.
+        if self.mode == Mode::Normal && !self.in_timeline() {
+            let view = if self.view == View::Workflow {
+                l("一覧", "list")
+            } else {
+                l("フロー", "flow")
+            };
+            for (key, what, offered) in [
+                ("v", view, true),
+                ("o", l("指揮", "lead"), self.orchestrator().is_some()),
+            ] {
+                let label = format!(" {what}{gap}");
+                if offered && line.width + key.width() + label.width() + more <= cols {
+                    line.plain(key).fg(DIM, &label);
+                }
+            }
         }
         if help {
             line.plain("?").fg(DIM, help_word);
@@ -4831,6 +4930,7 @@ pub(crate) const TERMINATING_SIGNALS: [libc::c_int; 3] =
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Open {
     pub timeline: bool,
+    pub workflow: bool,
     pub board_id: Option<String>,
 }
 
@@ -4882,7 +4982,9 @@ fn run_until_quit(
     board.timeline.offset_at = timeline::local_offset_at;
     board.timeline.unsupported = !client.supports_board_timeline();
     let visits = noa_config::timeline_visits_path();
-    if open.timeline {
+    if open.workflow {
+        board.open_workflow();
+    } else if open.timeline {
         board.timeline.set_board_id(open.board_id);
         board.open_timeline();
     }
@@ -7283,12 +7385,22 @@ mod tests {
         let all = rendered(&board, 60, 14, Instant::now());
         assert!(all.contains("↓ 続き"), "{all}");
         assert!(!all.contains("^U / ^W"), "{all}");
-        for _ in 0..20 {
+        // The help grows with its views. Its send-line keys must remain
+        // reachable on the way to the final timeline shortcut, rather
+        // than relying on the old number of help rows.
+        let mut saw_send_keys = false;
+        for _ in 0..100 {
             assert_eq!(board.key(Key::Char('j')), None);
+            let page = rendered(&board, 60, 14, Instant::now());
+            saw_send_keys |= page.contains("^U / ^W");
         }
+        assert!(saw_send_keys);
         assert!(board.help);
         let all = rendered(&board, 60, 14, Instant::now());
-        assert!(all.contains("^U / ^W") && !all.contains("↓ 続き"), "{all}");
+        assert!(
+            line_with(&all, "検索と絞り込みを解除").contains('F') && !all.contains("↓ 続き"),
+            "{all}"
+        );
         // k comes straight back, however far j was pressed.
         board.key(Key::Char('k'));
         assert!(rendered(&board, 60, 14, Instant::now()).contains("↓ 続き"));
@@ -9846,7 +9958,7 @@ mod tests {
         board.key(Key::Char('?'));
         let all = rendered(&board, 100, 60, Instant::now());
         assert!(
-            all.contains("タイムラインとワーカー一覧を切り替える"),
+            all.contains("タイムラインと前のワーカービューを切り替える"),
             "{all}"
         );
     }

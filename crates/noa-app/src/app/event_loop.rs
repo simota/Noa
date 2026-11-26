@@ -1937,8 +1937,16 @@ impl App {
                 .get(&window_id)
                 .and_then(|tab| tab.last_mouse_point)
                 .and_then(|point| self.float_hit_at(window_id, point));
-            let over_chrome =
-                hit.is_some_and(|hit| hit.part != crate::floating::FloatHitPart::Content);
+            let role_hit = if hit.is_none() {
+                self.windows
+                    .get(&window_id)
+                    .and_then(|tab| tab.last_mouse_point)
+                    .and_then(|point| self.orchestration_header_at(window_id, point))
+            } else {
+                None
+            };
+            let over_chrome = role_hit.is_some()
+                || hit.is_some_and(|hit| hit.part != crate::floating::FloatHitPart::Content);
             // The pane that saw this button go down, if this is its release.
             let owed = (state == ElementState::Released)
                 .then(|| {
@@ -1956,6 +1964,19 @@ impl App {
                 false,
                 owed.is_some(),
             ) {
+                return;
+            }
+            if button == MouseButton::Left
+                && state == ElementState::Pressed
+                && let Some(pane) = role_hit
+            {
+                // A role strip focuses its pane; neither half of the click
+                // becomes a terminal mouse report or starts a selection.
+                self.focus_pane(window_id, pane);
+                if let Some(tab) = self.windows.get_mut(&window_id) {
+                    tab.float_press_consumed = true;
+                    tab.window.request_redraw();
+                }
                 return;
             }
             let (hovered, position, tween_live) =
@@ -2270,10 +2291,12 @@ impl App {
             self.on_cursor_moved(window_id, position);
         }
         let pane_id = self.windows.get(&window_id).and_then(|state| {
-            let over_float_chrome = state
-                .last_mouse_point
-                .and_then(|point| self.float_hit_at(window_id, point))
-                .is_some_and(|hit| hit.part != crate::floating::FloatHitPart::Content);
+            let over_float_chrome = state.last_mouse_point.is_some_and(|point| {
+                match self.float_hit_at(window_id, point) {
+                    Some(hit) => hit.part != crate::floating::FloatHitPart::Content,
+                    None => self.orchestration_header_at(window_id, point).is_some(),
+                }
+            });
             floating::wheel_pane(
                 self.script_target(state),
                 state.last_mouse_pane,

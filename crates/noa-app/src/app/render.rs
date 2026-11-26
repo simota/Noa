@@ -431,6 +431,7 @@ impl App {
         // `draw_rebuilt_panes` call site.
         let scratch_terminal_ring = self.is_scratch_terminal_window(window_id);
         let float_draws = self.float_draws(window_id);
+        let role_headers = self.orchestration_headers(window_id);
         // The split zoom transition's frame (`None` when no tween is in
         // flight), resolved before the borrows below like the floats.
         let split_zoom_frame = self.split_zoom_frame(window_id, Instant::now());
@@ -588,6 +589,11 @@ impl App {
                 render_pane_rect(draw.placed.strip),
             )
         }));
+        expected_panes.extend(
+            role_headers
+                .iter()
+                .map(|header| (header.render_id(), render_pane_rect(header.rect))),
+        );
         // Tab-switch stall fix: consume the one-shot post-reveal flag
         // regardless of outcome — it only ever applies to the very next
         // redraw after `Occluded(false)`, win or lose. `has_renderable_frame`
@@ -838,13 +844,18 @@ impl App {
             .iter()
             .map(|draw| state.float_strip_snapshot(draw))
             .collect();
+        let role_snapshots: Vec<FrameSnapshot> = role_headers
+            .iter()
+            .map(|header| state.orchestration_header_snapshot(header))
+            .collect();
         state
             .float_strips
             .retain(|id, _| state.floats.contains(*id));
         state.renderer.set_overlays(
-            float_draws
+            role_headers
                 .iter()
-                .map(|draw| draw.overlay_group())
+                .map(|header| header.overlay_group())
+                .chain(float_draws.iter().map(|draw| draw.overlay_group()))
                 .collect(),
         );
         let mut panes = snapshots
@@ -862,6 +873,16 @@ impl App {
                 .map(|(draw, snapshot)| PaneFrame {
                     pane: floating::strip_render_pane_id(draw.placed.id),
                     rect: render_pane_rect(draw.placed.strip),
+                    snapshot,
+                }),
+        );
+        panes.extend(
+            role_headers
+                .iter()
+                .zip(&role_snapshots)
+                .map(|(header, snapshot)| PaneFrame {
+                    pane: header.render_id(),
+                    rect: render_pane_rect(header.rect),
                     snapshot,
                 }),
         );
@@ -884,6 +905,17 @@ impl App {
                 if let Some(surface) = state.surfaces.get_mut(pane_id) {
                     surface.pending_reveal_snapshot = Some(snapshot.clone());
                 }
+            }
+            // Synthetic strips consumed row damage too, but have no pending
+            // snapshot slot. Keep their cached instances for this reveal;
+            // invalidate the key so the catch-up redraw cannot lose a title
+            // or focus-color change whose dirty row was just consumed.
+            for pane in role_headers.iter().map(|header| header.render_id()).chain(
+                float_draws
+                    .iter()
+                    .map(|draw| floating::strip_render_pane_id(draw.placed.id)),
+            ) {
+                state.renderer.invalidate_pane(pane);
             }
             crate::tab_switch_trace::on_fast_path_reveal();
             state.window.request_redraw();

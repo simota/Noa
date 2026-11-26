@@ -8,7 +8,9 @@ use super::{CENTER_MIN, LEFT_WIDTH, RIGHT_WIDTH, Verify, start};
 
 impl Verify {
     pub(super) fn adapt_layout(&mut self, width: f32) {
+        self.viewport_width = width;
         start::adapt(&mut self.tree, &mut self.start, width);
+        let focused = self.tree.focused();
         let compact = width < LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH + 12.0;
         self.tree
             .set_hidden(self.navigation, !compact || self.session.is_none());
@@ -36,16 +38,19 @@ impl Verify {
                 })
             })
         } else {
+            let room = width - CENTER_MIN - 12.0;
+            let extra_left = (self.wide_sizes.0 - 220.0).max(0.0);
+            let extra_right = (self.wide_sizes.1 - 260.0).max(0.0);
+            let scale = ((room - 480.0) / (extra_left + extra_right).max(1.0)).min(1.0);
             SplitView::horizontal()
-                .pane(SplitPane::fixed(self.wide_sizes.0).min(220.0))
+                .pane(SplitPane::fixed(220.0 + extra_left * scale).min(220.0))
                 .pane(SplitPane::flexible().min(CENTER_MIN))
-                .pane(SplitPane::fixed(self.wide_sizes.1).min(260.0))
+                .pane(SplitPane::fixed(260.0 + extra_right * scale).min(260.0))
         };
         self.tree.update::<SplitView, _>(self.split, |view, cx| {
             *view = split;
             cx.request_layout();
         });
-        let focused = self.tree.focused();
         let losing_focus = focused.is_some_and(|id| {
             self.pane_roots
                 .iter()
@@ -74,6 +79,8 @@ impl Verify {
         }
         if losing_focus {
             self.tree.set_focus(Some(self.navigation_buttons[pane]));
+        } else if !compact && focused.is_some_and(|id| self.within(id, self.navigation)) {
+            self.focus_action(&super::Action::ShowTab(self.tab), 0);
         }
     }
 

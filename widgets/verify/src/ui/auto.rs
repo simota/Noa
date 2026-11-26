@@ -42,8 +42,6 @@ const STAT_MAX: usize = 8 * 1024;
 /// A custom strategy's text in its role line, in characters.
 const CUSTOM_MAX: usize = 300;
 const THREAD: &str = "verify-assign";
-/// The start button's label, which the assignment block names.
-const START_LABEL: &str = "検証を開始";
 const CHANGED: &str = "割り当て中にエージェントの選択が変わったため反映しませんでした。\
                        もう一度「自動で割り当て」を押してください";
 
@@ -409,8 +407,9 @@ impl Auto {
             lines.push(Line::Text(why.clone()));
         }
         if let Some(filled) = &self.filled {
+            let start_label = form.start_label();
             lines.push(Line::Heading(format!(
-                "自動割り当て（{} が決定）— 内容を確認して「{START_LABEL}」を押してください",
+                "自動割り当て（{} が決定）— 内容を確認して「{start_label}」を押してください",
                 filled.assignment.planner
             )));
             for pick in &filled.assignment.picks {

@@ -524,13 +524,23 @@ fn note_entry(sep: &str, text: &str) -> String {
 }
 
 fn rerun_label(rerun: &Rerun) -> String {
-    match rerun {
-        Rerun::Matched { exit, .. } => format!("一致（{exit}）"),
-        Rerun::Differed { exit: Some(e), .. } => format!("不一致（{e}）"),
-        Rerun::Differed { exit: None, .. } => "不一致（終了コードなし）".to_owned(),
+    let mut label = match rerun {
+        Rerun::Matched { exit, .. } => format!("終了コード一致（{exit}） · 出力内容は未比較"),
+        Rerun::Differed { exit: Some(e), .. } => {
+            format!("終了コード相違（{e}） · 出力内容は未比較")
+        }
+        Rerun::Differed { exit: None, .. } => {
+            "終了コードを取得できず · 出力内容は未比較".to_owned()
+        }
         Rerun::TimedOut { .. } => "時間切れ".to_owned(),
         Rerun::NotRun { why, .. } => format!("未実行（{}）", one_line(why)),
-    }
+    };
+    label.push_str(if rerun_log(rerun).is_some() {
+        " · 再実行ログ保存済み"
+    } else {
+        " · 再実行ログ未保存"
+    });
+    label
 }
 
 fn write_media(out: &mut String, item: &Evidence, base: Option<&Path>) {
@@ -777,7 +787,7 @@ fn write_evidence(out: &mut String, session: &Session) {
     if !marked.is_empty() {
         out.push_str(match session.isolation {
             Isolation::Worktree if ran => {
-                "再実行は各検証者自身のペインで、その検証者のエージェントがウィジェットの書いたスクリプトを起動して行いました。同じ環境で同じ終了コードが出るかの確認で、別の検証者による独立した追試ではありません（追試は「## 追試」）。\n\n"
+                "再実行は各検証者自身のペインで、その検証者のエージェントがウィジェットの書いたスクリプトを起動して行いました。同じ環境で同じ終了コードが出るかを確認し、出力内容は比較していません。別の検証者による独立した追試ではありません（追試は「## 追試」）。\n\n"
             }
             Isolation::Worktree if pending => {
                 "再実行はまだ一つも行われていません（各検証者自身のペインで、その検証者のエージェントが起動します）。\n\n"
@@ -962,6 +972,21 @@ fn write_gaps(out: &mut String, session: &Session) {
                 one_line(why)
             );
         }
+        if matches!(
+            &item.rerun,
+            Some(
+                Rerun::Matched { log: None, .. }
+                    | Rerun::Differed { log: None, .. }
+                    | Rerun::TimedOut { log: None }
+            )
+        ) {
+            gaps = true;
+            let _ = writeln!(
+                out,
+                "- 再実行ログ未保存: `{}` — 再実行の出力を確認できません",
+                item.key
+            );
+        }
         // Marked for a re-run that the close came before.
         if session.closed
             && item.rerun.is_none()
@@ -1009,6 +1034,18 @@ fn write_gaps(out: &mut String, session: &Session) {
                 r.round,
                 r.outcome.label()
             );
+        }
+    }
+    for criterion in &session.criteria {
+        for fail in History::of(session, &criterion.id).open_fails() {
+            if !fail.observations.is_empty() {
+                gaps = true;
+                let _ = writeln!(
+                    out,
+                    "- 失敗を解消する保存済み証跡が不足: {}（{} R{}） — 観察だけの not_reproduced は失敗を解消しません",
+                    criterion.id, fail.fail.part, fail.fail.round
+                );
+            }
         }
     }
     for raw in session.unplaced() {
@@ -1350,7 +1387,7 @@ fn write_fix_item(
                 indent(cmd.trim())
             );
             if let Some(r) = &item.rerun {
-                let _ = writeln!(out, "  Re-run: {}", rerun_english(r));
+                let _ = writeln!(out, "  Re-run: {}", crate::model::brief::rerun_text(r));
             }
         }
         EvidenceBody::File { path, caption, .. } => {
@@ -1378,16 +1415,6 @@ fn write_fix_item(
             "  Last {FIX_TAIL_LINES} lines of its log:\n\n```\n{}\n```\n",
             tail.trim_end()
         );
-    }
-}
-
-fn rerun_english(rerun: &Rerun) -> String {
-    match rerun {
-        Rerun::Matched { exit, .. } => format!("matched (exit {exit})"),
-        Rerun::Differed { exit: Some(e), .. } => format!("differed (exit {e})"),
-        Rerun::Differed { exit: None, .. } => "differed (no exit status)".to_owned(),
-        Rerun::TimedOut { .. } => "timed out".to_owned(),
-        Rerun::NotRun { why, .. } => format!("not run: {why}"),
     }
 }
 
@@ -1498,7 +1525,7 @@ mod tests {
         let brief = rig.brief("judge", crate::model::types::BriefKind::Work);
         assert!(
             brief.contains(
-                "  - claude/r1/e1: command of 2 lines (cwd .) exit 0; re-run matched (exit 0)\n    ```\n    set -e\n    cargo test actual_case\n    ```\n    stored: "
+                "  - claude/r1/e1: command of 2 lines (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log not stored\n    ```\n    set -e\n    cargo test actual_case\n    ```\n    stored: "
             ),
             "{brief}"
         );
@@ -1508,7 +1535,7 @@ mod tests {
         let block = "\n  ```\n  set -e\n  cargo test actual_case\n  ```\n";
         let evidence = evidence_section(&report);
         let at = evidence
-            .find("- `claude/r1/e1` コマンド 2 行（.） · 終了コード 0 · 再実行 一致（0） · digest ")
+            .find("- `claude/r1/e1` コマンド 2 行（.） · 終了コード 0 · 再実行 終了コード一致（0） · 出力内容は未比較 · 再実行ログ未保存 · digest ")
             .unwrap_or_else(|| panic!("{report}"));
         let entry = &evidence[at..];
         let entry = &entry[..entry.find("\n- ").map_or(entry.len(), |end| end + 1)];
@@ -1707,6 +1734,38 @@ mod tests {
         let at = report.find(SECTIONS[6]).unwrap();
         let rest = &report[at..];
         &rest[..rest.find(SECTIONS[7]).unwrap()]
+    }
+
+    #[test]
+    fn a_matched_exit_code_keeps_the_missing_rerun_log_visible_as_a_gap() {
+        let mut rig = Rig::new(2);
+        testkit::through_round_one(&mut rig);
+        let mut session = rig.engine.session().clone();
+        let report = report_markdown(&session, None);
+        assert!(
+            evidence_section(&report)
+                .contains("再実行 終了コード一致（0） · 出力内容は未比較 · 再実行ログ未保存"),
+            "{report}"
+        );
+        let gap = "- 再実行ログ未保存: `claude/r1/e1` — 再実行の出力を確認できません";
+        assert!(gaps_section(&report).contains(gap), "{report}");
+
+        let item = session
+            .evidence
+            .iter_mut()
+            .find(|e| e.key == EvidenceKey::new("claude/r1/e1"))
+            .unwrap();
+        item.rerun = Some(Rerun::Matched {
+            exit: 0,
+            log: Some(testkit::stored_for(1, &testkit::p("claude.rerun"), "1.log")),
+        });
+        let report = report_markdown(&session, None);
+        assert!(
+            evidence_section(&report)
+                .contains("再実行 終了コード一致（0） · 出力内容は未比較 · 再実行ログ保存済み"),
+            "{report}"
+        );
+        assert!(!gaps_section(&report).contains(gap), "{report}");
     }
 
     #[test]

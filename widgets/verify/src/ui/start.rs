@@ -277,6 +277,16 @@ fn next_row(kind: AgentKind, panel: &[VerifierChoice]) -> VerifierChoice {
 }
 
 impl Form {
+    pub(super) fn start_label(&self) -> &'static str {
+        if self.recheck.is_some() {
+            "受け入れ基準を確認"
+        } else if self.confirm {
+            "受け入れ基準を作成"
+        } else {
+            "検証を開始"
+        }
+    }
+
     /// The clean form for the available `kinds` (not empty): the judge is
     /// the first; the panel is L1-9's default (claude 仕様適合, codex 反証,
     /// claude 回帰) where those kinds are offered, else one row per kind,
@@ -1394,11 +1404,7 @@ pub(super) fn adapt(tree: &mut UiTree, parts: &mut Parts, width: f32) {
             label.set_text(cx, summary)
         });
     }
-    let label = if form.confirm {
-        "受け入れ基準を作成"
-    } else {
-        "検証を開始"
-    };
+    let label = form.start_label();
     if tree
         .get::<Button>(parts.start_button)
         .is_some_and(|button| button.label() != label)

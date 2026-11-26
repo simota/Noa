@@ -225,7 +225,10 @@ fn ac6_with_confirmation_on_the_session_holds_after_the_criteria_and_edits_are_e
 
     // 検証を開始 freezes them; the worktrees come first, then round 1.
     let at = rig.tick();
-    rig.feed(Input::UserStartVerify { edits: Vec::new(), at });
+    rig.feed(Input::UserStartVerify {
+        edits: Vec::new(),
+        at,
+    });
     assert_eq!(rig.engine.session().frozen_at, Some(at));
     assert!(rig.asked(&Effect::MakeWorktrees));
     assert!(rig.engine.session().rounds.is_empty());
@@ -252,7 +255,10 @@ fn ac6_with_confirmation_on_the_session_holds_after_the_criteria_and_edits_are_e
 #[test]
 fn saving_and_starting_commits_all_edits_and_freezing_in_one_replayable_batch() {
     for isolation in [Isolation::Worktree, Isolation::Shared] {
-        let mut rig = Rig::build(Options { isolation, ..Options::default() });
+        let mut rig = Rig::build(Options {
+            isolation,
+            ..Options::default()
+        });
         testkit::accept_default_criteria(&mut rig);
         // Priority menus save immediately, before the text fields do.
         let at = rig.tick();
@@ -290,15 +296,25 @@ fn saving_and_starting_commits_all_edits_and_freezing_in_one_replayable_batch() 
             at,
         });
         assert_eq!(out.batches[0].len(), 4);
-        assert!(out.batches[0][..3].iter().all(|e| matches!(e, Event::CriteriaEdited { .. })));
+        assert!(
+            out.batches[0][..3]
+                .iter()
+                .all(|e| matches!(e, Event::CriteriaEdited { .. }))
+        );
         assert_eq!(out.batches[0][3], Event::CriteriaFrozen { at });
         let mut boundary = before;
         reduce::apply(&mut boundary, &out.batches[0]).unwrap();
         assert_eq!(boundary.frozen_at, Some(at));
         assert_eq!(boundary.criteria.len(), 4);
-        assert_eq!(boundary.criteria[0].statement, "New tabs keep the focused cwd");
+        assert_eq!(
+            boundary.criteria[0].statement,
+            "New tabs keep the focused cwd"
+        );
         assert_eq!(boundary.criteria[0].priority, Priority::Should);
-        assert_eq!(boundary.criteria[1].how, "Interrupt a write, then reopen the store");
+        assert_eq!(
+            boundary.criteria[1].how,
+            "Interrupt a write, then reopen the store"
+        );
         if isolation == Isolation::Worktree {
             assert!(out.effects.contains(&Effect::MakeWorktrees));
             testkit::make_worktrees(&mut rig);
@@ -309,8 +325,16 @@ fn saving_and_starting_commits_all_edits_and_freezing_in_one_replayable_batch() 
         for brief in &round.briefs {
             assert_eq!(brief.base_rev, session.rev);
             assert!(brief.body.contains("New tabs keep the focused cwd"));
-            assert!(brief.body.contains("Interrupt a write, then reopen the store"));
-            assert!(brief.body.contains("Closing one tab leaves the others open"));
+            assert!(
+                brief
+                    .body
+                    .contains("Interrupt a write, then reopen the store")
+            );
+            assert!(
+                brief
+                    .body
+                    .contains("Closing one tab leaves the others open")
+            );
         }
         assert_eq!(reduce::replay(&rig.log).unwrap(), *session);
     }
@@ -330,19 +354,27 @@ fn a_refused_pending_edit_leaves_every_criterion_unfrozen_and_unchanged() {
         how: None,
         priority: None,
     };
-    let error = rig.try_feed(Input::UserStartVerify {
-        edits: vec![edit.clone(), CriteriaEdit::Add {
-            statement: "An unfinished addition".into(),
-            how: " ".into(),
-            priority: Priority::Must,
-        }],
-        at,
-    }).unwrap_err();
+    let error = rig
+        .try_feed(Input::UserStartVerify {
+            edits: vec![
+                edit.clone(),
+                CriteriaEdit::Add {
+                    statement: "An unfinished addition".into(),
+                    how: " ".into(),
+                    priority: Priority::Must,
+                },
+            ],
+            at,
+        })
+        .unwrap_err();
     assert!(error.contains(HOW_EMPTY), "{error}");
     assert_eq!(*rig.engine.session(), before);
     assert_eq!(rig.log, log);
     assert_eq!(rig.effects, effects);
-    rig.feed(Input::UserStartVerify { edits: vec![edit], at });
+    rig.feed(Input::UserStartVerify {
+        edits: vec![edit],
+        at,
+    });
     assert_eq!(rig.engine.session().frozen_at, Some(at));
 }
 
@@ -351,12 +383,16 @@ fn pending_additions_are_validated_against_each_other_before_any_is_saved() {
     let mut rig = Rig::new(2);
     testkit::accept_default_criteria(&mut rig);
     let before = rig.engine.session().clone();
-    let edits = (before.criteria.len()..=MAX_CRITERIA).map(|n| CriteriaEdit::Add {
-        statement: format!("Check {n}"),
-        how: "Run the check".into(),
-        priority: Priority::Should,
-    }).collect();
-    let error = rig.try_feed(Input::UserStartVerify { edits, at: 99 }).unwrap_err();
+    let edits = (before.criteria.len()..=MAX_CRITERIA)
+        .map(|n| CriteriaEdit::Add {
+            statement: format!("Check {n}"),
+            how: "Run the check".into(),
+            priority: Priority::Should,
+        })
+        .collect();
+    let error = rig
+        .try_feed(Input::UserStartVerify { edits, at: 99 })
+        .unwrap_err();
     assert!(error.contains(&format!("{MAX_CRITERIA}件まで")), "{error}");
     assert_eq!(*rig.engine.session(), before);
     assert_eq!(rig.phase(), Phase::Confirming);
@@ -375,7 +411,12 @@ fn ac6_with_confirmation_off_round_one_starts_as_soon_as_the_criteria_are_accept
     assert_eq!(rig.round(), 1, "round 1 started at once");
     assert_eq!(s.current_round().unwrap().briefs.len(), 3);
     assert!(!rig.asked(&Effect::MakeWorktrees), "shared mode makes none");
-    let err = rig.try_feed(Input::UserStartVerify { edits: Vec::new(), at: 99 }).unwrap_err();
+    let err = rig
+        .try_feed(Input::UserStartVerify {
+            edits: Vec::new(),
+            at: 99,
+        })
+        .unwrap_err();
     assert!(err.contains("確認待ち"), "{err}");
 }
 
@@ -384,7 +425,10 @@ fn a_worktree_that_fails_refuses_round_one_until_retried() {
     let mut rig = Rig::new(2);
     testkit::accept_default_criteria(&mut rig);
     let at = rig.tick();
-    rig.feed(Input::UserStartVerify { edits: Vec::new(), at });
+    rig.feed(Input::UserStartVerify {
+        edits: Vec::new(),
+        at,
+    });
     rig.feed(Input::WorktreeFailed {
         part: p("codex"),
         path: PathBuf::from("/repo-wt/verify-ver-1-codex"),
@@ -456,8 +500,8 @@ fn ac16_the_round_runs_briefing_verifying_ingesting_ruling_and_the_judge_waits_f
     rig.rerun("claude-2", |_, _| Rerun::TimedOut { log: None });
     assert_eq!(rig.phase(), Phase::Ruling);
     let brief = rig.brief("judge", BriefKind::Work);
-    assert!(brief.contains("re-run matched (exit 0)"), "{brief}");
-    assert!(brief.contains("re-run differed (exit 1)"), "{brief}");
+    assert!(brief.contains("re-run exit code matched (0)"), "{brief}");
+    assert!(brief.contains("re-run exit code differed (1)"), "{brief}");
     assert!(brief.contains("re-run timed out"), "{brief}");
 }
 
@@ -1841,7 +1885,10 @@ fn a_worktree_made_after_the_verification_closed_is_recorded_and_removed() {
     let mut rig = Rig::new(2);
     testkit::accept_default_criteria(&mut rig);
     let at = rig.tick();
-    rig.feed(Input::UserStartVerify { edits: Vec::new(), at });
+    rig.feed(Input::UserStartVerify {
+        edits: Vec::new(),
+        at,
+    });
     assert!(rig.asked(&Effect::MakeWorktrees));
     // 終了 before the runner reports any worktree: none is recorded yet.
     let out = rig.feed(Input::UserClose);

@@ -865,7 +865,10 @@ mod tests {
             forwarded(Command::Extend { by: 3 }),
             Some(Action::Extend { by: 3 })
         );
-        assert_eq!(forwarded(Command::StartVerify { edits: Vec::new() }), Some(Action::StartVerify { edits: Vec::new() }));
+        assert_eq!(
+            forwarded(Command::StartVerify { edits: Vec::new() }),
+            Some(Action::StartVerify { edits: Vec::new() })
+        );
         assert_eq!(forwarded(Command::ClosePanes), Some(Action::ClosePanes));
         let edit = verify::model::types::CriteriaEdit::Remove { id: "AC-2".into() };
         assert_eq!(

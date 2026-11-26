@@ -43,8 +43,6 @@ pub(super) struct Row {
     pub(super) statement: WidgetId,
     pub(super) how: WidgetId,
     pub(super) priority: WidgetId,
-    /// The statement and how the fields were filled with.
-    built: (String, String),
 }
 
 pub(super) struct AddRow {
@@ -112,11 +110,9 @@ impl Editor {
     pub(super) fn harvest(&mut self, tree: &UiTree) {
         for row in &self.rows {
             let now = (field_text(tree, row.statement), area_text(tree, row.how));
-            if now != row.built {
-                self.drafts.insert(row.id.clone(), now);
-            } else {
-                self.drafts.remove(&row.id);
-            }
+            // A save may still be in flight when the person reverts to
+            // the old snapshot's text. Preserve that latest intent too.
+            self.drafts.insert(row.id.clone(), now);
         }
         if let Some(add) = &self.add {
             self.add_draft = AddDraft {
@@ -196,8 +192,13 @@ impl Editor {
     }
 
     pub(super) fn edits_field(&self, source: WidgetId) -> bool {
-        self.rows.iter().any(|row| source == row.statement || source == row.how)
-            || self.add.as_ref().is_some_and(|add| source == add.statement || source == add.how)
+        self.rows
+            .iter()
+            .any(|row| source == row.statement || source == row.how)
+            || self
+                .add
+                .as_ref()
+                .is_some_and(|add| source == add.statement || source == add.how)
     }
 
     /// Collects the current fields, including drafts from another tab.
@@ -218,16 +219,16 @@ impl Editor {
                 statement: !valid_statement(&statement),
                 reason: format!("{}: {reason}", criterion.id),
             })?;
-            let statement = (statement != criterion.statement).then_some(statement);
-            let how = (how != criterion.how).then_some(how);
-            if statement.is_some() || how.is_some() {
-                edits.push(CriteriaEdit::Edit {
-                    id: criterion.id.clone(),
-                    statement,
-                    how,
-                    priority: None,
-                });
-            }
+            // The runner may already hold an earlier individual save
+            // whose snapshot has not arrived. Send the current fields;
+            // the engine drops values equal to its own current state.
+            // Priority remains on its separate, ordered immediate path.
+            edits.push(CriteriaEdit::Edit {
+                id: criterion.id.clone(),
+                statement: Some(statement),
+                how: Some(how),
+                priority: None,
+            });
         }
         let add = self.addition_draft(tree);
         let statement = add.statement.trim().to_owned();
@@ -242,17 +243,27 @@ impl Editor {
                 return Err(ConfirmationError {
                     criterion: None,
                     statement: true,
-                    reason: format!("基準は{MAX_CRITERIA}件までです。追加欄を空にするか、不要な基準を削除してください"),
+                    reason: format!(
+                        "基準は{MAX_CRITERIA}件までです。追加欄を空にするか、不要な基準を削除してください"
+                    ),
                 });
             }
-            edits.push(CriteriaEdit::Add { statement, how, priority: add.priority });
+            edits.push(CriteriaEdit::Add {
+                statement,
+                how,
+                priority: add.priority,
+            });
         }
         Ok(edits)
     }
 
     pub(super) fn focus_error(&self, tree: &mut UiTree, error: &ConfirmationError) {
         let fields = match &error.criterion {
-            Some(id) => self.rows.iter().find(|row| &row.id == id).map(|row| (row.statement, row.how)),
+            Some(id) => self
+                .rows
+                .iter()
+                .find(|row| &row.id == id)
+                .map(|row| (row.statement, row.how)),
             None => self.add.as_ref().map(|add| (add.statement, add.how)),
         };
         if let Some((statement, how)) = fields {
@@ -382,7 +393,8 @@ pub(super) fn insert(
         "判定役の基準を確かめ、必要なら直してから検証を始めます。未保存の変更と追加欄の基準も、開始時にまとめて保存します。変更はレポートの「基準の変更」に記録され、検証が始まると基準は固定されます。",
     );
     if editable {
-        editor.pending_label = Some(tree.insert(Some(list), Label::new("").font_size(12.0).wrap(true)));
+        editor.pending_label =
+            Some(tree.insert(Some(list), Label::new("").font_size(12.0).wrap(true)));
     }
     if !session.criteria_summary.is_empty() {
         let c = card(tree, list, true);
@@ -482,7 +494,6 @@ pub(super) fn insert(
             statement,
             how,
             priority,
-            built: (c.statement.clone(), c.how.clone()),
         });
     }
     if !session.removed_criteria.is_empty() {

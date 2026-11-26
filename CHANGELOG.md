@@ -19,6 +19,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The board timeline gains a compact one-post-per-line view (`c`), a loaded
   post count and selection indicator, and one-step search and filter reset
   (`F`). Switching density preserves the selected post and pending updates.
+- Verify gains result filters for unresolved required criteria, failed
+  rulings, differing re-runs, blocked checks and untested criteria. A result
+  opens its cited evidence and returns to the same filtered matrix. Older
+  rulings, progress details and secondary actions open on demand.
+- Verify can reuse structured criteria when rechecking a changed target,
+  preserving their ids, order, verification methods, priorities and sources.
+  A fresh confirmation precedes verification; the report compares the two
+  target versions and labels criteria as resolved, continuing, newly failing,
+  newly runnable or unconfirmed. Previous results do not count in the new run.
+- Verify keeps execution settings behind a disclosure while automatic
+  assignment stays visible, and switches its three panes to navigation at
+  narrow widths down to 720 × 640. Stored images can be compared side by side
+  with zoom in a local browser page; native media cards remain placeholders.
+
+### Fixed
+
+- Verify includes unsaved criterion edits when starting verification and
+  persists the validated edits and freeze in one batch. Invalid edits keep
+  the confirmation open without partially changing the accepted criteria.
+- Verify labels a matching re-run as an exit-code match, makes clear that
+  output content was not compared, and flags a missing stored re-run log.
+  Clearing a known failed result requires stored evidence; an observation
+  alone cannot clear it.
 
 ## [0.9.18] - 2026-11-26
 

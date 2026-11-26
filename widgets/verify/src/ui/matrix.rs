@@ -132,8 +132,8 @@ impl Crossed {
 pub(super) struct Cell {
     /// The latest result; `None` when the verifier reported none.
     pub outcome: Option<Outcome>,
-    /// ≠ when a re-run of a command that result cites differed, else ↻
-    /// when one matched.
+    /// A re-run problem takes precedence over a match; ↻! is a matched
+    /// exit code whose log was not stored, ↻ a match with its log stored.
     pub rerun: Option<&'static str>,
     /// Another verifier cross-checked the result shown: a check is about
     /// the result its verifier had as of the round before the check (L1-6
@@ -153,7 +153,8 @@ impl Cell {
     pub(super) fn tone(&self) -> Tone {
         if self.outcome == Some(Outcome::Fail) {
             Tone::Critical
-        } else if matches!(self.rerun, Some("≠" | "⏱" | "↻–")) || self.crossed.needs_attention()
+        } else if matches!(self.rerun, Some("≠" | "⏱" | "↻–" | "↻!"))
+            || self.crossed.needs_attention()
         {
             Tone::Warning
         } else {
@@ -163,8 +164,9 @@ impl Cell {
 
     fn description(&self) -> String {
         let rerun = match self.rerun {
-            Some("≠") => "再実行が相違",
-            Some("↻") => "再実行の終了コードが一致（出力内容は未確認）",
+            Some("≠") => "再実行の終了コードが相違（出力内容は未比較）",
+            Some("↻") => "再実行の終了コードが一致・ログ保存済み（出力内容は未比較）",
+            Some("↻!") => "再実行の終了コードが一致・ログ未保存（出力内容は未比較）",
             Some("⏱") => "再実行が時間切れ",
             Some("↻–") => "再実行されていません",
             _ => "再実行の結果なし",
@@ -191,6 +193,11 @@ pub(super) fn cell(session: &Session, part: &PartId, criterion: &str) -> Cell {
         Some("⏱")
     } else if reruns.iter().any(|r| matches!(r, Rerun::NotRun { .. })) {
         Some("↻–")
+    } else if reruns
+        .iter()
+        .any(|r| matches!(r, Rerun::Matched { log: None, .. }))
+    {
+        Some("↻!")
     } else if reruns.iter().any(|r| matches!(r, Rerun::Matched { .. })) {
         Some("↻")
     } else {
@@ -456,7 +463,7 @@ pub(super) fn insert(
     note(
         tree,
         list,
-        "✓ 成功 · ✗ 失敗 · ⊘ 実行不能 · – 未実施 ／ ↻ 終了コード一致（出力内容は未確認） · ≠ 相違 · ⏱ 時間切れ · ↻– 未実行 ／ ⇄✓ 追試で再現 · ⇄✗ 再現せず · ⇄? 異議 · ⇄± 結果が混在。基準を選ぶと詳細、結果を選ぶと引用した証跡を表示します",
+        "✓ 成功 · ✗ 失敗 · ⊘ 実行不能 · – 未実施 ／ ↻ 終了コード一致・ログ保存済み · ↻! 終了コード一致・ログ未保存 · ≠ 終了コード相違（出力内容はいずれも未比較） · ⏱ 時間切れ · ↻– 未実行 ／ ⇄✓ 追試で再現 · ⇄✗ 再現せず · ⇄? 異議 · ⇄± 結果が混在。基準を選ぶと詳細、結果を選ぶと引用した証跡を表示します",
     );
 }
 
@@ -508,6 +515,40 @@ mod tests {
             assert_eq!(shown.rerun, Some(mark));
             assert!(matches!(shown.tone(), Tone::Warning));
         }
+    }
+
+    #[test]
+    fn a_matched_exit_without_its_log_warns_and_a_reported_failure_stays_critical() {
+        let mut session = crate::demo::session();
+        let part = PartId::new("claude-2");
+        let key = session.latest_result(&part, "AC-1").unwrap().evidence[0].clone();
+        session.cross_checks.clear();
+        let item = session.evidence_item_mut(&key).unwrap();
+        let stored = item.stored.clone().unwrap();
+        item.rerun = Some(Rerun::Matched { exit: 0, log: None });
+        let mut shown = cell(&session, &part, "AC-1");
+        assert_eq!(shown.rerun, Some("↻!"));
+        assert!(
+            shown
+                .description()
+                .contains("ログ未保存（出力内容は未比較）")
+        );
+        assert!(matches!(shown.tone(), Tone::Warning));
+        shown.outcome = Some(Outcome::Fail);
+        assert!(matches!(shown.tone(), Tone::Critical));
+
+        session.evidence_item_mut(&key).unwrap().rerun = Some(Rerun::Matched {
+            exit: 0,
+            log: Some(stored),
+        });
+        let shown = cell(&session, &part, "AC-1");
+        assert_eq!(shown.rerun, Some("↻"));
+        assert!(
+            shown
+                .description()
+                .contains("ログ保存済み（出力内容は未比較）")
+        );
+        assert!(matches!(shown.tone(), Tone::Success));
     }
 
     #[test]

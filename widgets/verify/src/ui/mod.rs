@@ -19,6 +19,7 @@ mod evidence;
 mod fix;
 mod layout;
 mod matrix;
+mod preview;
 mod progress;
 mod report;
 mod start;
@@ -124,6 +125,8 @@ pub enum Action {
     /// 開く: the stored copy (a log in the window's text view, anything
     /// else in the system viewer).
     OpenEvidence(EvidenceKey),
+    /// Compare the currently scoped stored images in a local HTML page.
+    PreviewImages,
     /// Finder で表示 on the stored copy.
     RevealEvidence(EvidenceKey),
     CloseLog,
@@ -268,7 +271,8 @@ pub struct Verify {
     evidence_filters: evidence::Filters,
     criteria_filter: matrix::Filter,
     evidence_focus: Option<evidence::Focus>,
-    evidence_return: Option<(CenterTab, Option<FocusAnchor>)>,
+    evidence_return: Option<(CenterTab, Option<FocusAnchor>, usize)>,
+    preview_job: Option<preview::Job>,
     expanded_history: BTreeSet<String>,
     actions_expanded: bool,
     progress_expanded: bool,
@@ -344,6 +348,7 @@ pub struct Verify {
     compact_pane: usize,
     applied_pane: Option<usize>,
     wide_sizes: (f32, f32),
+    viewport_width: f32,
     left_host: WidgetId,
     header_host: WidgetId,
     progress_host: WidgetId,
@@ -563,6 +568,7 @@ impl Verify {
             criteria_filter: matrix::Filter::default(),
             evidence_focus: None,
             evidence_return: None,
+            preview_job: None,
             expanded_history: BTreeSet::new(),
             actions_expanded: false,
             progress_expanded: false,
@@ -612,6 +618,7 @@ impl Verify {
             compact_pane: 1,
             applied_pane: None,
             wide_sizes: (LEFT_WIDTH, RIGHT_WIDTH),
+            viewport_width: LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH + 12.0,
             left_host,
             header_host,
             progress_host,
@@ -754,6 +761,7 @@ impl Verify {
             );
         }
         self.rebuild_status(text);
+        self.adapt_layout(self.viewport_width);
     }
 
     fn refresh_past(&mut self) {
@@ -801,11 +809,13 @@ impl Verify {
         self.timeline = Status::Idle;
         self.extending = false;
         self.tab = CenterTab::Criteria;
+        self.compact_pane = 1;
         self.defect_filters = defects::Filters::default();
         self.evidence_filters = evidence::Filters::default();
         self.criteria_filter = matrix::Filter::default();
         self.evidence_focus = None;
         self.evidence_return = None;
+        self.preview_job = None;
         self.expanded_history.clear();
         self.actions_expanded = false;
         self.progress_expanded = false;
@@ -1033,16 +1043,20 @@ impl Verify {
                 self.criteria_filter,
                 &mut self.actions,
             ),
-            CenterTab::Evidence | CenterTab::Gallery => evidence::insert(
-                &mut self.tree,
-                self.center_host,
-                &session,
-                &self.evidence_filters,
-                self.evidence_focus.as_ref(),
-                self.tab == CenterTab::Gallery,
-                can_attach,
-                &mut self.actions,
-            ),
+            CenterTab::Evidence | CenterTab::Gallery => {
+                let preview_offer = self.preview_offer();
+                evidence::insert(
+                    &mut self.tree,
+                    self.center_host,
+                    &session,
+                    &self.evidence_filters,
+                    self.evidence_focus.as_ref(),
+                    self.tab == CenterTab::Gallery,
+                    can_attach,
+                    &preview_offer,
+                    &mut self.actions,
+                );
+            }
             CenterTab::Defects => defects::insert(
                 &mut self.tree,
                 self.center_host,
@@ -1432,9 +1446,11 @@ impl Verify {
             }
             // Drafts typed for another verification's criteria go.
             if snapshot.session.as_ref().map(|s| &s.id) != self.session.as_ref().map(|s| &s.id) {
+                self.compact_pane = 1;
                 self.editor.reset();
                 self.evidence_focus = None;
                 self.evidence_return = None;
+                self.preview_job = None;
                 self.expanded_history.clear();
                 self.reference_selection = false;
             }
@@ -1449,6 +1465,7 @@ impl Verify {
     }
 
     fn rebuild_if_changed(&mut self, text: &mut TextStore) {
+        self.poll_preview();
         let next = self.built_key();
         if let Some(prev) = &self.built {
             if prev == &next {
@@ -1537,8 +1554,9 @@ impl Verify {
 
     fn show_evidence_focus(&mut self, focus: evidence::Focus, text: &mut TextStore) {
         if self.evidence_focus.is_none() {
-            self.evidence_return = Some((self.tab, self.focused_action()));
+            self.evidence_return = Some((self.tab, self.focused_action(), self.compact_pane));
         }
+        self.compact_pane = 1;
         self.evidence_focus = Some(focus);
         self.tab = CenterTab::Evidence;
         self.close_log();
@@ -1580,6 +1598,7 @@ impl Verify {
             );
             match read {
                 Ok((bytes, _)) => {
+                    self.compact_pane = 1;
                     let title = format!("{key} のログ — $ {cmd}");
                     evidence::show_log(
                         &mut self.tree,
@@ -1632,6 +1651,7 @@ impl Verify {
         self.attach_current = self.attach_queue.pop_front();
         match &self.attach_current {
             Some(draft) => {
+                self.compact_pane = 2;
                 let shows = match &self.selected {
                     Some(Selected::Criterion(id)) => id.clone(),
                     _ => String::new(),
@@ -1806,11 +1826,13 @@ impl Verify {
                 self.rebuild(text);
             }
             Action::InspectCriterion(id) => {
+                self.compact_pane = 2;
                 self.selected = Some(Selected::Criterion(id));
                 self.reference_selection = true;
                 self.rebuild(text);
             }
             Action::InspectDefect(id) => {
+                self.compact_pane = 2;
                 self.selected = Some(Selected::Defect(id));
                 self.reference_selection = true;
                 self.rebuild(text);
@@ -1847,11 +1869,12 @@ impl Verify {
                 self.evidence_focus = None;
                 self.close_log();
                 let back = self.evidence_return.take();
-                if let Some((tab, _)) = &back {
+                if let Some((tab, _, pane)) = &back {
                     self.tab = *tab;
+                    self.compact_pane = *pane;
                 }
                 self.rebuild(text);
-                if let Some((_, Some((action, scope, nth)))) = back {
+                if let Some((_, Some((action, scope, nth)), _)) = back {
                     self.focus_action_in(&action, Some(scope), nth);
                 }
             }
@@ -1907,6 +1930,7 @@ impl Verify {
                 self.rebuild(text);
             }
             Action::OpenEvidence(key) => self.open_evidence(&key, text),
+            Action::PreviewImages => self.preview_images(text),
             Action::RevealEvidence(key) => self.reveal_evidence(&key),
             Action::CloseLog => {
                 self.close_log();
@@ -1981,6 +2005,7 @@ impl Verify {
                 match self.editor.pending(&self.tree, &session) {
                     Ok(edits) => self.send_cmd(Command::StartVerify { edits }),
                     Err(error) => {
+                        self.compact_pane = 1;
                         self.tab = CenterTab::Criteria;
                         self.close_log();
                         self.rebuild(text);
@@ -1993,9 +2018,7 @@ impl Verify {
             Action::ToggleStartSettings => start::toggle_settings(&mut self.tree, &mut self.start),
             Action::CompactPane(index) => {
                 self.compact_pane = index.min(2);
-                self.applied_pane = None;
-                self.tree
-                    .update::<Container, _>(self.board, |_, cx| cx.request_layout());
+                self.adapt_layout(self.viewport_width);
             }
             Action::OpenWorktree(part) => {
                 let path = self
@@ -2288,8 +2311,9 @@ impl Verify {
             self.toast(start::left_out_message(&left_out));
         }
         self.toast(format!(
-            "{} と同じ設定を入れました。確かめてから「検証を開始」を押してください",
-            session.id
+            "{} と同じ設定を入れました。確かめてから「{}」を押してください",
+            session.id,
+            form.start_label()
         ));
         self.rebuild(text);
         start::show_top(&mut self.tree, &self.start);
@@ -2413,18 +2437,14 @@ impl Screen for Verify {
                 .priority_source(message.source)
                 .map(str::to_owned)
             {
-                let priority = self.editor.priority(&self.tree, &id);
-                let changed = self
-                    .session
-                    .as_ref()
-                    .and_then(|s| s.criterion(&id))
-                    .is_some_and(|c| Some(c.priority) != priority);
-                if changed {
+                // Each selection is the latest intent. The snapshot may
+                // still predate a previous selection being saved.
+                if let Some(priority) = self.editor.priority(&self.tree, &id) {
                     self.send_edit(verify::model::types::CriteriaEdit::Edit {
                         id,
                         statement: None,
                         how: None,
-                        priority,
+                        priority: Some(priority),
                     });
                 }
                 return;

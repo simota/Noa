@@ -163,9 +163,7 @@ fn cited(
             Some(line),
             Label::new(text).font_size(11.5).wrap(true).selectable(true),
         );
-        if let Some(rerun) = evidence::rerun_text(item) {
-            caption(tree, line, rerun);
-        }
+        evidence::rerun_details(tree, line, item);
         if matches!(item.body, EvidenceBody::Observation { .. }) {
             tag(tree, line, "未裏付け", Tone::Warning);
         } else if item.stored.is_some() {

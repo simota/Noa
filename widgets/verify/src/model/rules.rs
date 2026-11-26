@@ -88,6 +88,8 @@ pub struct OpenFail<'a> {
     pub about_other: Vec<Check<'a>>,
     /// Cited by `not_reproduced` checks about it, but not stored.
     pub unstored: Vec<&'a EvidenceKey>,
+    /// Text-only observations cannot discharge a recorded failure.
+    pub observations: Vec<&'a EvidenceKey>,
     /// Cited by those checks, but media whose `shows` leaves the criterion
     /// out.
     pub elsewhere: Vec<&'a EvidenceKey>,
@@ -270,20 +272,24 @@ impl<'a> History<'a> {
     }
 
     /// Whether `check` is a `not_reproduced` about that very `result`
-    /// (rule 1), citing evidence that counts for the criterion (rule 2):
-    /// it answers a fail (rule 4) and contests a pass (rule 3).
+    /// (rule 1). A fail needs a stored command or file for the criterion
+    /// to answer it (rule 4); text can still contest a pass (rule 3).
     fn not_reproduces(&self, check: &Check, result: &CriterionResult) -> bool {
         check.check.outcome == CrossOutcome::NotReproduced
             && check.about.is_some_and(|r| std::ptr::eq(r, result))
-            && check
-                .check
-                .evidence
-                .iter()
-                .any(|k| self.standing(k).counts())
+            && check.check.evidence.iter().any(|k| {
+                let standing = self.standing(k);
+                if result.outcome == Outcome::Fail {
+                    standing == Standing::Stored
+                } else {
+                    standing.counts()
+                }
+            })
     }
 
     /// Rule 4: every `fail` of any round that no `not_reproduced` about it
-    /// answered, oldest first. Nothing else answers one: not a later
+    /// answered with stored command or file evidence, oldest first.
+    /// Nothing else answers one: not a text-only observation, not a later
     /// result of its verifier, not a `disputed` or `reproduced` check, not
     /// a `not_reproduced` about another result of its verifier.
     pub fn open_fails(&self) -> Vec<OpenFail<'a>> {
@@ -296,6 +302,7 @@ impl<'a> History<'a> {
                     fail,
                     about_other: Vec::new(),
                     unstored: Vec::new(),
+                    observations: Vec::new(),
                     elsewhere: Vec::new(),
                 };
                 for c in &self.checks {
@@ -314,6 +321,7 @@ impl<'a> History<'a> {
                     for key in &c.check.evidence {
                         let list = match self.standing(key) {
                             Standing::Unstored => &mut open.unstored,
+                            Standing::Observation => &mut open.observations,
                             Standing::Elsewhere => &mut open.elsewhere,
                             _ => continue,
                         };
@@ -487,6 +495,12 @@ impl OpenFail<'_> {
             why.push_str(&format!(
                 "; {} is not evidence for {criterion} (its shows leaves {criterion} out)",
                 keys(&self.elsewhere)
+            ));
+        }
+        if !self.observations.is_empty() {
+            why.push_str(&format!(
+                "; {} is text-only observation; answering a fail needs a stored command or file for {criterion}",
+                keys(&self.observations)
             ));
         }
         why
@@ -1400,10 +1414,37 @@ mod tests {
                 Ok(()),
             ),
             (
-                "a fail answered by an observation",
+                "a text-only observation cannot answer a recorded fail",
                 [
                     Res(1, "codex", "AC-1", Fail, &["e1"]),
                     Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["o1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Err(format!("{OPEN}; claude-2/r2/o1 is text-only observation; answering a fail needs a stored command or file for AC-1")),
+            ),
+            (
+                "a fail answered by stored evidence with an additional observation",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["o1", "e1"]),
+                ]
+                .into_iter()
+                .chain(claude_matched())
+                .collect(),
+                Verified,
+                &["claude/r1/e1"],
+                Ok(()),
+            ),
+            (
+                "a fail answered by a stored file showing the criterion",
+                [
+                    Res(1, "codex", "AC-1", Fail, &["e1"]),
+                    Chk(2, "claude-2", "codex/AC-1", NotReproduced, &["f1"]),
+                    Shows("claude-2/r2/f1", &["AC-1"]),
                 ]
                 .into_iter()
                 .chain(claude_matched())

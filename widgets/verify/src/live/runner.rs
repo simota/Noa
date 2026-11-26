@@ -4357,13 +4357,13 @@ pub(crate) mod tests {
         let judge = fake.pane_of(":judge");
         let brief = fake.pastes(judge).last().cloned().unwrap();
         assert!(
-            brief.contains("exit 5; re-run differed (exit 3)"),
+            brief.contains("exit 5; re-run exit code differed (3)"),
             "{brief}"
         );
         let report = verify::model::export::report_markdown(s, None);
         assert!(
             report.contains(
-                "`claude/r1/e1` コマンド `exit 3`（.） · 終了コード 5 · 再実行 不一致（3）"
+                "`claude/r1/e1` コマンド `exit 3`（.） · 終了コード 5 · 再実行 終了コード相違（3）"
             ),
             "{report}"
         );
@@ -5040,20 +5040,38 @@ pub(crate) mod tests {
             how: Some("Build with warnings denied".into()),
             priority: None,
         };
-        actions.send(Action::StartVerify { edits: vec![edit.clone(), CriteriaEdit::Add {
-            statement: "An unfinished addition".into(),
-            how: String::new(),
-            priority: verify::model::types::Priority::Must,
-        }] }).unwrap();
+        actions
+            .send(Action::StartVerify {
+                edits: vec![
+                    edit.clone(),
+                    CriteriaEdit::Add {
+                        statement: "An unfinished addition".into(),
+                        how: String::new(),
+                        priority: verify::model::types::Priority::Must,
+                    },
+                ],
+            })
+            .unwrap();
         runner.drain_actions(Some(&mut conn)).unwrap();
         assert_eq!(*runner.engine.session(), before);
-        assert_eq!(fs::read(runner.engine.dir().join(store::EVENTS_FILE)).unwrap(), log);
+        assert_eq!(
+            fs::read(runner.engine.dir().join(store::EVENTS_FILE)).unwrap(),
+            log
+        );
         assert!(!notices(&updates).is_empty());
-        actions.send(Action::StartVerify { edits: vec![edit] }).unwrap();
+        actions
+            .send(Action::StartVerify { edits: vec![edit] })
+            .unwrap();
         runner.drain_actions(Some(&mut conn)).unwrap();
         assert!(runner.engine.session().frozen_at.is_some());
-        assert_eq!(runner.engine.session().criteria[0].how, "Build with warnings denied");
-        assert_eq!(runner.engine.session().criteria[0].priority, verify::model::types::Priority::Should);
+        assert_eq!(
+            runner.engine.session().criteria[0].how,
+            "Build with warnings denied"
+        );
+        assert_eq!(
+            runner.engine.session().criteria[0].priority,
+            verify::model::types::Priority::Should
+        );
         // The worktrees are made, then the round starts on the next tick.
         assert_eq!(runner.engine.session().worktrees.len(), 2);
         step(&mut runner, &mut conn);
@@ -6846,6 +6864,13 @@ pub(crate) mod tests {
         let (runner, _actions, _updates) = run_to_a_failure_from(&fake, start, |_| {});
         let previous = runner.engine.session().clone();
         stop(runner);
+        let before = link_events(&key_dir);
+        assert!(before.iter().any(|event| matches!(
+            event,
+            task_links::LinkEvent::SessionOutcome {
+                session, decision: Some(decision), closed: true, ..
+            } if session == previous.id.as_str() && decision == "fail"
+        )));
         let Start::New(mut new) = new_start(&root, state_of(&work), Isolation::Worktree, false)
         else {
             unreachable!()
@@ -6863,7 +6888,19 @@ pub(crate) mod tests {
         assert_eq!(origin.run, "run-recheck");
         assert_eq!(origin.key_dir, key_dir);
         assert_eq!(linked(&key_dir).len(), 2);
-        assert_eq!(outcomes(&key_dir).last(), Some(&(None, false)));
+        let after = link_events(&key_dir);
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert!(matches!(
+            &after[before.len()..],
+            [task_links::LinkEvent::SessionLinked {
+                kind: SessionKind::Verify, session: linked_session, run, ..
+            }] if linked_session == session.id.as_str() && run == "run-recheck"
+        ));
+        // SessionLinked starts a new running link. SessionOutcome is
+        // written only when that session's outcome changes; the older
+        // session's failure stays in the log under its own id.
+        assert!(!session.closed);
+        assert_eq!(runner.outcome, Some((None, false)));
         drop(runner);
         let _ = fs::remove_dir_all(root);
     }

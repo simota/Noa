@@ -107,7 +107,7 @@ Save every file you cite under /golden/repo-wt/verify-ver-golden-claude/.noa/ver
 - When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
 - An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
 - rerun/ is the widget's: save nothing there and cite nothing from it.
-- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares only the exit status, not output content. Do not touch the worktree after writing your reply until the next brief.
 - Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
 
 ## 6. Rules
@@ -195,7 +195,7 @@ Save every file you cite under /golden/repo-wt/verify-ver-golden-codex/.noa/veri
 - When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
 - An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
 - rerun/ is the widget's: save nothing there and cite nothing from it.
-- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares only the exit status, not output content. Do not touch the worktree after writing your reply until the next brief.
 - Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
 
 ## 6. Rules
@@ -283,7 +283,7 @@ Save every file you cite under /golden/repo-wt/verify-ver-golden-agy/.noa/verify
 - When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
 - An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
 - rerun/ is the widget's: save nothing there and cite nothing from it.
-- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares only the exit status, not output content. Do not touch the worktree after writing your reply until the next brief.
 - Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
 
 ## 6. Rules
@@ -392,12 +392,12 @@ Isolation: one detached worktree per verifier; re-runs in each verifier's own pa
 ## 4. Results this round
 ### AC-1 [must] New tabs open in the focused pane's cwd
 - claude: pass — pwd shows /tmp.
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
   - claude/r1/e2: PNG image shots/new tab.png — "pwd in the new tab shows /tmp"
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/shots/new tab.png (1036 bytes, digest 56af731184d382ca)
 - codex: fail — With a symlinked cwd the tab opens in $HOME.
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
     log tail:
 ```
@@ -408,17 +408,17 @@ exit 101
   - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
 - agy: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-2 [must] A cwd that no longer exists falls back to $HOME
 - claude: pass
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
 - codex: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-3 [should] Opening a tab stays under 50 ms
 - claude: pass — 31 ms median.
@@ -436,7 +436,7 @@ exit 101
 ### AC-5 [should] Quitting keeps every tab's cwd for the next launch
 - claude: not_tested — Out of my strategy's reach this round.
 - codex: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy: blocked — Quitting kills my pane.
   - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
@@ -457,7 +457,7 @@ Raw defects this round (place each one):
 Claim: A symlinked cwd is resolved to its target's parent
 Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
 Evidence: codex/r1/e1
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
 
 Defects so far:
@@ -469,8 +469,8 @@ Defects so far:
 - A cross-check of round N on <verifier>/<criterion> is about that verifier's latest result on the criterion as of round N-1, the one its brief named; once the verifier has reported a later result, the later checks on that subject are about the later result.
 - Evidence is for a criterion when a result on it cites it, or a cross-check about a result on it, or it is media whose shows names it (media with shows is evidence only for the criteria it names). It counts when its file was stored (an observation has no file and counts as text); a command or file missing at ingest counts for nothing. Evidence cited for verified or failed must be evidence for that criterion.
 - A pass of any round counts when the ruling cites a command or file of it that counts, unless it is contested. A pass is contested once a not_reproduced cross-check about that very result cites evidence that counts, until a later pass on the criterion (of a round after that check, from any verifier, its own included) that has a command or file that counts for the criterion and is not itself contested (media whose shows leaves the criterion out does not lift it); a contested pass is neither one of two sources nor the pass whose matched re-run is cited. A disputed check contests nothing. Each verifier is one source however many of its passes count; media the person attached (user/<n>) whose shows names the criterion is one more source, so it counts only together with a verifier's pass. A cross-check is no pass, whatever its outcome; only a not_reproduced that contests a pass takes one away.
-- A fail of any round is open until a not_reproduced cross-check about that very result cites evidence that counts. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.
-- verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each); a contested pass gives neither.
+- A fail of any round is open until a not_reproduced cross-check about that very result cites a stored command or file that counts for the criterion. A text-only observation does not answer a fail. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.
+- verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each); a contested pass gives neither. A matched re-run means only that the exit code matched: the widget does not compare output content. A missing re-run log must be reported as a gap, even when an exit code was recorded.
 - failed needs cited evidence that counts and that a fail result on the criterion cites, or a reproduced cross-check about a fail result on it, or a reproduced cross-check on a defect (also one merged since); a cross-check about a pass backs no failure.
 - inconclusive and not_applicable need a rationale.
 - Defect ops: every raw defect of this round goes into exactly one add or merge "from", or one dismiss.
@@ -555,27 +555,27 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
 
 ### AC-1 — failed (R1): codex's symlink test fails and the recording shows $HOME.
 - claude R1: pass — pwd shows /tmp.
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
   - claude/r1/e2: PNG image shots/new tab.png — "pwd in the new tab shows /tmp"
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/shots/new tab.png (1036 bytes, digest 56af731184d382ca)
 - codex R1: fail — With a symlinked cwd the tab opens in $HOME.
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
   - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
 - agy R1: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-2 — verified (R1): claude's test re-ran with the same status.
 - claude R1: pass
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
 - codex R1: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 - claude R1: pass — 31 ms median.
@@ -593,14 +593,14 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
 ### AC-5 — inconclusive (R1): Only codex passed it, on a test that does not quit.
 - claude R1: not_tested — Out of my strategy's reach this round.
 - codex R1: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: blocked — Quitting kills my pane.
   - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
 ### D1 — open · high · falsify: A symlinked cwd is resolved to its target's parent
 Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
 - codex/1 (R1): A symlinked cwd is resolved to its target's parent
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
 
 ## 6. Your assignments
@@ -616,7 +616,7 @@ Save every file you cite under /golden/repo-wt/verify-ver-golden-claude/.noa/ver
 - When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
 - An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
 - rerun/ is the widget's: save nothing there and cite nothing from it.
-- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares only the exit status, not output content. Do not touch the worktree after writing your reply until the next brief.
 - Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
 
 Rules:
@@ -655,7 +655,7 @@ Rules:
 - paths (log, file): relative to your r<N>/<you>/ folder, no "..", no leading "/", not under rerun/; a regular file, not a link
 - file: an image (PNG, JPEG, GIF, WebP) or video (MP4, MOV, WebM) must have an extension matching its content and a caption of 1-300 characters; marks only on a video, at most 20, t as mm:ss[.f] or hh:mm:ss[.f] in time order; shows (optional) lists the criteria a picture shows
 - defects (optional, at most 20): problems no criterion covers; each id new, claim one line at most 300 characters, severity critical/high/medium/low/info, confidence high/medium/low, repro required, evidence at least one id; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
-- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note
+- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note. To answer a fail with not_reproduced, cite a command log or file for that criterion; a text-only observation cannot answer it
 ===== R2 brief to codex =====
 ## 1. Request and round
 You are: verifier codex
@@ -704,27 +704,27 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
 
 ### AC-1 — failed (R1): codex's symlink test fails and the recording shows $HOME.
 - claude R1: pass — pwd shows /tmp.
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
   - claude/r1/e2: PNG image shots/new tab.png — "pwd in the new tab shows /tmp"
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/shots/new tab.png (1036 bytes, digest 56af731184d382ca)
 - codex R1: fail — With a symlinked cwd the tab opens in $HOME.
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
   - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
 - agy R1: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-2 — verified (R1): claude's test re-ran with the same status.
 - claude R1: pass
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
 - codex R1: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 - claude R1: pass — 31 ms median.
@@ -742,14 +742,14 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
 ### AC-5 — inconclusive (R1): Only codex passed it, on a test that does not quit.
 - claude R1: not_tested — Out of my strategy's reach this round.
 - codex R1: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: blocked — Quitting kills my pane.
   - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
 ### D1 — open · high · falsify: A symlinked cwd is resolved to its target's parent
 Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
 - codex/1 (R1): A symlinked cwd is resolved to its target's parent
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
 
 ## 6. Your assignments
@@ -762,7 +762,7 @@ Save every file you cite under /golden/repo-wt/verify-ver-golden-codex/.noa/veri
 - When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
 - An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
 - rerun/ is the widget's: save nothing there and cite nothing from it.
-- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares only the exit status, not output content. Do not touch the worktree after writing your reply until the next brief.
 - Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
 
 Rules:
@@ -801,7 +801,7 @@ Rules:
 - paths (log, file): relative to your r<N>/<you>/ folder, no "..", no leading "/", not under rerun/; a regular file, not a link
 - file: an image (PNG, JPEG, GIF, WebP) or video (MP4, MOV, WebM) must have an extension matching its content and a caption of 1-300 characters; marks only on a video, at most 20, t as mm:ss[.f] or hh:mm:ss[.f] in time order; shows (optional) lists the criteria a picture shows
 - defects (optional, at most 20): problems no criterion covers; each id new, claim one line at most 300 characters, severity critical/high/medium/low/info, confidence high/medium/low, repro required, evidence at least one id; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
-- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note
+- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note. To answer a fail with not_reproduced, cite a command log or file for that criterion; a text-only observation cannot answer it
 ===== R2 brief to agy =====
 ## 1. Request and round
 You are: verifier agy
@@ -850,27 +850,27 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
 
 ### AC-1 — failed (R1): codex's symlink test fails and the recording shows $HOME.
 - claude R1: pass — pwd shows /tmp.
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
   - claude/r1/e2: PNG image shots/new tab.png — "pwd in the new tab shows /tmp"
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/shots/new tab.png (1036 bytes, digest 56af731184d382ca)
 - codex R1: fail — With a symlinked cwd the tab opens in $HOME.
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
   - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
 - agy R1: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-2 — verified (R1): claude's test re-ran with the same status.
 - claude R1: pass
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
 - codex R1: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 ### AC-3 — inconclusive (R1): Only claude's benchmark is stored; agy's log was gone before ingest and counts for nothing.
 - claude R1: pass — 31 ms median.
@@ -888,14 +888,14 @@ AC-1 fails for a symlinked cwd; AC-2 holds; AC-3 rests on one stored benchmark; 
 ### AC-5 — inconclusive (R1): Only codex passed it, on a test that does not quit.
 - claude R1: not_tested — Out of my strategy's reach this round.
 - codex R1: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: blocked — Quitting kills my pane.
   - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
 ### D1 — open · high · falsify: A symlinked cwd is resolved to its target's parent
 Repro: 1. ln -s /tmp /tmp/l 2. cd /tmp/l 3. Cmd-T 4. pwd
 - codex/1 (R1): A symlinked cwd is resolved to its target's parent
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
 
 ## 6. Your assignments
@@ -909,7 +909,7 @@ Save every file you cite under /golden/repo-wt/verify-ver-golden-agy/.noa/verify
 - When capturing the screen is not allowed (on macOS, a screen-recording permission your terminal lacks), report the criterion as blocked with that reason; do not describe the screen as an observation instead.
 - An observation (text only) is shown as unbacked and never makes a criterion verified on its own.
 - rerun/ is the widget's: save nothing there and cite nothing from it.
-- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief.
+- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most 8). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares only the exit status, not output content. Do not touch the worktree after writing your reply until the next brief.
 - Limits: logs at most 8 MiB, images and other files 15 MiB, videos 200 MiB; at most 40 items per reply.
 
 Rules:
@@ -948,7 +948,7 @@ Rules:
 - paths (log, file): relative to your r<N>/<you>/ folder, no "..", no leading "/", not under rerun/; a regular file, not a link
 - file: an image (PNG, JPEG, GIF, WebP) or video (MP4, MOV, WebM) must have an extension matching its content and a caption of 1-300 characters; marks only on a video, at most 20, t as mm:ss[.f] or hh:mm:ss[.f] in time order; shows (optional) lists the criteria a picture shows
 - defects (optional, at most 20): problems no criterion covers; each id new, claim one line at most 300 characters, severity critical/high/medium/low/info, confidence high/medium/low, repro required, evidence at least one id; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
-- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note
+- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note. To answer a fail with not_reproduced, cite a command log or file for that criterion; a text-only observation cannot answer it
 ===== R2 re-run brief to claude =====
 ## Re-run
 Round 2: the widget runs the commands you marked rerun: true again, in this pane.
@@ -992,20 +992,20 @@ Isolation: one detached worktree per verifier; re-runs in each verifier's own pa
 - (no new result this round)
 Earlier rounds on this criterion (the evidence standard reads these too):
 - claude R1: pass — pwd shows /tmp.
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
   - claude/r1/e2: PNG image shots/new tab.png — "pwd in the new tab shows /tmp"
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/shots/new tab.png (1036 bytes, digest 56af731184d382ca)
 - codex R1: fail — With a symlinked cwd the tab opens in $HOME.
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
   - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
 - agy R1: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 Your ruling so far (R1): failed — codex's symlink test fails and the recording shows $HOME.
-  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run matched (exit 101)
+  - codex/r1/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 101; re-run exit code matched (101); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/1.log (1028 bytes, digest d91652720290f86e)
   - codex/r1/e2: MOV video video/symlink.mov — "cd into a symlink, Cmd-T, pwd" [00:04 Cmd-T pressed] [00:06.5 the new tab shows $HOME]
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/video/symlink.mov (1035 bytes, digest 7fbb867bbedf39d4)
@@ -1013,16 +1013,16 @@ Your ruling so far (R1): failed — codex's symlink test fails and the recording
 - (no new result this round)
 Earlier rounds on this criterion (the evidence standard reads these too):
 - claude R1: pass
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
 - codex R1: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: pass
-  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - agy/r1/e1: command `LANG=ja_JP.UTF-8 cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/agy/logs/1.log (1026 bytes, digest 419d5086c11d4da2)
 Your ruling so far (R1): verified — claude's test re-ran with the same status.
-  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r1/e1: command `cargo test -p app cwd_` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/claude/logs/1.log (1029 bytes, digest 3145b15b544f640b)
 ### AC-3 [should] Opening a tab stays under 50 ms
 - agy: fail — A cold start takes 72 ms.
@@ -1060,7 +1060,7 @@ Your ruling so far (R1): inconclusive — Only claude's benchmark is stored; agy
 Earlier rounds on this criterion (the evidence standard reads these too):
 - claude R1: not_tested — Out of my strategy's reach this round.
 - codex R1: pass
-  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run differed (exit 1)
+  - codex/r1/e3: command `cargo test -p app cwd_gone` (cwd .) exit 0; re-run exit code differed (1); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r1/codex/logs/3.log (1028 bytes, digest e789da942a51bc14)
 - agy R1: blocked — Quitting kills my pane.
   - agy/r1/o1: observation (unbacked): The pane closed when I pressed Cmd-Q.
@@ -1075,7 +1075,7 @@ You may open images by their stored path when your CLI can read images. You cann
 
 ## 5. Cross-checks
 - claude on codex/AC-1: not_reproduced — cwd_symlink passes in my worktree.
-  - claude/r2/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 0; re-run matched (exit 0)
+  - claude/r2/e1: command `cargo test -p app cwd_symlink -- --exact` (cwd .) exit 0; re-run exit code matched (0); output content not compared; re-run log stored
     stored: /golden/repo/.noa/verify/ver-golden/evidence/r2/claude/logs/1.log (1029 bytes, digest b5c829dabcf4f722)
 - claude on D1: reproduced — A link inside a link resolves wrong.
   - claude/r2/e2: command `./scripts/nested-link.sh` (cwd .) exit 1
@@ -1101,8 +1101,8 @@ Defects so far:
 - A cross-check of round N on <verifier>/<criterion> is about that verifier's latest result on the criterion as of round N-1, the one its brief named; once the verifier has reported a later result, the later checks on that subject are about the later result.
 - Evidence is for a criterion when a result on it cites it, or a cross-check about a result on it, or it is media whose shows names it (media with shows is evidence only for the criteria it names). It counts when its file was stored (an observation has no file and counts as text); a command or file missing at ingest counts for nothing. Evidence cited for verified or failed must be evidence for that criterion.
 - A pass of any round counts when the ruling cites a command or file of it that counts, unless it is contested. A pass is contested once a not_reproduced cross-check about that very result cites evidence that counts, until a later pass on the criterion (of a round after that check, from any verifier, its own included) that has a command or file that counts for the criterion and is not itself contested (media whose shows leaves the criterion out does not lift it); a contested pass is neither one of two sources nor the pass whose matched re-run is cited. A disputed check contests nothing. Each verifier is one source however many of its passes count; media the person attached (user/<n>) whose shows names the criterion is one more source, so it counts only together with a verifier's pass. A cross-check is no pass, whatever its outcome; only a not_reproduced that contests a pass takes one away.
-- A fail of any round is open until a not_reproduced cross-check about that very result cites evidence that counts. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.
-- verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each); a contested pass gives neither.
+- A fail of any round is open until a not_reproduced cross-check about that very result cites a stored command or file that counts for the criterion. A text-only observation does not answer a fail. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.
+- verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each); a contested pass gives neither. A matched re-run means only that the exit code matched: the widget does not compare output content. A missing re-run log must be reported as a gap, even when an exit code was recorded.
 - failed needs cited evidence that counts and that a fail result on the criterion cites, or a reproduced cross-check about a fail result on it, or a reproduced cross-check on a defect (also one merged since); a cross-check about a pass backs no failure.
 - inconclusive and not_applicable need a rationale.
 - Defect ops: every raw defect of this round goes into exactly one add or merge "from", or one dismiss.

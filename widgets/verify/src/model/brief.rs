@@ -74,8 +74,8 @@ pub const EVIDENCE_STANDARD: [&str; 10] = [
     "A cross-check of round N on <verifier>/<criterion> is about that verifier's latest result on the criterion as of round N-1, the one its brief named; once the verifier has reported a later result, the later checks on that subject are about the later result.",
     "Evidence is for a criterion when a result on it cites it, or a cross-check about a result on it, or it is media whose shows names it (media with shows is evidence only for the criteria it names). It counts when its file was stored (an observation has no file and counts as text); a command or file missing at ingest counts for nothing. Evidence cited for verified or failed must be evidence for that criterion.",
     "A pass of any round counts when the ruling cites a command or file of it that counts, unless it is contested. A pass is contested once a not_reproduced cross-check about that very result cites evidence that counts, until a later pass on the criterion (of a round after that check, from any verifier, its own included) that has a command or file that counts for the criterion and is not itself contested (media whose shows leaves the criterion out does not lift it); a contested pass is neither one of two sources nor the pass whose matched re-run is cited. A disputed check contests nothing. Each verifier is one source however many of its passes count; media the person attached (user/<n>) whose shows names the criterion is one more source, so it counts only together with a verifier's pass. A cross-check is no pass, whatever its outcome; only a not_reproduced that contests a pass takes one away.",
-    "A fail of any round is open until a not_reproduced cross-check about that very result cites evidence that counts. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.",
-    "verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each); a contested pass gives neither.",
+    "A fail of any round is open until a not_reproduced cross-check about that very result cites a stored command or file that counts for the criterion. A text-only observation does not answer a fail. Nothing else answers it: not a later blocked, not_tested or pass result of the same verifier, not a disputed or reproduced check, not a not_reproduced about another result of that verifier; a fail its verifier replaced before anyone checked it stays open. A fail that a reproduced cross-check about it reproduced is confirmed, whatever comes later.",
+    "verified needs a cited command or file (an observation alone never satisfies it), no open and no confirmed fail on the criterion, and either a cited command of a counting pass whose re-run matched (the matched re-run of a fail's command is not one) or two sources (cite one item of each); a contested pass gives neither. A matched re-run means only that the exit code matched: the widget does not compare output content. A missing re-run log must be reported as a gap, even when an exit code was recorded.",
     "failed needs cited evidence that counts and that a fail result on the criterion cites, or a reproduced cross-check about a fail result on it, or a reproduced cross-check on a defect (also one merged since); a cross-check about a pass backs no failure.",
     "inconclusive and not_applicable need a rationale.",
     "Defect ops: every raw defect of this round goes into exactly one add or merge \"from\", or one dismiss.",
@@ -168,9 +168,14 @@ fn write_target(out: &mut String, session: &Session, reply_dir: &Path) {
         }
     );
     if session.spec.is_some() {
+        let description = if inherited_spec_changed(session) {
+            "the current captured spec; see Criteria for the inherited source version"
+        } else {
+            "the spec the criteria come from"
+        };
         let _ = writeln!(
             out,
-            "- {}: the spec the criteria come from",
+            "- {}: {description}",
             target_dir.join(crate::capture::SPEC_FILE).display()
         );
     }
@@ -198,6 +203,7 @@ fn write_target(out: &mut String, session: &Session, reply_dir: &Path) {
 
 /// The criteria, frozen, with their priority, source and how.
 fn write_criteria(out: &mut String, session: &Session) {
+    write_spec_provenance(out, session);
     for c in &session.criteria {
         let _ = writeln!(
             out,
@@ -213,6 +219,47 @@ fn write_criteria(out: &mut String, session: &Session) {
             }
         );
     }
+}
+
+fn inherited_spec_changed(session: &Session) -> bool {
+    session
+        .recheck
+        .as_ref()
+        .is_some_and(|previous| previous.spec != session.spec)
+}
+
+/// Inherited line references belong to the baseline's spec version, not
+/// a newly captured file at the same path. Both verifier and judge read this.
+fn write_spec_provenance(out: &mut String, session: &Session) {
+    let Some(previous) = session
+        .recheck
+        .as_ref()
+        .filter(|_| inherited_spec_changed(session))
+    else {
+        return;
+    };
+    out.push_str("Recheck spec provenance:\n");
+    match &previous.spec {
+        Some(spec) => {
+            let _ = writeln!(
+                out,
+                "- Inherited spec:<line> sources refer to {} (digest {:016x}, {} lines). This is version metadata only: the older file is not included and may no longer exist.",
+                spec.path, spec.digest, spec.lines
+            );
+        }
+        None => out.push_str("- No spec was recorded for the inherited criteria.\n"),
+    }
+    match &session.spec {
+        Some(spec) => {
+            let _ = writeln!(
+                out,
+                "- Current captured spec: {} (digest {:016x}, {} lines); separate from the inherited source above.",
+                spec.path, spec.digest, spec.lines
+            );
+        }
+        None => out.push_str("- No spec was captured for this run.\n"),
+    }
+    out.push_str("The listed criteria and how are retained for verification of this run's captured target. Do not reinterpret inherited source line numbers against the current spec or regenerate criteria from it.\n\n");
 }
 
 fn strategy_text(strategy: &Strategy) -> String {
@@ -450,7 +497,7 @@ fn section_evidence(out: &mut String, heading: &str, session: &Session, part_dir
         Isolation::Worktree => {
             let _ = writeln!(
                 out,
-                "- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most {MAX_RERUNS}). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares the exit status. Do not touch the worktree after writing your reply until the next brief."
+                "- Mark `rerun: true` on commands that should give the same exit status when run again without your session's state (at most {MAX_RERUNS}). After your reply is accepted the widget may send you a short re-run brief: it runs those commands again in your pane and compares only the exit status, not output content. Do not touch the worktree after writing your reply until the next brief."
             );
         }
         Isolation::Shared => out.push_str(
@@ -527,7 +574,7 @@ fn write_reply_format(out: &mut String, session: &Session, cross: bool, reply_pa
     out.push_str(&session.categories().join(", "));
     out.push('\n');
     if cross {
-        out.push_str("- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note\n");
+        out.push_str("- cross_checks: exactly one per assignment of section 6; outcome reproduced, not_reproduced or disputed; evidence from your own runs, required except for disputed with a note. To answer a fail with not_reproduced, cite a command log or file for that criterion; a text-only observation cannot answer it\n");
     }
 }
 
@@ -759,14 +806,32 @@ pub fn mark_text(t_ms: u64) -> String {
     out
 }
 
-fn rerun_text(rerun: &Rerun) -> String {
-    match rerun {
-        Rerun::Matched { exit, .. } => format!("matched (exit {exit})"),
-        Rerun::Differed { exit: Some(e), .. } => format!("differed (exit {e})"),
-        Rerun::Differed { exit: None, .. } => "differed (no exit status)".to_owned(),
+pub(super) fn rerun_text(rerun: &Rerun) -> String {
+    let mut text = match rerun {
+        Rerun::Matched { exit, .. } => {
+            format!("exit code matched ({exit}); output content not compared")
+        }
+        Rerun::Differed { exit: Some(e), .. } => {
+            format!("exit code differed ({e}); output content not compared")
+        }
+        Rerun::Differed { exit: None, .. } => {
+            "no exit code obtained; output content not compared".to_owned()
+        }
         Rerun::TimedOut { .. } => "timed out".to_owned(),
         Rerun::NotRun { why, .. } => format!("not run: {why}"),
-    }
+    };
+    let log = match rerun {
+        Rerun::Matched { log, .. }
+        | Rerun::Differed { log, .. }
+        | Rerun::TimedOut { log }
+        | Rerun::NotRun { log, .. } => log,
+    };
+    text.push_str(if log.is_some() {
+        "; re-run log stored"
+    } else {
+        "; re-run log not stored"
+    });
+    text
 }
 
 /// Rulings and every result so far, with identities (round ≥ 2 briefs):
@@ -1363,8 +1428,94 @@ pub fn correction_note(to: &PartId, error: &str, reply_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::types::Phase;
+    use crate::model::recheck::Recheck;
+    use crate::model::types::{CriterionSource, Phase, SpecFile};
     use crate::testkit::{self, Rig, VERIFIERS, all_pass, cmd, reply_json};
+
+    fn recheck_with_spec() -> Session {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        let mut session = rig.engine.session().clone();
+        session.criteria[1].source = CriterionSource::Spec { line: 7 };
+        session.spec = Some(SpecFile {
+            path: "docs/original-spec.md".into(),
+            bytes: 100,
+            lines: 10,
+            digest: 0x1111,
+        });
+        session.recheck = Recheck::from_session(&session);
+        session
+    }
+
+    fn agent_briefs(session: &Session) -> [String; 2] {
+        let reply_dir = Path::new("/reply");
+        [
+            verifier_brief(
+                session,
+                &testkit::p("claude"),
+                1,
+                reply_dir,
+                Path::new("/reply/results.json"),
+                Path::new("/worktree"),
+            )
+            .body,
+            judge_brief(
+                session,
+                1,
+                reply_dir,
+                Path::new("/reply/judge.json"),
+                &BTreeMap::new(),
+            )
+            .body,
+        ]
+    }
+
+    #[test]
+    fn recheck_briefs_keep_inherited_spec_lines_separate_from_a_new_or_missing_spec() {
+        for current in [
+            Some(SpecFile {
+                path: "docs/original-spec.md".into(),
+                bytes: 20,
+                lines: 2,
+                digest: 0x2222,
+            }),
+            Some(SpecFile {
+                path: "docs/current-spec.md".into(),
+                bytes: 20,
+                lines: 2,
+                digest: 0x2222,
+            }),
+            None,
+        ] {
+            let mut session = recheck_with_spec();
+            session.spec = current.clone();
+            for body in agent_briefs(&session) {
+                assert!(body.contains("Inherited spec:<line> sources refer to docs/original-spec.md (digest 0000000000001111, 10 lines)"));
+                assert!(body.contains("the older file is not included and may no longer exist"));
+                assert!(body.contains(
+                    "[must] (spec:7) The store survives a crash\n  How: kill -9 mid-write; reopen"
+                ));
+                assert!(body.contains("retained for verification of this run's captured target"));
+                assert!(!body.contains("the spec the criteria come from"));
+                match &current {
+                    Some(spec) => assert!(body.contains(&format!(
+                        "Current captured spec: {} (digest 0000000000002222, 2 lines)",
+                        spec.path
+                    ))),
+                    None => assert!(body.contains("No spec was captured for this run")),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_unchanged_recheck_spec_keeps_the_ordinary_briefs() {
+        let mut session = recheck_with_spec();
+        let inherited = agent_briefs(&session);
+        session.recheck = None;
+        assert_eq!(inherited, agent_briefs(&session));
+        assert!(inherited[0].contains("the spec the criteria come from"));
+    }
 
     #[test]
     fn ac13_a_ruling_brief_lists_an_earlier_rounds_defect_reproduction_with_its_evidence() {

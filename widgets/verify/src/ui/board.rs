@@ -321,7 +321,9 @@ impl Verify {
                 button(
                     tree,
                     trailing,
-                    small("変更を保存して検証を開始").tooltip("未保存の変更と追加欄をまとめて保存し、基準を確定して R1 を始めます"),
+                    small("変更を保存して検証を開始").tooltip(
+                        "未保存の変更と追加欄をまとめて保存し、基準を確定して R1 を始めます",
+                    ),
                     Action::StartVerify,
                     actions,
                 );

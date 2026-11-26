@@ -1693,7 +1693,26 @@ impl Engine {
         // the limit). Nothing reaches the session or its log on failure.
         let mut checked = self.clone();
         let mut checks = Output::default();
-        for edit in edits {
+        for mut edit in edits {
+            // The UI sends its current text fields even if its snapshot
+            // still predates an individual save. Compare with the state
+            // after those earlier commands, keeping only actual changes.
+            if let CriteriaEdit::Edit {
+                id,
+                statement,
+                how,
+                priority,
+            } = &mut edit
+                && (statement.is_some() || how.is_some() || priority.is_some())
+                && let Some(current) = checked.session.criterion(id)
+            {
+                *statement = statement.take().filter(|s| s.trim() != current.statement);
+                *how = how.take().filter(|h| h.trim() != current.how);
+                *priority = priority.take().filter(|p| *p != current.priority);
+                if statement.is_none() && how.is_none() && priority.is_none() {
+                    continue;
+                }
+            }
             checked.edit_criteria(&mut checks, edit, at)?;
         }
         if !(1..=MAX_CRITERIA).contains(&checked.session.criteria.len()) {
@@ -1702,7 +1721,10 @@ impl Engine {
         for criterion in &checked.session.criteria {
             let n = criterion.statement.trim().chars().count();
             if !(1..=MAX_STATEMENT).contains(&n) || criterion.statement.contains('\n') {
-                return rejected(format!("{}: 基準は1行・{MAX_STATEMENT}文字までです", criterion.id));
+                return rejected(format!(
+                    "{}: 基準は1行・{MAX_STATEMENT}文字までです",
+                    criterion.id
+                ));
             }
             if criterion.how.trim().is_empty() {
                 return rejected(format!("{}: {HOW_EMPTY}", criterion.id));

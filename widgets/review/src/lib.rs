@@ -2,6 +2,7 @@
 //! engine that runs blind and cross-examination rounds, and the session
 //! store. The binary (`main.rs`) adds the UI and the live link to Noa.
 
+pub mod auto_assign;
 pub mod capture;
 pub mod engine;
 pub mod fsx;

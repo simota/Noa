@@ -15,6 +15,7 @@ use std::thread::JoinHandle;
 use crate::installed::Installed;
 use crate::session::runner::{self, Action, SessionHandle, Update};
 
+use discussion::auto_assign::AutoRecord;
 use discussion::model::types::{
     AgentChoice, AgentKind, DebateId, IssueId, PartId, RoundNo, Session,
 };
@@ -45,6 +46,7 @@ pub struct Snapshot {
 pub enum Command {
     /// Create a session and spawn its agents (`Engine::create`, then `Start`).
     Start {
+        auto: Option<AutoRecord>,
         topic: String,
         /// The directory (or repository) the agents run in; `None` for the
         /// discussions directory.
@@ -115,6 +117,7 @@ pub struct Channel {
     /// Which agents are installed: sent once, when the check is done (see
     /// [`start`]).
     pub installed: Receiver<Installed>,
+    pub(crate) wake: Arc<dyn Fn() + Send + Sync>,
     commands: Sender<Command>,
 }
 
@@ -169,7 +172,7 @@ fn start_with(
         snapshots: snapshot_tx,
         notices: notice_tx,
         history: history_tx,
-        wake,
+        wake: wake.clone(),
     };
     out.start_view(root.as_deref());
     std::thread::Builder::new()
@@ -182,6 +185,7 @@ fn start_with(
         notices,
         history,
         installed: mpsc::channel().1,
+        wake,
         commands,
     }
 }
@@ -294,6 +298,7 @@ fn run_commands(
                 continue;
             }
             Command::Start {
+                auto,
                 topic,
                 workdir,
                 max_rounds,
@@ -305,6 +310,7 @@ fn run_commands(
                     continue;
                 };
                 runner::Start::New {
+                    auto: auto.map(Box::new),
                     topic,
                     workdir,
                     max_rounds,
@@ -532,6 +538,7 @@ pub(crate) fn test_channel() -> (Channel, TestFeed) {
     (
         Channel {
             timeline: None,
+            wake: Arc::new(|| {}),
             snapshots,
             notices,
             history,
@@ -576,6 +583,7 @@ mod tests {
             |s| runner::spawn_session(s, || {}),
         );
         let start = || Command::Start {
+            auto: None,
             topic: "t".into(),
             workdir: Some(file.clone()),
             max_rounds: None,

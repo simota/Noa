@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::auto_assign::AutoRecord;
+
 /// Wall-clock time in milliseconds since the Unix epoch. Always injected by
 /// the caller, so the model and the engine never read a clock themselves.
 pub type Millis = u64;
@@ -1989,6 +1991,9 @@ pub struct Session {
     pub verifiers: Vec<Participant>,
     /// 基準を確認してから検証: hold for the person after the criteria.
     pub confirm: bool,
+    /// The auto-assignment it was started with, from its created event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<AutoRecord>,
     /// The judge's criteria brief.
     #[serde(default)]
     pub criteria_brief: Option<Brief>,
@@ -2231,6 +2236,11 @@ pub enum Event {
         verifiers: Vec<Participant>,
         confirm: bool,
         at: Millis,
+        /// The auto-assignment the panel was started with
+        /// (`docs/specs/auto-assign.md` L1-7); absent for a manual start,
+        /// and in every log written before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto: Option<AutoRecord>,
     },
     PaneAssigned {
         part: PartId,
@@ -2546,6 +2556,48 @@ mod tests {
         }
     }
 
+    /// A record of an auto-assignment whose first verifier row was changed
+    /// by hand after the fill.
+    fn auto_record() -> AutoRecord {
+        AutoRecord {
+            planner: "claude (sonnet · medium)".into(),
+            at: 7,
+            picks: vec![crate::auto_assign::Pick {
+                slot: "judge".into(),
+                agent: "claude".into(),
+                model: Some("opus".into()),
+                effort: Some("high".into()),
+                reason: "判定には深い推論が要るため".into(),
+            }],
+            overridden: vec!["verifier-1".into()],
+        }
+    }
+
+    #[test]
+    fn a_created_event_keeps_its_auto_record_and_reads_without_one() {
+        let Some(created) = every_event().into_iter().next() else {
+            unreachable!()
+        };
+        let line = serde_json::to_string(&created).unwrap();
+        assert!(line.contains(r#""auto":{"planner":"claude (sonnet · medium)""#));
+        let back: Event = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, created);
+        let Event::Created { auto, .. } = &back else {
+            unreachable!()
+        };
+        assert_eq!(auto.as_ref(), Some(&auto_record()));
+        // A log written before auto-assign existed has no such key.
+        let mut old: serde_json::Value = serde_json::from_str(&line).unwrap();
+        old.as_object_mut().unwrap().remove("auto");
+        let old: Event = serde_json::from_value(old).unwrap();
+        let Event::Created { auto, .. } = &old else {
+            unreachable!()
+        };
+        assert_eq!(*auto, None);
+        // And a manual start writes none.
+        assert!(!serde_json::to_string(&old).unwrap().contains("\"auto\""));
+    }
+
     fn every_event() -> Vec<Event> {
         let shot = EvidenceBody::File {
             path: "video/new-tab.mov".into(),
@@ -2628,6 +2680,7 @@ mod tests {
                 ],
                 confirm: true,
                 at: 1,
+                auto: Some(auto_record()),
             },
             Event::PaneAssigned {
                 part: p("claude"),
@@ -2985,6 +3038,7 @@ mod tests {
             verifiers,
             confirm,
             at,
+            auto,
         }) = every_event().into_iter().next()
         else {
             unreachable!()
@@ -3044,6 +3098,7 @@ mod tests {
             judge,
             verifiers,
             confirm,
+            auto,
             criteria_brief: Some(brief(JUDGE_ID, BriefKind::Work)),
             criteria_accepted: true,
             criteria_summary: "One criterion.".into(),
@@ -3243,6 +3298,7 @@ mod tests {
             judge: participant(JUDGE_ID, AgentKind::Agy, None),
             verifiers: Vec::new(),
             confirm: true,
+            auto: None,
             criteria_brief: None,
             criteria_accepted: false,
             criteria_summary: String::new(),

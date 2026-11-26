@@ -397,6 +397,7 @@ mod more_tests {
             branch: Some(format!("task-{run}")),
             label: format!("task:{run}"),
             at,
+            auto: None,
         }
     }
 

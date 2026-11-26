@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use competition::auto_assign::AutoRecord;
 use competition::model::types::{AgentChoice, AgentKind, PartId, RoundNo, Session};
 
 use crate::session::runner::{self, Action, SessionHandle, Update};
@@ -40,6 +41,10 @@ pub enum Command {
         /// The judge panel in seat order, lead first.
         judges: Vec<AgentChoice>,
         panel: Vec<AgentChoice>,
+        /// The auto-assignment the start form was filled from (its rows
+        /// still as filled), for the created event; `None` when staffed by
+        /// hand.
+        auto: Option<AutoRecord>,
     },
     Intervene {
         to: Vec<PartId>,
@@ -104,6 +109,9 @@ pub struct Channel {
     pub released: Receiver<()>,
     commands: Sender<(u64, Command)>,
     generation: Arc<AtomicU64>,
+    /// Wakes the screen: what a background job of the screen's own (the
+    /// auto-assignment planner) calls once it has a result.
+    pub wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Channel {
@@ -147,6 +155,7 @@ fn start_with(wake: Arc<dyn Fn() + Send + Sync>, timeline: Option<Timeline>) -> 
     wake();
     let publisher = timeline.clone();
     let tick = Arc::clone(&wake);
+    let screen_wake = Arc::clone(&wake);
     // Wakes the screen so the elapsed times in the progress strip move while
     // agents work without emitting events; the screen rebuilds only when the
     // shown minute changes.
@@ -181,6 +190,7 @@ fn start_with(wake: Arc<dyn Fn() + Send + Sync>, timeline: Option<Timeline>) -> 
         released,
         commands,
         generation,
+        wake: screen_wake,
     }
 }
 
@@ -232,6 +242,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     reveal_interval,
                     judges,
                     panel,
+                    auto,
                 },
                 None,
             ) => {
@@ -247,6 +258,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     judges,
                     panel,
                     root,
+                    auto,
                 }
             }
             (
@@ -420,6 +432,7 @@ impl Channel {
             released,
             commands,
             generation: Arc::new(AtomicU64::new(0)),
+            wake: Arc::new(|| {}),
         };
         let link = FakeLink {
             snapshots: snapshot_tx,

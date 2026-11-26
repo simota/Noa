@@ -56,6 +56,7 @@ mod timeline {
                 branch: None,
                 label: runs::label(&run),
                 at: 1000,
+                auto: None,
             },
             RunEvent::RunPaneAssigned {
                 run: run.clone(),

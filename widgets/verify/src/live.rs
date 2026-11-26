@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use verify::auto_assign::AutoRecord;
 use verify::model::types::{
     AgentChoice, CriteriaEdit, Isolation, Mark, PartId, RoundNo, Session, Target, VerifierChoice,
 };
@@ -73,6 +74,10 @@ pub enum Command {
         round_cap: RoundNo,
         judge: AgentChoice,
         panel: Vec<VerifierChoice>,
+        /// The auto-assignment the panel was filled from, while at least
+        /// one of its rows is still as filled (`docs/specs/auto-assign.md`
+        /// L1-7).
+        auto: Option<AutoRecord>,
     },
     /// Changes the criteria held for confirmation.
     EditCriteria {
@@ -185,9 +190,16 @@ pub struct Channel {
     pub timelines: Receiver<(u64, Status)>,
     commands: Sender<(u64, Command)>,
     generation: Arc<AtomicU64>,
+    /// Wakes the screen: what a thread the screen starts itself (the
+    /// auto-assign planner) calls once its result is ready.
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Channel {
+    pub fn waker(&self) -> Arc<dyn Fn() + Send + Sync> {
+        Arc::clone(&self.wake)
+    }
+
     /// Sends `cmd` in the current generation: what it starts, and what is
     /// said about it, belongs to the verification on screen now.
     pub fn send(&self, cmd: Command) {
@@ -228,6 +240,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
     let (timeline_tx, timelines) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let screen_wake = Arc::clone(&wake);
     let told = Arc::clone(&wake);
     let probed = version_tx.clone();
     std::thread::Builder::new()
@@ -289,6 +302,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
         timelines,
         commands,
         generation,
+        wake: screen_wake,
     }
 }
 
@@ -480,6 +494,7 @@ impl Dispatch {
                     round_cap,
                     judge,
                     panel,
+                    auto,
                 },
                 None,
             ) => {
@@ -500,6 +515,7 @@ impl Dispatch {
                     round_cap,
                     judge,
                     panel,
+                    auto,
                     root,
                 }))
             }
@@ -739,6 +755,7 @@ impl Channel {
             timelines,
             commands,
             generation: Arc::new(AtomicU64::new(0)),
+            wake: Arc::new(|| {}),
         };
         let link = FakeLink {
             snapshots: snapshot_tx,

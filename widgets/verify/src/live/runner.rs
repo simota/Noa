@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use verify::auto_assign::AutoRecord;
 use verify::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Output, Setup};
 use verify::evidence::{self, IngestItem};
 use verify::model::types::{
@@ -113,6 +114,9 @@ pub struct NewVerification {
     pub round_cap: RoundNo,
     pub judge: AgentChoice,
     pub panel: Vec<VerifierChoice>,
+    /// The auto-assignment the panel was filled from, recorded in the
+    /// created event (`docs/specs/auto-assign.md` L1-7).
+    pub auto: Option<AutoRecord>,
     /// The store root (`<data dir>/noa/verifications`).
     pub root: PathBuf,
 }
@@ -3019,6 +3023,7 @@ fn new_verification(
         round_cap,
         judge,
         panel,
+        auto,
         root,
     } = new;
     verify::engine::check_panel(&judge, &panel)?;
@@ -3070,7 +3075,7 @@ fn new_verification(
         judge,
         panel: &panel,
     };
-    let (engine, output) = match Engine::create_in(id, setup, &dir, config, now) {
+    let (engine, output) = match Engine::create_auto_in(id, setup, auto, &dir, config, now) {
         Ok(created) => created,
         Err(e) => {
             undo();
@@ -3660,6 +3665,7 @@ pub(crate) mod tests {
             round_cap: MAX_MAX_ROUNDS,
             judge: AgentKind::Claude.into(),
             panel: panel(),
+            auto: None,
             root: root.join("store"),
         }))
     }
@@ -5299,6 +5305,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_new_verification_records_its_auto_assignment_in_the_created_line() {
+        let root = temp_root();
+        let work = repo(&root);
+        let record = AutoRecord {
+            planner: "claude (sonnet · medium)".into(),
+            at: 3,
+            picks: vec![verify::auto_assign::Pick {
+                slot: "judge".into(),
+                agent: "claude".into(),
+                model: None,
+                effort: Some("high".into()),
+                reason: "判定役".into(),
+            }],
+            overridden: vec!["verifier-2".into()],
+        };
+        let Start::New(mut new) = new_start(&root, state_of(&work), Isolation::Shared, true) else {
+            unreachable!()
+        };
+        new.auto = Some(record.clone());
+        let (engine, _store) = new_verification(*new, CONFIG, 5).unwrap();
+        assert_eq!(engine.session().auto.as_ref(), Some(&record));
+        let dir = root.join("store").join(engine.session().id.as_str());
+        let log = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        let batch: Vec<Event> = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+        let Some(Event::Created { auto, .. }) = batch.into_iter().next() else {
+            panic!("{log}")
+        };
+        assert_eq!(auto, Some(record));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn an_id_taken_anywhere_moves_on_and_a_refused_start_removes_only_its_own() {
         let root = temp_root();
         let work = repo(&root);
@@ -5332,6 +5370,7 @@ pub(crate) mod tests {
             round_cap: MAX_MAX_ROUNDS,
             judge: AgentKind::Claude.into(),
             panel: panel(),
+            auto: None,
             root: root.join("store"),
         };
         assert!(new_verification(new, CONFIG, 5).is_err());

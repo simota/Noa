@@ -13,6 +13,8 @@ use verify::model::types::{
 };
 use verify::store::Store;
 
+use verify::auto_assign::{self, Assignment, AutoRecord, Job, PlanError, Planning};
+
 use crate::installed::Installed;
 use crate::live::{FakeLink, OpenPanes};
 
@@ -2949,4 +2951,740 @@ fn a_filter_that_hides_the_selected_defect_lets_it_go() {
     act(&mut screen, Action::SelectDefect(Some("D1".into())));
     act(&mut screen, Action::ToggleCategory("conformance".into()));
     assert_eq!(screen.selected, Some(Selected::Defect("D1".into())));
+}
+
+// ---- auto-assign (docs/specs/auto-assign.md, unit U3) ----
+
+/// A planner the fake was asked to start: its job, where its answer goes,
+/// and its cancel flag.
+struct Planned {
+    job: Job,
+    answer: std::sync::mpsc::Sender<Result<Assignment, PlanError>>,
+    cancel: auto_assign::Cancel,
+}
+
+/// Puts a fake in place of the planner: nothing runs, and the test answers
+/// on each planner's channel.
+fn fake_planner(screen: &mut Verify) -> Rc<RefCell<Vec<Planned>>> {
+    let planned = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&planned);
+    screen.auto.set_plan(Box::new(move |job, _wake| {
+        let (answer, rx) = std::sync::mpsc::channel();
+        let cancel: auto_assign::Cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        sink.borrow_mut().push(Planned {
+            job,
+            answer,
+            cancel: Arc::clone(&cancel),
+        });
+        Planning { rx, cancel }
+    }));
+    planned
+}
+
+/// A live screen with `kinds` installed, a fake planner, and a form that
+/// can start (its repository a plain folder).
+fn auto_ready(
+    name: &str,
+    kinds: &[AgentKind],
+) -> (
+    Verify,
+    FakeLink,
+    Rc<RefCell<Vec<Planned>>>,
+    TextStore,
+    PathBuf,
+) {
+    let repo = temp(name);
+    let (mut screen, link, tx, mut text) = live_pending();
+    let planned = fake_planner(&mut screen);
+    report(&mut screen, &tx, found(kinds), &mut text);
+    let form = start::Form {
+        request: "新しいタブが cwd を引き継ぐ変更".into(),
+        criteria: "新しいタブは cwd を引き継ぐ".into(),
+        ..startable_form(&repo)
+    };
+    start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+    screen.poll_live(&mut text);
+    (screen, link, planned, text, repo)
+}
+
+fn start_text(screen: &Verify) -> String {
+    labels_under(&screen.tree, screen.start.root).join("\n")
+}
+
+/// The items of the menu the pull-down opens (opened, then closed).
+fn auto_menu(screen: &mut Verify) -> Vec<String> {
+    let menu = screen.auto.menu().expect("the pull-down is shown");
+    screen.tree.set_focus(Some(menu));
+    press(screen, noa_gpui_core::Key::Space);
+    let items = screen
+        .tree
+        .overlays()
+        .filter_map(|id| screen.tree.get::<noa_gpui_core::widgets::Menu>(id))
+        .flat_map(|m| m.items().iter().map(|i| i.label().to_owned()))
+        .collect();
+    press(screen, noa_gpui_core::Key::Escape);
+    items
+}
+
+/// Chooses the pull-down's item `index` from the keyboard.
+fn choose_planner(screen: &mut Verify, index: usize) {
+    let menu = screen.auto.menu().expect("the pull-down is shown");
+    assert!(screen.tree.is_enabled(menu), "the pull-down is off");
+    screen.tree.set_focus(Some(menu));
+    press(screen, noa_gpui_core::Key::Space);
+    for _ in 0..=index {
+        press(screen, noa_gpui_core::Key::ArrowDown);
+    }
+    press(screen, noa_gpui_core::Key::Enter);
+}
+
+/// The planner's answer for a request with a judge and three verifiers,
+/// read and checked as `auto_assign::run` would.
+const ANSWER: &str = r#"Here you are:
+```json
+{"assignments":[
+ {"slot":"judge","agent":"codex","model":"gpt-6.2-sol","effort":"high","reason":"判定は深い推論が要るため"},
+ {"slot":"verifier-1","agent":"claude","model":"opus","effort":null,"reason":"仕様との突き合わせが得意なため"},
+ {"slot":"verifier-2","agent":"agy","model":null,"effort":"medium","reason":"反証は別系統のモデルが良いため"},
+ {"slot":"verifier-3","agent":"codex","model":"gpt-6-luna","effort":"low","reason":"回帰の確認は定型的なため"}
+]}
+```"#;
+
+fn answer_for(planned: &Planned, request: &auto_assign::Request, text: &str) -> Assignment {
+    let raw = auto_assign::parse(text).unwrap();
+    auto_assign::validate(raw, request, &planned.job.planner, &*planned.job.check).unwrap()
+}
+
+/// The first planner's job turned into its request, and its answer.
+fn answered(planned: &Rc<RefCell<Vec<Planned>>>, at: usize) -> (auto_assign::Request, Planned) {
+    let mut planned = planned.borrow_mut();
+    let mut one = planned.remove(at);
+    let request = std::mem::replace(&mut one.job.request, Box::new(|| unreachable!()))();
+    (request, one)
+}
+
+#[test]
+fn auto_the_pull_down_offers_only_the_installed_planners_and_says_why_it_is_off() {
+    // While the check runs, the pull-down is there but off.
+    let (mut screen, _link, tx, mut text) = live_pending();
+    let menu = screen.auto.menu().unwrap();
+    assert!(!screen.tree.is_enabled(menu));
+    // codex and agy installed: only codex plans (agy never does, Q9).
+    report(
+        &mut screen,
+        &tx,
+        found(&[AgentKind::Codex, AgentKind::Agy]),
+        &mut text,
+    );
+    // An empty repository: the form cannot be read, the note says why.
+    let menu = screen.auto.menu().unwrap();
+    assert!(!screen.tree.is_enabled(menu));
+    assert!(
+        start_text(&screen).contains("自動で割り当てるには: リポジトリを指定してください"),
+        "{}",
+        start_text(&screen)
+    );
+    let repo = temp("auto-menu");
+    start::fill(
+        &mut screen.tree,
+        &mut screen.start,
+        &startable_form(&repo),
+        &mut text,
+    );
+    screen.poll_live(&mut text);
+    assert!(screen.tree.is_enabled(screen.auto.menu().unwrap()));
+    assert!(!start_text(&screen).contains("自動で割り当てるには"));
+    assert_eq!(auto_menu(&mut screen), ["codex で決める"]);
+
+    let (mut all, _link, _planned, _text, other) = auto_ready("auto-menu-all", &AgentKind::ALL);
+    assert_eq!(auto_menu(&mut all), ["claude で決める", "codex で決める"]);
+
+    let (mut agy, _link, _planned, _text, third) = auto_ready("auto-menu-agy", &[AgentKind::Agy]);
+    assert!(!agy.tree.is_enabled(agy.auto.menu().unwrap()));
+    assert!(
+        start_text(&agy).contains("自動割り当てに使えるエージェントがインストールされていません")
+    );
+    assert!(auto_menu(&mut agy).is_empty());
+    for dir in [repo, other, third] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn auto_a_valid_assignment_fills_every_row_and_shows_each_reason() {
+    let (mut screen, link, planned, mut text, repo) = auto_ready("auto-fill", &AgentKind::ALL);
+    let before = start::read(&screen.tree, &screen.start);
+    choose_planner(&mut screen, 0);
+    assert_eq!(planned.borrow().len(), 1);
+    // While it decides: the caption and 中止, the form and 検証を開始 stay.
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains("claude (sonnet · medium) が割り当てを決めています…"),
+        "{shown}"
+    );
+    assert!(acts(&screen).contains(&Action::AutoCancel));
+    assert!(screen.auto.menu().is_none());
+    assert!(screen.tree.is_enabled(screen.start.start_button));
+
+    let (request, planned) = answered(&planned, 0);
+    assert_eq!(planned.job.planner.agent, "claude");
+    assert_eq!(planned.job.cwd, repo);
+    let slots: Vec<(&str, &str)> = request
+        .slots
+        .iter()
+        .map(|s| (s.id.as_str(), s.role.as_str()))
+        .collect();
+    assert_eq!(slots.len(), 4);
+    assert_eq!(slots[0].0, "judge");
+    assert!(
+        slots[0]
+            .1
+            .starts_with("judge: writes the acceptance criteria")
+    );
+    assert_eq!(
+        slots[2],
+        ("verifier-2", "verifier using the strategy '反証'")
+    );
+    assert_eq!(request.widget, "verify");
+    let agents: Vec<&str> = request
+        .candidates
+        .iter()
+        .map(|c| c.agent.as_str())
+        .collect();
+    assert_eq!(agents, ["claude", "codex", "agy"]);
+    assert!(request.content.contains("新しいタブが cwd を引き継ぐ変更"));
+    assert!(request.content.contains("- 新しいタブは cwd を引き継ぐ"));
+    // Not a git repository: no diff summary, said so.
+    assert!(request.content.contains("(diff summary unavailable)"));
+
+    let assignment = answer_for(&planned, &request, ANSWER);
+    planned.answer.send(Ok(assignment)).unwrap();
+    screen.poll_live(&mut text);
+    let form = start::read(&screen.tree, &screen.start);
+    assert_eq!(form.judge.label(), "codex (gpt-6.2-sol · high)");
+    let rows: Vec<String> = form.panel.iter().map(|r| r.agent.label()).collect();
+    assert_eq!(
+        rows,
+        ["claude (opus)", "agy (medium)", "codex (gpt-6-luna · low)"]
+    );
+    // Only the agents changed: the strategies and everything else stay.
+    let strategies = |f: &start::Form| {
+        f.panel
+            .iter()
+            .map(|r| r.strategy.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(strategies(&form), strategies(&before));
+    assert_eq!(
+        (form.request.as_str(), form.repo.as_str()),
+        (before.request.as_str(), before.repo.as_str())
+    );
+    let shown = start_text(&screen);
+    for line in [
+        "自動割り当て（claude (sonnet · medium) が決定）— 内容を確認して「検証を開始」を押してください",
+        "判定役: codex (gpt-6.2-sol · high) — 判定は深い推論が要るため",
+        "検証者 1: claude (opus) — 仕様との突き合わせが得意なため",
+        "検証者 2: agy (medium) — 反証は別系統のモデルが良いため",
+        "検証者 3: codex (gpt-6-luna · low) — 回帰の確認は定型的なため",
+    ] {
+        assert!(shown.contains(line), "{line}\n---\n{shown}");
+    }
+    assert!(!shown.contains("（手動で変更）"));
+    assert!(screen.auto.menu().is_some(), "the pull-down is back");
+    assert!(commands(&link).is_empty(), "a fill starts nothing (D1)");
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_a_failure_leaves_the_rows_and_names_its_cause() {
+    let (mut screen, link, planned, mut text, repo) = auto_ready("auto-fail", &AgentKind::ALL);
+    let before = start::read(&screen.tree, &screen.start);
+    choose_planner(&mut screen, 0);
+    let (_, first) = answered(&planned, 0);
+    first.answer.send(Err(PlanError::Timeout(180))).unwrap();
+    screen.poll_live(&mut text);
+    assert_eq!(start::read(&screen.tree, &screen.start), before);
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains(
+            "自動割り当てに失敗しました: claude (sonnet · medium) が 180 秒以内に割り当てを返しませんでした。手動で選ぶか、別のエージェントで決めてください"
+        ),
+        "{shown}"
+    );
+    // An invalid answer (a verifier left out) is refused whole, and the
+    // other planner can be asked.
+    choose_planner(&mut screen, 1);
+    let (request, second) = answered(&planned, 0);
+    assert_eq!(second.job.planner.agent, "codex");
+    let raw = auto_assign::parse(
+        r#"{"assignments":[{"slot":"judge","agent":"claude","model":null,"effort":null,"reason":"r"}]}"#,
+    )
+    .unwrap();
+    let invalid =
+        auto_assign::validate(raw, &request, &second.job.planner, &*second.job.check).unwrap_err();
+    second.answer.send(Err(invalid)).unwrap();
+    screen.poll_live(&mut text);
+    assert_eq!(start::read(&screen.tree, &screen.start), before);
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains(
+            "自動割り当てに失敗しました: codex (gpt-6.2-sol · medium) の割り当てが不正です: verifier-1 の割り当てがありません"
+        ),
+        "{shown}"
+    );
+    assert!(commands(&link).is_empty());
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_an_answer_after_the_rows_changed_is_not_put_in() {
+    let (mut screen, _link, planned, mut text, repo) = auto_ready("auto-stale", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    // The person picks another judge while the planner decides.
+    let judge = screen.start.judge;
+    press_down(&mut screen, judge, &mut text);
+    let edited = start::read(&screen.tree, &screen.start);
+    assert_eq!(edited.judge.kind, AgentKind::Codex);
+    let (request, one) = answered(&planned, 0);
+    let assignment = answer_for(
+        &one,
+        &request,
+        &ANSWER.replace(
+            r#""agent":"codex","model":"gpt-6.2-sol""#,
+            r#""agent":"agy","model":null"#,
+        ),
+    );
+    one.answer.send(Ok(assignment)).unwrap();
+    screen.poll_live(&mut text);
+    assert_eq!(start::read(&screen.tree, &screen.start), edited);
+    assert!(start_text(&screen).contains(
+        "割り当て中にエージェントの選択が変わったため反映しませんでした。もう一度「自動で割り当て」を押してください"
+    ));
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_the_start_records_the_unchanged_picks_and_the_overridden_slots() {
+    let (mut screen, link, planned, mut text, repo) = auto_ready("auto-start", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    let (request, one) = answered(&planned, 0);
+    one.answer
+        .send(Ok(answer_for(&one, &request, ANSWER)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    // Verifier 1 is changed by hand after the fill (claude to codex).
+    let row = screen.start.panel[0].kind;
+    press_down(&mut screen, row, &mut text);
+    screen.poll_live(&mut text);
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains("検証者 1: claude (opus) — 仕様との突き合わせが得意なため（手動で変更）"),
+        "{shown}"
+    );
+    assert!(shown.contains("検証者 2: agy (medium) — 反証は別系統のモデルが良いため\n"));
+    act(&mut screen, Action::Start);
+    let sent = commands(&link);
+    let [Command::Start { auto, panel, .. }] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let AutoRecord {
+        planner,
+        picks,
+        overridden,
+        at,
+    } = auto.clone().expect("the start carries the assignment");
+    assert_eq!(planner, "claude (sonnet · medium)");
+    assert!(at > 0);
+    let slots: Vec<&str> = picks.iter().map(|p| p.slot.as_str()).collect();
+    assert_eq!(slots, ["judge", "verifier-2", "verifier-3"]);
+    assert_eq!(picks[0].reason, "判定は深い推論が要るため");
+    assert_eq!(overridden, ["verifier-1"]);
+    assert_eq!(
+        panel[0].agent.kind,
+        AgentKind::Codex,
+        "the hand-made pick starts"
+    );
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_cancel_and_a_start_while_deciding_stop_the_planner() {
+    let (mut screen, link, planned, mut text, repo) = auto_ready("auto-cancel", &AgentKind::ALL);
+    let before = start::read(&screen.tree, &screen.start);
+    choose_planner(&mut screen, 0);
+    press_button(&mut screen, &Action::AutoCancel);
+    assert!(
+        planned.borrow()[0]
+            .cancel
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(screen.auto.menu().is_some());
+    assert!(!start_text(&screen).contains("が割り当てを決めています"));
+    // What the cancelled planner says late is never read.
+    let (request, late) = answered(&planned, 0);
+    let _ = late.answer.send(Ok(answer_for(&late, &request, ANSWER)));
+    screen.poll_live(&mut text);
+    assert_eq!(start::read(&screen.tree, &screen.start), before);
+    assert!(!start_text(&screen).contains("自動割り当て（"));
+
+    // 検証を開始 while it decides starts the rows as they are.
+    choose_planner(&mut screen, 1);
+    act(&mut screen, Action::Start);
+    assert!(
+        planned.borrow()[0]
+            .cancel
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    let sent = commands(&link);
+    let [Command::Start { auto, judge, .. }] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(*auto, None);
+    assert_eq!(*judge, before.judge);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_verify_again_refills_without_the_assignment() {
+    let root = temp("auto-again");
+    let dir = stored_demo(&root);
+    let (mut screen, link, planned, mut text, repo) =
+        auto_ready("auto-again-repo", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    let (request, one) = answered(&planned, 0);
+    one.answer
+        .send(Ok(answer_for(&one, &request, ANSWER)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    assert!(start_text(&screen).contains("自動割り当て（"));
+    act(&mut screen, Action::VerifyAgain(Some(dir)));
+    screen.poll_live(&mut text);
+    assert!(!start_text(&screen).contains("自動割り当て（"));
+    let form = start::Form {
+        repo: repo.display().to_string(),
+        ..start::read(&screen.tree, &screen.start)
+    };
+    start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+    act(&mut screen, Action::Start);
+    let sent = commands(&link);
+    let [Command::Start { auto, .. }] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(*auto, None, "a run set up again is manual (L1-7)");
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_a_stored_log_keeps_its_record_and_one_without_it_still_loads() {
+    let record = AutoRecord {
+        planner: "codex (gpt-6.2-sol · medium)".into(),
+        at: 42,
+        picks: vec![auto_assign::Pick {
+            slot: "judge".into(),
+            agent: "claude".into(),
+            model: Some("opus".into()),
+            effort: None,
+            reason: "判定役には強いモデル".into(),
+        }],
+        overridden: vec!["verifier-1".into(), "verifier-2".into()],
+    };
+    let with = temp("auto-store-with");
+    let mut log = crate::demo::log();
+    let Event::Created { auto, .. } = &mut log[0][0] else {
+        panic!("the log starts with its created event");
+    };
+    *auto = Some(record.clone());
+    let dir = stored_log(&with, crate::demo::DONE_ID, &log);
+    let first = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    assert!(
+        first.lines().next().unwrap().contains(r#""auto":{"#),
+        "{first}"
+    );
+    let session = store::read_session(&dir).unwrap();
+    assert_eq!(session.auto, Some(record));
+
+    let without = temp("auto-store-without");
+    let dir = stored_demo(&without);
+    let first = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    assert!(!first.lines().next().unwrap().contains(r#""auto""#));
+    assert_eq!(store::read_session(&dir).unwrap().auto, None);
+    for root in [with, without] {
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn auto_a_failed_or_cancelled_replan_keeps_the_fill_already_made() {
+    let (mut screen, link, planned, mut text, repo) = auto_ready("auto-replan", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    let (request, one) = answered(&planned, 0);
+    one.answer
+        .send(Ok(answer_for(&one, &request, ANSWER)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    let filled = start::read(&screen.tree, &screen.start);
+    let heading = "自動割り当て（claude (sonnet · medium) が決定）";
+    // codex is asked again and runs out of time: the rows the first fill
+    // made and its block stay, under the failure.
+    choose_planner(&mut screen, 1);
+    assert!(start_text(&screen).contains(heading));
+    let (_, second) = answered(&planned, 0);
+    second.answer.send(Err(PlanError::Timeout(180))).unwrap();
+    screen.poll_live(&mut text);
+    assert_eq!(start::read(&screen.tree, &screen.start), filled);
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains(
+            "自動割り当てに失敗しました: codex (gpt-6.2-sol · medium) が 180 秒以内に割り当てを返しませんでした"
+        ),
+        "{shown}"
+    );
+    assert!(shown.contains(heading), "{shown}");
+    assert!(shown.contains("判定役: codex (gpt-6.2-sol · high) — 判定は深い推論が要るため\n"));
+    // A third attempt, cancelled: the same.
+    choose_planner(&mut screen, 0);
+    press_button(&mut screen, &Action::AutoCancel);
+    assert!(start_text(&screen).contains(heading));
+    act(&mut screen, Action::Start);
+    let sent = commands(&link);
+    let [Command::Start { auto, .. }] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let record = auto.clone().expect("the fill made before is recorded");
+    assert_eq!(record.planner, "claude (sonnet · medium)");
+    let slots: Vec<&str> = record.picks.iter().map(|p| p.slot.as_str()).collect();
+    assert_eq!(slots, ["judge", "verifier-1", "verifier-2", "verifier-3"]);
+    assert!(record.overridden.is_empty());
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_a_changed_strategy_or_a_removed_row_is_a_change_of_that_row_only() {
+    let (mut screen, link, planned, mut text, repo) = auto_ready("auto-rows", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    let (request, one) = answered(&planned, 0);
+    // Verifiers 1 and 2 get the same agent, model and effort.
+    let alike = ANSWER.replace(
+        r#""agent":"agy","model":null,"effort":"medium""#,
+        r#""agent":"claude","model":"opus","effort":null"#,
+    );
+    one.answer
+        .send(Ok(answer_for(&one, &request, &alike)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    // Verifier 3's strategy goes from 回帰 to the next one: its reason
+    // was given for 回帰.
+    let strategy = screen.start.panel[2].strategy;
+    press_down(&mut screen, strategy, &mut text);
+    assert_ne!(
+        start::read(&screen.tree, &screen.start).panel[2].strategy,
+        StrategyChoice::Builtin(BuiltinStrategy::Regression)
+    );
+    screen.poll_live(&mut text);
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains(
+            "検証者 3: codex (gpt-6-luna · low) — 回帰の確認は定型的なため（手動で変更）"
+        ),
+        "{shown}"
+    );
+    // Verifier 1's row goes, and verifier 2's, alike, moves up into its
+    // place: it keeps its own pick and takes none of the removed row's.
+    act(&mut screen, Action::RemovePanelRow(0));
+    screen.poll_live(&mut text);
+    let shown = start_text(&screen);
+    assert!(
+        shown.contains("検証者 1: claude (opus) — 仕様との突き合わせが得意なため（手動で変更）"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("検証者 2: claude (opus) — 反証は別系統のモデルが良いため\n"),
+        "{shown}"
+    );
+    act(&mut screen, Action::Start);
+    let sent = commands(&link);
+    let [Command::Start { auto, .. }] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let record = auto.clone().expect("the start carries the assignment");
+    let slots: Vec<&str> = record.picks.iter().map(|p| p.slot.as_str()).collect();
+    assert_eq!(slots, ["judge", "verifier-2"]);
+    assert_eq!(record.picks[1].reason, "反証は別系統のモデルが良いため");
+    assert_eq!(record.overridden, ["verifier-1", "verifier-3"]);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn auto_opening_a_past_verification_while_deciding_stops_the_planner() {
+    let root = temp("auto-open-past");
+    let dir = stored_demo(&root);
+    let (mut screen, link, planned, mut text, repo) =
+        auto_ready("auto-open-past-repo", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    act(&mut screen, Action::OpenPast(dir));
+    assert!(screen.session.is_some(), "the stored verification is shown");
+    assert!(
+        planned.borrow()[0]
+            .cancel
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(!matches!(
+        screen.auto.state,
+        auto::AutoState::Running { .. }
+    ));
+    // What it says late is never read.
+    let (request, late) = answered(&planned, 0);
+    let _ = late.answer.send(Ok(answer_for(&late, &request, ANSWER)));
+    screen.poll_live(&mut text);
+    act(&mut screen, Action::NewVerification);
+    screen.poll_live(&mut text);
+    assert!(screen.auto.menu().is_some(), "the pull-down is back");
+    assert!(!start_text(&screen).contains("自動割り当て（"));
+    assert!(!start_text(&screen).contains("が割り当てを決めています"));
+    assert_eq!(
+        start::read(&screen.tree, &screen.start).judge,
+        start::Form::for_kinds(screen.start.kinds()).judge
+    );
+    assert!(
+        !commands(&link)
+            .iter()
+            .any(|c| matches!(c, Command::Start { .. }))
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+/// The pull-down and 中止 are made once and kept: planning hides one and
+/// shows the other. Hiding the focused one does not drop focus: choosing a
+/// planner from the keyboard puts it on 中止, and 中止, a result or a
+/// failure put it back on the pull-down. A planner ending while focus is
+/// in another control leaves it there.
+#[test]
+fn auto_focus_follows_the_control_shown_in_place_of_the_focused_one() {
+    let (mut screen, _link, planned, mut text, repo) = auto_ready("auto-focus", &AgentKind::ALL);
+    let menu = screen.auto.menu().expect("the pull-down is shown");
+
+    choose_planner(&mut screen, 0);
+    let stop = widget_for(&screen, &Action::AutoCancel).expect("中止 is shown");
+    assert_eq!(screen.tree.focused(), Some(stop), "planning: focus on 中止");
+    // 中止 pressed from the keyboard, where focus already is.
+    press(&mut screen, noa_gpui_core::Key::Space);
+    assert!(
+        planned.borrow()[0]
+            .cancel
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert_eq!(screen.auto.menu(), Some(menu), "the same pull-down is back");
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "stopped: focus on the pull-down"
+    );
+
+    choose_planner(&mut screen, 0);
+    assert_eq!(widget_for(&screen, &Action::AutoCancel), Some(stop));
+    assert_eq!(screen.tree.focused(), Some(stop));
+    let (request, one) = answered(&planned, 1);
+    one.answer
+        .send(Ok(answer_for(&one, &request, ANSWER)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    assert!(start_text(&screen).contains("自動割り当て（"), "filled");
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "filled: focus on the pull-down"
+    );
+
+    choose_planner(&mut screen, 0);
+    let (_, one) = answered(&planned, 1);
+    one.answer.send(Err(PlanError::Spawn("x".into()))).unwrap();
+    screen.poll_live(&mut text);
+    assert!(start_text(&screen).contains("自動割り当てに失敗しました"));
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "failed: focus on the pull-down"
+    );
+
+    // Focus moved to the repository field while planning stays there when
+    // the planner ends.
+    choose_planner(&mut screen, 0);
+    assert_eq!(screen.tree.focused(), Some(stop));
+    screen.tree.set_focus(Some(screen.start.repo));
+    let (request, one) = answered(&planned, 1);
+    one.answer
+        .send(Ok(answer_for(&one, &request, ANSWER)))
+        .unwrap();
+    screen.poll_live(&mut text);
+    assert!(!matches!(
+        screen.auto.state,
+        auto::AutoState::Running { .. }
+    ));
+    assert_eq!(screen.tree.focused(), Some(screen.start.repo));
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+/// A rebuild while the pull-down's menu is open keeps the pull-down, so
+/// the item chosen after it still starts that planner.
+#[test]
+fn auto_a_rebuild_while_the_menu_is_open_keeps_the_chosen_item() {
+    let (mut screen, _link, planned, mut text, repo) =
+        auto_ready("auto-open-menu", &AgentKind::ALL);
+    let menu = screen.auto.menu().expect("the pull-down is shown");
+    screen.tree.set_focus(Some(menu));
+    press(&mut screen, noa_gpui_core::Key::Space);
+    assert!(
+        screen.tree.overlays().any(|id| screen
+            .tree
+            .get::<noa_gpui_core::widgets::Menu>(id)
+            .is_some()),
+        "the menu is open"
+    );
+    screen.rebuild(&mut text);
+    screen.poll_live(&mut text);
+    assert_eq!(screen.auto.menu(), Some(menu));
+    press(&mut screen, noa_gpui_core::Key::ArrowDown);
+    press(&mut screen, noa_gpui_core::Key::ArrowDown);
+    press(&mut screen, noa_gpui_core::Key::Enter);
+    let planned = planned.borrow();
+    assert_eq!(planned.len(), 1, "the chosen item started a planner");
+    assert_eq!(planned[0].job.planner.agent, "codex");
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+/// Resuming an unfinished past verification while a planner decides
+/// leaves the start view: the planner stops, as for 検証を開始.
+#[test]
+fn auto_resuming_a_past_verification_while_deciding_stops_the_planner() {
+    let root = temp("auto-resume-past");
+    let dir = stored_unfinished(&root);
+    let (mut screen, link, planned, mut text, repo) =
+        auto_ready("auto-resume-past-repo", &AgentKind::ALL);
+    choose_planner(&mut screen, 0);
+    act(&mut screen, Action::ResumePast(dir.clone()));
+    assert_eq!(commands(&link), [Command::Resume { dir: dir.clone() }]);
+    assert!(
+        planned.borrow()[0]
+            .cancel
+            .load(std::sync::atomic::Ordering::Acquire),
+        "the planner was not cancelled"
+    );
+    assert!(!matches!(
+        screen.auto.state,
+        auto::AutoState::Running { .. }
+    ));
+    // The resumed verification comes up; the late answer is never read.
+    let session = store::read_session(&dir).unwrap();
+    link.snapshots.send(snapshot(session, None, 0)).unwrap();
+    let (request, late) = answered(&planned, 0);
+    let _ = late.answer.send(Ok(answer_for(&late, &request, ANSWER)));
+    screen.poll_live(&mut text);
+    assert!(
+        screen.session.is_some(),
+        "the resumed verification is shown"
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(repo);
 }

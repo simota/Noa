@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::auto_assign::AutoRecord;
+
 /// Wall-clock time in milliseconds since the Unix epoch. Always injected by
 /// the caller, so the model never reads a clock itself.
 pub type Millis = u64;
@@ -210,6 +212,12 @@ pub enum RunEvent {
         branch: Option<String>,
         label: String,
         at: Millis,
+        /// The auto-assignment the run was started with
+        /// (`docs/specs/auto-assign.md` L1-7). Optional and left out when
+        /// `None`, so older binaries read the line, and lines without it
+        /// read here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto: Option<AutoRecord>,
     },
     /// Written after the spawn: the float and the board tab it is on.
     RunPaneAssigned {
@@ -359,6 +367,7 @@ mod tests {
             branch: Some("task-run-5".into()),
             label: "task:run-5".into(),
             at: 5,
+            auto: None,
         };
         let local = RunEvent::RunStarted {
             run: RunId::new("run-6"),
@@ -368,6 +377,7 @@ mod tests {
             branch: None,
             label: "task:run-6".into(),
             at: 6,
+            auto: None,
         };
         let assigned = RunEvent::RunPaneAssigned {
             run: RunId::new("run-5"),
@@ -402,6 +412,131 @@ mod tests {
         assert!(
             serde_json::from_str::<RunEvent>(r#"{"event":"RunLost","run":"r","at":1}"#).is_err()
         );
+    }
+
+    fn auto_record() -> AutoRecord {
+        AutoRecord {
+            planner: "claude (sonnet · medium)".into(),
+            at: 4,
+            picks: vec![crate::auto_assign::Pick {
+                slot: "worker".into(),
+                agent: "codex".into(),
+                model: None,
+                effort: None,
+                reason: "テストの修正なので codex で十分".into(),
+            }],
+            overridden: Vec::new(),
+        }
+    }
+
+    /// Auto-assign D6: `auto` is an optional field of `RunStarted`; a line
+    /// with it reads back with it, and a line without it (any log written
+    /// before) reads as `None`.
+    #[test]
+    fn auto_on_run_started_round_trips_and_is_left_out_when_none() {
+        let with = RunEvent::RunStarted {
+            run: RunId::new("run-7"),
+            task: TaskRef::Local("t-1".into()),
+            agent: AgentKind::Codex,
+            workdir: PathBuf::from("/src/noa"),
+            branch: None,
+            label: "task:run-7".into(),
+            at: 7,
+            auto: Some(auto_record()),
+        };
+        let json = line(&with);
+        assert_eq!(
+            json,
+            r#"{"event":"RunStarted","run":"run-7","task":{"local":"t-1"},"agent":"codex","workdir":"/src/noa","branch":null,"label":"task:run-7","at":7,"auto":{"planner":"claude (sonnet · medium)","at":4,"picks":[{"slot":"worker","agent":"codex","reason":"テストの修正なので codex で十分"}]}}"#
+        );
+        assert_eq!(serde_json::from_str::<RunEvent>(&json).unwrap(), with);
+        let old = r#"{"event":"RunStarted","run":"run-6","task":{"local":"t-1"},"agent":"claude","workdir":"/src/noa","branch":null,"label":"task:run-6","at":6}"#;
+        let RunEvent::RunStarted { auto, .. } = serde_json::from_str(old).unwrap() else {
+            panic!("not RunStarted");
+        };
+        assert_eq!(auto, None);
+    }
+
+    /// Auto-assign D6: an older binary, whose `RunStarted` has no `auto`,
+    /// still reads a line that has one (no `deny_unknown_fields`).
+    #[test]
+    fn an_older_run_started_reads_a_line_with_auto() {
+        #[derive(Deserialize)]
+        #[serde(tag = "event")]
+        enum Old {
+            RunStarted {
+                run: RunId,
+                task: TaskRef,
+                agent: AgentKind,
+                workdir: PathBuf,
+                branch: Option<String>,
+                label: String,
+                at: Millis,
+            },
+        }
+        let json = line(&RunEvent::RunStarted {
+            run: RunId::new("run-7"),
+            task: TaskRef::Local("t-1".into()),
+            agent: AgentKind::Codex,
+            workdir: PathBuf::from("/src/noa"),
+            branch: None,
+            label: "task:run-7".into(),
+            at: 7,
+            auto: Some(auto_record()),
+        });
+        let Old::RunStarted {
+            run,
+            task,
+            agent,
+            workdir,
+            branch,
+            label,
+            at,
+        } = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            (run, task, agent, workdir, branch, label, at),
+            (
+                RunId::new("run-7"),
+                TaskRef::Local("t-1".into()),
+                AgentKind::Codex,
+                PathBuf::from("/src/noa"),
+                None,
+                "task:run-7".into(),
+                7
+            )
+        );
+    }
+
+    /// Auto-assign U6: `runs::replay` of a log with `auto` on one run and
+    /// not on the other keeps both runs (replay drops a line it cannot
+    /// parse, so a field it did not know would lose the run).
+    #[test]
+    fn replay_keeps_runs_with_and_without_auto() {
+        let tmp = crate::testkit::TempDir::new("types-auto-replay");
+        let log = tmp.path().join("runs.jsonl");
+        let started = |run: &str, at: Millis, auto: Option<AutoRecord>| RunEvent::RunStarted {
+            run: RunId::new(run),
+            task: TaskRef::Local("t-1".into()),
+            agent: AgentKind::Codex,
+            workdir: PathBuf::from("/src/noa"),
+            branch: None,
+            label: format!("task:{run}"),
+            at,
+            auto,
+        };
+        crate::runs::append(&log, &started("run-1", 1, None)).unwrap();
+        crate::runs::append(&log, &started("run-2", 2, Some(auto_record()))).unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(!lines[0].contains("\"auto\""), "{text}");
+        assert!(
+            lines[1].contains(r#""auto":{"planner":"claude (sonnet · medium)""#),
+            "{text}"
+        );
+        let runs = crate::runs::replay(&log).unwrap();
+        let ids: Vec<&str> = runs.iter().map(|r| r.run.as_str()).collect();
+        assert_eq!(ids, ["run-1", "run-2"]);
+        assert!(runs.iter().all(|r| r.agent == AgentKind::Codex));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! of the latest [`Snapshot`] and sends [`Command`]s. What it keeps is view
 //! state: the issue filter, what the center pane shows, the composer text.
 
+mod auto;
 mod chat;
 mod composer;
 mod debate;
@@ -35,8 +36,8 @@ use noa_gpui_scene::{Color, Size};
 use noa_gpui_text::TextStore;
 
 use discussion::model::types::{
-    AgentKind, Author, DebateId, DebateStatus, IssueId, IssueState, MAX_PANEL, MODERATOR_ID,
-    Message, MsgKind, PartId, Phase, Position, Receipt, RoundNo, Session,
+    AgentKind, Author, DebateId, DebateStatus, IssueId, IssueState, MODERATOR_ID, Message, MsgKind,
+    PartId, Phase, Position, Receipt, RoundNo, Session,
 };
 
 use discussion::store::Summary;
@@ -186,6 +187,7 @@ pub struct Discussion {
     installed: Option<Installed>,
 
     start: start::Parts,
+    auto: auto::Auto,
     meeting: WidgetId,
     tree_host: WidgetId,
     center_host: WidgetId,
@@ -288,6 +290,7 @@ impl Discussion {
         );
 
         let start = start::insert(&mut tree, body);
+        let auto = auto::Auto::new(&mut tree, start.auto_controls);
 
         let meeting = tree.insert(Some(body), Container::new(fill()));
         let split = tree.insert(
@@ -325,6 +328,7 @@ impl Discussion {
             timeline_state: None,
             history: Arc::new(Vec::new()),
             installed,
+            auto,
             start,
             meeting,
             tree_host,
@@ -396,13 +400,7 @@ impl Discussion {
             self.rebuild_minutes(text);
             self.rebuild_composer(text);
         } else {
-            start::rebuild_note(
-                &mut self.tree,
-                &self.start,
-                &self.link,
-                self.installed.as_ref(),
-                text,
-            );
+            self.render_auto(text);
             self.tree
                 .set_enabled(self.start.start_button, self.agents_ready());
             start::actions(&self.start, &mut self.actions);
@@ -834,6 +832,7 @@ impl Discussion {
         if stale || (listed && self.session.is_none()) {
             self.rebuild(text);
         }
+        self.poll_auto(text);
         for notice in notices {
             self.toast(notice);
         }
@@ -845,6 +844,7 @@ impl Discussion {
     /// the start view the topic is cleared for the next discussion; the
     /// working directory, round limit and agents stay as they were set.
     fn switched(&mut self, to_start: bool) {
+        self.auto.reset();
         self.filter = None;
         self.center = Center::Chat;
         self.shown_debates.clear();
@@ -933,7 +933,7 @@ impl Discussion {
             }
             Action::Retry => self.send(Command::Retry, "失敗したブリーフを再送します"),
             Action::Send => self.send_intervention(),
-            Action::Start => self.start_session(),
+            Action::Start => self.start_session(text),
             Action::AddPanelRow => {
                 start::add_row(&mut self.tree, &mut self.start);
                 self.rebuild(text);
@@ -1069,25 +1069,13 @@ impl Discussion {
         }
     }
 
-    fn start_session(&mut self) {
+    fn start_session(&mut self, text: &mut TextStore) {
         if !self.agents_ready() {
             // The start button is disabled meanwhile; its note says why.
             return;
         }
         let form = start::read(&self.tree, &self.start);
-        if form.topic.is_empty() {
-            self.toast("議題を入力してください");
-            return;
-        }
-        if form.panel.is_empty() {
-            self.toast("パネリストを 1 人以上選んでください");
-            return;
-        }
-        if form.panel.len() > MAX_PANEL {
-            self.toast(format!("パネリストは {MAX_PANEL} 体までです"));
-            return;
-        }
-        let workdir = match start::workdir(&form.workdir) {
+        let workdir = match form.checked_workdir() {
             Ok(workdir) => workdir,
             Err(why) => {
                 self.toast(why);
@@ -1103,8 +1091,11 @@ impl Discussion {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        let auto = self.auto.record(&self.start, &form);
+        self.cancel_planning(text);
         self.send(
             Command::Start {
+                auto,
                 topic: form.topic,
                 workdir,
                 max_rounds: Some(form.max_rounds),
@@ -1116,16 +1107,23 @@ impl Discussion {
     }
 
     fn handle_message(&mut self, message: &UiMessage, text: &mut TextStore) {
-        if message.source == self.start.moderator
-            && message.downcast_ref::<SelectionChanged>().is_some()
-        {
-            start::moderator_kind_changed(&mut self.tree, &mut self.start, text);
-            return;
-        }
-        if message.downcast_ref::<SelectionChanged>().is_some()
-            && start::row_kind_changed(&mut self.tree, &mut self.start, message.source, text)
-        {
-            return;
+        if self.session.is_none() {
+            if self.handle_auto(message, text) {
+                return;
+            }
+            if message.downcast_ref::<SelectionChanged>().is_some() {
+                if message.source == self.start.moderator {
+                    start::moderator_kind_changed(&mut self.tree, &mut self.start, text);
+                } else {
+                    start::row_kind_changed(&mut self.tree, &mut self.start, message.source, text);
+                }
+                self.render_auto(text);
+            } else if message
+                .downcast_ref::<noa_gpui_core::widgets::TextChanged>()
+                .is_some()
+            {
+                self.render_auto(text);
+            }
         }
         if message.downcast_ref::<ButtonClicked>().is_none() {
             return;

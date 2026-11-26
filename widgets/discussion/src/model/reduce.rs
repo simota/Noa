@@ -10,6 +10,25 @@ use super::types::{
     MinuteItem, MinuteSection, ModeratorOutput, MsgKind, PartId, Participant, Phase, Receipt,
     Round, RoundKind, RoundNo, Session, SessionId, Stance, Verdict,
 };
+use crate::auto_assign::AutoRecord;
+
+/// The topic and its optional staffing decision are siblings on the wire.
+/// A manually created discussion can still supply just its topic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedTopic {
+    pub topic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<AutoRecord>,
+}
+
+impl<T: Into<String>> From<T> for CreatedTopic {
+    fn from(topic: T) -> Self {
+        Self {
+            topic: topic.into(),
+            auto: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -17,7 +36,8 @@ pub enum Event {
     /// Always the first event of the log, and only there.
     Created {
         id: SessionId,
-        topic: String,
+        #[serde(flatten)]
+        topic: CreatedTopic,
         /// Absent in logs written before sessions could name a directory.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workdir: Option<std::path::PathBuf>,
@@ -170,7 +190,8 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
     };
     let mut session = Session {
         id: id.clone(),
-        topic: topic.clone(),
+        topic: topic.topic.clone(),
+        auto: topic.auto.clone(),
         workdir: workdir.clone(),
         max_rounds: *max_rounds,
         user_max_rounds: *max_rounds,

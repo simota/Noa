@@ -43,6 +43,7 @@ pub struct Snapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Start {
+        auto: Option<review::auto_assign::AutoRecord>,
         request: String,
         target: Box<Target>,
         max_rounds: RoundNo,
@@ -109,6 +110,7 @@ pub enum Command {
 pub type Notice = (u64, String);
 
 pub struct Channel {
+    pub wake: Arc<dyn Fn() + Send + Sync>,
     pub snapshots: Receiver<Snapshot>,
     pub notices: Receiver<Notice>,
     /// One `()` each time a runner has stopped and let go of its log, so
@@ -200,6 +202,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
             }
         })
         .expect("spawn review-clock thread");
+    let ui_wake = Arc::clone(&wake);
     std::thread::Builder::new()
         .name("review-commands".into())
         .spawn(move || {
@@ -217,6 +220,7 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static, link: Link) -> Channel {
         })
         .expect("spawn review-commands thread");
     Channel {
+        wake: ui_wake,
         snapshots,
         notices,
         released,
@@ -317,6 +321,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
             }
             (
                 Command::Start {
+                    auto,
                     request,
                     target,
                     max_rounds,
@@ -331,6 +336,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     continue;
                 };
                 runner::Start::New(Box::new(runner::NewReview {
+                    auto,
                     request,
                     target: *target,
                     max_rounds,
@@ -616,6 +622,7 @@ impl Channel {
         let (timeline_tx, timelines) = mpsc::channel();
         let (commands, command_rx) = mpsc::channel();
         let channel = Channel {
+            wake: Arc::new(|| {}),
             snapshots,
             notices,
             released,

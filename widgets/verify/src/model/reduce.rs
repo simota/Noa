@@ -49,6 +49,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
             verifiers,
             confirm,
             at,
+            auto,
         },
         rest,
     )) = batch.split_first()
@@ -87,6 +88,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
         judge: judge.clone(),
         verifiers: verifiers.clone(),
         confirm: *confirm,
+        auto: auto.clone(),
         criteria_brief: None,
         criteria_accepted: false,
         criteria_summary: String::new(),

@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use competition::auto_assign::AutoRecord;
 use competition::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
 use competition::model::export;
 use competition::model::types::{
@@ -51,6 +52,9 @@ pub enum Start {
         judges: Vec<AgentChoice>,
         panel: Vec<AgentChoice>,
         root: PathBuf,
+        /// The auto-assignment the panel was filled from, recorded in the
+        /// created event; `None` when it was staffed by hand.
+        auto: Option<AutoRecord>,
     },
     /// Continues the competition logged in `dir` (`Store::open` +
     /// `Engine::resume`): agents still in their panes are taken up again,
@@ -424,6 +428,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 judges,
                 panel,
                 root,
+                auto,
             } => {
                 if let Some(workdir) = &workdir {
                     store::prepare_workdir(workdir)
@@ -440,7 +445,8 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     panel: &panel,
                 };
                 let (engine, output) =
-                    Engine::create_in(id, setup, &dir, config, now).map_err(|e| e.to_string())?;
+                    Engine::create_in_with_auto(id, setup, auto, &dir, config, now)
+                        .map_err(|e| e.to_string())?;
                 let store = Store::create(&dir, &output.batches[0])
                     .map_err(|e| format!("create {}: {e}", dir.display()))?;
                 // Prepare each contestant's private output directory upfront.
@@ -1751,6 +1757,7 @@ mod tests {
             judges: vec![AgentKind::Claude.into()],
             panel,
             root: root.to_owned(),
+            auto: None,
         }
     }
 
@@ -2410,6 +2417,7 @@ mod tests {
             judges: vec![AgentKind::Claude.into(); judges],
             panel: vec![AgentKind::Claude.into(); n],
             root: root.to_owned(),
+            auto: None,
         }
     }
 
@@ -2961,6 +2969,7 @@ mod tests {
             judges: vec![AgentKind::Claude.into()],
             panel: vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
             root: root.clone(),
+            auto: None,
         };
         let (mut runner, actions, updates) = rig_on(&fake, start);
         let mut conn = fake.clone();
@@ -3094,6 +3103,50 @@ mod tests {
              startup (2 idle contestants): panes={startup_panes} paste_ready={startup_paste} screen={startup_screen} changes={startup_changes}\n  \
              steady-state (100 ticks):     panes={steady_panes} paste_ready={steady_paste} screen={steady_screen} changes={steady_changes}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The record of an auto-assigned start goes into the log's created
+    /// line, and the log still opens (for a resume) with it.
+    #[test]
+    fn a_new_competition_records_its_auto_assignment_in_the_created_line() {
+        use competition::auto_assign::Pick;
+        use competition::model::reduce::Event;
+        let fake = fake();
+        let root = temp_root();
+        let record = AutoRecord {
+            planner: "claude (sonnet · medium)".into(),
+            at: 42,
+            picks: vec![Pick {
+                slot: "judge-1".into(),
+                agent: "claude".into(),
+                model: None,
+                effort: None,
+                reason: "全体を見渡せる".into(),
+            }],
+            overridden: vec!["contestant-1".into()],
+        };
+        let mut start = new_start(
+            &root,
+            vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+        );
+        let Start::New { auto, .. } = &mut start else {
+            unreachable!()
+        };
+        *auto = Some(record.clone());
+        let (runner, _actions, _updates) =
+            open_wired(&fake, start).unwrap_or_else(|e| panic!("{e}"));
+        let dir = runner.store.dir().to_owned();
+        drop(runner);
+        let log = fs::read_to_string(dir.join(store::EVENTS_FILE)).unwrap();
+        let first: Vec<Event> = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+        let [Event::Created { request, .. }] = &first[..] else {
+            panic!("{first:?}");
+        };
+        assert_eq!(request.request, "Design a music player UI");
+        assert_eq!(request.auto.as_ref(), Some(&record));
+        let (_store, session) = Store::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(session.request, "Design a music player UI");
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -9,6 +9,7 @@
 //! keeps is view state: the tab, the filters, the selection, the drafts,
 //! the open log, the file waiting for its caption.
 
+mod auto;
 mod board;
 mod cards;
 mod composer;
@@ -36,8 +37,8 @@ use noa_gpui_core::style::{
     Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Alert, AlertResponse, AlertStyle, Container, Label, ScrollView, SelectionChanged, SplitPane,
-    SplitView, StatusBar, Tag, TextChanged, Toast, Tone,
+    Alert, AlertResponse, AlertStyle, Container, Label, MenuChosen, ScrollView, SelectionChanged,
+    SplitPane, SplitView, StatusBar, Tag, TextChanged, Toast, Tone,
 };
 use noa_gpui_core::{
     DragData, Event as UiEvent, Message as UiMessage, Role, Style, Theme, UiTree, WidgetId,
@@ -80,6 +81,10 @@ const EXTEND_BY: [RoundNo; 2] = [1, 3];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Start,
+    /// 「自動で割り当て」: `agent` decides the agent rows.
+    AutoAssign(AgentKind),
+    /// 中止 on the planner deciding.
+    AutoCancel,
     AddPanelRow,
     RemovePanelRow(usize),
     /// Opens a panel to choose the spec file.
@@ -303,6 +308,10 @@ pub struct Verify {
     attach_current: Option<evidence::AttachDraft>,
     attach_queue: VecDeque<evidence::AttachDraft>,
     opener: Opener,
+    /// 「自動で割り当て」 in the start view.
+    auto: auto::Auto,
+    /// Wakes the screen from a thread it starts (the planner).
+    wake: Arc<dyn Fn() + Send + Sync>,
 
     start: start::Parts,
     editor: criteria::Editor,
@@ -378,7 +387,9 @@ impl Verify {
     /// The live screen. `installed` delivers which agents the login shell
     /// has; until it does, the start button waits.
     pub fn live(channel: Channel, installed: Receiver<Installed>) -> Self {
+        let wake = channel.waker();
         let mut screen = Self::build(Source::Live(channel), Link::Connecting, None);
+        screen.wake = wake;
         screen.installed = Some(installed);
         screen.detection = start::Detection::Pending;
         screen.rebuild(&mut TextStore::new(Default::default()));
@@ -539,6 +550,8 @@ impl Verify {
             attach_current: None,
             attach_queue: VecDeque::new(),
             opener: system_opener(),
+            auto: auto::Auto::new(auto::system_plan()),
+            wake: Arc::new(|| {}),
             start,
             editor: criteria::Editor::default(),
             board,
@@ -639,6 +652,8 @@ impl Verify {
                 ),
             }
             start::actions(&self.start, &mut self.actions);
+            self.show_auto(text);
+            self.auto.actions(&mut self.actions);
             start::rebuild_past(
                 &mut self.tree,
                 &self.start,
@@ -676,8 +691,11 @@ impl Verify {
     }
 
     /// Leaves whatever verification is on screen: its runner stops (an
-    /// unfinished one stays resumable from the list).
+    /// unfinished one stays resumable from the list). A planner deciding
+    /// the start view's rows stops too: the view it would fill, and its
+    /// 中止, go from the screen.
     fn leave(&mut self) {
+        self.auto.cancel();
         if let Source::Live(channel) = &self.source {
             channel.leave();
             if !self.read_only && self.session.as_ref().is_some_and(|s| !s.closed) {
@@ -1168,8 +1186,38 @@ impl Verify {
         }
     }
 
+    /// Draws 「自動で割り当て」 and its lines in the note as the form is
+    /// now (nothing is redrawn when nothing changed).
+    fn show_auto(&mut self, text: &mut TextStore) {
+        let form = start::read(&self.tree, &self.start);
+        self.auto
+            .show(&mut self.tree, &self.start, &form, &self.detection, text);
+    }
+
+    /// Takes the planner's answer once it has come (the rows are filled
+    /// from a valid one), and keeps the control and the assignment block in
+    /// step with the form.
+    fn poll_auto(&mut self, text: &mut TextStore) {
+        if self.session.is_some() {
+            return;
+        }
+        let form = start::read(&self.tree, &self.start);
+        let was_running = matches!(self.auto.state, auto::AutoState::Running { .. });
+        let ids = self.start.row_ids();
+        if let Some(filled) = self.auto.poll(&form, &ids, system_now()) {
+            let rows: Vec<_> = filled.panel.iter().map(|row| row.agent.clone()).collect();
+            start::set_agents(&mut self.tree, &mut self.start, &filled.judge, &rows, text);
+        }
+        if was_running && !matches!(self.auto.state, auto::AutoState::Running { .. }) {
+            self.rebuild(text);
+        } else {
+            self.show_auto(text);
+        }
+    }
+
     fn poll_live(&mut self, text: &mut TextStore) {
         self.poll_installed(text);
+        self.poll_auto(text);
         if matches!(self.source, Source::Live(_)) {
             self.recheck_stored();
         }
@@ -1527,6 +1575,29 @@ impl Verify {
     fn handle_action(&mut self, action: Action, text: &mut TextStore) {
         match action {
             Action::Start => self.start_verification(text),
+            Action::AutoAssign(kind) => {
+                // A demo or snapshot runs no agent CLI, as it sends nothing.
+                if !matches!(self.source, Source::Live(_)) {
+                    return self.toast("デモ表示では操作を送信できません");
+                }
+                let Some(planner) = verify::auto_assign::planner(kind.command()) else {
+                    return;
+                };
+                let form = start::read(&self.tree, &self.start);
+                let wake = Arc::clone(&self.wake);
+                self.auto.begin(
+                    planner,
+                    &form,
+                    &self.start.row_ids(),
+                    self.start.kinds(),
+                    Box::new(move || wake()),
+                );
+                self.rebuild(text);
+            }
+            Action::AutoCancel => {
+                self.auto.cancel();
+                self.rebuild(text);
+            }
             Action::AddPanelRow => {
                 start::add_row(&mut self.tree, &mut self.start);
                 self.rebuild(text);
@@ -1557,9 +1628,9 @@ impl Verify {
                 }
                 Ok(session) => match self.detection.resume_blocker(&session) {
                     Some(why) => self.toast(why),
-                    None => self.send_cmd(Command::Resume { dir }),
+                    None => self.resume_past(dir, text),
                 },
-                Err(_) => self.send_cmd(Command::Resume { dir }),
+                Err(_) => self.resume_past(dir, text),
             },
             Action::VerifyAgain(dir) => self.verify_again(dir, text),
             Action::MorePast => {
@@ -1757,6 +1828,7 @@ impl Verify {
             Action::NewVerification => {
                 self.leave();
                 self.refusal = None;
+                self.auto.reset();
                 let form = start::Form::for_kinds(self.start.kinds());
                 start::fill(&mut self.tree, &mut self.start, &form, text);
                 self.start.refilled = false;
@@ -1900,6 +1972,7 @@ impl Verify {
     fn refuse(&mut self, why: String, text: &mut TextStore) {
         start::show_refusal(&mut self.tree, &self.start, &why, text);
         self.refusal = Some(why);
+        self.show_auto(text);
     }
 
     fn start_verification(&mut self, text: &mut TextStore) {
@@ -1915,6 +1988,9 @@ impl Verify {
         if let Err(why) = verify::engine::check_panel(&form.judge, &form.panel) {
             return self.refuse(why, text);
         }
+        // A planner still deciding stops: the rows start as they are.
+        let was_planning = matches!(self.auto.state, auto::AutoState::Running { .. });
+        let auto = self.auto.record(&form, &self.start.row_ids());
         self.refusal = None;
         self.starting = true;
         start::rebuild_note(
@@ -1934,7 +2010,23 @@ impl Verify {
             round_cap: form.round_cap,
             judge: form.judge,
             panel: form.panel,
+            auto,
         });
+        if was_planning {
+            self.rebuild(text);
+        }
+    }
+
+    /// Resumes the unfinished past verification in `dir` from the start
+    /// view's list. It leaves the start view, as 検証を開始 does, so a
+    /// planner still deciding its rows stops.
+    fn resume_past(&mut self, dir: PathBuf, text: &mut TextStore) {
+        let was_planning = matches!(self.auto.state, auto::AutoState::Running { .. });
+        self.auto.cancel();
+        self.send_cmd(Command::Resume { dir });
+        if was_planning {
+            self.rebuild(text);
+        }
     }
 
     fn verify_again(&mut self, dir: Option<PathBuf>, text: &mut TextStore) {
@@ -1953,6 +2045,8 @@ impl Verify {
             self.leave();
         }
         self.refusal = None;
+        // The new run is manual unless the person auto-assigns again (L1-7).
+        self.auto.reset();
         let left_out = start::fill(&mut self.tree, &mut self.start, &form, text);
         // Set by the person: the agent check that reports later only drops
         // kinds that are not installed.
@@ -2049,6 +2143,18 @@ impl Screen for Verify {
         {
             let query = query.clone();
             evidence::search_log(&mut self.tree, &self.log, &query);
+            return;
+        }
+        if let Some(MenuChosen(index)) = message.downcast_ref::<MenuChosen>()
+            && Some(message.source) == self.auto.menu()
+        {
+            if let Some(planner) = self.auto.chosen(*index)
+                && let Some(kind) = AgentKind::ALL
+                    .into_iter()
+                    .find(|k| k.command() == planner.agent)
+            {
+                self.handle_action(Action::AutoAssign(kind), text);
+            }
             return;
         }
         if message.downcast_ref::<SelectionChanged>().is_some() {

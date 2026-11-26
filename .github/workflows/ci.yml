@@ -24,6 +24,13 @@ env:
   # it, Cargo reuses what an earlier build left (artifacts are keyed by
   # version and features, so differing lockfiles still build apart).
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  # Every CI build starts from a fresh checkout, so incremental state is never
+  # reused: it only costs time to write (local cold run 469s -> 423s, target
+  # 23G -> 17G). Line tables keep file:line in backtraces but drop the rest of
+  # the debug info (423s -> 370s, 17G -> 8.1G). Neither changes what the tests
+  # check: debug assertions and overflow checks stay on.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   build-and-test:
@@ -47,9 +54,43 @@ jobs:
             --no-self-update
           rustup default 1.92.0
 
+      # Restore the build of the registry dependencies, which a fresh checkout
+      # otherwise compiles from scratch. Noa's own crates rebuild every run
+      # (their sources are newer than any cached artifact), so the key only
+      # follows what decides the dependencies: the toolchain, the lockfiles
+      # and the manifests (the widgets set per-package profiles there).
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'widgets/*/Cargo.lock', 'widgets/*/Cargo.toml') }}
+          restore-keys: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-
+
       # The checks live in scripts/verify.sh; CI lists none of its own.
       - name: Verify
         run: scripts/verify.sh --full
+
+      # Only main saves, so pull requests restore main's cache and never
+      # evict it from the repository's 10 GB quota with their own.
+      - name: Trim build cache
+        if: success() && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: scripts/ci-trim-target.sh
+
+      - name: Save build cache
+        if: success() && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Keep verify output
         if: failure()
@@ -89,8 +130,42 @@ jobs:
             --no-self-update
           rustup default 1.92.0
 
+      # Restore the build of the registry dependencies, which a fresh checkout
+      # otherwise compiles from scratch. Noa's own crates rebuild every run
+      # (their sources are newer than any cached artifact), so the key only
+      # follows what decides the dependencies: the toolchain, the lockfiles
+      # and the manifests (the widgets set per-package profiles there).
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'widgets/*/Cargo.lock', 'widgets/*/Cargo.toml') }}
+          restore-keys: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-
+
       - name: Verify
         run: scripts/verify.sh --full
+
+      # Only main saves, so pull requests restore main's cache and never
+      # evict it from the repository's 10 GB quota with their own.
+      - name: Trim build cache
+        if: success() && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: scripts/ci-trim-target.sh
+
+      - name: Save build cache
+        if: success() && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Keep verify output
         if: failure()

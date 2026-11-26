@@ -6,14 +6,14 @@
 //! This file is shared byte for byte by the tasks (master), review, verify,
 //! discussion and competition widgets, so it names nothing of its crate;
 //! a test in each copy compares it with the master. It uses only `std`,
-//! `serde` and `serde_json`: `setsid` and `killpg` are declared here
-//! rather than taken from `libc`, which not every one of the crates has.
+//! `serde` and `serde_json`: `setsid`, `killpg` and `waitid` are declared
+//! here rather than taken from `libc`, which not every one of the crates has.
 
 use std::io::Read;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,8 @@ const DRAIN: Duration = Duration::from_millis(500);
 pub const PROMPT_MAX: usize = 64 * 1024;
 /// The run's content inside the prompt.
 pub const CONTENT_MAX: usize = 32 * 1024;
-/// What is read of the planner's answer (stdout, or codex's message file).
+/// What each of the planner's streams (stdout, stderr, codex's message
+/// file) may hold; past it the planner is not answering.
 pub const OUTPUT_MAX: usize = 256 * 1024;
 /// The end of stderr kept for the exit message.
 const STDERR_KEPT: usize = 2 * 1024;
@@ -326,7 +327,12 @@ pub fn prompt(req: &Request) -> String {
 /// `--strict-mcp-config` (with no `--mcp-config`) the MCP servers too,
 /// claude.ai connectors included. codex's read-only sandbox holds only with
 /// `approval_policy=never`: under a person's `on-request` policy a refused
-/// command is escalated, and an automatic reviewer may approve it.
+/// command is escalated, and an automatic reviewer may approve it. codex
+/// gets no MCP servers with `--ignore-user-config`, which loads neither
+/// `config.toml` (its `mcp_servers`) nor, the project's trust being in that
+/// file, a project's `.codex/config.toml`; `-c mcp_servers={}` would not do,
+/// as `-c` merges into the tables. `--disable apps` drops the ChatGPT
+/// connectors, `--disable plugins` the plugins and any servers they bring.
 pub fn script(p: &Planner) -> String {
     let model = p.model;
     match p.agent {
@@ -346,7 +352,8 @@ pub fn script(p: &Planner) -> String {
                 .map(|e| format!(" -c model_reasoning_effort={e}"))
                 .unwrap_or_default();
             format!(
-                "exec codex exec --skip-git-repo-check --sandbox read-only \
+                "exec codex exec --skip-git-repo-check --ignore-user-config \
+                 --disable apps --disable plugins --sandbox read-only \
                  -c approval_policy=never --ephemeral -m {model}{effort} \
                  -o \"${OUT_VAR}\" -- \"${PROMPT_VAR}\""
             )
@@ -550,14 +557,31 @@ pub fn spawn(job: Job, thread_name: &str, wake: impl Fn() + Send + 'static) -> P
     Planning { rx, cancel }
 }
 
-/// The C library calls the planner needs (POSIX; `pid_t` is `i32` on macOS
-/// and Linux, and `SIGKILL` is 9 on both).
+/// The C library calls the planner needs (POSIX; `pid_t` is `i32` and
+/// `idtype_t` and `id_t` are `u32` on macOS and Linux, and the constants
+/// are the same on both but `WNOWAIT`).
 mod sys {
     unsafe extern "C" {
         pub fn setsid() -> i32;
         pub fn killpg(pgrp: i32, sig: i32) -> i32;
+        pub fn waitid(idtype: u32, id: u32, infop: *mut SigInfo, options: i32) -> i32;
     }
     pub const SIGKILL: i32 = 9;
+    pub const P_PID: u32 = 1;
+    pub const WNOHANG: i32 = 1;
+    pub const WEXITED: i32 = 4;
+    /// `si_code`s of a child that ended: exited, killed, dumped core.
+    pub const CLD_EXITED: i32 = 1;
+    pub const CLD_DUMPED: i32 = 3;
+    #[cfg(target_os = "linux")]
+    pub const WNOWAIT: i32 = 0x0100_0000;
+    #[cfg(target_os = "macos")]
+    pub const WNOWAIT: i32 = 0x20;
+
+    /// Room for a `siginfo_t`, 128 bytes on Linux and 104 on macOS. Only
+    /// its first and third fields, `si_signo` and `si_code`, are read.
+    #[repr(C, align(8))]
+    pub struct SigInfo(pub [i32; 32]);
 }
 
 /// The directory codex writes its answer into, removed when dropped.
@@ -648,15 +672,15 @@ fn run_script(
     let mut child = cmd
         .spawn()
         .map_err(|e| PlanError::Spawn(format!("{shell} を起動できません: {e}")))?;
-    // Both streams are read as they come, so a chatty rc file cannot fill a
-    // pipe and stall the shell.
+    // Both streams are read to their end as they come, so a chatty rc file
+    // cannot fill a pipe and stall the shell; past `OUTPUT_MAX` they are
+    // only counted.
     let (done_tx, done_rx) = mpsc::channel();
-    let out = Arc::new(Mutex::new(Vec::new()));
-    let err = Arc::new(Mutex::new(Vec::new()));
+    let out = Arc::new(Mutex::new(Captured::default()));
+    let err = Arc::new(Mutex::new(Captured::default()));
     if let Some(stdout) = child.stdout.take() {
-        // One byte past the limit is kept, so `parse` sees it was passed.
         read_into(stdout, Arc::clone(&out), done_tx.clone(), |buf, chunk| {
-            let room = (OUTPUT_MAX + 1).saturating_sub(buf.len());
+            let room = OUTPUT_MAX.saturating_sub(buf.len());
             buf.extend(&chunk[..chunk.len().min(room)]);
         });
     }
@@ -668,29 +692,32 @@ fn run_script(
         });
     }
     let deadline = Instant::now() + timeout;
-    let status = loop {
+    let unknown =
+        |e: std::io::Error| PlanError::Spawn(format!("{shell} の終了を確認できません: {e}"));
+    // The shell is reaped only by `kill_group`, after its group was killed,
+    // on every path: once reaped, its pid, and so the id of a group left
+    // empty, may already be another process's.
+    loop {
         if cancel.load(Ordering::Relaxed) {
-            kill_group(&mut child);
+            let _ = kill_group(&mut child);
             return Err(PlanError::Cancelled);
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
-            Ok(None) => {
-                kill_group(&mut child);
+        match exited(&child) {
+            Ok(true) => break,
+            Ok(false) if Instant::now() < deadline => std::thread::sleep(POLL),
+            Ok(false) => {
+                let _ = kill_group(&mut child);
                 return Err(PlanError::Timeout(timeout.as_secs()));
             }
             Err(e) => {
-                kill_group(&mut child);
-                return Err(PlanError::Spawn(format!(
-                    "{shell} の終了を確認できません: {e}"
-                )));
+                let _ = kill_group(&mut child);
+                return Err(unknown(e));
             }
         }
-    };
+    }
     // What the shell left running (an rc file's background job) goes with
     // it: it would hold the pipes, and their readers, open.
-    kill_group(&mut child);
+    let status = kill_group(&mut child).map_err(unknown)?;
     let drained = Instant::now() + DRAIN;
     for _ in 0..2 {
         let left = drained.saturating_duration_since(Instant::now());
@@ -698,14 +725,17 @@ fn run_script(
             break;
         }
     }
-    let taken = |buf: &Mutex<Vec<u8>>| {
-        String::from_utf8_lossy(&buf.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
-    };
+    let out = std::mem::take(&mut *out.lock().unwrap_or_else(|e| e.into_inner()));
+    let err = std::mem::take(&mut *err.lock().unwrap_or_else(|e| e.into_inner()));
     if !status.success() {
         return Err(PlanError::Exit {
             code: status.code(),
-            stderr_tail: taken(&err),
+            stderr_tail: err.text(),
         });
+    }
+    // Each stream is capped, also the one the answer is not read from.
+    if out.len > OUTPUT_MAX || err.len > OUTPUT_MAX {
+        return Err(PlanError::Unparsable("出力が大きすぎます".to_owned()));
     }
     let answer = match &out_dir {
         Some(dir) => {
@@ -720,17 +750,31 @@ fn run_script(
             }
             text
         }
-        None => taken(&out),
+        None => out.text(),
     };
     drop(out_dir);
     validate(parse(&answer)?, &req, &planner, &*check)
 }
 
-/// Reads `from` to its end on a thread of its own, `keep` adding each
-/// chunk to `buf`, then reports on `done`.
+/// One of the planner's streams as read: what was kept of it, and the
+/// length of all that came.
+#[derive(Default)]
+struct Captured {
+    kept: Vec<u8>,
+    len: usize,
+}
+
+impl Captured {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.kept).into_owned()
+    }
+}
+
+/// Reads `from` to its end on a thread of its own, counting each chunk in
+/// `buf` and `keep` adding it to what `buf` kept, then reports on `done`.
 fn read_into(
     mut from: impl Read + Send + 'static,
-    buf: Arc<Mutex<Vec<u8>>>,
+    buf: Arc<Mutex<Captured>>,
     done: mpsc::Sender<()>,
     keep: impl Fn(&mut Vec<u8>, &[u8]) + Send + 'static,
 ) {
@@ -740,24 +784,42 @@ fn read_into(
             if n == 0 {
                 break;
             }
-            keep(
-                &mut buf.lock().unwrap_or_else(|e| e.into_inner()),
-                &chunk[..n],
-            );
+            let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+            buf.len += n;
+            keep(&mut buf.kept, &chunk[..n]);
         }
         let _ = done.send(());
     });
 }
 
-/// Kills the planner's shell and all it started, then reaps the shell. The
-/// shell leads its own session, so its group is its pid.
-fn kill_group(child: &mut Child) {
+/// Whether the shell has exited, leaving it unreaped (`WNOWAIT`): until
+/// [`kill_group`] reaps it, its pid is not given to another process.
+fn exited(child: &Child) -> std::io::Result<bool> {
+    let mut info = sys::SigInfo([0; 32]);
+    let options = sys::WEXITED | sys::WNOHANG | sys::WNOWAIT;
+    // SAFETY: waitid writes at most one siginfo_t, which `info` has room
+    // for, and leaves the child as it is.
+    if unsafe { sys::waitid(sys::P_PID, child.id(), &mut info, options) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // With WNOHANG and the child still running, POSIX sets si_signo to 0.
+    // macOS reports a stopped child too, WEXITED or not (Go issue 19314),
+    // so si_code has to say the child ended.
+    let [signo, _, code, ..] = info.0;
+    Ok(signo != 0 && (sys::CLD_EXITED..=sys::CLD_DUMPED).contains(&code))
+}
+
+/// Kills the planner's shell and all it started, then reaps the shell and
+/// returns how it ended. The shell leads its own session, so its group id
+/// is its pid, which the unreaped shell (alive, or exited but seen only
+/// through [`exited`]) still holds.
+fn kill_group(child: &mut Child) -> std::io::Result<ExitStatus> {
     // SAFETY: killpg only sends a signal, to the group the unreaped shell
     // leads.
     unsafe {
         sys::killpg(child.id() as i32, sys::SIGKILL);
     }
-    let _ = child.wait();
+    child.wait()
 }
 
 #[cfg(test)]
@@ -949,7 +1011,7 @@ mod tests {
         );
         assert_eq!(
             script(&PLANNERS[1]),
-            r#"exec codex exec --skip-git-repo-check --sandbox read-only -c approval_policy=never --ephemeral -m gpt-6.2-sol -c model_reasoning_effort=medium -o "$NOA_ASSIGN_OUT" -- "$NOA_ASSIGN_PROMPT""#
+            r#"exec codex exec --skip-git-repo-check --ignore-user-config --disable apps --disable plugins --sandbox read-only -c approval_policy=never --ephemeral -m gpt-6.2-sol -c model_reasoning_effort=medium -o "$NOA_ASSIGN_OUT" -- "$NOA_ASSIGN_PROMPT""#
         );
         // Not a planner: a hand-made agy planner gets the failing script.
         for agent in ["agy", "vim"] {
@@ -1325,6 +1387,10 @@ mod tests {
             pub fn getsid(pid: i32) -> i32;
             pub fn kill(pid: i32, sig: i32) -> i32;
         }
+        #[cfg(target_os = "linux")]
+        pub const SIGSTOP_CONT: (i32, i32) = (19, 18);
+        #[cfg(target_os = "macos")]
+        pub const SIGSTOP_CONT: (i32, i32) = (17, 19);
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -1435,18 +1501,16 @@ mod tests {
             pid_file.display()
         );
         // A loaded machine may kill the shell before it wrote the pid; that
-        // run proves nothing, so it is tried again.
-        let pid: i32 = (1..)
-            .find_map(|tries| {
+        // run proves nothing, so it is tried again, five times at most.
+        let pid: i32 = (0..5)
+            .find_map(|_| {
                 let started = Instant::now();
                 let got = sh(job("claude", &dir), &script, Duration::from_secs(1));
                 assert_eq!(got, Err(PlanError::Timeout(1)));
                 assert!(started.elapsed() < Duration::from_secs(5));
-                let pid = std::fs::read_to_string(&pid_file).ok()?.trim().parse().ok();
-                assert!(pid.is_some() || tries < 5, "no pid in {tries} tries");
-                pid
+                std::fs::read_to_string(&pid_file).ok()?.trim().parse().ok()
             })
-            .unwrap();
+            .expect("the shell wrote no pid in 5 tries");
         let _ = std::fs::remove_dir_all(&dir);
         gone(pid, "the shell's child");
     }
@@ -1524,13 +1588,103 @@ mod tests {
     #[test]
     fn the_planner_shell_runs_in_a_session_of_its_own() {
         let dir = scratch("sid");
-        // SAFETY: getsid only reads this process's session id.
-        let ours = unsafe { c::getsid(0) };
-        let script =
-            format!("[ \"$(ps -o sid= -p $$ | tr -d ' ')\" != {ours} ] && printf '%s' '{ANSWER}'");
-        let got = sh(job("claude", &dir), &script, Duration::from_secs(10));
+        let pid_file = dir.join("pid");
+        let go = dir.join("go");
+        // The shell waits for `go`, so its session is read while it runs.
+        let script = format!(
+            "echo $$ > '{pid}.new' && mv '{pid}.new' '{pid}'; \
+             while [ ! -e '{go}' ]; do sleep 0.02; done; printf '%s' '{ANSWER}'",
+            pid = pid_file.display(),
+            go = go.display()
+        );
+        let job = job("claude", &dir);
+        let running = std::thread::spawn(move || sh(job, &script, Duration::from_secs(10)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let shell: i32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "the shell wrote no pid");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // SAFETY: getsid only reads a session id; -1 (an error) fails below.
+        let session = unsafe { c::getsid(shell) };
+        std::fs::write(&go, "").unwrap();
+        let got = running.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(session, shell, "the shell does not lead a session");
         assert!(got.is_ok(), "{got:?}");
+    }
+
+    /// The shell is seen to exit without being reaped, so its pid, the id
+    /// of its group, is still its own when the group is killed. A stopped
+    /// shell has not exited.
+    #[test]
+    fn an_exited_shell_stays_unreaped_until_its_group_is_killed() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "read line; exit 5"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        assert!(!exited(&child).unwrap());
+        let (stop, cont) = c::SIGSTOP_CONT;
+        // SAFETY: signals to the test's own child.
+        unsafe { c::kill(pid, stop) };
+        std::thread::sleep(Duration::from_millis(100));
+        let stopped = exited(&child).unwrap();
+        // SAFETY: as above. Continued, the shell ends when stdin closes,
+        // even if the assertion fails.
+        unsafe { c::kill(pid, cont) };
+        assert!(!stopped, "a stopped shell read as exited");
+        drop(child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !exited(&child).unwrap() {
+            assert!(Instant::now() < deadline, "the shell did not exit");
+            std::thread::sleep(POLL);
+        }
+        assert!(exited(&child).unwrap(), "seeing the exit reaped the shell");
+        // SAFETY: signal 0 only asks whether the process exists.
+        assert_eq!(unsafe { c::kill(pid, 0) }, 0, "the shell was reaped");
+        assert_eq!(kill_group(&mut child).unwrap().code(), Some(5));
+    }
+
+    /// Each stream is capped, also the one the answer is not read from:
+    /// claude's stderr, codex's stdout.
+    #[test]
+    fn a_stream_past_its_cap_is_refused() {
+        let dir = scratch("cap");
+        let too_big = Err(PlanError::Unparsable("出力が大きすぎます".into()));
+        let over = OUTPUT_MAX + 1;
+        // The interactive shell writes a line or two of its own to stderr.
+        let under = OUTPUT_MAX - 4096;
+        // (agent, its answer, bytes then sent to stdout and stderr, fits)
+        let answer = format!("printf '%s' '{ANSWER}'");
+        let in_file = format!("{answer} > \"${OUT_VAR}\"");
+        let runs = [
+            ("claude", &answer, 0, over, false),
+            ("claude", &answer, 0, under, true),
+            ("claude", &answer, OUTPUT_MAX, 0, false),
+            ("codex", &in_file, over, 0, false),
+            ("codex", &in_file, 0, over, false),
+            ("codex", &in_file, under, under, true),
+        ];
+        for (agent, answer, stdout, stderr, fits) in runs {
+            let script =
+                format!("{answer}; head -c {stdout} /dev/zero; head -c {stderr} /dev/zero >&2");
+            let got = sh(job(agent, &dir), &script, Duration::from_secs(20));
+            if fits {
+                assert!(got.is_ok(), "{agent}: {script}: {got:?}");
+            } else {
+                assert_eq!(got, too_big, "{agent}: {script}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1585,6 +1739,7 @@ mod tests {
     fn smoke() {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let mut failed = Vec::new();
         for p in PLANNERS {
             if std::env::var("NOA_ASSIGN_SMOKE")
                 .is_ok_and(|only| !only.split(',').any(|a| a == p.agent))
@@ -1603,8 +1758,16 @@ mod tests {
             eprintln!("== {} in {:?}", p.label(), started.elapsed());
             match got {
                 Ok(a) => eprintln!("{a:#?}"),
-                Err(e) => eprintln!("{e:?}\n{}", e.message(&p.label())),
+                Err(e) => {
+                    eprintln!("{e:?}\n{}", e.message(&p.label()));
+                    failed.push(p.label());
+                }
             }
         }
+        assert!(
+            failed.is_empty(),
+            "no assignment from {}",
+            failed.join(", ")
+        );
     }
 }

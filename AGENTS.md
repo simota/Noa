@@ -61,9 +61,13 @@ when no GPU adapter is available.
   macOS and Linux; clippy (`-D warnings`) and desktop-file validation run only
   on Linux, as before. It also builds `widgets/agent-dashboard`,
   `widgets/repo-browser`, `widgets/discussion`, `widgets/competition`,
-  `widgets/review`, `widgets/verify`, `widgets/tasks` and `widgets/agent-usage`, crates outside the workspace, with their tests; the tests run only on macOS (some expect the
-  widths of macOS's system fonts), except `widgets/tasks`' and `widgets/agent-usage`'s, which run on Linux too. `scripts/verify.sh` runs the same check when
+  `widgets/review`, `widgets/verify`, `widgets/tasks`, `widgets/agent-usage` and `widgets/scaffold`, crates outside the workspace, with their tests; the tests run only on macOS (some expect the
+  widths of macOS's system fonts), except `widgets/tasks`', `widgets/agent-usage`'s and `widgets/scaffold`'s, which run on Linux too. `scripts/verify.sh` runs the same check when
   a change reaches one of these crates or the Noa crates it uses by path.
+- `scripts/check-widget-registration.py` runs in every `scripts/verify.sh`: it
+  reads the places a widget is registered and fails when one disagrees with
+  `dev/scaffold/registry.json`. A new or changed widget follows
+  `docs/runbooks/add-widget.md`.
 - A failing check is named in the output; its full log is
   `.verify/<check>.log`, and timings are in `.verify/timings`.
 - The script pins the CI toolchain (`RUSTUP_TOOLCHAIN=1.92.0`). In a sandbox,

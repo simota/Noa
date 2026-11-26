@@ -1622,6 +1622,7 @@ dependencies = [
  "noa-render",
  "noa-theme",
  "noa-vt",
+ "noa-widget",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -1756,6 +1757,16 @@ version = "0.9.19"
 dependencies = [
  "noa-core",
  "simdutf8",
+]
+
+[[package]]
+name = "noa-widget"
+version = "0.9.19"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2762,6 +2773,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",

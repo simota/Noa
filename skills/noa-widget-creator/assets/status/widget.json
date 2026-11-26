@@ -1,0 +1,37 @@
+{
+  "apiVersion": "noa.widget/v1",
+  "id": "status",
+  "version": "0.1.0",
+  "title": "作業状況",
+  "description": "エージェントが取得した状況と件数を表示し、再取得の依頼を受け取る。",
+  "dataSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["message", "count"],
+    "properties": {
+      "message": {"type": "string", "maxLength": 2000},
+      "count": {"type": "integer", "minimum": 0, "maximum": 100000}
+    }
+  },
+  "initialData": {
+    "message": "結果を待っています。",
+    "count": 0
+  },
+  "view": {
+    "type": "column",
+    "id": "root",
+    "gap": "md",
+    "children": [
+      {"type": "text", "id": "message", "text": {"source": "data", "pointer": "/message"}},
+      {"type": "metric", "id": "count", "label": "件数", "value": {"source": "data", "pointer": "/count"}},
+      {"type": "button", "id": "refresh", "label": "再取得", "action": "refresh"}
+    ]
+  },
+  "actions": [
+    {
+      "id": "refresh",
+      "kind": "agent-event",
+      "payloadSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+    }
+  ]
+}

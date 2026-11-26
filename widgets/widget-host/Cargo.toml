@@ -1,0 +1,30 @@
+[package]
+name = "widget-host"
+description = "Native host for declarative repository widgets"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+noa-gpui-platform = { version = "0.2.1", features = ["native"] }
+noa-gpui-core = "0.2.1"
+noa-gpui-scene = "0.2.1"
+noa-gpui-text = "0.2.1"
+noa-widget = { path = "../../crates/noa-widget" }
+noa-ipc = { path = "../../crates/noa-ipc" }
+serde_json = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev.package.font-types]
+opt-level = 1
+[profile.dev.package.read-fonts]
+opt-level = 1
+[profile.dev.package.skrifa]
+opt-level = 1
+[profile.dev.package.harfrust]
+opt-level = 1

@@ -9,6 +9,7 @@ use crate::AttachOutputSender;
 use crate::error::IpcError;
 use crate::protocol::{Panel, Row, SpawnParams, SplitDirection, TextSource};
 use crate::timeline::{TimelineCall, TimelineError};
+use crate::widget::{WidgetCall, WidgetError};
 
 /// An IPC-visible pane id. The app maps this to its internal pointer-derived
 /// id; `noa-ipc` only ever sees `u64`.
@@ -171,6 +172,11 @@ pub trait IpcBackend: Send + Sync + 'static {
     /// timeline service refuses every call as `unsupported`.
     fn timeline(&self, _call: TimelineCall) -> Result<serde_json::Value, TimelineError> {
         Err(TimelineError::unsupported())
+    }
+
+    /// Repository widgets are owned by a service independent of the GUI loop.
+    fn widget(&self, _call: WidgetCall) -> Result<serde_json::Value, WidgetError> {
+        Err(WidgetError::unsupported())
     }
 
     /// Capabilities this backend adds to `noa.hello` after the server's own

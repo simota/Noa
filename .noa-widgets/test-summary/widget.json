@@ -1,0 +1,93 @@
+{
+  "apiVersion": "noa.widget/v1",
+  "id": "test-summary",
+  "version": "0.1.0",
+  "title": "テスト結果",
+  "description": "テスト結果を表示し、失敗したテストの再実行を担当エージェントに依頼する。",
+  "dataSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["summary", "passed", "failed", "failures"],
+    "properties": {
+      "summary": { "type": "string", "maxLength": 2000 },
+      "passed": { "type": "integer", "minimum": 0 },
+      "failed": { "type": "integer", "minimum": 0 },
+      "failures": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name"],
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
+  "initialData": {
+    "summary": "テスト結果を待っています。",
+    "passed": 0,
+    "failed": 0,
+    "failures": []
+  },
+  "view": {
+    "type": "column",
+    "id": "root",
+    "gap": "md",
+    "children": [
+      {
+        "type": "text",
+        "id": "summary",
+        "text": { "source": "data", "pointer": "/summary" }
+      },
+      {
+        "type": "row",
+        "id": "metrics",
+        "gap": "md",
+        "children": [
+          {
+            "type": "metric",
+            "id": "passed",
+            "label": "成功",
+            "value": { "source": "data", "pointer": "/passed" }
+          },
+          {
+            "type": "metric",
+            "id": "failed",
+            "label": "失敗",
+            "value": { "source": "data", "pointer": "/failed" }
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "id": "failures",
+        "rows": { "source": "data", "pointer": "/failures" },
+        "rowKey": "/id",
+        "columns": [
+          { "title": "失敗したテスト", "pointer": "/name" }
+        ]
+      },
+      {
+        "type": "button",
+        "id": "rerun",
+        "label": "失敗したテストを再実行",
+        "action": "rerun-failed"
+      }
+    ]
+  },
+  "actions": [
+    {
+      "id": "rerun-failed",
+      "kind": "agent-event",
+      "payloadSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ]
+}

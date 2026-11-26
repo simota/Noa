@@ -1362,6 +1362,16 @@ impl From<TimelineError> for RpcFail {
     }
 }
 
+impl From<crate::widget::WidgetError> for RpcFail {
+    fn from(err: crate::widget::WidgetError) -> Self {
+        Self {
+            code: err.code(),
+            data: Some(err.data()),
+            message: err.message,
+        }
+    }
+}
+
 /// Parses the `params` of `noa.updateSubscription`, which takes them by name
 /// only: anything but a JSON object is -32602. That includes a by-position
 /// array, which serde would otherwise bind to the struct's fields in
@@ -1644,6 +1654,12 @@ fn dispatch(
             "noa.unsubscribe" => {
                 require_scope(session, Scope::Read)?;
                 handle_unsubscribe(broadcaster, conn_id, req.params)
+            }
+            method if method.starts_with("noa.widget.") => {
+                let call = crate::widget::WidgetCall::parse(method, req.params)?
+                    .ok_or_else(|| RpcFail::unknown_method(method))?;
+                require_scope(session, call.scope())?;
+                backend.widget(call).map_err(Into::into)
             }
             method if method.starts_with("noa.timeline.") => {
                 let call = TimelineCall::parse(method, req.params)?

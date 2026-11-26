@@ -46,6 +46,10 @@ pub enum ErrorCode {
     /// Board timeline: this backend has no timeline service, or the post's
     /// schema version is not one it takes.
     Unsupported,
+    /// A repository widget revision, consumer or request id conflicts.
+    WidgetConflict,
+    /// A repository widget instance or definition is unknown.
+    WidgetNotFound,
     Internal,
 }
 
@@ -75,6 +79,8 @@ impl ErrorCode {
             ErrorCode::StoreIo => -32016,
             ErrorCode::CorruptStore => -32017,
             ErrorCode::Unsupported => -32018,
+            ErrorCode::WidgetConflict => -32019,
+            ErrorCode::WidgetNotFound => -32020,
         }
     }
 }

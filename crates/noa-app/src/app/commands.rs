@@ -250,6 +250,9 @@ impl App {
             AppCommand::OpenVerify => self.open_helper_program(crate::helper_program::VERIFY),
             AppCommand::OpenTasks => self.open_helper_program(crate::helper_program::TASKS),
             AppCommand::OpenScaffold => self.open_helper_program(crate::helper_program::SCAFFOLD),
+            AppCommand::OpenWidgetHost => {
+                self.open_helper_program(crate::helper_program::WIDGET_HOST)
+            }
             AppCommand::OpenAgentUsage => {
                 self.open_helper_program(crate::helper_program::AGENT_USAGE)
             }

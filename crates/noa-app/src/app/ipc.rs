@@ -89,12 +89,21 @@ impl App {
             .server_bind
             .parse()
             .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        if self.widget_service.is_none()
+            && let Some(root) = dirs::data_local_dir().map(|d| d.join("noa").join("widgets"))
+        {
+            match crate::widget::start(root, self.ipc_shared.clone()) {
+                Ok(handle) => self.widget_service = Some(handle),
+                Err(err) => log::warn!("widgets: service not started: {err}"),
+            }
+        }
         let backend = AppIpcBackend {
             shared: self.ipc_shared.clone(),
             proxy: self.proxy.clone(),
             pending: self.ipc_pending.clone(),
             next_request: self.ipc_next_request.clone(),
             timeline: start_timeline(),
+            widgets: self.widget_service.clone(),
         };
         let config = noa_ipc::ServerConfig {
             port: self.config.server_port,

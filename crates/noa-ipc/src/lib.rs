@@ -25,6 +25,7 @@ pub mod push;
 pub mod server;
 pub mod timeline;
 pub mod timeline_outbox;
+pub mod widget;
 
 pub use attach::{
     ATTACH_BACKPRESSURE_TIMEOUT, ATTACH_OUTPUT_CAPACITY_BYTES, ATTACH_TOKEN_TTL, AttachOutputError,
@@ -50,3 +51,4 @@ pub use server::{
     TOO_MANY_CONNECTIONS_REASON,
 };
 pub use timeline::{Seq, TimelineCall, TimelineError, TimelineErrorKind};
+pub use widget::{CAPABILITY_REPO_WIDGETS_V1, WidgetCall, WidgetError, WidgetErrorKind};

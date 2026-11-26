@@ -379,6 +379,7 @@ pub(crate) struct AppIpcBackend {
     /// `None` when it did not start. The capability is absent then, and
     /// while its store did not open.
     pub(crate) timeline: Option<crate::timeline::TimelineHandle>,
+    pub(crate) widgets: Option<crate::widget::WidgetHandle>,
 }
 
 impl AppIpcBackend {
@@ -556,12 +557,26 @@ impl IpcBackend for AppIpcBackend {
         timeline.call(call, panels)
     }
 
+    fn widget(&self, call: noa_ipc::WidgetCall) -> Result<serde_json::Value, noa_ipc::WidgetError> {
+        let Some(widgets) = self.widgets.as_ref().filter(|service| service.opened()) else {
+            return Err(noa_ipc::WidgetError::unsupported());
+        };
+        widgets.call(call)
+    }
+
     fn capabilities(&self) -> Vec<&'static str> {
+        let mut capabilities = Vec::new();
         if self.open_timeline().is_some() {
-            vec![noa_ipc::CAPABILITY_BOARD_TIMELINE_V1]
-        } else {
-            Vec::new()
+            capabilities.push(noa_ipc::CAPABILITY_BOARD_TIMELINE_V1);
         }
+        if self
+            .widgets
+            .as_ref()
+            .is_some_and(|service| service.opened())
+        {
+            capabilities.push(noa_ipc::CAPABILITY_REPO_WIDGETS_V1);
+        }
+        capabilities
     }
 }
 

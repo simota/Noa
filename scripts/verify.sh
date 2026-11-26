@@ -66,10 +66,10 @@ sys.exit(1 if bad else 0)'
 
 # widgets/agent-dashboard, widgets/repo-browser, widgets/discussion,
 # widgets/competition, widgets/review, widgets/verify, widgets/tasks,
-# widgets/scaffold and widgets/agent-usage are crates of their own, outside the
+# widgets/scaffold, widgets/agent-usage and widgets/widget-host are crates of their own, outside the
 # workspace. Each is built with its tests everywhere; the tests run on macOS
 # only, because some expect the text widths of macOS's system fonts. The
-# exception is widgets/agent-usage, widgets/tasks and widgets/scaffold (no
+# exception is widgets/agent-usage, widgets/tasks, widgets/scaffold and widgets/widget-host (no
 # font-dependent test), whose tests run everywhere. Which widget ships on which
 # platform is dev/scaffold/registry.json's to say, checked by the registration
 # checker.
@@ -82,6 +82,7 @@ verify=widgets/verify/Cargo.toml
 tasks=widgets/tasks/Cargo.toml
 scaffold=widgets/scaffold/Cargo.toml
 usage=widgets/agent-usage/Cargo.toml
+widget_host=widgets/widget-host/Cargo.toml
 widget_check() {
   cargo build --manifest-path "$1" --locked --all-targets || return
   [ "$os" = Darwin ] || return 0
@@ -136,6 +137,7 @@ if [ "$full" = 1 ]; then
   in_part widgets && run tasks usage_check "$tasks"
   in_part widgets && run scaffold usage_check "$scaffold"
   in_part widgets && run usage usage_check "$usage"
+  in_part widgets && run widget-host usage_check "$widget_host"
   in_part core && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   in_part core && run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
   in_part core && run registration-test python3 -I -B -m unittest discover -s scripts/tests -p 'test_check_widget_registration.py'
@@ -144,7 +146,7 @@ if [ "$full" = 1 ]; then
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
 elif [ "${#changed[@]}" -gt 0 ]; then
-  pkgs=() hook=0 skill=0 reg=0 dash=0 rb=0 disc=0 comp=0 rev=0 ver=0 tsk=0 scf=0 use=0
+  pkgs=() hook=0 skill=0 reg=0 dash=0 rb=0 disc=0 comp=0 rev=0 ver=0 tsk=0 scf=0 use=0 wgh=0
   for path in "${changed[@]}"; do
     p=$(package_of "$path"); [ -n "$p" ] && pkgs+=("$p")
     case $path in widgets/agent-dashboard/*) dash=1 ;; esac
@@ -159,6 +161,7 @@ elif [ "${#changed[@]}" -gt 0 ]; then
     # the registry it round-trips.
     case $path in widgets/scaffold/* | scripts/tests/fixtures/widget-registration/* | dev/scaffold/*) scf=1 ;; esac
     case $path in widgets/agent-usage/*) use=1 ;; esac
+    case $path in widgets/widget-host/* | .noa-widgets/* | skills/noa-widgets/* | skills/noa-widget-creator/*) wgh=1 ;; esac
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
     case $path in scripts/install-agent-skill.sh | scripts/test_install_agent_skill.py | skills/*) skill=1 ;; esac
     case $path in scripts/check-widget-registration.py | scripts/tests/* | dev/scaffold/*) reg=1 ;; esac
@@ -227,6 +230,12 @@ elif [ "${#changed[@]}" -gt 0 ]; then
       echo "verify: cannot list the agent usage's packages; checking it anyway"
       use=1
     fi
+    if uses=$(widget_uses "$widget_host"); then
+      for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && wgh=1; done
+    else
+      echo "verify: cannot list the widget host's packages; checking it anyway"
+      wgh=1
+    fi
   fi
   [ "$dash" = 1 ] && run dashboard widget_check "$dashboard"
   [ "$rb" = 1 ] && run browser widget_check "$browser"
@@ -237,6 +246,7 @@ elif [ "${#changed[@]}" -gt 0 ]; then
   [ "$tsk" = 1 ] && run tasks usage_check "$tasks"
   [ "$scf" = 1 ] && run scaffold usage_check "$scaffold"
   [ "$use" = 1 ] && run usage usage_check "$usage"
+  [ "$wgh" = 1 ] && run widget-host usage_check "$widget_host"
   [ "$hook" = 1 ] && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   [ "$skill" = 1 ] && run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
   [ "$reg" = 1 ] && run registration-test python3 -I -B -m unittest discover -s scripts/tests -p 'test_check_widget_registration.py'

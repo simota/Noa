@@ -353,11 +353,10 @@ impl Auto {
         };
         let agents = self.agents.clone();
         let repo = &env.view.repo;
-        let cwd = if repo.is_dir() {
-            repo.to_owned()
-        } else {
-            std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
-        };
+        let cwd = planner_cwd(
+            repo.is_dir().then(|| repo.to_owned()),
+            std::env::var_os("HOME"),
+        );
         let job = Job {
             planner,
             shell: tasks::shell::login_shell(),
@@ -540,6 +539,13 @@ impl Drop for Auto {
     }
 }
 
+/// The planner's cwd: the repository when it is a directory, else a
+/// non-empty `HOME`, else `/` (an empty path would fail the spawn).
+fn planner_cwd(repo: Option<PathBuf>, home: Option<std::ffi::OsString>) -> PathBuf {
+    repo.or_else(|| home.filter(|h| !h.is_empty()).map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,5 +681,16 @@ mod tests {
         );
         assert!(unchanged(Some(AgentKind::Codex), &a.picks[0]));
         assert!(!unchanged(Some(AgentKind::Claude), &a.picks[0]));
+    }
+
+    #[test]
+    fn planner_cwd_skips_an_empty_home() {
+        assert_eq!(planner_cwd(None, Some("".into())), PathBuf::from("/"));
+        assert_eq!(planner_cwd(None, None), PathBuf::from("/"));
+        assert_eq!(planner_cwd(None, Some("/h".into())), PathBuf::from("/h"));
+        assert_eq!(
+            planner_cwd(Some("/r".into()), Some("/h".into())),
+            PathBuf::from("/r")
+        );
     }
 }

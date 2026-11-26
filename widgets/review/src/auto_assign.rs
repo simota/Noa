@@ -331,8 +331,11 @@ pub fn prompt(req: &Request) -> String {
 /// gets no MCP servers with `--ignore-user-config`, which loads neither
 /// `config.toml` (its `mcp_servers`) nor, the project's trust being in that
 /// file, a project's `.codex/config.toml`; `-c mcp_servers={}` would not do,
-/// as `-c` merges into the tables. `--disable apps` drops the ChatGPT
-/// connectors, `--disable plugins` the plugins and any servers they bring.
+/// as `-c` merges into the tables. `--ignore-rules` skips the exec-policy
+/// `.rules` files, the person's and the project's, kept apart from
+/// `config.toml`: a command a saved rule allows could run outside the
+/// sandbox. `--disable apps` drops the ChatGPT connectors,
+/// `--disable plugins` the plugins and any servers they bring.
 pub fn script(p: &Planner) -> String {
     let model = p.model;
     match p.agent {
@@ -353,7 +356,7 @@ pub fn script(p: &Planner) -> String {
                 .unwrap_or_default();
             format!(
                 "exec codex exec --skip-git-repo-check --ignore-user-config \
-                 --disable apps --disable plugins --sandbox read-only \
+                 --ignore-rules --disable apps --disable plugins --sandbox read-only \
                  -c approval_policy=never --ephemeral -m {model}{effort} \
                  -o \"${OUT_VAR}\" -- \"${PROMPT_VAR}\""
             )
@@ -727,6 +730,20 @@ fn run_script(
     }
     let out = std::mem::take(&mut *out.lock().unwrap_or_else(|e| e.into_inner()));
     let err = std::mem::take(&mut *err.lock().unwrap_or_else(|e| e.into_inner()));
+    let answer = answer_of(status, &out, &err, out_dir.as_ref().map(OutDir::file))?;
+    drop(out_dir);
+    validate(parse(&answer)?, &req, &planner, &*check)
+}
+
+/// The planner's answer, from how its shell ended and what its streams
+/// held: stdout, or codex's message `file`. A failed exit, a stream past
+/// its cap and a stream that broke off are not answers.
+fn answer_of(
+    status: ExitStatus,
+    out: &Captured,
+    err: &Captured,
+    file: Option<PathBuf>,
+) -> Result<String, PlanError> {
     if !status.success() {
         return Err(PlanError::Exit {
             code: status.code(),
@@ -737,31 +754,36 @@ fn run_script(
     if out.len > OUTPUT_MAX || err.len > OUTPUT_MAX {
         return Err(PlanError::Unparsable("出力が大きすぎます".to_owned()));
     }
-    let answer = match &out_dir {
-        Some(dir) => {
-            let mut bytes = Vec::new();
-            let read = std::fs::File::open(dir.file())
-                .and_then(|f| f.take(OUTPUT_MAX as u64 + 1).read_to_end(&mut bytes));
-            let text = String::from_utf8_lossy(&bytes).into_owned();
-            if read.is_err() || text.trim().is_empty() {
-                return Err(PlanError::Unparsable(
-                    "codex が最終メッセージを書きませんでした".to_owned(),
-                ));
-            }
-            text
+    // What came before a failed read would pass for a short answer.
+    for (stream, name) in [(out, "標準出力"), (err, "標準エラー出力")] {
+        if let Some(e) = &stream.failed {
+            return Err(PlanError::Unparsable(format!(
+                "{name}の読み取りに失敗しました: {e}"
+            )));
         }
-        None => out.text(),
+    }
+    let Some(file) = file else {
+        return Ok(out.text());
     };
-    drop(out_dir);
-    validate(parse(&answer)?, &req, &planner, &*check)
+    let mut bytes = Vec::new();
+    let read = std::fs::File::open(file)
+        .and_then(|f| f.take(OUTPUT_MAX as u64 + 1).read_to_end(&mut bytes));
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    if read.is_err() || text.trim().is_empty() {
+        return Err(PlanError::Unparsable(
+            "codex が最終メッセージを書きませんでした".to_owned(),
+        ));
+    }
+    Ok(text)
 }
 
-/// One of the planner's streams as read: what was kept of it, and the
-/// length of all that came.
+/// One of the planner's streams as read: what was kept of it, the length
+/// of all that came, and the read error that cut it short, if one did.
 #[derive(Default)]
 struct Captured {
     kept: Vec<u8>,
     len: usize,
+    failed: Option<std::io::Error>,
 }
 
 impl Captured {
@@ -772,6 +794,8 @@ impl Captured {
 
 /// Reads `from` to its end on a thread of its own, counting each chunk in
 /// `buf` and `keep` adding it to what `buf` kept, then reports on `done`.
+/// A read a signal interrupts is tried again; any other read error ends
+/// the stream, kept in `buf.failed`.
 fn read_into(
     mut from: impl Read + Send + 'static,
     buf: Arc<Mutex<Captured>>,
@@ -780,13 +804,21 @@ fn read_into(
 ) {
     std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
-        while let Ok(n) = from.read(&mut chunk) {
-            if n == 0 {
-                break;
+        loop {
+            match from.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+                    buf.len += n;
+                    keep(&mut buf.kept, &chunk[..n]);
+                }
+                // A signal came before any byte did: nothing was lost.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    buf.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(error);
+                    break;
+                }
             }
-            let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
-            buf.len += n;
-            keep(&mut buf.kept, &chunk[..n]);
         }
         let _ = done.send(());
     });
@@ -1011,7 +1043,7 @@ mod tests {
         );
         assert_eq!(
             script(&PLANNERS[1]),
-            r#"exec codex exec --skip-git-repo-check --ignore-user-config --disable apps --disable plugins --sandbox read-only -c approval_policy=never --ephemeral -m gpt-6.2-sol -c model_reasoning_effort=medium -o "$NOA_ASSIGN_OUT" -- "$NOA_ASSIGN_PROMPT""#
+            r#"exec codex exec --skip-git-repo-check --ignore-user-config --ignore-rules --disable apps --disable plugins --sandbox read-only -c approval_policy=never --ephemeral -m gpt-6.2-sol -c model_reasoning_effort=medium -o "$NOA_ASSIGN_OUT" -- "$NOA_ASSIGN_PROMPT""#
         );
         // Not a planner: a hand-made agy planner gets the failing script.
         for agent in ["agy", "vim"] {
@@ -1674,9 +1706,14 @@ mod tests {
             ("codex", &in_file, 0, over, false),
             ("codex", &in_file, under, under, true),
         ];
+        // macOS's head refuses a count of 0 (and exits 1), so an empty
+        // stream gets no command.
+        let zeros = |bytes: usize, to: &str| match bytes {
+            0 => String::new(),
+            n => format!("; head -c {n} /dev/zero{to}"),
+        };
         for (agent, answer, stdout, stderr, fits) in runs {
-            let script =
-                format!("{answer}; head -c {stdout} /dev/zero; head -c {stderr} /dev/zero >&2");
+            let script = format!("{answer}{}{}", zeros(stdout, ""), zeros(stderr, " >&2"));
             let got = sh(job(agent, &dir), &script, Duration::from_secs(20));
             if fits {
                 assert!(got.is_ok(), "{agent}: {script}: {got:?}");
@@ -1685,6 +1722,93 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hands out its reads in order, then the end of the stream.
+    struct Reads(std::collections::VecDeque<std::io::Result<&'static [u8]>>);
+
+    impl Read for Reads {
+        fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+            let Some(read) = self.0.pop_front() else {
+                return Ok(0);
+            };
+            let bytes = read?;
+            into[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    /// What [`read_into`] captures of `reads`, kept whole.
+    fn captured(reads: Vec<std::io::Result<&'static [u8]>>) -> Captured {
+        let buf = Arc::new(Mutex::new(Captured::default()));
+        let (done_tx, done_rx) = mpsc::channel();
+        read_into(
+            Reads(reads.into()),
+            Arc::clone(&buf),
+            done_tx,
+            |kept, chunk| kept.extend(chunk),
+        );
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the reader did not finish");
+        std::mem::take(&mut *buf.lock().unwrap())
+    }
+
+    /// A signal that interrupts a read loses nothing: the read is tried
+    /// again, and the rest of the answer still comes.
+    #[test]
+    fn a_read_a_signal_interrupts_is_tried_again() {
+        let (head, tail) = ANSWER.as_bytes().split_at(20);
+        let got = captured(vec![
+            Ok(head),
+            Err(std::io::ErrorKind::Interrupted.into()),
+            Ok(tail),
+        ]);
+        assert!(got.failed.is_none(), "{:?}", got.failed);
+        assert_eq!((got.text(), got.len), (ANSWER.to_owned(), ANSWER.len()));
+    }
+
+    /// Any other read error ends the stream as failed, not at its end, and
+    /// what came before it is not taken for a short answer.
+    #[test]
+    fn a_stream_that_broke_off_is_not_a_short_answer() {
+        use std::os::unix::process::ExitStatusExt;
+        let (head, tail) = ANSWER.as_bytes().split_at(20);
+        let broken = || {
+            captured(vec![
+                Ok(head),
+                Err(std::io::Error::other("pipe broke")),
+                Ok(tail),
+            ])
+        };
+        let got = broken();
+        assert_eq!((got.kept.as_slice(), got.len), (head, head.len()));
+        assert_eq!(
+            got.failed.map(|e| e.to_string()).as_deref(),
+            Some("pipe broke")
+        );
+
+        let ok = ExitStatus::from_raw(0);
+        let whole = || captured(vec![Ok(ANSWER.as_bytes())]);
+        let quiet = Captured::default();
+        assert_eq!(answer_of(ok, &whole(), &quiet, None), Ok(ANSWER.to_owned()));
+        assert_eq!(
+            answer_of(ok, &broken(), &quiet, None),
+            Err(PlanError::Unparsable(
+                "標準出力の読み取りに失敗しました: pipe broke".into()
+            ))
+        );
+        assert_eq!(
+            answer_of(ok, &whole(), &broken(), None),
+            Err(PlanError::Unparsable(
+                "標準エラー出力の読み取りに失敗しました: pipe broke".into()
+            ))
+        );
+        // A failed exit is still told by its code.
+        assert!(matches!(
+            answer_of(ExitStatus::from_raw(3 << 8), &broken(), &quiet, None),
+            Err(PlanError::Exit { code: Some(3), .. })
+        ));
     }
 
     #[test]

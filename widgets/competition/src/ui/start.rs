@@ -58,6 +58,12 @@ pub(super) struct Parts {
     pub(super) panel: Vec<PanelRow>,
     pub(super) add_row: WidgetId,
     pub(super) start_button: WidgetId,
+    /// Holds the 「自動で割り当て」 control (`ui::auto`), above the judges.
+    pub(super) auto_host: WidgetId,
+    /// Under the note: what auto-assignment says (the assignment block, a
+    /// failure, why it cannot run). Kept apart so the note's rebuild and
+    /// this one's leave each other alone.
+    pub(super) auto_note: WidgetId,
     note: WidgetId,
     /// Holds the list of past competitions.
     past: WidgetId,
@@ -142,7 +148,8 @@ pub(super) fn left_out_message(kinds: &[AgentKind]) -> String {
 
 /// One panel entry: its agent kind, model and effort, and its remove button.
 pub(super) struct PanelRow {
-    host: WidgetId,
+    /// The row itself: who it is while rows around it come and go.
+    pub(super) host: WidgetId,
     pub(super) kind: WidgetId,
     pub(super) setup: SetupParts,
     pub(super) remove: WidgetId,
@@ -406,6 +413,10 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         .width(80.0),
     );
 
+    let auto_host = tree.insert(
+        Some(card),
+        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+    );
     let judge_col = tree.insert(Some(card), Container::column().gap(6.0));
     caption(
         tree,
@@ -474,7 +485,9 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(card),
         Container::row().align_items(AlignItems::CENTER).gap(8.0),
     );
-    let note = tree.insert(Some(foot), Container::column().grow(1.0));
+    let notes = tree.insert(Some(foot), Container::column().grow(1.0).gap(4.0));
+    let note = tree.insert(Some(notes), Container::column());
+    let auto_note = tree.insert(Some(notes), Container::column().gap(2.0));
     let start_button = tree.insert(
         Some(foot),
         Button::new("コンペティションを開始").default_button(true),
@@ -497,6 +510,8 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         panel,
         add_row,
         start_button,
+        auto_host,
+        auto_note,
         note,
         past,
     };
@@ -734,6 +749,55 @@ pub(super) fn fill(
     }
     sync_row_buttons(tree, parts);
     left_out
+}
+
+/// Shows `judges` (lead first) and `panel` in the agent rows already there,
+/// in place: each row keeps its identity ([`PanelRow::host`]) and its
+/// remove button. Counts beyond the rows' are ignored; the caller fills a
+/// form of the same shape (auto-assignment fills only the rows it found).
+pub(super) fn show_agents(
+    tree: &mut UiTree,
+    parts: &mut Parts,
+    judges: &[AgentChoice],
+    panel: &[AgentChoice],
+    text: &mut TextStore,
+) {
+    let kinds = parts.kinds.clone();
+    if let Some(lead) = judges.first() {
+        show_choice(
+            tree,
+            &kinds,
+            parts.judge,
+            &mut parts.judge_setup,
+            lead,
+            text,
+        );
+    }
+    for (row, choice) in parts.co_judges.iter_mut().zip(judges.iter().skip(1)) {
+        show_choice(tree, &kinds, row.kind, &mut row.setup, choice, text);
+    }
+    for (row, choice) in parts.panel.iter_mut().zip(panel) {
+        show_choice(tree, &kinds, row.kind, &mut row.setup, choice, text);
+    }
+}
+
+/// Picks `choice`'s kind in the menu `popup` and rebuilds the model and
+/// effort controls for it, showing its setup.
+fn show_choice(
+    tree: &mut UiTree,
+    kinds: &[AgentKind],
+    popup: WidgetId,
+    setup: &mut SetupParts,
+    choice: &AgentChoice,
+    text: &mut TextStore,
+) {
+    let index = kind_index(kinds, choice.kind);
+    tree.update::<PopUpButton, _>(popup, |p, cx| p.set_selected(cx, index));
+    clear_children(tree, setup.host, text);
+    let (model, effort) = insert_setup_controls(tree, setup.host, choice.kind);
+    setup.model = model;
+    setup.effort = effort;
+    set_setup(tree, setup, choice.kind, &choice.setup);
 }
 
 /// Makes the agent menus offer `kinds` (rebuilt: a menu's entries are

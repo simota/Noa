@@ -68,8 +68,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-cold-x8ie31-${{ runner.os }}-${{ runner.arch }}-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'widgets/*/Cargo.lock', 'widgets/*/Cargo.toml') }}
-          restore-keys: cargo-cold-x8ie31-${{ runner.os }}-${{ runner.arch }}-1.92.0-
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'widgets/*/Cargo.lock', 'widgets/*/Cargo.toml') }}
+          restore-keys: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-
 
       # The checks live in scripts/verify.sh; CI lists none of its own.
       - name: Verify
@@ -144,8 +144,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-cold-x8ie31-${{ runner.os }}-${{ runner.arch }}-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'widgets/*/Cargo.lock', 'widgets/*/Cargo.toml') }}
-          restore-keys: cargo-cold-x8ie31-${{ runner.os }}-${{ runner.arch }}-1.92.0-
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'widgets/*/Cargo.lock', 'widgets/*/Cargo.toml') }}
+          restore-keys: cargo-v1-${{ runner.os }}-${{ runner.arch }}-1.92.0-
 
       - name: Verify
         run: scripts/verify.sh --full

@@ -70,6 +70,8 @@ pub(super) struct Parts {
     pub(super) panel: Vec<PanelRow>,
     pub(super) add_row: WidgetId,
     pub(super) start_button: WidgetId,
+    pub(super) auto_host: WidgetId,
+    pub(super) auto_note: WidgetId,
     note: WidgetId,
     past: WidgetId,
 }
@@ -178,7 +180,7 @@ pub(super) fn left_out_message(kinds: &[AgentKind]) -> String {
 /// One reviewer row: agent kind, model, effort, lens, custom lens text, and
 /// its remove button.
 pub(super) struct PanelRow {
-    host: WidgetId,
+    pub(super) host: WidgetId,
     pub(super) kind: WidgetId,
     pub(super) setup: SetupParts,
     pub(super) lens: WidgetId,
@@ -714,6 +716,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     );
 
     let lead_col = section(tree, card, "リード（取りまとめ役）");
+    let auto_host = tree.insert(Some(lead_col), Container::row().gap(8.0));
     let lead_row = tree.insert(
         Some(lead_col),
         Container::row().align_items(AlignItems::CENTER).gap(6.0),
@@ -770,7 +773,9 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(card),
         Container::row().align_items(AlignItems::CENTER).gap(8.0),
     );
-    let note = tree.insert(Some(foot), Container::column().grow(1.0));
+    let notes = tree.insert(Some(foot), Container::column().grow(1.0));
+    let note = tree.insert(Some(notes), Container::column());
+    let auto_note = tree.insert(Some(notes), Container::column());
     let start_button = tree.insert(
         Some(foot),
         Button::new("レビューを開始").default_button(true),
@@ -805,6 +810,8 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         panel,
         add_row,
         start_button,
+        auto_host,
+        auto_note,
         note,
         past,
     };
@@ -1124,6 +1131,11 @@ pub(super) fn fill(
     let rounds = f64::from(form.max_rounds);
     tree.update::<NumberInput, _>(parts.max_rounds, |n, cx| n.set_value(cx, rounds));
     let (form, left_out) = form.clone().restricted(&parts.kinds);
+    fill_agents(tree, parts, &form, text);
+    left_out
+}
+
+pub(super) fn fill_agents(tree: &mut UiTree, parts: &mut Parts, form: &Form, text: &mut TextStore) {
     let lead = kind_index(&parts.kinds, form.lead.kind);
     tree.update::<PopUpButton, _>(parts.lead, |p, cx| p.set_selected(cx, lead));
     lead_kind_changed(tree, parts, text);
@@ -1138,7 +1150,6 @@ pub(super) fn fill(
         .map(|choice| insert_row(tree, parts.panel_list, &parts.kinds, choice))
         .collect();
     sync_row_buttons(tree, parts);
-    left_out
 }
 
 /// Makes the agent menus offer `kinds` (rebuilt: a menu's entries are

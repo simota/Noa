@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use tasks::auto_assign::AutoRecord;
 use tasks::model::types::{AgentKind, Isolation, Millis, Run, RunEvent, RunId, Task};
 use tasks::task_links::{self, LinkEvent};
 use tasks::{fsx, runs, shell, store, worktree};
@@ -22,6 +23,9 @@ pub struct RunRequest {
     pub repo: PathBuf,
     pub agent: AgentKind,
     pub isolation: Isolation,
+    /// The auto-assignment the form was filled from, when one was and the
+    /// person kept its pick; logged on `RunStarted`.
+    pub auto: Option<AutoRecord>,
 }
 
 /// `git -C dir <args>`, without the person's `GIT_*` variables; its stdout,
@@ -143,6 +147,7 @@ pub fn start<N: Noa>(
                 branch: branch.clone(),
                 label: label.clone(),
                 at: now,
+                auto: req.auto.clone(),
             })
         });
     if let Err(why) = prepared {
@@ -326,6 +331,7 @@ pub(crate) mod tests {
             repo: repo.to_owned(),
             agent: AgentKind::Codex,
             isolation,
+            auto: None,
         }
     }
 
@@ -505,6 +511,52 @@ pub(crate) mod tests {
         assert!(runs.iter().all(|r| r.workdir == repo && r.branch.is_none()));
         assert!(runs::task_file(&repo, &second).is_file());
         assert!(!tmp.0.join("app-wt").exists());
+    }
+
+    /// Auto-assign L1-7: the request's `AutoRecord` is logged on the run's
+    /// `RunStarted`, and a manual run logs none.
+    #[test]
+    fn run_started_logs_the_requests_auto_record() {
+        let tmp = Temp::new("start-auto");
+        let repo = tmp.0.join("app");
+        repo_at(&repo);
+        let log = tmp.0.join("runs.jsonl");
+        let mut noa = FakeNoa::new(Some(log.clone()));
+        let mut board = None;
+        let auto = AutoRecord {
+            planner: "codex (gpt-6.2-sol · medium)".into(),
+            at: 3,
+            picks: vec![tasks::auto_assign::Pick {
+                slot: "worker".into(),
+                agent: "codex".into(),
+                model: None,
+                effort: None,
+                reason: "小さな修正".into(),
+            }],
+            overridden: Vec::new(),
+        };
+        let with = RunRequest {
+            auto: Some(auto.clone()),
+            ..request(&repo, Isolation::Here)
+        };
+        start(&mut noa, &mut board, &log, &with, 9).unwrap();
+        start(
+            &mut noa,
+            &mut board,
+            &log,
+            &request(&repo, Isolation::Here),
+            9,
+        )
+        .unwrap();
+        let text = fs::read_to_string(&log).unwrap();
+        let logged: Vec<Option<AutoRecord>> = text
+            .lines()
+            .filter_map(|l| match serde_json::from_str::<RunEvent>(l).unwrap() {
+                RunEvent::RunStarted { auto, .. } => Some(auto),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(logged, [Some(auto), None], "{text}");
     }
 
     #[test]

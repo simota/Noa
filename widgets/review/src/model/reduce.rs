@@ -7,11 +7,33 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::auto_assign::AutoRecord;
+
 use super::types::{
     Brief, Coverage, Finding, FindingStatus, LeadOp, LeadOutput, Message, Millis, PartId,
     Participant, Phase, RawFinding, RawKey, Receipt, ReviewNote, Round, RoundKind, RoundNo,
     Session, SessionId, Stance, StanceKind, Target, TargetManifest, is_object_id,
 };
+
+/// Optional creation metadata, flattened so existing logs keep their original shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreationContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<AutoRecord>,
+}
+
+impl CreationContext {
+    pub(crate) fn new(workdir: Option<PathBuf>, auto: Option<AutoRecord>) -> Option<Self> {
+        (workdir.is_some() || auto.is_some()).then_some(Self { workdir, auto })
+    }
+
+    fn read<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<Self>, D::Error> {
+        let context = Self::deserialize(de)?;
+        Ok(Self::new(context.workdir, context.auto))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -22,8 +44,8 @@ pub enum Event {
         request: String,
         target: Box<Target>,
         manifest: Box<TargetManifest>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        workdir: Option<PathBuf>,
+        #[serde(flatten, deserialize_with = "CreationContext::read")]
+        workdir: Option<CreationContext>,
         max_rounds: RoundNo,
         lead: Participant,
         reviewers: Vec<Participant>,
@@ -148,7 +170,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
             request,
             target,
             manifest,
-            workdir,
+            workdir: context,
             max_rounds,
             lead,
             reviewers,
@@ -175,7 +197,8 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
         request: request.clone(),
         target: (**target).clone(),
         manifest: (**manifest).clone(),
-        workdir: workdir.clone(),
+        workdir: context.as_ref().and_then(|c| c.workdir.clone()),
+        auto: context.as_ref().and_then(|c| c.auto.clone()),
         max_rounds: *max_rounds,
         rev: 1,
         created_at: *at,

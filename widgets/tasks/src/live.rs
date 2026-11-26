@@ -372,6 +372,10 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
         Some(&self.related)
     }
 
+    fn waker(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        Some(self.wake.clone())
+    }
+
     fn act(&mut self, intent: Intent) {
         match intent {
             Intent::Create {
@@ -407,6 +411,7 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
                 task,
                 agent,
                 isolation,
+                auto,
             } => match self.task(&task) {
                 Some(task) => {
                     let req = RunRequest {
@@ -414,6 +419,7 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
                         repo: self.repo.clone(),
                         agent,
                         isolation,
+                        auto,
                     };
                     self.send(Job::Run(Box::new(req)));
                 }
@@ -1672,6 +1678,7 @@ mod tests {
             task: r.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Here,
+            auto: None,
         });
         a.until("実行中 in the first window", |v| {
             col(v, &r) == Some(Column::Running)
@@ -1751,6 +1758,7 @@ mod tests {
             task: marker.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Here,
+            auto: None,
         });
         let view = rig.until("実行中", |v| col(v, &marker) == Some(Column::Running));
         let run = view.runs[0].run.run.clone();
@@ -1811,6 +1819,7 @@ mod tests {
                     branch: None,
                     label: "task:run-1".into(),
                     at: START - 1_000,
+                    auto: None,
                 },
             )
             .unwrap();
@@ -1845,6 +1854,7 @@ mod tests {
                 task: TaskRef::Local(id.clone()),
                 agent: AgentKind::Claude,
                 isolation: Isolation::Worktree,
+                auto: None,
             };
             a.feed.act(run.clone());
             b.act(run);
@@ -1909,6 +1919,7 @@ mod tests {
             task: task.r#ref.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Here,
+            auto: None,
         });
         let r = task.r#ref.clone();
         let view = rig.until("実行中", |v| {
@@ -1927,6 +1938,7 @@ mod tests {
             task: r.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Here,
+            auto: None,
         });
         rig.until("refused", |v| {
             v.notice
@@ -1975,6 +1987,7 @@ mod tests {
                 branch: None,
                 label: "task:run-1".into(),
                 at: START - 60_000,
+                auto: None,
             },
             RunEvent::RunPaneAssigned {
                 run: RunId::new("run-1"),
@@ -2000,6 +2013,7 @@ mod tests {
             task: t2.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Here,
+            auto: None,
         });
         rig.until("the second run", |v| col(v, &t2) == Some(Column::Running));
         let spawned = rig.noa.with(|s| s.spawned.clone());
@@ -2067,6 +2081,7 @@ mod tests {
             task: TaskRef::Local("t-404".into()),
             agent: AgentKind::Claude,
             isolation: Isolation::Here,
+            auto: None,
         });
         assert!(
             rig.wakes.lock().unwrap().contains(&me),
@@ -2104,6 +2119,7 @@ mod tests {
             task: t1.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Here,
+            auto: None,
         });
         rig.until("refused", |v| {
             v.notice
@@ -2117,6 +2133,7 @@ mod tests {
             task: t2.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Here,
+            auto: None,
         });
         rig.until("the second run", |v| col(v, &t2) == Some(Column::Running));
         let spawned = rig.noa.with(|s| s.spawned.clone());
@@ -2150,6 +2167,7 @@ mod tests {
             task: t2.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Worktree,
+            auto: None,
         });
         rig.until("running", |v| col(v, &t2) == Some(Column::Running));
         assert_eq!(rig.noa.with(|s| s.connects), 2, "reconnected");
@@ -2175,6 +2193,7 @@ mod tests {
             task: t2.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Worktree,
+            auto: None,
         });
         let view = rig.until("refused", |v| {
             v.notice
@@ -2213,6 +2232,7 @@ mod tests {
             task: t2.clone(),
             agent: AgentKind::Claude,
             isolation: Isolation::Here,
+            auto: None,
         });
         rig.until("the second run", |v| col(v, &t2) == Some(Column::Running));
         let spawned = rig.noa.with(|s| s.spawned.clone());
@@ -2275,6 +2295,7 @@ mod tests {
                 branch: None,
                 label: "task:run-1".into(),
                 at: START - 1_000,
+                auto: None,
             },
         )
         .unwrap();
@@ -2499,6 +2520,7 @@ mod tests {
                 branch: branch.map(str::to_owned),
                 label: runs::label(&RunId::new(run)),
                 at,
+                auto: None,
             },
         )
         .unwrap();
@@ -2521,9 +2543,49 @@ mod tests {
             task: t.clone(),
             agent: AgentKind::Claude,
             isolation,
+            auto: None,
         });
         let view = rig.until("実行中", |v| col(v, &t) == Some(Column::Running));
         view.runs[0].run.clone()
+    }
+
+    /// Auto-assign L1-7: 実行's `Intent::Run` with an `AutoRecord` reaches
+    /// the run log's `RunStarted` (through `RunRequest.auto`), and the run
+    /// replays as any other.
+    #[test]
+    fn an_auto_assigned_run_logs_its_record_on_run_started() {
+        let mut rig = rig("auto-record", |repo, _, _| write_task(repo, "t-1", "one"));
+        let t = local_ref("t-1");
+        rig.until("the task", |v| v.tasks.iter().any(|x| x.r#ref == t));
+        let auto = tasks::auto_assign::AutoRecord {
+            planner: "claude (sonnet · medium)".into(),
+            at: START,
+            picks: vec![tasks::auto_assign::Pick {
+                slot: "worker".into(),
+                agent: "codex".into(),
+                model: None,
+                effort: None,
+                reason: "小さな修正".into(),
+            }],
+            overridden: Vec::new(),
+        };
+        rig.feed.act(Intent::Run {
+            task: t.clone(),
+            agent: AgentKind::Codex,
+            isolation: Isolation::Here,
+            auto: Some(auto.clone()),
+        });
+        let view = rig.until("実行中", |v| col(v, &t) == Some(Column::Running));
+        assert_eq!(view.runs[0].run.agent, AgentKind::Codex);
+        let text = fs::read_to_string(&rig.log).unwrap();
+        let logged: Vec<Option<tasks::auto_assign::AutoRecord>> = text
+            .lines()
+            .filter_map(|l| match serde_json::from_str::<RunEvent>(l).unwrap() {
+                RunEvent::RunStarted { auto, .. } => Some(auto),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(logged, [Some(auto)], "{text}");
     }
 
     /// AC-2: the 関連成果 of a task whose run committed twice and was

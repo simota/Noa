@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Review, Verify, Discussion, Competition and Tasks: 「自動で割り当て」 lets
+  claude or codex pick the agent, model and effort for every worker slot from
+  the run's content, with a reason per slot, shown in the form before the run
+  starts and recorded in the run's log.
+
 ## [0.9.17] - 2026-11-25
 
 A tasks widget that hands local tasks, GitHub issues and code markers to

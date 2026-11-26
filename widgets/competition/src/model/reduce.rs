@@ -12,6 +12,28 @@ use super::types::{
     AmendNote, Brief, JudgeOutput, Message, Millis, PartId, Participant, Phase, Receipt, Round,
     RoundKind, RoundNo, Session, SessionId, Submission,
 };
+use crate::auto_assign::AutoRecord;
+
+/// The created event's request, and beside it on the wire the record of
+/// the auto-assignment the competition was started with (absent from a
+/// manually staffed competition, and from logs written before it existed).
+/// Kept in one flattened struct so the event's shape in code stays
+/// `request: "…".into()`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedRequest {
+    pub request: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<AutoRecord>,
+}
+
+impl<T: Into<String>> From<T> for CreatedRequest {
+    fn from(request: T) -> Self {
+        Self {
+            request: request.into(),
+            auto: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -19,7 +41,8 @@ pub enum Event {
     /// Always the first event of the log, and only there.
     Created {
         id: SessionId,
-        request: String,
+        #[serde(flatten)]
+        request: CreatedRequest,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workdir: Option<PathBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,7 +196,7 @@ pub fn create(batch: &[Event]) -> Result<Session, ReduceError> {
     };
     let mut session = Session {
         id: id.clone(),
-        request: request.clone(),
+        request: request.request.clone(),
         workdir: workdir.clone(),
         max_rounds: *max_rounds,
         reveal_interval: *reveal_interval,
@@ -1321,5 +1344,46 @@ mod tests {
             );
             assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), event);
         }
+    }
+
+    /// D6 of `docs/specs/auto-assign.md`: the auto-assignment sits beside the
+    /// request in the created line, only when there is one; a line without
+    /// it (a manual start, a log from before) loads as before.
+    #[test]
+    fn a_created_line_keeps_its_auto_assignment_and_loads_without_one() {
+        use crate::auto_assign::Pick;
+        let manual = serde_json::to_string(&created()).unwrap();
+        assert!(!manual.contains("\"auto\""), "{manual}");
+        let back: Vec<Event> = serde_json::from_str(&manual).unwrap();
+        assert!(matches!(&back[0], Event::Created { request, .. } if request.auto.is_none()));
+        assert_eq!(create(&back).unwrap().request, "x");
+
+        let mut batch = created();
+        let record = AutoRecord {
+            planner: "codex (gpt-6.2-sol · medium)".into(),
+            at: 7,
+            picks: vec![Pick {
+                slot: "contestant-2".into(),
+                agent: "codex".into(),
+                model: Some("gpt-6.2-astra".into()),
+                effort: Some("high".into()),
+                reason: "実装寄りの依頼".into(),
+            }],
+            overridden: vec!["judge-1".into()],
+        };
+        let Event::Created { request, .. } = &mut batch[0] else {
+            unreachable!()
+        };
+        request.auto = Some(record.clone());
+        let line = serde_json::to_string(&batch).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value[0]["event"], "created");
+        assert_eq!(value[0]["request"], "x");
+        assert_eq!(value[0]["auto"]["planner"], "codex (gpt-6.2-sol · medium)");
+        assert_eq!(value[0]["auto"]["picks"][0]["slot"], "contestant-2");
+        assert_eq!(value[0]["auto"]["overridden"][0], "judge-1");
+        let back: Vec<Event> = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, batch);
+        assert_eq!(create(&back).unwrap().request, "x");
     }
 }

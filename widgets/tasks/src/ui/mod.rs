@@ -15,6 +15,7 @@
 //! detail. While a menu
 //! (or another overlay) has focus, every key is the menu's.
 
+pub mod auto;
 pub mod columns;
 pub mod dates;
 pub mod detail;
@@ -24,6 +25,7 @@ pub mod views;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use noa_gpui_core::style::{FlexDirection, Rect as LayoutRect, length};
 use noa_gpui_core::widgets::{
@@ -37,6 +39,7 @@ use noa_gpui_platform::Screen;
 use noa_gpui_scene::Color;
 use noa_gpui_text::TextStore;
 
+use tasks::auto_assign::AutoRecord;
 use tasks::model::column::{Filter, column, matches};
 use tasks::model::types::{
     AgentKind, Column, DONE_DAYS, GitHubView, Isolation, Millis, RunId, RunView, Source, State,
@@ -88,6 +91,9 @@ pub enum Intent {
         task: TaskRef,
         agent: AgentKind,
         isolation: Isolation,
+        /// The 「自動で割り当て」 the form was filled from, when its pick
+        /// was kept (`docs/specs/auto-assign.md` L1-7).
+        auto: Option<AutoRecord>,
     },
     OpenPane(RunId),
     ClosePane(RunId),
@@ -121,6 +127,17 @@ pub trait Feed {
     /// Each task's 関連成果, as of the last View `poll` gave (a feed that
     /// links nothing has none).
     fn related(&self) -> Option<&BTreeMap<TaskRef, Related>> {
+        None
+    }
+    /// What wakes the screen from another thread (a planner's result
+    /// arrives on one); without it the result shows at the next wake.
+    fn waker(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        None
+    }
+    /// How 「自動で割り当て」 plans instead of running the planner's CLI
+    /// ([`auto::Hooks::system`]): the demo, which starts nothing, answers
+    /// from its canned data. Asked once, when the screen is made.
+    fn planner(&self) -> Option<Box<auto::PlanFn>> {
         None
     }
 }
@@ -191,10 +208,16 @@ pub struct Tasks {
     /// (the calendar's month with it): its position is kept across a
     /// rebuild of the same one.
     layout_scroll: Option<((Layout, i32), WidgetId)>,
+    /// How 実行's 「自動で割り当て」 starts a planner, and its clock.
+    auto_hooks: auto::Hooks,
 }
 
 impl Tasks {
     pub fn new(feed: Box<dyn Feed>) -> Tasks {
+        let mut auto_hooks = auto::Hooks::system();
+        if let Some(plan) = feed.planner() {
+            auto_hooks.plan = plan;
+        }
         let mut tree = UiTree::new();
         tree.set_theme(Theme::for_appearance(Appearance::Dark));
         let root = tree.insert(
@@ -344,6 +367,7 @@ impl Tasks {
             month: 0,
             month_buttons: None,
             layout_scroll: None,
+            auto_hooks,
         };
         // Nothing is laid out yet: any store serves the first build.
         let mut text = TextStore::new(Default::default());
@@ -655,7 +679,7 @@ impl Tasks {
         self.rebuild(text);
     }
 
-    fn open_form(&mut self, form: Form, text: &mut TextStore) {
+    fn open_form(&mut self, mut form: Form, text: &mut TextStore) {
         clear(&mut self.tree, self.form_host, text);
         form.insert(&mut self.tree, self.form_host);
         self.form = Some(form);
@@ -1033,6 +1057,9 @@ impl Screen for Tasks {
     }
 
     fn woken(&mut self, text: &mut TextStore) {
+        if let Some(form) = &mut self.form {
+            form.poll_auto(&mut self.tree, (self.auto_hooks.clock)());
+        }
         if let Some(view) = self.feed.poll() {
             // A new notice from the feed is newer than the screen's own.
             if view.notice.is_some() && view.notice != self.view.notice {
@@ -1098,7 +1125,12 @@ impl Screen for Tasks {
 
     fn handle(&mut self, message: Message, text: &mut TextStore) {
         if let Some(form) = &mut self.form {
-            match form.handle(&message, &self.tree) {
+            let env = auto::Env {
+                hooks: &self.auto_hooks,
+                wake: self.feed.waker(),
+                view: &self.view,
+            };
+            match form.handle(&message, &mut self.tree, &env) {
                 FormOutcome::Pending => {}
                 FormOutcome::Cancel => {
                     self.close_form(text);

@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use discussion::auto_assign::AutoRecord;
 use discussion::engine::{AgentState, Config, Effect, Engine, EngineError, Input, Setup};
 use discussion::model::export;
 use discussion::model::types::{
@@ -85,6 +86,7 @@ pub enum Start {
     /// A new discussion, stored under `root` (usually
     /// [`store::default_root`]).
     New {
+        auto: Option<Box<AutoRecord>>,
         topic: String,
         /// The directory (or repository) the agents run in; `None` runs
         /// them in the discussions directory.
@@ -563,6 +565,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         let now = clock.now();
         let (engine, store) = match start {
             Start::New {
+                auto,
                 topic,
                 workdir,
                 max_rounds,
@@ -589,8 +592,15 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     moderator,
                     panel: &panel,
                 };
-                let (engine, out) = Engine::create_in(id, setup, &dir, config, now)
-                    .map_err(|e| format!("討論を始められません: {e}"))?;
+                let (engine, out) = Engine::create_in_with_auto(
+                    id,
+                    setup,
+                    &dir,
+                    config,
+                    now,
+                    auto.map(|record| *record),
+                )
+                .map_err(|e| format!("討論を始められません: {e}"))?;
                 let first = out.batches.first().map(Vec::as_slice).unwrap_or_default();
                 let store = Store::create(&dir, first)
                     .map_err(|e| format!("{} を作れません: {e}", dir.display()))?;
@@ -1870,6 +1880,53 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn created_log_round_trips_the_optional_auto_record() {
+        use discussion::auto_assign::Pick;
+        let record = AutoRecord {
+            planner: "claude (sonnet · medium)".into(),
+            at: 98,
+            picks: vec![Pick {
+                slot: "moderator".into(),
+                agent: "codex".into(),
+                model: None,
+                effort: None,
+                reason: "議論を整理する".into(),
+            }],
+            overridden: vec!["panelist-1".into()],
+        };
+        for auto in [Some(record), None] {
+            let root = temp_root("auto-record");
+            let rig = Rig::open(
+                &Fake::new(),
+                Start::New {
+                    topic: "議題".into(),
+                    workdir: None,
+                    max_rounds: Some(3),
+                    moderator: AgentKind::Codex.into(),
+                    panel: vec![AgentKind::Agy.into()],
+                    auto: auto.clone().map(Box::new),
+                    root: root.clone(),
+                },
+            );
+            let dir = rig.dir();
+            drop(rig);
+            let log = fs::read_to_string(dir.join(store::EVENTS_FILE)).unwrap();
+            let first: serde_json::Value =
+                serde_json::from_str(log.lines().next().unwrap()).unwrap();
+            assert_eq!(first[0]["event"], "created");
+            assert_eq!(
+                first[0].get("auto").cloned(),
+                auto.as_ref().map(|a| serde_json::to_value(a).unwrap())
+            );
+            assert_eq!(store::load(&dir).unwrap().auto, auto);
+            let resumed = Rig::open(&Fake::new(), Start::Resume { dir });
+            assert_eq!(resumed.session().auto, auto);
+            drop(resumed);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     fn p(id: &str) -> PartId {
         PartId::new(id)
     }
@@ -1908,6 +1965,7 @@ mod tests {
             Rig::open(
                 fake,
                 Start::New {
+                    auto: None,
                     topic: "Pick a database".into(),
                     workdir: None,
                     max_rounds: None,
@@ -2279,6 +2337,7 @@ mod tests {
         let mut rig = Rig::open(
             &fake,
             Start::New {
+                auto: None,
                 topic: "Review this repo".into(),
                 workdir: Some(workdir.clone()),
                 max_rounds: None,
@@ -2361,6 +2420,7 @@ mod tests {
         let mut rig = Rig::open(
             &fake,
             Start::New {
+                auto: None,
                 topic: "Review this repo".into(),
                 workdir: Some(workdir.clone()),
                 max_rounds: None,
@@ -2392,6 +2452,7 @@ mod tests {
         let missing = root.join("missing");
         let opened = Runner::open(
             Start::New {
+                auto: None,
                 topic: "t".into(),
                 workdir: Some(missing.clone()),
                 max_rounds: None,
@@ -2794,6 +2855,7 @@ mod tests {
         let mut rig = Rig::open(
             &fake,
             Start::New {
+                auto: None,
                 topic: "Review this repo".into(),
                 workdir: Some(workdir.clone()),
                 max_rounds: None,
@@ -2921,6 +2983,7 @@ mod tests {
         let mut rig = Rig::open(
             &fake,
             Start::New {
+                auto: None,
                 topic: "Pick a database".into(),
                 workdir: None,
                 max_rounds: Some(1),
@@ -3241,6 +3304,7 @@ mod tests {
         let mut rig = Rig::open(
             &fake,
             Start::New {
+                auto: None,
                 topic: "Pick a database".into(),
                 workdir: Some(workdir.clone()),
                 max_rounds: None,
@@ -3446,6 +3510,7 @@ mod tests {
         actions.send(Action::Stop).unwrap();
         run_session(
             Start::New {
+                auto: None,
                 topic: "t".into(),
                 workdir: None,
                 max_rounds: None,

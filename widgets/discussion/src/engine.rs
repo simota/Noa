@@ -13,8 +13,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::auto_assign::AutoRecord;
 use crate::model::brief;
-use crate::model::reduce::{self, Event, ReduceError};
+use crate::model::reduce::{self, CreatedTopic, Event, ReduceError};
 use crate::model::types::{
     AgentChoice, AgentKind, Author, Brief, DebateId, DebateStatus, IssueId, IssueOp, MODERATOR_ID,
     Message, Millis, MsgKind, PartId, Participant, Phase, Position, Role, RoundKind, RoundNo,
@@ -290,6 +291,18 @@ impl Engine {
         config: Config,
         now: Millis,
     ) -> Result<(Engine, Output), EngineError> {
+        Self::create_in_with_auto(id, setup, dir, config, now, None)
+    }
+
+    /// Creates the same session and records the choices confirmed at start.
+    pub fn create_in_with_auto(
+        id: SessionId,
+        setup: Setup<'_>,
+        dir: &Path,
+        config: Config,
+        now: Millis,
+        auto: Option<AutoRecord>,
+    ) -> Result<(Engine, Output), EngineError> {
         let Setup {
             topic,
             workdir,
@@ -312,7 +325,10 @@ impl Engine {
         let (moderator, panelists) = participants(&moderator, panel);
         let batch = vec![Event::Created {
             id,
-            topic: topic.to_owned(),
+            topic: CreatedTopic {
+                topic: topic.to_owned(),
+                auto,
+            },
             workdir,
             max_rounds,
             moderator,

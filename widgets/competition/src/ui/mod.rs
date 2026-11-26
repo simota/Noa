@@ -1,6 +1,7 @@
 //! The competition window: leaderboard | compare / timeline | judge board,
 //! with an intervention composer and a start view before any session exists.
 
+mod auto;
 mod compare;
 mod composer;
 mod judge;
@@ -20,8 +21,8 @@ use noa_gpui_core::style::{
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
 use noa_gpui_core::widgets::{
-    Button, ButtonClicked, Container, ControlSize, Label, ScrollView, SelectionChanged, SplitPane,
-    SplitView, StatusBar, Tag, Toast, Tone,
+    Button, ButtonClicked, Container, ControlSize, Label, MenuChosen, ScrollView, SelectionChanged,
+    SplitPane, SplitView, StatusBar, Tag, TextChanged, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
@@ -51,6 +52,10 @@ pub(crate) const MIN_WINDOW: (f64, f64) = (
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Start,
+    /// Plans the agent rows with the pull-down's `n`th planner.
+    AutoAssign(usize),
+    /// Stops that planning (中止).
+    CancelAutoAssign,
     ShowCompare,
     ShowTimeline,
     ShowMap,
@@ -159,6 +164,8 @@ pub struct Competition {
     /// and the clock minute while some agent's elapsed time is running.
     built: Option<BuiltKey>,
 
+    /// The start form's 「自動で割り当て」.
+    auto: auto::Auto,
     start: start::Parts,
     board: WidgetId,
     left_host: WidgetId,
@@ -294,6 +301,7 @@ impl Competition {
         );
 
         let start = start::insert(&mut tree, body);
+        let assign = auto::Auto::new(&mut tree, start.auto_host);
 
         let board = tree.insert(Some(body), Container::new(fill()));
         let split = tree.insert(
@@ -342,6 +350,7 @@ impl Competition {
             detection: start::Detection::all_installed(),
             installed: None,
             built: None,
+            auto: assign,
             start,
             board,
             left_host,
@@ -380,6 +389,8 @@ impl Competition {
         self.tree.set_hidden(self.board, !started);
 
         if started {
+            // The start view is gone: a planner for its form has no use.
+            self.auto.cancel_running();
             self.rebuild_left(text);
             self.rebuild_progress(text);
             self.rebuild_center(text);
@@ -393,6 +404,7 @@ impl Competition {
                 &self.detection,
                 text,
             );
+            self.render_auto(text);
             start::actions(&self.start, &mut self.actions);
             start::rebuild_past(
                 &mut self.tree,
@@ -436,6 +448,7 @@ impl Competition {
     /// Leaves whatever competition is on screen: its runner stops (an
     /// unfinished one stays resumable from the list).
     fn leave(&mut self) {
+        self.auto.cancel_running();
         if let Source::Live(channel) = &self.source {
             channel.leave();
             if !self.read_only && self.session.as_ref().is_some_and(|s| !s.closed) {
@@ -464,6 +477,7 @@ impl Competition {
             self.toast("デモ表示では操作を送信できません");
             return;
         }
+        self.auto.cancel_running();
         self.extending = self.read_only;
         self.send_cmd(Command::ExtendStored { dir, by });
         self.rebuild(text);
@@ -798,6 +812,7 @@ impl Competition {
 
     fn poll_live(&mut self, text: &mut TextStore) {
         self.poll_installed(text);
+        self.poll_auto(text);
         let mut latest = None;
         let mut notices = Vec::new();
         let mut released = false;
@@ -939,6 +954,10 @@ impl Competition {
                     }
                 };
                 let judges = form.judges();
+                // Starting while planning starts the rows as they are.
+                let auto = self.auto.record(&form, &self.start);
+                self.auto.cancel_running();
+                self.render_auto(text);
                 self.send_cmd(Command::Start {
                     request: form.request,
                     workdir,
@@ -946,8 +965,11 @@ impl Competition {
                     reveal_interval: form.reveal_interval,
                     judges,
                     panel: form.panel,
+                    auto,
                 });
             }
+            Action::AutoAssign(index) => self.begin_auto(index, text),
+            Action::CancelAutoAssign => self.cancel_auto(text),
             Action::ShowCompare => {
                 self.tab = CenterTab::Compare;
                 self.rebuild(text);
@@ -1048,18 +1070,25 @@ impl Competition {
                     self.toast(why);
                 }
             }
-            Action::ResumePast(dir) => match self.load_stored(&dir) {
-                // Finished since the list was read: there is nothing to
-                // resume, so it opens read-only.
-                Ok((session, _)) if session.closed => {
-                    if let Err(why) = self.show_stored(&dir, text) {
-                        self.toast(why);
+            Action::ResumePast(dir) => {
+                // Leaving the start view: its planner stops.
+                self.auto.cancel_running();
+                match self.load_stored(&dir) {
+                    // Finished since the list was read: there is nothing to
+                    // resume, so it opens read-only.
+                    Ok((session, _)) if session.closed => {
+                        if let Err(why) = self.show_stored(&dir, text) {
+                            self.toast(why);
+                        }
                     }
+                    _ => self.send_cmd(Command::Resume { dir }),
                 }
-                _ => self.send_cmd(Command::Resume { dir }),
-            },
+                self.render_auto(text);
+            }
             Action::RematchPast(dir) => match self.load_stored(&dir) {
                 Ok((session, _)) => {
+                    // A rematch is staffed by hand unless assigned again.
+                    self.auto.forget();
                     let form = start::Form::of_session(&session);
                     let left_out = start::fill(&mut self.tree, &mut self.start, &form, text);
                     self.rebuild(text);
@@ -1076,6 +1105,7 @@ impl Competition {
             },
             Action::NewCompetition => {
                 self.leave();
+                self.auto.forget();
                 let form = start::Form::for_kinds(self.start.kinds());
                 start::fill(&mut self.tree, &mut self.start, &form, text);
                 self.rebuild(text);
@@ -1085,6 +1115,7 @@ impl Competition {
                     return;
                 };
                 self.leave();
+                self.auto.forget();
                 let form = start::Form::of_session(&session);
                 let left_out = start::fill(&mut self.tree, &mut self.start, &form, text);
                 self.rebuild(text);
@@ -1131,16 +1162,33 @@ impl Screen for Competition {
             }
             return;
         }
+        if message.source == self.auto.menu
+            && let Some(MenuChosen(index)) = message.downcast_ref()
+        {
+            let index = *index;
+            return self.handle_action(Action::AutoAssign(index), text);
+        }
+        if message.source == self.auto.cancel && message.downcast_ref::<ButtonClicked>().is_some() {
+            return self.handle_action(Action::CancelAutoAssign, text);
+        }
         if message.source == self.start.judge
             && message.downcast_ref::<SelectionChanged>().is_some()
         {
             start::judge_kind_changed(&mut self.tree, &mut self.start, text);
-            return;
+            return self.render_auto(text);
         }
         if message.downcast_ref::<SelectionChanged>().is_some()
             && start::row_kind_changed(&mut self.tree, &mut self.start, message.source, text)
         {
-            return;
+            return self.render_auto(text);
+        }
+        // An edit of the start form: the block marks rows changed by hand,
+        // and the pull-down follows whether there is a request to read.
+        if self.session.is_none()
+            && (message.downcast_ref::<TextChanged>().is_some()
+                || message.downcast_ref::<SelectionChanged>().is_some())
+        {
+            self.render_auto(text);
         }
         if message.downcast_ref::<ButtonClicked>().is_some()
             && let Some((_, action)) = self
@@ -3181,5 +3229,716 @@ mod tests {
                 .collect();
             assert_eq!(sent, [s(&want)]);
         }
+    }
+
+    // ---- 「自動で割り当て」 (docs/specs/auto-assign.md, unit U5) ----
+
+    use competition::auto_assign::{
+        self as assign, Assignment, AutoRecord, Cancel, Job, Pick, PlanError, Planning, RawPick,
+        Request,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A planner run the screen asked for: its job, where its result goes,
+    /// and the flag it is told to stop by.
+    struct Planned {
+        job: Job,
+        reply: std::sync::mpsc::Sender<Result<Assignment, PlanError>>,
+        cancel: Cancel,
+    }
+
+    type Queue = Rc<RefCell<Vec<Planned>>>;
+
+    /// Swaps the screen's planner for one that runs nothing: each run is
+    /// queued for the test to answer.
+    fn fake_planner(screen: &mut Competition) -> Queue {
+        let queue: Queue = Rc::default();
+        let runs = Rc::clone(&queue);
+        screen.auto.spawn = Box::new(move |job, _wake| {
+            let (reply, rx) = std::sync::mpsc::channel();
+            let cancel = Cancel::default();
+            runs.borrow_mut().push(Planned {
+                job,
+                reply,
+                cancel: Arc::clone(&cancel),
+            });
+            Planning { rx, cancel }
+        });
+        queue
+    }
+
+    const REQUEST: &str = "コーヒー焙煎所の LP を作る";
+
+    fn set_request(screen: &mut Competition, request: &str, text: &mut TextStore) {
+        let request = request.to_owned();
+        let area = screen.start.request;
+        screen
+            .tree
+            .update::<noa_gpui_core::widgets::TextArea, _>(area, |a, cx| a.set_text(cx, request));
+        screen.rebuild(text);
+    }
+
+    /// A live screen with `kinds` installed, a request typed and a fake
+    /// planner.
+    fn auto_screen(kinds: &[AgentKind]) -> (Competition, crate::live::FakeLink, Queue, TextStore) {
+        let (mut screen, link, tx, mut text) = live_pending();
+        let queue = fake_planner(&mut screen);
+        report(&mut screen, &tx, found(kinds), &mut text);
+        set_request(&mut screen, REQUEST, &mut text);
+        (screen, link, queue, text)
+    }
+
+    /// [`auto_screen`] with claude and codex, two judges (claude, claude)
+    /// and three contestants (claude, codex, codex).
+    fn five_rows() -> (Competition, crate::live::FakeLink, Queue, TextStore) {
+        let (mut screen, link, queue, mut text) =
+            auto_screen(&[AgentKind::Claude, AgentKind::Codex]);
+        screen.handle_action(Action::AddJudgeRow, &mut text);
+        screen.handle_action(Action::AddPanelRow, &mut text);
+        let form = start::read(&screen.tree, &screen.start);
+        assert_eq!(
+            kinds_of(&form.judges()),
+            [AgentKind::Claude, AgentKind::Claude]
+        );
+        assert_eq!(
+            kinds_of(&form.panel),
+            [AgentKind::Claude, AgentKind::Codex, AgentKind::Codex]
+        );
+        (screen, link, queue, text)
+    }
+
+    type Answer<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>);
+
+    /// What the planner answers for [`five_rows`].
+    const FIVE: [Answer<'static>; 5] = [
+        ("judge-1", "claude", Some("opus"), Some("high")),
+        ("judge-2", "codex", Some("gpt-6.2-sol"), Some("xhigh")),
+        ("contestant-1", "codex", Some("gpt-6.2-astra"), None),
+        ("contestant-2", "claude", Some("sonnet"), Some("medium")),
+        ("contestant-3", "claude", None, None),
+    ];
+
+    fn on(kind: AgentKind, model: Option<&str>, effort: Option<&str>) -> AgentChoice {
+        AgentChoice {
+            kind,
+            setup: AgentSetup {
+                model: model.map(Into::into),
+                effort: effort.map(Into::into),
+            },
+        }
+    }
+
+    fn reason(slot: &str) -> String {
+        format!("{slot} にはこの組み合わせが向いています")
+    }
+
+    /// Answers the oldest queued run with `picks`, through the shared
+    /// validation and the widget's own check, and lets the screen take it.
+    /// The run's request comes back.
+    fn answer(
+        screen: &mut Competition,
+        queue: &Queue,
+        picks: &[Answer<'_>],
+        text: &mut TextStore,
+    ) -> Request {
+        let Planned { job, reply, .. } = queue.borrow_mut().remove(0);
+        let request = (job.request)();
+        let raw = picks
+            .iter()
+            .map(|(slot, agent, model, effort)| RawPick {
+                slot: (*slot).into(),
+                agent: (*agent).into(),
+                model: model.map(Into::into),
+                effort: effort.map(Into::into),
+                reason: reason(slot),
+            })
+            .collect();
+        let assignment = assign::validate(raw, &request, &job.planner, &*job.check)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        reply.send(Ok(assignment)).unwrap();
+        screen.poll_live(text);
+        request
+    }
+
+    /// Fails the oldest queued run with `error`.
+    fn fail(screen: &mut Competition, queue: &Queue, error: PlanError, text: &mut TextStore) {
+        let Planned { reply, .. } = queue.borrow_mut().remove(0);
+        reply.send(Err(error)).unwrap();
+        screen.poll_live(text);
+    }
+
+    fn auto_notes(screen: &Competition) -> Vec<String> {
+        texts_under(&screen.tree, screen.start.auto_note)
+    }
+
+    const HEADING: &str = "自動割り当て（claude (sonnet · medium) が決定）— 内容を確認して「コンペティションを開始」を押してください";
+
+    #[test]
+    fn the_auto_assign_pull_down_offers_only_installed_planners() {
+        // Waiting for the installed check: nothing to pick.
+        let (mut screen, _link, tx, mut text) = live_pending();
+        let _queue = fake_planner(&mut screen);
+        assert!(!screen.tree.is_enabled(screen.auto.menu));
+        assert!(screen.auto.planner_agents().is_empty());
+        report(
+            &mut screen,
+            &tx,
+            found(&[AgentKind::Codex, AgentKind::Agy]),
+            &mut text,
+        );
+        assert_eq!(screen.auto.planner_agents(), ["codex"]);
+        // No request yet: nothing to assign by, and the note says so.
+        assert!(!screen.tree.is_enabled(screen.auto.menu));
+        assert_eq!(auto_notes(&screen), ["依頼内容を入力してください"]);
+        // Typing one turns it on.
+        let area = screen.start.request;
+        screen.tree.set_focus(Some(area));
+        screen.dispatch(noa_gpui_core::Event::Text("LP".into()), &mut text);
+        assert!(screen.tree.is_enabled(screen.auto.menu));
+        assert!(auto_notes(&screen).is_empty());
+
+        let (screen, _link, _queue, _text) = auto_screen(&AgentKind::ALL);
+        assert_eq!(screen.auto.planner_agents(), ["claude", "codex"]);
+        assert!(screen.tree.is_enabled(screen.auto.menu));
+
+        // agy is never a planner.
+        let (screen, _link, _queue, _text) = auto_screen(&[AgentKind::Agy]);
+        assert!(screen.auto.planner_agents().is_empty());
+        assert!(!screen.tree.is_enabled(screen.auto.menu));
+        assert_eq!(
+            auto_notes(&screen),
+            ["自動割り当てに使えるエージェントがインストールされていません"]
+        );
+    }
+
+    #[test]
+    fn an_assignment_fills_every_judge_and_contestant_and_shows_each_reason() {
+        let (mut screen, _link, queue, mut text) = five_rows();
+        let menu = screen.auto.menu;
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert!(screen.auto.running());
+        assert!(screen.tree.is_hidden(menu));
+        assert!(!screen.tree.is_hidden(screen.auto.cancel));
+        assert!(
+            texts_under(&screen.tree, screen.start.auto_host)
+                .contains(&"claude が割り当てを決めています…".to_owned())
+        );
+        assert_eq!(queue.borrow()[0].job.planner.agent, "claude");
+        // The form stays editable while planning.
+        assert!(screen.tree.is_enabled(screen.start.start_button));
+        // The widget's own check is the one the start makes.
+        let bad = Pick {
+            slot: "judge-1".into(),
+            agent: "claude".into(),
+            model: Some("-rm".into()),
+            effort: None,
+            reason: "x".into(),
+        };
+        let why = (queue.borrow()[0].job.check)(&bad).unwrap_err();
+        assert!(why.contains("のモデル名"), "{why}");
+
+        let request = answer(&mut screen, &queue, &FIVE, &mut text);
+        assert_eq!(request.widget, "competition");
+        assert_eq!(
+            request.run,
+            "agents compete blind on the same task and judges score them"
+        );
+        let slots: Vec<(&str, &str)> = request
+            .slots
+            .iter()
+            .map(|s| (s.id.as_str(), s.role.as_str()))
+            .collect();
+        assert_eq!(
+            slots,
+            [
+                (
+                    "judge-1",
+                    "lead judge: scores every round, decides early finish and writes the final review"
+                ),
+                ("judge-2", "co-judge: scores every round"),
+                (
+                    "contestant-1",
+                    "contestant: does the task blind, competing with the others"
+                ),
+                (
+                    "contestant-2",
+                    "contestant: does the task blind, competing with the others"
+                ),
+                (
+                    "contestant-3",
+                    "contestant: does the task blind, competing with the others"
+                ),
+            ]
+        );
+        let agents: Vec<&str> = request
+            .candidates
+            .iter()
+            .map(|c| c.agent.as_str())
+            .collect();
+        assert_eq!(agents, ["claude", "codex"]);
+        assert_eq!(request.candidates[1].models, AgentKind::Codex.models());
+        assert!(request.content.contains(REQUEST), "{}", request.content);
+
+        let form = start::read(&screen.tree, &screen.start);
+        assert_eq!(
+            form.judges(),
+            [
+                on(AgentKind::Claude, Some("opus"), Some("high")),
+                on(AgentKind::Codex, Some("gpt-6.2-sol"), Some("xhigh")),
+            ]
+        );
+        assert_eq!(
+            form.panel,
+            [
+                on(AgentKind::Codex, Some("gpt-6.2-astra"), None),
+                on(AgentKind::Claude, Some("sonnet"), Some("medium")),
+                on(AgentKind::Claude, None, None),
+            ]
+        );
+        assert_eq!(
+            auto_notes(&screen),
+            [
+                HEADING.to_owned(),
+                format!("審判 1: claude (opus · high) — {}", reason("judge-1")),
+                format!(
+                    "審判 2: codex (gpt-6.2-sol · xhigh) — {}",
+                    reason("judge-2")
+                ),
+                format!(
+                    "参加者 1: codex (gpt-6.2-astra) — {}",
+                    reason("contestant-1")
+                ),
+                format!(
+                    "参加者 2: claude (sonnet · medium) — {}",
+                    reason("contestant-2")
+                ),
+                format!("参加者 3: claude — {}", reason("contestant-3")),
+            ]
+        );
+        assert!(!screen.auto.running());
+        assert!(!screen.tree.is_hidden(screen.auto.menu));
+        // Each row's controls are the filled kind's: codex's efforts here.
+        let effort = screen.co_judge_effort_items();
+        assert_eq!(effort, AgentKind::Codex.efforts().len() + 1);
+    }
+
+    impl Competition {
+        /// How many entries the second judge's effort menu has.
+        fn co_judge_effort_items(&mut self) -> usize {
+            let effort = self.start.co_judges[0].setup.effort;
+            let mut text = TextStore::new(Default::default());
+            menu_len(self, effort, &mut text)
+        }
+    }
+
+    #[test]
+    fn a_failed_assignment_leaves_the_form_and_names_its_cause() {
+        let (mut screen, link, queue, mut text) = five_rows();
+        let before = start::read(&screen.tree, &screen.start);
+        screen.handle_action(Action::AutoAssign(1), &mut text);
+        assert_eq!(queue.borrow()[0].job.planner.agent, "codex");
+        fail(
+            &mut screen,
+            &queue,
+            PlanError::Exit {
+                code: Some(2),
+                stderr_tail: "warming up\nnot logged in\n".into(),
+            },
+            &mut text,
+        );
+        assert_eq!(start::read(&screen.tree, &screen.start), before);
+        assert_eq!(
+            auto_notes(&screen),
+            [
+                "自動割り当てに失敗しました: codex (gpt-6.2-sol · medium) が終了コード 2 で終了しました（not logged in）。手動で選ぶか、別のエージェントで決めてください"
+            ]
+        );
+        // An invalid answer is a failure too: nothing of it reaches the form.
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        let Planned { job, reply, .. } = queue.borrow_mut().remove(0);
+        let request = (job.request)();
+        let raw = vec![RawPick {
+            slot: "judge-1".into(),
+            agent: "claude".into(),
+            model: Some("opus-9".into()),
+            effort: None,
+            reason: "x".into(),
+        }];
+        let error = assign::validate(raw, &request, &job.planner, &*job.check).unwrap_err();
+        reply.send(Err(error)).unwrap();
+        screen.poll_live(&mut text);
+        assert_eq!(start::read(&screen.tree, &screen.start), before);
+        let notes = auto_notes(&screen);
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].starts_with(
+                "自動割り当てに失敗しました: claude (sonnet · medium) の割り当てが不正です: "
+            ),
+            "{notes:?}"
+        );
+        // A cancelled run says nothing, and nothing was started.
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        screen.handle_action(Action::CancelAutoAssign, &mut text);
+        assert!(
+            queue.borrow()[0]
+                .cancel
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(auto_notes(&screen).is_empty());
+        assert!(commands(&link).is_empty());
+    }
+
+    #[test]
+    fn an_assignment_for_rows_changed_meanwhile_is_not_applied() {
+        const CHANGED: &str = "割り当て中にエージェントの選択が変わったため反映しませんでした。もう一度「自動で割り当て」を押してください";
+        // A row's kind changed by hand.
+        let (mut screen, _link, queue, mut text) = five_rows();
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        let row = screen.start.panel[0].kind;
+        press_down(&mut screen, row, &mut text);
+        let edited = start::read(&screen.tree, &screen.start);
+        assert_eq!(edited.panel[0].kind, AgentKind::Codex);
+        answer(&mut screen, &queue, &FIVE, &mut text);
+        assert_eq!(start::read(&screen.tree, &screen.start), edited);
+        assert_eq!(auto_notes(&screen), [CHANGED]);
+
+        // A row removed and another added: the same choices, other rows.
+        let (mut screen, _link, queue, mut text) = five_rows();
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        screen.handle_action(Action::RemovePanelRow(2), &mut text);
+        screen.handle_action(Action::AddPanelRow, &mut text);
+        let edited = start::read(&screen.tree, &screen.start);
+        answer(&mut screen, &queue, &FIVE, &mut text);
+        assert_eq!(start::read(&screen.tree, &screen.start), edited);
+        assert_eq!(auto_notes(&screen), [CHANGED]);
+    }
+
+    /// The whole `Command::Start` after a fill: rows still as filled are
+    /// recorded with their reasons, by row (a removed row's slot is
+    /// overridden; the rows after it keep theirs), and rows changed by hand
+    /// are overridden.
+    #[test]
+    fn the_start_records_the_rows_still_as_filled_and_the_overridden_slots() {
+        let (mut screen, link, queue, mut text) = five_rows();
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        answer(&mut screen, &queue, &FIVE, &mut text);
+        // contestant-1's row goes; judge-2's kind is changed by hand.
+        screen.handle_action(Action::RemovePanelRow(0), &mut text);
+        // codex → claude, one up its menu.
+        let judge_2 = screen.start.co_judges[0].kind;
+        screen.tree.set_focus(Some(judge_2));
+        screen.dispatch(
+            noa_gpui_core::Event::KeyDown {
+                key: noa_gpui_core::Key::ArrowUp,
+                modifiers: Default::default(),
+            },
+            &mut text,
+        );
+        let notes = auto_notes(&screen);
+        assert!(notes[2].ends_with("（手動で変更）"), "{notes:?}");
+        assert!(notes[3].ends_with("（手動で変更）"), "{notes:?}");
+        assert!(!notes[1].ends_with("（手動で変更）"), "{notes:?}");
+        assert!(!notes[4].ends_with("（手動で変更）"), "{notes:?}");
+
+        screen.handle_action(Action::Start, &mut text);
+        let sent = commands(&link);
+        assert_eq!(sent.len(), 1);
+        let Command::Start {
+            auto: Some(record), ..
+        } = &sent[0]
+        else {
+            panic!("{sent:?}");
+        };
+        let pick = |i: usize| {
+            let (slot, agent, model, effort) = FIVE[i];
+            Pick {
+                slot: slot.into(),
+                agent: agent.into(),
+                model: model.map(Into::into),
+                effort: effort.map(Into::into),
+                reason: reason(slot),
+            }
+        };
+        let judge_2 = start::read(&screen.tree, &screen.start).co_judges[0].clone();
+        assert_eq!(judge_2.kind, AgentKind::Claude);
+        assert_eq!(
+            sent[0],
+            Command::Start {
+                request: REQUEST.into(),
+                workdir: None,
+                max_rounds: Some(competition::model::types::DEFAULT_MAX_ROUNDS),
+                reveal_interval: competition::model::types::DEFAULT_REVEAL_INTERVAL,
+                judges: vec![on(AgentKind::Claude, Some("opus"), Some("high")), judge_2],
+                panel: vec![
+                    on(AgentKind::Claude, Some("sonnet"), Some("medium")),
+                    on(AgentKind::Claude, None, None),
+                ],
+                auto: Some(AutoRecord {
+                    planner: "claude (sonnet · medium)".into(),
+                    at: record.at,
+                    picks: vec![pick(0), pick(3), pick(4)],
+                    overridden: vec!["judge-2".into(), "contestant-1".into()],
+                }),
+            }
+        );
+        assert!(record.at > 0);
+    }
+
+    #[test]
+    fn a_start_without_an_assignment_or_after_a_new_form_records_none() {
+        let (mut screen, link, queue, mut text) =
+            auto_screen(&[AgentKind::Claude, AgentKind::Codex]);
+        let starts = |link: &crate::live::FakeLink| -> Vec<Command> {
+            commands(link)
+                .into_iter()
+                .filter(|c| matches!(c, Command::Start { .. }))
+                .collect()
+        };
+        screen.handle_action(Action::Start, &mut text);
+        let sent = starts(&link);
+        assert!(
+            matches!(&sent[..], [Command::Start { auto: None, .. }]),
+            "{sent:?}"
+        );
+        // A fill, then a clean form: the lead's row is the same row, but the
+        // form is new and staffed by hand.
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        answer(
+            &mut screen,
+            &queue,
+            &[
+                ("judge-1", "claude", None, None),
+                ("contestant-1", "claude", None, None),
+                ("contestant-2", "codex", None, None),
+            ],
+            &mut text,
+        );
+        screen.handle_action(Action::NewCompetition, &mut text);
+        assert!(
+            auto_notes(&screen)
+                .iter()
+                .all(|n| !n.starts_with("自動割り当て（"))
+        );
+        set_request(&mut screen, REQUEST, &mut text);
+        screen.handle_action(Action::Start, &mut text);
+        let sent = starts(&link);
+        assert!(
+            matches!(&sent[..], [Command::Start { auto: None, .. }]),
+            "{sent:?}"
+        );
+    }
+
+    /// Empties `field` and types `typed` into it, key by key, so each edit
+    /// reaches the screen as the person's would.
+    fn retype(screen: &mut Competition, field: WidgetId, typed: &str, text: &mut TextStore) {
+        screen.tree.set_focus(Some(field));
+        let erase = screen
+            .tree
+            .get::<noa_gpui_core::widgets::TextField>(field)
+            .map_or(0, |f| f.text().chars().count());
+        for _ in 0..erase {
+            screen.dispatch(
+                noa_gpui_core::Event::KeyDown {
+                    key: noa_gpui_core::Key::Backspace,
+                    modifiers: Default::default(),
+                },
+                text,
+            );
+        }
+        if !typed.is_empty() {
+            screen.dispatch(noa_gpui_core::Event::Text(typed.into()), text);
+        }
+        let form = start::read(&screen.tree, &screen.start);
+        assert_eq!(form.workdir, typed);
+    }
+
+    /// Whether the pull-down is on, and the auto note.
+    fn auto_control(screen: &Competition) -> (bool, Vec<String>) {
+        (screen.tree.is_enabled(screen.auto.menu), auto_notes(screen))
+    }
+
+    #[test]
+    fn an_unreadable_workdir_turns_the_pull_down_off_until_it_is_fixed() {
+        const RELATIVE: &str = "foo は絶対パスではありません";
+        let (mut screen, _link, queue, mut text) = auto_screen(&[AgentKind::Claude]);
+        let field = screen.start.workdir;
+        assert_eq!(auto_control(&screen), (true, vec![]));
+        // A relative path: off, with the start's own message.
+        retype(&mut screen, field, "foo", &mut text);
+        assert_eq!(auto_control(&screen), (false, vec![RELATIVE.to_owned()]));
+        // Asked anyway: no planner, and the message once.
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert!(queue.borrow().is_empty());
+        assert_eq!(auto_control(&screen), (false, vec![RELATIVE.to_owned()]));
+        // Cleared: on again, nothing left over.
+        retype(&mut screen, field, "", &mut text);
+        assert_eq!(auto_control(&screen), (true, vec![]));
+
+        // A folder that is not there, then made: on again once it is.
+        let root = temp_root("auto-workdir");
+        let path = root.to_str().unwrap().to_owned();
+        retype(&mut screen, field, &path, &mut text);
+        assert_eq!(
+            auto_control(&screen),
+            (false, vec![format!("{path} はディレクトリではありません")])
+        );
+        std::fs::create_dir_all(&root).unwrap();
+        retype(&mut screen, field, "", &mut text);
+        retype(&mut screen, field, &path, &mut text);
+        assert_eq!(auto_control(&screen), (true, vec![]));
+        // The planner runs there.
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert_eq!(queue.borrow()[0].job.cwd, root);
+
+        // A planner's failure gives way to the form's message, and fixing
+        // the form leaves neither.
+        fail(&mut screen, &queue, PlanError::Timeout(180), &mut text);
+        let (on, notes) = auto_control(&screen);
+        assert!(on);
+        assert!(
+            matches!(&notes[..], [n] if n.starts_with("自動割り当てに失敗しました: ")),
+            "{notes:?}"
+        );
+        retype(&mut screen, field, "foo", &mut text);
+        assert_eq!(auto_control(&screen), (false, vec![RELATIVE.to_owned()]));
+        retype(&mut screen, field, &path, &mut text);
+        assert_eq!(auto_control(&screen), (true, vec![]));
+
+        // An empty request asked anyway: its message once, gone once one
+        // is typed.
+        set_request(&mut screen, "", &mut text);
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert_eq!(
+            auto_control(&screen),
+            (false, vec!["依頼内容を入力してください".to_owned()])
+        );
+        set_request(&mut screen, REQUEST, &mut text);
+        assert_eq!(auto_control(&screen), (true, vec![]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_later_planning_run_keeps_the_applied_assignment_until_the_start() {
+        let (mut screen, link, queue, mut text) = five_rows();
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        answer(&mut screen, &queue, &FIVE, &mut text);
+        let filled = start::read(&screen.tree, &screen.start);
+        // A second run fails: the block of the first stays, with the cause.
+        screen.handle_action(Action::AutoAssign(1), &mut text);
+        assert!(auto_notes(&screen).contains(&HEADING.to_owned()));
+        fail(&mut screen, &queue, PlanError::Timeout(180), &mut text);
+        let notes = auto_notes(&screen);
+        assert!(notes[0].contains("180 秒以内に"), "{notes:?}");
+        assert_eq!(notes[1], HEADING);
+        // A third is cancelled; a fourth is still running at the start,
+        // which stops it and records the first fill.
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        screen.handle_action(Action::CancelAutoAssign, &mut text);
+        assert_eq!(auto_notes(&screen)[0], HEADING);
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        screen.handle_action(Action::Start, &mut text);
+        let running = queue.borrow_mut().pop().unwrap();
+        assert!(running.cancel.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!screen.auto.running());
+        assert_eq!(start::read(&screen.tree, &screen.start), filled);
+        let sent = commands(&link);
+        let [
+            Command::Start {
+                auto: Some(record), ..
+            },
+        ] = &sent[..]
+        else {
+            panic!("{sent:?}");
+        };
+        assert_eq!(record.picks.len(), FIVE.len());
+        assert!(record.overridden.is_empty());
+        // Its late answer is not taken.
+        let _ = running.reply.send(Err(PlanError::Timeout(1)));
+        screen.poll_live(&mut text);
+        assert_eq!(auto_notes(&screen)[0], HEADING);
+    }
+
+    #[test]
+    fn planning_takes_focus_to_cancel_and_back_on_controls_made_once() {
+        let (mut screen, _link, queue, mut text) = five_rows();
+        let (menu, cancel) = (screen.auto.menu, screen.auto.cancel);
+        screen.rebuild(&mut text);
+        assert_eq!((screen.auto.menu, screen.auto.cancel), (menu, cancel));
+        // Chosen from the keyboard: the menu opens, a rebuild comes in
+        // meanwhile, and the choice still reaches the screen.
+        screen.prepare(VIEW, &mut text);
+        screen.tree.set_focus(Some(menu));
+        let key = |screen: &mut Competition, key, text: &mut TextStore| {
+            screen.dispatch(
+                noa_gpui_core::Event::KeyDown {
+                    key,
+                    modifiers: Default::default(),
+                },
+                text,
+            );
+        };
+        key(&mut screen, noa_gpui_core::Key::ArrowDown, &mut text);
+        screen.rebuild(&mut text);
+        screen.prepare(VIEW, &mut text);
+        key(&mut screen, noa_gpui_core::Key::ArrowDown, &mut text);
+        key(&mut screen, noa_gpui_core::Key::Enter, &mut text);
+        assert_eq!(queue.borrow().len(), 1, "the choice was dropped");
+        assert_eq!(queue.borrow()[0].job.planner.agent, "claude");
+        assert_eq!(screen.tree.focused(), Some(cancel));
+        screen.rebuild(&mut text);
+        assert_eq!(screen.tree.focused(), Some(cancel));
+        answer(&mut screen, &queue, &FIVE, &mut text);
+        assert_eq!(screen.tree.focused(), Some(menu));
+        // 中止 too gives the focus back.
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert_eq!(screen.tree.focused(), Some(cancel));
+        screen.handle_action(Action::CancelAutoAssign, &mut text);
+        assert_eq!(screen.tree.focused(), Some(menu));
+        assert_eq!(screen.auto.menu, menu);
+    }
+
+    #[test]
+    fn leaving_the_start_view_stops_the_planner() {
+        let root = temp_root("auto-leave");
+        let dir = stored_competition(&root);
+        let (mut screen, _link, mut text) = live_on(&root);
+        let queue = fake_planner(&mut screen);
+        screen.poll_live(&mut text);
+        set_request(&mut screen, REQUEST, &mut text);
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert!(screen.auto.running());
+        screen.handle_action(Action::OpenPast(dir.clone()), &mut text);
+        assert!(screen.session.is_some());
+        assert!(!screen.auto.running());
+        assert!(
+            queue.borrow()[0]
+                .cancel
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        // Resuming one leaves too.
+        screen.handle_action(Action::NewCompetition, &mut text);
+        set_request(&mut screen, REQUEST, &mut text);
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        screen.handle_action(Action::ResumePast(dir), &mut text);
+        assert!(!screen.auto.running());
+        assert!(
+            queue.borrow()[1]
+                .cancel
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_demo_starts_no_planner() {
+        let mut screen = Competition::demo_start();
+        let queue = fake_planner(&mut screen);
+        let mut text = TextStore::new(Default::default());
+        screen.rebuild(&mut text);
+        assert!(!screen.tree.is_enabled(screen.auto.menu));
+        screen.handle_action(Action::AutoAssign(0), &mut text);
+        assert!(queue.borrow().is_empty());
+        assert!(!screen.auto.running());
     }
 }

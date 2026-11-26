@@ -1035,3 +1035,736 @@ fn the_code_source_filter_shows_only_markers() {
         ("コード", Some(tasks::model::types::Source::Code))
     );
 }
+
+// ------------------------------------------- auto-assign (docs/specs/auto-assign.md, U6)
+
+use std::sync::mpsc;
+
+use noa_gpui_core::widgets::PullDownButton;
+use tasks::auto_assign::{
+    Assignment, AutoRecord, Cancel, Job, PLANNERS, Pick, PlanError, Planning,
+};
+
+use super::auto::{AutoState, Hooks};
+
+/// What the fake planner was handed: the job, the channel its result goes
+/// on, and its cancel flag.
+type Planned = Rc<RefCell<Vec<(Job, mpsc::Sender<Result<Assignment, PlanError>>, Cancel)>>>;
+
+/// The assignment's arrival time the fake clock gives.
+const ARRIVED: Millis = 42;
+
+/// Replaces the real planner thread: each start is recorded, and the test
+/// sends its result.
+fn fake_planner(screen: &mut Tasks) -> Planned {
+    let planned: Planned = Rc::default();
+    let log = planned.clone();
+    screen.auto_hooks = Hooks {
+        plan: Box::new(move |job, _wake| {
+            let (tx, rx) = mpsc::channel();
+            let cancel = Cancel::default();
+            log.borrow_mut().push((job, tx, cancel.clone()));
+            Planning { rx, cancel }
+        }),
+        clock: Box::new(|| ARRIVED),
+    };
+    planned
+}
+
+/// The 実行 form on t-1 with `agents` installed, and the fake planner.
+fn run_form_with(agents: &[AgentKind]) -> (Tasks, Rc<RefCell<Vec<Intent>>>, TextStore, Planned) {
+    let mut view = demo::view();
+    view.agents = Some(agents.to_vec());
+    let (mut screen, log, mut text) = screen_on(view);
+    let planned = fake_planner(&mut screen);
+    screen.select_ref(&local("t-1"));
+    key(&mut screen, &mut text, 'x');
+    assert!(screen.form.is_some(), "the 実行 form is open");
+    (screen, log, text, planned)
+}
+
+fn find_under(tree: &UiTree, id: WidgetId, pred: &dyn Fn(WidgetId) -> bool) -> Option<WidgetId> {
+    if pred(id) {
+        return Some(id);
+    }
+    tree.children(id)
+        .iter()
+        .find_map(|c| find_under(tree, *c, pred))
+}
+
+fn auto_menu(screen: &Tasks) -> WidgetId {
+    find_under(&screen.tree, screen.form_host, &|id| {
+        screen.tree.get::<PullDownButton>(id).is_some()
+    })
+    .expect("no 自動で割り当て in the form")
+}
+
+fn agent_segment(screen: &Tasks) -> WidgetId {
+    find_under(&screen.tree, screen.form_host, &|id| {
+        screen.tree.get::<SegmentedControl>(id).is_some()
+    })
+    .unwrap()
+}
+
+fn agent_selected(screen: &Tasks) -> Vec<bool> {
+    let id = agent_segment(screen);
+    screen
+        .tree
+        .get::<SegmentedControl>(id)
+        .unwrap()
+        .selected()
+        .to_vec()
+}
+
+fn visible(tree: &UiTree, id: WidgetId) -> bool {
+    !tree.is_hidden(id) && !tree.ancestors(id).any(|a| tree.is_hidden(a))
+}
+
+/// The form's labels a reader sees, in tree order (empty ones left out).
+fn form_texts(screen: &Tasks) -> Vec<String> {
+    fn walk(tree: &UiTree, id: WidgetId, out: &mut Vec<String>) {
+        if let Some(l) = tree.get::<Label>(id)
+            && visible(tree, id)
+            && !l.text().is_empty()
+        {
+            out.push(l.text().to_owned());
+        }
+        for c in tree.children(id) {
+            walk(tree, *c, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&screen.tree, screen.form_host, &mut out);
+    out
+}
+
+/// Presses the form's button labelled `label` from the keyboard.
+fn press_button(screen: &mut Tasks, text: &mut TextStore, label: &str) {
+    let button = form_button(screen, label);
+    assert!(visible(&screen.tree, button), "{label} is hidden");
+    screen.tree.set_focus(Some(button));
+    special(screen, text, Key::Space);
+}
+
+/// Chooses the pull-down's item `i` from the keyboard.
+fn choose_planner(screen: &mut Tasks, text: &mut TextStore, i: usize) {
+    let menu = auto_menu(screen);
+    screen.tree.set_focus(Some(menu));
+    special(screen, text, Key::Space);
+    assert!(screen.in_overlay(), "the menu is open");
+    for _ in 0..=i {
+        special(screen, text, Key::ArrowDown);
+    }
+    special(screen, text, Key::Enter);
+}
+
+/// Moves the agent segment `by` from the keyboard and selects it.
+fn pick_by_hand(screen: &mut Tasks, text: &mut TextStore, by: Key) {
+    let segment = agent_segment(screen);
+    screen.tree.set_focus(Some(segment));
+    special(screen, text, by);
+    special(screen, text, Key::Space);
+}
+
+fn answer(planned: &Planned, at: usize, result: Result<Assignment, PlanError>) {
+    planned.borrow()[at].1.send(result).unwrap();
+}
+
+fn worker(agent: &str, reason: &str) -> Pick {
+    Pick {
+        slot: "worker".into(),
+        agent: agent.into(),
+        model: None,
+        effort: None,
+        reason: reason.into(),
+    }
+}
+
+fn assignment(pick: Pick) -> Assignment {
+    Assignment {
+        planner: PLANNERS[0].label(),
+        picks: vec![pick],
+    }
+}
+
+const HEADING: &str =
+    "自動割り当て（claude (sonnet · medium) が決定）— 内容を確認して「実行」を押してください";
+
+/// L1-2 step 1 and L1-4: 「自動で割り当て」 is in the 実行 form under the
+/// エージェント segment, its items are the installed planners (never agy),
+/// and choosing one starts that planner on the task (L1-3), showing the
+/// caption and 中止 in place of the pull-down.
+#[test]
+fn auto_the_pull_down_is_in_the_run_form_and_starts_the_chosen_planner() {
+    let (mut screen, _, mut text, planned) = run_form_with(&AgentKind::ALL);
+    let menu = auto_menu(&screen);
+    assert!(screen.tree.is_enabled(menu));
+    let texts = form_texts(&screen);
+    let at = |s: &str| texts.iter().position(|t| t == s).unwrap();
+    assert!(at("エージェント") < at("作業場所"), "{texts:?}");
+    let auto = screen.form.as_ref().unwrap().auto().unwrap();
+    let names: Vec<&str> = auto.planners().iter().map(|p| p.agent).collect();
+    assert_eq!(names, ["claude", "codex"]);
+
+    choose_planner(&mut screen, &mut text, 1);
+    let mut jobs = planned.borrow_mut();
+    let [(job, _, cancel)] = &mut jobs[..] else {
+        panic!("one planner started");
+    };
+    assert_eq!(job.planner, PLANNERS[1], "codex");
+    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+    let request = std::mem::replace(&mut job.request, Box::new(|| unreachable!()));
+    let req = request();
+    let task = screen.task(&local("t-1")).unwrap().clone();
+    assert_eq!(req.slots.len(), 1);
+    assert_eq!(req.slots[0].id, "worker");
+    let candidates: Vec<&str> = req.candidates.iter().map(|c| c.agent.as_str()).collect();
+    assert_eq!(
+        candidates,
+        ["claude", "codex", "agy"],
+        "agy may be assigned"
+    );
+    assert!(
+        req.candidates
+            .iter()
+            .all(|c| c.models.is_empty() && c.efforts.is_empty())
+    );
+    assert!(
+        req.content.starts_with(&format!("Title: {}\n", task.title)),
+        "{}",
+        req.content
+    );
+    drop(jobs);
+    assert!(
+        !visible(&screen.tree, menu),
+        "the caption replaces the pull-down"
+    );
+    assert!(
+        form_texts(&screen)
+            .contains(&"codex (gpt-6.2-sol · medium) が割り当てを決めています…".to_owned()),
+        "{:?}",
+        form_texts(&screen)
+    );
+    assert!(matches!(
+        screen.form.as_ref().unwrap().auto().unwrap().state(),
+        AutoState::Running { .. }
+    ));
+}
+
+/// L1-4: with agy the only agent there is no planner: the pull-down is
+/// disabled and the note says why.
+#[test]
+fn auto_with_only_agy_the_pull_down_is_disabled_and_says_why() {
+    let (mut screen, _, mut text, planned) = run_form_with(&[AgentKind::Agy]);
+    let menu = auto_menu(&screen);
+    assert!(!screen.tree.is_enabled(menu));
+    assert!(
+        form_texts(&screen)
+            .contains(&"自動割り当てに使えるエージェントがインストールされていません".to_owned())
+    );
+    screen.tree.set_focus(Some(menu));
+    special(&mut screen, &mut text, Key::Space);
+    assert!(planned.borrow().is_empty());
+}
+
+/// L1-2 step 3 and L1-7: a valid assignment selects its agent's segment
+/// and shows the block with the reason; 実行 sends `Intent::Run` with the
+/// `AutoRecord` of the kept pick.
+#[test]
+fn auto_a_fill_selects_the_segment_shows_the_reason_and_run_carries_auto() {
+    let (mut screen, log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    assert_eq!(agent_selected(&screen), [true, false, false]);
+    choose_planner(&mut screen, &mut text, 0);
+    let pick = worker("agy", "画面の文言修正だけなので軽いエージェントで足りる");
+    answer(&planned, 0, Ok(assignment(pick.clone())));
+    screen.woken(&mut text);
+    screen.prepare(window(), &mut text);
+    assert_eq!(agent_selected(&screen), [false, false, true]);
+    let block =
+        format!("{HEADING}\nエージェント: agy — 画面の文言修正だけなので軽いエージェントで足りる");
+    assert!(
+        form_texts(&screen).contains(&block),
+        "{:?}",
+        form_texts(&screen)
+    );
+    assert!(
+        visible(&screen.tree, auto_menu(&screen)),
+        "the pull-down is back"
+    );
+
+    press_button(&mut screen, &mut text, "実行");
+    assert_eq!(
+        sent(&log),
+        [Intent::Run {
+            task: local("t-1"),
+            agent: AgentKind::Agy,
+            isolation: Isolation::Worktree,
+            auto: Some(AutoRecord {
+                planner: "claude (sonnet · medium)".into(),
+                at: ARRIVED,
+                picks: vec![pick],
+                overridden: Vec::new(),
+            }),
+        }]
+    );
+}
+
+/// L1-2 step 6 and L1-7: an agent changed by hand after the fill is marked
+/// 「（手動で変更）」 and not recorded: Tasks' one pick changed leaves the
+/// run manual (`auto: None`).
+#[test]
+fn auto_an_agent_changed_after_the_fill_is_marked_and_not_recorded() {
+    let (mut screen, log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    choose_planner(&mut screen, &mut text, 0);
+    answer(&planned, 0, Ok(assignment(worker("agy", "軽い"))));
+    screen.woken(&mut text);
+    pick_by_hand(&mut screen, &mut text, Key::ArrowLeft);
+    assert_eq!(agent_selected(&screen), [false, true, false]);
+    let block = format!("{HEADING}\nエージェント: agy — 軽い（手動で変更）");
+    assert!(
+        form_texts(&screen).contains(&block),
+        "{:?}",
+        form_texts(&screen)
+    );
+    press_button(&mut screen, &mut text, "実行");
+    assert_eq!(
+        sent(&log),
+        [Intent::Run {
+            task: local("t-1"),
+            agent: AgentKind::Codex,
+            isolation: Isolation::Worktree,
+            auto: None,
+        }]
+    );
+}
+
+/// L1-2 step 5: a failure leaves the form as it was and names its cause.
+#[test]
+fn auto_a_failure_leaves_the_form_and_names_the_cause() {
+    let (mut screen, log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    choose_planner(&mut screen, &mut text, 0);
+    answer(
+        &planned,
+        0,
+        Err(PlanError::Exit {
+            code: Some(1),
+            stderr_tail: "Error: not logged in\n".into(),
+        }),
+    );
+    screen.woken(&mut text);
+    assert_eq!(agent_selected(&screen), [true, false, false], "untouched");
+    let note = "自動割り当てに失敗しました: claude (sonnet · medium) が終了コード 1 で終了しました（Error: not logged in）。手動で選ぶか、別のエージェントで決めてください";
+    assert!(
+        form_texts(&screen).contains(&note.to_owned()),
+        "{:?}",
+        form_texts(&screen)
+    );
+    assert!(visible(&screen.tree, auto_menu(&screen)));
+
+    // Another planner may be tried; an invalid answer is a failure too.
+    choose_planner(&mut screen, &mut text, 1);
+    answer(
+        &planned,
+        1,
+        Err(PlanError::Invalid("worker の割り当てがありません".into())),
+    );
+    screen.woken(&mut text);
+    let note = "自動割り当てに失敗しました: codex (gpt-6.2-sol · medium) の割り当てが不正です: worker の割り当てがありません。手動で選ぶか、別のエージェントで決めてください";
+    assert!(
+        form_texts(&screen).contains(&note.to_owned()),
+        "{:?}",
+        form_texts(&screen)
+    );
+    press_button(&mut screen, &mut text, "実行");
+    assert_eq!(
+        sent(&log),
+        [Intent::Run {
+            task: local("t-1"),
+            agent: AgentKind::Claude,
+            isolation: Isolation::Worktree,
+            auto: None,
+        }]
+    );
+}
+
+/// L1-2 step 4: an agent chosen by hand while the planner ran is kept: the
+/// assignment is not filled in, and the note says why.
+#[test]
+fn auto_a_fill_after_the_agent_changed_meanwhile_is_refused() {
+    let (mut screen, log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    choose_planner(&mut screen, &mut text, 0);
+    pick_by_hand(&mut screen, &mut text, Key::ArrowRight);
+    assert_eq!(agent_selected(&screen), [false, true, false]);
+    answer(&planned, 0, Ok(assignment(worker("agy", "軽い"))));
+    screen.woken(&mut text);
+    assert_eq!(agent_selected(&screen), [false, true, false], "not filled");
+    let note = "割り当て中にエージェントの選択が変わったため反映しませんでした。もう一度「自動で割り当て」を押してください";
+    assert!(
+        form_texts(&screen).contains(&note.to_owned()),
+        "{:?}",
+        form_texts(&screen)
+    );
+    press_button(&mut screen, &mut text, "実行");
+    let got = sent(&log);
+    assert!(
+        matches!(
+            &got[..],
+            [Intent::Run {
+                agent: AgentKind::Codex,
+                auto: None,
+                ..
+            }]
+        ),
+        "{got:?}"
+    );
+}
+
+fn form_button(screen: &Tasks, label: &str) -> WidgetId {
+    find_under(&screen.tree, screen.form_host, &|id| {
+        screen
+            .tree
+            .get::<Button>(id)
+            .is_some_and(|b| b.label() == label)
+    })
+    .unwrap_or_else(|| panic!("no button {label:?}"))
+}
+
+/// Hiding the focused control does not drop focus: choosing a planner from
+/// the keyboard puts it on 中止, and 中止, a result or a failure put it
+/// back on the pull-down. A planner ending while focus is in another
+/// control leaves it there.
+#[test]
+fn auto_focus_follows_the_control_shown_in_place_of_the_focused_one() {
+    let (mut screen, _log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    let stop = form_button(&screen, "中止");
+    let menu = auto_menu(&screen);
+
+    choose_planner(&mut screen, &mut text, 0);
+    assert_eq!(screen.tree.focused(), Some(stop), "planning: focus on 中止");
+    // 中止 pressed from the keyboard, where focus already is.
+    special(&mut screen, &mut text, Key::Space);
+    assert!(
+        planned.borrow()[0]
+            .2
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "stopped: focus on the pull-down"
+    );
+
+    choose_planner(&mut screen, &mut text, 0);
+    assert_eq!(screen.tree.focused(), Some(stop));
+    answer(&planned, 1, Ok(assignment(worker("codex", "速い"))));
+    screen.woken(&mut text);
+    assert!(matches!(
+        screen.form.as_ref().unwrap().auto().unwrap().state(),
+        AutoState::Idle
+    ));
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "filled: focus on the pull-down"
+    );
+
+    choose_planner(&mut screen, &mut text, 0);
+    answer(&planned, 2, Err(PlanError::Spawn("x".into())));
+    screen.woken(&mut text);
+    assert_eq!(
+        screen.tree.focused(),
+        Some(menu),
+        "failed: focus on the pull-down"
+    );
+
+    // Focus moved to the agent segment while planning stays there when the
+    // planner ends. (A start always has focus on the pull-down: closing its
+    // menu, by key or by pointer, gives focus back to it.)
+    choose_planner(&mut screen, &mut text, 0);
+    assert_eq!(screen.tree.focused(), Some(stop));
+    let segment = agent_segment(&screen);
+    screen.tree.set_focus(Some(segment));
+    answer(&planned, 3, Ok(assignment(worker("agy", "軽い"))));
+    screen.woken(&mut text);
+    assert_eq!(agent_selected(&screen), [false, false, true], "filled");
+    assert_eq!(screen.tree.focused(), Some(segment));
+}
+
+/// L1-2 step 2: 中止 cancels the planner (its flag is set, so `run` kills
+/// its group), the pull-down comes back, and a result that arrives after
+/// is dropped. 実行 while a planner runs starts the manual pick and cancels
+/// that planner too.
+#[test]
+fn auto_stop_and_run_while_planning_cancel_the_planner() {
+    let (mut screen, log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    let cancelled = |at: usize| {
+        planned.borrow()[at]
+            .2
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    choose_planner(&mut screen, &mut text, 0);
+    press_button(&mut screen, &mut text, "中止");
+    assert!(cancelled(0));
+    assert!(visible(&screen.tree, auto_menu(&screen)));
+    assert!(
+        !form_texts(&screen)
+            .iter()
+            .any(|t| t.contains("決めています")),
+        "{:?}",
+        form_texts(&screen)
+    );
+    // The stopped planner's late answer is not filled in.
+    let _ = planned.borrow()[0]
+        .1
+        .send(Ok(assignment(worker("agy", "軽い"))));
+    screen.woken(&mut text);
+    assert_eq!(agent_selected(&screen), [true, false, false]);
+
+    choose_planner(&mut screen, &mut text, 0);
+    assert!(!cancelled(1));
+    press_button(&mut screen, &mut text, "実行");
+    assert!(cancelled(1), "closing the form stops its planner");
+    assert_eq!(
+        sent(&log),
+        [Intent::Run {
+            task: local("t-1"),
+            agent: AgentKind::Claude,
+            isolation: Isolation::Worktree,
+            auto: None,
+        }]
+    );
+}
+
+/// Fills the 実行 form with claude's assignment of `pick`, then starts codex
+/// on it: the re-run's caption shows, and the fill's block stays while
+/// codex decides. Returns that block.
+fn fill_then_rerun(
+    screen: &mut Tasks,
+    text: &mut TextStore,
+    planned: &Planned,
+    pick: &Pick,
+) -> String {
+    choose_planner(screen, text, 0);
+    answer(planned, 0, Ok(assignment(pick.clone())));
+    screen.woken(text);
+    assert_eq!(agent_selected(screen), [false, false, true]);
+    let block = format!("{HEADING}\nエージェント: {} — {}", pick.agent, pick.reason);
+    choose_planner(screen, text, 1);
+    let texts = form_texts(screen);
+    assert!(
+        texts.contains(&"codex (gpt-6.2-sol · medium) が割り当てを決めています…".to_owned()),
+        "{texts:?}"
+    );
+    assert!(
+        texts.contains(&block),
+        "kept while codex decides: {texts:?}"
+    );
+    block
+}
+
+/// What 実行 sends after claude's fill of `pick` (agy) is still the form's.
+fn run_with_claudes_fill(pick: Pick) -> Intent {
+    Intent::Run {
+        task: local("t-1"),
+        agent: AgentKind::Agy,
+        isolation: Isolation::Worktree,
+        auto: Some(AutoRecord {
+            planner: "claude (sonnet · medium)".into(),
+            at: ARRIVED,
+            picks: vec![pick],
+            overridden: Vec::new(),
+        }),
+    }
+}
+
+/// L1-2 step 7: a re-run stopped by 中止 leaves the fill it followed: the
+/// form keeps that agent and its block, and 実行 records that fill.
+#[test]
+fn auto_a_stopped_rerun_keeps_the_applied_fill_and_run_records_it() {
+    let (mut screen, log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    let pick = worker("agy", "画面の文言修正だけなので軽いエージェントで足りる");
+    let block = fill_then_rerun(&mut screen, &mut text, &planned, &pick);
+
+    press_button(&mut screen, &mut text, "中止");
+    assert!(
+        planned.borrow()[1]
+            .2
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert_eq!(agent_selected(&screen), [false, false, true]);
+    let texts = form_texts(&screen);
+    assert!(
+        !texts.iter().any(|t| t.contains("決めています")),
+        "{texts:?}"
+    );
+    assert!(texts.contains(&block), "{texts:?}");
+
+    press_button(&mut screen, &mut text, "実行");
+    assert_eq!(sent(&log), [run_with_claudes_fill(pick)]);
+}
+
+/// L1-2 steps 5 and 7: a re-run that fails leaves the fill it followed: its
+/// cause is shown above that fill's block, the form keeps the agent, and
+/// 実行 records that fill.
+#[test]
+fn auto_a_failed_rerun_keeps_the_applied_fill_below_the_failure_and_run_records_it() {
+    let (mut screen, log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    let pick = worker("agy", "画面の文言修正だけなので軽いエージェントで足りる");
+    let block = fill_then_rerun(&mut screen, &mut text, &planned, &pick);
+
+    answer(&planned, 1, Err(PlanError::Timeout(180)));
+    screen.woken(&mut text);
+    assert_eq!(agent_selected(&screen), [false, false, true], "untouched");
+    let note = "自動割り当てに失敗しました: codex (gpt-6.2-sol · medium) が 180 秒以内に割り当てを返しませんでした。手動で選ぶか、別のエージェントで決めてください";
+    let texts = form_texts(&screen);
+    let at = |s: &str| texts.iter().position(|t| t == s);
+    assert!(
+        at(note).zip(at(&block)).is_some_and(|(n, b)| n < b),
+        "the cause above the block: {texts:?}"
+    );
+
+    press_button(&mut screen, &mut text, "実行");
+    assert_eq!(sent(&log), [run_with_claudes_fill(pick)]);
+}
+
+/// The planner reads an issue's body once its detail is loaded, as the
+/// run's agent does (L1-3: the material `runs::brief` writes).
+#[test]
+fn auto_the_planner_reads_a_loaded_issues_body() {
+    let mut view = demo::view();
+    view.agents = Some(vec![AgentKind::Claude]);
+    let issue = view.github.tasks[0].clone();
+    let TaskRef::GitHub { number, .. } = issue.r#ref.clone() else {
+        panic!("{issue:?}");
+    };
+    view.github.details.insert(
+        number,
+        Ok(tasks::model::types::IssueDetail {
+            body: "issue の本文".into(),
+            comments: Vec::new(),
+        }),
+    );
+    let (mut screen, _, mut text) = screen_on(view);
+    let planned = fake_planner(&mut screen);
+    screen.select_ref(&issue.r#ref);
+    key(&mut screen, &mut text, 'x');
+    choose_planner(&mut screen, &mut text, 0);
+    let mut jobs = planned.borrow_mut();
+    let request = std::mem::replace(&mut jobs[0].0.request, Box::new(|| unreachable!()));
+    let content = request().content;
+    assert!(content.contains("issue の本文"), "{content}");
+    assert!(content.contains(&format!("Source: #{number}")), "{content}");
+}
+
+/// Hands out the View last put in `next`, once, as a feed does when its
+/// sources change; records nothing.
+struct Later {
+    next: Rc<RefCell<Option<View>>>,
+}
+
+impl Feed for Later {
+    fn poll(&mut self) -> Option<View> {
+        self.next.borrow_mut().take()
+    }
+
+    fn act(&mut self, _intent: Intent) {}
+}
+
+/// The request the fake planner's start `at` was handed.
+fn planned_request(planned: &Planned, at: usize) -> tasks::auto_assign::Request {
+    let mut jobs = planned.borrow_mut();
+    let request = std::mem::replace(&mut jobs[at].0.request, Box::new(|| unreachable!()));
+    request()
+}
+
+/// L1-3: the planner reads the task as it is when a planner is chosen, not
+/// when the form opened. 実行 pressed on an issue before its detail loaded,
+/// then the body arriving while the form is open: the next planner reads
+/// that body, as the run's brief would; before it arrived, the planner was
+/// told it is not loaded, as the run would be.
+#[test]
+fn auto_the_planner_reads_an_issues_body_loaded_after_the_form_opened() {
+    let mut view = demo::view();
+    view.agents = Some(vec![AgentKind::Claude]);
+    let issue = view.github.tasks[0].clone();
+    let TaskRef::GitHub { number, .. } = issue.r#ref.clone() else {
+        panic!("{issue:?}");
+    };
+    // Its detail not loaded yet (the demo has some loaded).
+    view.github.details.remove(&number);
+    assert!(issue.body.is_none());
+    let next = Rc::new(RefCell::new(Some(view.clone())));
+    let mut screen = Tasks::new(Box::new(Later { next: next.clone() }));
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(window(), &mut text);
+    let planned = fake_planner(&mut screen);
+    screen.select_ref(&issue.r#ref);
+    key(&mut screen, &mut text, 'x');
+    assert!(screen.form.is_some(), "the 実行 form is open");
+
+    choose_planner(&mut screen, &mut text, 0);
+    let before = planned_request(&planned, 0).content;
+    assert!(
+        before.ends_with("(The issue's text is not loaded.)\n"),
+        "{before}"
+    );
+    press_button(&mut screen, &mut text, "中止");
+
+    // `LoadDetail` finishes: the feed's next View has the body.
+    view.github.details.insert(
+        number,
+        Ok(tasks::model::types::IssueDetail {
+            body: "あとから読み込んだ本文".into(),
+            comments: Vec::new(),
+        }),
+    );
+    *next.borrow_mut() = Some(view);
+    screen.woken(&mut text);
+    screen.prepare(window(), &mut text);
+    assert!(screen.form.is_some(), "the form stays open");
+
+    choose_planner(&mut screen, &mut text, 0);
+    let after = planned_request(&planned, 1).content;
+    assert!(after.contains("あとから読み込んだ本文"), "{after}");
+    assert!(!after.contains("not loaded"), "{after}");
+}
+
+/// `--demo` starts nothing: 「自動で割り当て」 is answered by the demo's
+/// canned planner, not a CLI, and the demo has no waker, so the answer is
+/// shown as the planner is chosen, without a wake.
+#[test]
+fn auto_in_the_demo_the_canned_answer_shows_without_a_wake() {
+    let mut screen = Tasks::new(Box::<DemoFeed>::default());
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(window(), &mut text);
+    assert!(screen.feed.waker().is_none(), "the demo cannot wake");
+    screen.select_ref(&local("t-1"));
+    key(&mut screen, &mut text, 'x');
+    assert!(screen.form.is_some(), "the 実行 form is open");
+    assert_eq!(agent_selected(&screen), [true, false, false]);
+
+    // No `woken` between choosing codex and reading the form.
+    choose_planner(&mut screen, &mut text, 1);
+    assert!(
+        screen
+            .form
+            .as_ref()
+            .unwrap()
+            .auto()
+            .unwrap()
+            .applied()
+            .is_some(),
+        "{:?}",
+        screen.form.as_ref().unwrap().auto()
+    );
+    assert_eq!(agent_selected(&screen), [false, true, false]);
+    let block = format!(
+        "自動割り当て（codex (gpt-6.2-sol · medium) が決定）— 内容を確認して「実行」を押してください\nエージェント: codex — {}",
+        demo::PLANNED
+    );
+    assert!(
+        form_texts(&screen).contains(&block),
+        "{:?}",
+        form_texts(&screen)
+    );
+}

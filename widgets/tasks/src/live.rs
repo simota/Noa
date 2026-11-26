@@ -33,7 +33,10 @@ use tasks::model::types::{
 use tasks::related::{self, LinkScan, Related};
 use tasks::sibling::{self, Launcher};
 use tasks::task_links::{self, CHANGE_POLL_MS, LinkEvent, SessionKind, TaskKey};
+use tasks::timeline::{self, Publisher, RunSpec, Share, Status, TimelineApi};
 use tasks::{code, runs, store, worktree};
+
+use noa_ipc::timeline::Outcome;
 
 use crate::installed::{self, Installed};
 use crate::ui::{Feed, Intent, View};
@@ -80,6 +83,15 @@ enum Job {
         task: TaskRef,
         id: String,
     },
+    /// Where the runs are registered and shared from now on.
+    Timeline(Box<TimelineLink>),
+    /// 共有: posts the run's result with `outcome`; `None` sends the
+    /// staged share again (再試行).
+    Share {
+        run: RunId,
+        title: Option<String>,
+        outcome: Option<Outcome>,
+    },
 }
 
 /// What the worker sends back.
@@ -90,6 +102,64 @@ enum Up {
         related: BTreeMap<TaskRef, Related>,
     },
     Notice(String),
+    /// Where each shared run's post stands.
+    Timeline(BTreeMap<RunId, Status>),
+}
+
+/// How the worker reaches the Board Timeline: the outbox root
+/// (`noa_config::timeline_outbox_dir()`) and a connection of its own (the
+/// [`Connect`] link knows nothing of the timeline). Made on the worker.
+pub struct TimelineLink {
+    pub outbox_root: PathBuf,
+    pub connect: Box<dyn FnMut() -> Result<Box<dyn TimelineApi>, String> + Send>,
+}
+
+impl TimelineLink {
+    /// The running Noa's control server.
+    pub fn system(outbox_root: PathBuf) -> Self {
+        Self {
+            outbox_root,
+            connect: Box::new(|| {
+                timeline::connect().map(|client| Box::new(client) as Box<dyn TimelineApi>)
+            }),
+        }
+    }
+}
+
+/// The worker's side of the timeline.
+struct Timeline {
+    link: TimelineLink,
+    /// The repository key as a request-id token ([`timeline::session_key`]).
+    session: String,
+    /// Its connection, dropped after a failure.
+    api: Option<Box<dyn TimelineApi>>,
+    /// Where each run shared (or failed to be) stands.
+    states: BTreeMap<RunId, Status>,
+    /// The outcome a share asked for, for a 再試行 of one whose share could
+    /// not be saved (a saved share keeps its own).
+    asked: HashMap<RunId, Outcome>,
+}
+
+impl Timeline {
+    fn api(&mut self) -> Result<&mut Box<dyn TimelineApi>, String> {
+        if self.api.is_none() {
+            self.api = Some((self.link.connect)()?);
+        }
+        Ok(self.api.as_mut().expect("connected above"))
+    }
+
+    fn publisher(&self, run: &Run, live: bool) -> Result<Publisher, String> {
+        Publisher::open(
+            &self.link.outbox_root,
+            &self.session,
+            run.run.as_str(),
+            RunSpec {
+                worker_pane: run.pane.filter(|_| live),
+                task_ref: Some(timeline::task_ref(&run.task)),
+            },
+        )
+        .map_err(|e| format!("outbox: {e}"))
+    }
 }
 
 /// The live feed of one repository.
@@ -111,6 +181,10 @@ pub struct LiveFeed<C> {
     shown: Option<View>,
     /// Tells the screen to poll: for what `act` says itself.
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// Where each shared run's post stands, as the worker last said.
+    timeline: BTreeMap<RunId, Status>,
+    /// `timeline` changed since the last View handed out.
+    timeline_new: bool,
     /// The connector lives on the worker.
     connect: PhantomData<fn() -> C>,
 }
@@ -167,6 +241,9 @@ impl LiveFeed<IpcConnect> {
             wake.clone(),
         );
         feed.installed = Some(installed::spawn(move || wake()));
+        if let Some(outbox) = noa_config::timeline_outbox_dir() {
+            feed.send(Job::Timeline(Box::new(TimelineLink::system(outbox))));
+        }
         Ok(feed)
     }
 }
@@ -230,6 +307,7 @@ impl<C: Connect + Send + 'static> LiveFeed<C> {
                     wake: worker_wake,
                     up: up_tx,
                     sent: None,
+                    timeline: None,
                 }
                 .run(job_rx)
             });
@@ -251,6 +329,8 @@ impl<C: Connect + Send + 'static> LiveFeed<C> {
             installed: None,
             shown: None,
             wake,
+            timeline: BTreeMap::new(),
+            timeline_new: false,
             connect: PhantomData,
         }
     }
@@ -329,6 +409,12 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
                     }
                 }
                 Up::Notice(notice) => self.notice = Some(notice),
+                Up::Timeline(states) => {
+                    if states != self.timeline {
+                        self.timeline = states;
+                        self.timeline_new = true;
+                    }
+                }
             }
         }
         if let Some(rx) = &self.installed
@@ -355,7 +441,8 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
             notice: self.notice.clone(),
             now: (self.clock)(),
         };
-        let related_new = std::mem::replace(&mut self.related_new, false);
+        let related_new = std::mem::replace(&mut self.related_new, false)
+            | std::mem::replace(&mut self.timeline_new, false);
         if !related_new
             && self
                 .shown
@@ -366,6 +453,10 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
         }
         self.shown = Some(view.clone());
         Some(view)
+    }
+
+    fn timeline(&self) -> Option<&BTreeMap<RunId, Status>> {
+        Some(&self.timeline)
     }
 
     fn related(&self) -> Option<&BTreeMap<TaskRef, Related>> {
@@ -437,6 +528,19 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
                 }
             }
             Intent::RemoveLink { task, id } => self.send(Job::RemoveLink { task, id }),
+            Intent::Share { run, outcome } => {
+                let title = self
+                    .runs
+                    .iter()
+                    .find(|v| v.run.run == run)
+                    .and_then(|v| self.task(&v.run.task))
+                    .map(|task| task.title);
+                self.send(Job::Share {
+                    run,
+                    title,
+                    outcome,
+                });
+            }
         }
     }
 }
@@ -497,6 +601,8 @@ struct Worker<C: Connect> {
     wake: Arc<dyn Fn() + Send + Sync>,
     up: Sender<Up>,
     sent: Option<Seen>,
+    /// The Board Timeline, once [`Job::Timeline`] gave it.
+    timeline: Option<Timeline>,
 }
 
 /// What the worker last sent.
@@ -1124,6 +1230,15 @@ impl<C: Connect> Worker<C> {
             Job::OpenSession { kind, session } => self.open_session(kind, &session),
             Job::AddLink { task, url } => self.add_link(&task, &url),
             Job::RemoveLink { task, id } => self.remove_link(&task, &id),
+            Job::Timeline(link) => {
+                self.use_timeline(*link);
+                return;
+            }
+            Job::Share {
+                run,
+                title,
+                outcome,
+            } => self.share(&run, title.as_deref(), outcome),
         };
         // What the intent changed is shown before what is said about it.
         self.look_now();
@@ -1194,6 +1309,9 @@ impl<C: Connect> Worker<C> {
         let started = start::start(conn, &mut board, &log, req, now);
         self.board = board;
         self.reload_runs();
+        if let Ok((run, _)) = &started {
+            self.register_on_timeline(run);
+        }
         // Its base is in the link log now.
         self.link_scan = LinkScan::new(self.links.clone());
         started.map(|(run, base)| {
@@ -1207,6 +1325,165 @@ impl<C: Connect> Worker<C> {
                 None => started,
             }
         })
+    }
+
+    /// Takes up the Board Timeline: where the runs shared before stand,
+    /// from their outboxes, and a share not on the timeline yet (saved
+    /// before an exit, or its answer lost) is sent again at once.
+    fn use_timeline(&mut self, link: TimelineLink) {
+        let mut tl = Timeline {
+            session: timeline::session_key(&store::repo_key(&self.repo)),
+            link,
+            api: None,
+            states: BTreeMap::new(),
+            asked: HashMap::new(),
+        };
+        for run in &self.runs {
+            // A run id that cannot name a folder under the root (a log
+            // edited by hand) has no outbox: nothing is looked at for it.
+            let Some(dir) =
+                timeline::outbox_dir(&tl.link.outbox_root, &tl.session, run.run.as_str())
+            else {
+                continue;
+            };
+            if !dir.is_dir() {
+                continue;
+            }
+            if let Some(state) = tl.publisher(run, false).ok().and_then(|p| p.shared()) {
+                tl.states.insert(run.run.clone(), state);
+            }
+        }
+        let unsent: Vec<RunId> = tl
+            .states
+            .iter()
+            .filter(|(_, state)| state.unsent())
+            .map(|(run, _)| run.clone())
+            .collect();
+        let _ = self.up.send(Up::Timeline(tl.states.clone()));
+        (self.wake)();
+        self.timeline = Some(tl);
+        for run in unsent {
+            // As 再試行 would: the share as it was saved.
+            let _ = self.share(&run, None, None);
+        }
+    }
+
+    /// Registers a run just started on the timeline, its float as the
+    /// worker on its board: the result is shared later, by the person. A
+    /// failure is retried by the share.
+    fn register_on_timeline(&mut self, run: &RunId) {
+        let Some(tl) = &mut self.timeline else {
+            return;
+        };
+        let Some(found) = self.runs.iter().find(|r| &r.run == run) else {
+            return;
+        };
+        if found.pane.is_none() {
+            return;
+        }
+        let registered = tl.publisher(found, true).and_then(|mut publisher| {
+            let api = tl.api()?;
+            Ok(publisher.register(api.as_mut(), found.board))
+        });
+        if !matches!(registered, Ok(Status::Idle)) {
+            tl.api = None;
+        }
+    }
+
+    /// 共有: the run's result file as it is now, posted with `outcome`,
+    /// saved in the run's outbox before anything is sent; `None` (再試行)
+    /// sends what was saved, without reading the result file again. The
+    /// run log and the result file are only read.
+    fn share(
+        &mut self,
+        run: &RunId,
+        title: Option<&str>,
+        outcome: Option<Outcome>,
+    ) -> Result<String, String> {
+        let now = (self.clock)();
+        let live = self
+            .views(now)
+            .iter()
+            .any(|v| &v.run.run == run && matches!(v.liveness, Liveness::Alive { .. }));
+        let Some(tl) = &mut self.timeline else {
+            return Err("タイムラインに投稿できません（保存先がわかりません）".into());
+        };
+        let found = self
+            .runs
+            .iter()
+            .find(|r| &r.run == run)
+            .ok_or_else(|| format!("{run} の記録がありません"))?;
+        let (up, wake) = (&self.up, &self.wake);
+        let status = (|| -> Result<Status, String> {
+            let mut publisher = tl.publisher(found, live)?;
+            let saved = publisher
+                .saved_share()
+                .map_err(|e| format!("outbox: {e}"))?;
+            let candidate = match saved {
+                // Shared before: sent as it was shared, whatever the result
+                // file says now (or if it is gone with its work tree).
+                Some(candidate) => candidate,
+                None => {
+                    let outcome = outcome
+                        .or_else(|| tl.asked.get(run).copied())
+                        .unwrap_or(Outcome::Unknown);
+                    tl.asked.insert(run.clone(), outcome);
+                    let path = runs::result_file(&found.workdir, run);
+                    let (text, longer) = timeline::read_result(&found.workdir, &path)
+                        .map_err(|e| format!("{} を読めません: {e}", path.display()))?;
+                    let candidate = timeline::candidate(
+                        &tl.session,
+                        &Share {
+                            run,
+                            task: &found.task,
+                            title,
+                            result_path: &path,
+                            result: &text,
+                            longer,
+                            outcome,
+                        },
+                    );
+                    publisher
+                        .save_share(&candidate)
+                        .map_err(|e| format!("outbox: {e}"))?;
+                    candidate
+                }
+            };
+            // Pending while it is on its way.
+            if !matches!(publisher.shared(), Some(Status::Published { .. })) {
+                tl.states.insert(run.clone(), Status::Pending);
+                let _ = up.send(Up::Timeline(tl.states.clone()));
+                wake();
+            }
+            // The board is named only while the run's float is on it: an
+            // id from before a restart may be another pane now.
+            let board = found.board.filter(|_| live);
+            let api = tl.api()?;
+            Ok(publisher.sync(api.as_mut(), board, &[candidate]))
+        })()
+        .unwrap_or_else(|message| Status::Failed { message });
+        if status.failed() {
+            tl.api = None;
+        }
+        let notice = match &status {
+            Status::Published { seq, .. } => Ok(format!(
+                "{run} の結果をタイムラインに投稿しました（#{seq}）"
+            )),
+            Status::Idle => Err("この Noa はタイムラインに対応していません".to_owned()),
+            Status::Pending => Ok(format!("{run} の結果は投稿待ちです")),
+            Status::Waiting { why } => Err(format!("{run} の結果は投稿待ちです: {why}")),
+            Status::Failed { message } => Err(format!("タイムラインに投稿できません: {message}")),
+        };
+        if status == Status::Idle {
+            tl.states.remove(run);
+        } else {
+            tl.states.insert(run.clone(), status);
+        }
+        let _ = self.up.send(Up::Timeline(tl.states.clone()));
+        // Woken here, not only by the notice: a share sent again at start
+        // has none, and its outcome would wait for the next periodic wake.
+        (self.wake)();
+        notice
     }
 
     /// The pane of `run`, by its label, in the last listing: also one
@@ -1622,6 +1899,11 @@ mod tests {
     /// log and Noa, its own worker and a clock 7 ms off (its run ids
     /// differ, as another window's would).
     fn second_window(rig: &Rig) -> LiveFeed<FakeNoa> {
+        second_window_waking(rig, Arc::new(|| {}))
+    }
+
+    /// [`second_window`], waking its screen with `wake`.
+    fn second_window_waking(rig: &Rig, wake: Arc<dyn Fn() + Send + Sync>) -> LiveFeed<FakeNoa> {
         let root = rig.log.parent().unwrap().parent().unwrap().to_path_buf();
         let c = rig.clock.clone();
         LiveFeed::with(
@@ -1635,7 +1917,7 @@ mod tests {
             Box::new(|_: &str| {}),
             Box::new(sibling::Offline("テストでは起動しません")),
             Arc::new(move || c.load(Ordering::SeqCst) + 7),
-            Arc::new(|| {}),
+            wake,
         )
     }
 
@@ -3122,5 +3404,466 @@ mod tests {
         rig.until_related(&t, "gone from t-1", |r| r.prs.is_empty());
         let kept = rig.until_related(&issue, "kept on #12", |r| r.prs.len() == 1);
         assert_eq!(kept.prs[0].url, url);
+    }
+
+    mod timeline {
+        use super::*;
+        use noa_ipc::ClientError;
+        use noa_ipc::timeline::{
+            PostParams, PostResult, PublishOwner, RegisterRunParams, RegisterRunResult, Seq,
+        };
+        use noa_ipc::timeline_outbox::PostSink;
+
+        #[derive(Default)]
+        struct Posted {
+            posts: Vec<PostParams>,
+            runs: Vec<RegisterRunParams>,
+            /// The seq each request was stored under (a re-send gets it back).
+            stored: HashMap<String, u64>,
+            /// The next post is stored and its answer lost.
+            lose_next: bool,
+            /// The next post is answered once this says so.
+            gate: Option<std::sync::mpsc::Receiver<()>>,
+        }
+
+        #[derive(Clone, Default)]
+        struct Tl(Arc<Mutex<Posted>>);
+
+        impl PostSink for Tl {
+            fn post(&mut self, p: &PostParams) -> Result<PostResult, ClientError> {
+                let gate = {
+                    let mut w = self.0.lock().unwrap();
+                    w.posts.push(p.clone());
+                    w.gate.take()
+                };
+                if let Some(gate) = gate {
+                    let _ = gate.recv();
+                }
+                let mut w = self.0.lock().unwrap();
+                let next = w.stored.len() as u64 + 1;
+                let duplicate = w.stored.contains_key(&p.request_id);
+                let seq = *w.stored.entry(p.request_id.clone()).or_insert(next);
+                if std::mem::take(&mut w.lose_next) {
+                    return Err(ClientError::Timeout("noa.timeline.post".into()));
+                }
+                Ok(PostResult {
+                    created_at: "2026-11-26T00:00:00Z".into(),
+                    duplicate,
+                    post_id: format!("po-{seq:016x}"),
+                    seq: Seq(seq),
+                })
+            }
+        }
+
+        fn published(seq: u64) -> Status {
+            Status::Published {
+                seq,
+                post_id: format!("po-{seq:016x}"),
+            }
+        }
+
+        /// The timeline `tl` behind a link with its outbox in `rig`'s data;
+        /// `up` says whether Noa can be reached (always, when `None`).
+        fn link_to(rig: &Rig, tl: &Tl, up: Option<Arc<std::sync::atomic::AtomicBool>>) -> Job {
+            let shared = tl.clone();
+            Job::Timeline(Box::new(TimelineLink {
+                outbox_root: rig.root.join("outbox"),
+                connect: Box::new(move || match &up {
+                    Some(up) if !up.load(Ordering::SeqCst) => Err("Noa に接続できません".into()),
+                    _ => Ok(Box::new(shared.clone()) as Box<dyn TimelineApi>),
+                }),
+            }))
+        }
+
+        /// Starts a run of the rig's task `t-1` and waits for its float.
+        fn started(rig: &mut Rig) -> RunId {
+            rig.until("the task", |v| v.tasks.len() == 1);
+            rig.feed.act(Intent::Run {
+                task: TaskRef::Local("t-1".into()),
+                agent: AgentKind::Claude,
+                isolation: Isolation::Here,
+            });
+            let alive = |run: &&RunView| matches!(run.liveness, Liveness::Alive { .. });
+            let view = rig.until("実行中", |v| v.runs.iter().any(|run| alive(&run)));
+            view.runs.iter().find(alive).unwrap().run.run.clone()
+        }
+
+        impl TimelineApi for Tl {
+            fn supports(&self) -> bool {
+                true
+            }
+
+            fn register_run(
+                &mut self,
+                p: &RegisterRunParams,
+            ) -> Result<RegisterRunResult, ClientError> {
+                let mut w = self.0.lock().unwrap();
+                w.runs.push(p.clone());
+                Ok(RegisterRunResult {
+                    board_id: "bd-0000000000000001".into(),
+                    created: w.runs.len() == 1,
+                    producer_id: p.publish_policy.producer_id.clone().unwrap(),
+                    run_id: "rn-0000000000000001".into(),
+                    worker_id: Some("wk-0000000000000001".into()),
+                })
+            }
+        }
+
+        /// Polls until `run`'s share state is one `done` takes.
+        fn until_shared(rig: &mut Rig, run: &RunId, done: impl Fn(&Status) -> bool) -> Status {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                rig.feed.poll();
+                if let Some(state) = rig.feed.timeline().and_then(|all| all.get(run))
+                    && done(state)
+                {
+                    return state.clone();
+                }
+                assert!(Instant::now() < deadline, "no share state for {run}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        #[test]
+        fn ac5_a_run_is_registered_at_start_and_posted_only_when_shared() {
+            let mut rig = rig("timeline", |repo, _, _| write_task(repo, "t-1", "フォント"));
+            let tl = Tl::default();
+            let shared = tl.clone();
+            rig.feed.send(Job::Timeline(Box::new(TimelineLink {
+                outbox_root: rig.root.join("outbox"),
+                connect: Box::new(move || Ok(Box::new(shared.clone()) as Box<dyn TimelineApi>)),
+            })));
+            rig.until("the task", |v| v.tasks.len() == 1);
+            let task = TaskRef::Local("t-1".into());
+            rig.feed.act(Intent::Run {
+                task: task.clone(),
+                agent: AgentKind::Claude,
+                isolation: Isolation::Here,
+            });
+            let view = rig.until("実行中", |v| {
+                v.runs
+                    .iter()
+                    .any(|run| matches!(run.liveness, Liveness::Alive { .. }))
+            });
+            let run = view.runs[0].run.clone();
+            {
+                let posted = tl.0.lock().unwrap();
+                assert_eq!(posted.runs.len(), 1, "registered once its float is up");
+                let reg = &posted.runs[0];
+                assert_eq!(reg.worker_pane_id.map(|p| p.0), run.pane);
+                assert_eq!(reg.orchestrator_pane_id.map(|p| p.0), run.board);
+                assert_eq!(reg.publish_policy.owner, PublishOwner::Runner);
+                let key = tasks::timeline::session_key(&store::repo_key(&rig.repo));
+                assert_eq!(reg.request_id, format!("tasks-{key}-run-{}", run.run));
+                assert_eq!(
+                    reg.publish_policy.producer_id.as_deref(),
+                    Some(format!("tasks:{key}").as_str())
+                );
+                assert_eq!(reg.task_ref.as_ref().unwrap().id, "t-1");
+                assert!(posted.posts.is_empty(), "nothing posted before 共有");
+            }
+
+            let result = runs::result_file(&rig.repo, &run.run);
+            fs::write(&result, "# 報告\n\n直しました\n").unwrap();
+            let log = fs::read(&rig.log).unwrap();
+            rig.feed.act(Intent::Share {
+                run: run.run.clone(),
+                outcome: Some(Outcome::Succeeded),
+            });
+            let published = |s: &Status| matches!(s, Status::Published { .. });
+            assert_eq!(
+                until_shared(&mut rig, &run.run, published),
+                self::published(1)
+            );
+            let posted = tl.0.lock().unwrap();
+            assert_eq!(posted.posts.len(), 1);
+            let post = &posted.posts[0];
+            let key = tasks::timeline::session_key(&store::repo_key(&rig.repo));
+            assert_eq!(post.request_id, format!("tasks-{key}-result-{}", run.run));
+            assert_eq!(post.post.outcome, Outcome::Succeeded);
+            assert_eq!(post.post.title, "タスク結果: フォント");
+            assert_eq!(post.post.summary, "報告");
+            assert_eq!(post.post.body_markdown, "# 報告\n\n直しました\n");
+            assert_eq!(post.post.artifacts[0].r#ref, result.display().to_string());
+            // Sharing reads the run's files and writes neither.
+            assert_eq!(fs::read(&rig.log).unwrap(), log);
+            assert_eq!(
+                fs::read_to_string(&result).unwrap(),
+                "# 報告\n\n直しました\n"
+            );
+        }
+
+        #[test]
+        fn ac5_a_share_that_cannot_reach_noa_fails_and_retries_with_its_outcome() {
+            let mut rig = rig("timeline-down", |repo, _, _| {
+                write_task(repo, "t-1", "フォント")
+            });
+            let tl = Tl::default();
+            let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (shared, gate) = (tl.clone(), up.clone());
+            rig.feed.send(Job::Timeline(Box::new(TimelineLink {
+                outbox_root: rig.root.join("outbox"),
+                connect: Box::new(move || {
+                    if gate.load(Ordering::SeqCst) {
+                        Ok(Box::new(shared.clone()) as Box<dyn TimelineApi>)
+                    } else {
+                        Err("Noa に接続できません".into())
+                    }
+                }),
+            })));
+            rig.until("the task", |v| v.tasks.len() == 1);
+            rig.feed.act(Intent::Run {
+                task: TaskRef::Local("t-1".into()),
+                agent: AgentKind::Claude,
+                isolation: Isolation::Here,
+            });
+            let view = rig.until("実行中", |v| {
+                v.runs
+                    .iter()
+                    .any(|run| matches!(run.liveness, Liveness::Alive { .. }))
+            });
+            let run = view.runs[0].run.run.clone();
+            fs::write(runs::result_file(&rig.repo, &run), "結果\n").unwrap();
+            rig.feed.act(Intent::Share {
+                run: run.clone(),
+                outcome: Some(Outcome::Succeeded),
+            });
+            let failed = until_shared(&mut rig, &run, Status::failed);
+            assert_eq!(failed.detail().as_deref(), Some("Noa に接続できません"));
+            // Written again after the share: the share keeps what it was.
+            fs::write(runs::result_file(&rig.repo, &run), "あとで書き換え\n").unwrap();
+            up.store(true, Ordering::SeqCst);
+            rig.feed.act(Intent::Share {
+                run: run.clone(),
+                outcome: None,
+            });
+            let published = |s: &Status| matches!(s, Status::Published { .. });
+            assert_eq!(until_shared(&mut rig, &run, published), self::published(1));
+            let posted = tl.0.lock().unwrap();
+            assert_eq!(
+                posted.posts[0].post.outcome,
+                Outcome::Succeeded,
+                "the asked outcome"
+            );
+            assert_eq!(posted.posts[0].post.body_markdown, "結果\n", "as shared");
+        }
+
+        // Review defects 4 and 5: a share made while Noa was down is saved
+        // with its outcome; a restart sends it, as it was shared, with no
+        // press.
+        #[test]
+        fn ac5_a_share_saved_before_an_exit_goes_out_at_the_next_start() {
+            let mut rig = rig("timeline-restart-saved", |repo, _, _| {
+                write_task(repo, "t-1", "フォント")
+            });
+            let tl = Tl::default();
+            let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            rig.feed.send(link_to(&rig, &tl, Some(up.clone())));
+            let run = started(&mut rig);
+            fs::write(runs::result_file(&rig.repo, &run), "共有した結果\n").unwrap();
+            rig.feed.act(Intent::Share {
+                run: run.clone(),
+                outcome: Some(Outcome::Succeeded),
+            });
+            until_shared(&mut rig, &run, Status::failed);
+            fs::write(runs::result_file(&rig.repo, &run), "書き換え\n").unwrap();
+            // Quit and start again, Noa up now.
+            up.store(true, Ordering::SeqCst);
+            rig.feed = second_window(&rig);
+            rig.feed.send(link_to(&rig, &tl, None));
+            let published = |s: &Status| matches!(s, Status::Published { .. });
+            assert_eq!(until_shared(&mut rig, &run, published), self::published(1));
+            let posted = tl.0.lock().unwrap();
+            assert_eq!(posted.posts.len(), 1);
+            assert_eq!(posted.posts[0].post.outcome, Outcome::Succeeded);
+            assert_eq!(posted.posts[0].post.body_markdown, "共有した結果\n");
+        }
+
+        // Review defects 4 and 6: a share whose answer was lost goes out
+        // again at the next start, from the outbox alone (the work tree's
+        // result file gone meanwhile), and the server keeps one.
+        #[test]
+        fn ac5_a_share_whose_answer_was_lost_is_resent_at_start_without_its_file() {
+            let mut rig = rig("timeline-restart-lost", |repo, _, _| {
+                write_task(repo, "t-1", "フォント")
+            });
+            let tl = Tl::default();
+            tl.0.lock().unwrap().lose_next = true;
+            rig.feed.send(link_to(&rig, &tl, None));
+            let run = started(&mut rig);
+            let result = runs::result_file(&rig.repo, &run);
+            fs::write(&result, "結果\n").unwrap();
+            rig.feed.act(Intent::Share {
+                run: run.clone(),
+                outcome: None,
+            });
+            let failed = until_shared(&mut rig, &run, Status::failed);
+            assert_eq!(
+                failed.detail().as_deref(),
+                Some("timed out waiting for the post acknowledgement")
+            );
+            // The work tree is cleaned up.
+            fs::remove_dir_all(result.parent().unwrap()).unwrap();
+            rig.feed = second_window(&rig);
+            rig.feed.send(link_to(&rig, &tl, None));
+            let published = |s: &Status| matches!(s, Status::Published { .. });
+            assert_eq!(until_shared(&mut rig, &run, published), self::published(1));
+            {
+                let posted = tl.0.lock().unwrap();
+                assert_eq!(posted.posts.len(), 2);
+                assert_eq!(posted.posts[0], posted.posts[1], "the stored envelope");
+                assert_eq!(posted.stored.len(), 1, "stored once");
+            }
+        }
+
+        // Review defect 6: 再試行 of a share whose post timed out does not
+        // need the result file any more.
+        #[test]
+        fn ac5_a_retry_needs_only_the_outbox() {
+            let mut rig = rig("timeline-retry-no-file", |repo, _, _| {
+                write_task(repo, "t-1", "フォント")
+            });
+            let tl = Tl::default();
+            tl.0.lock().unwrap().lose_next = true;
+            rig.feed.send(link_to(&rig, &tl, None));
+            let run = started(&mut rig);
+            let result = runs::result_file(&rig.repo, &run);
+            fs::write(&result, "結果\n").unwrap();
+            rig.feed.act(Intent::Share {
+                run: run.clone(),
+                outcome: Some(Outcome::Partial),
+            });
+            until_shared(&mut rig, &run, Status::failed);
+            fs::remove_dir_all(result.parent().unwrap()).unwrap();
+            rig.feed.act(Intent::Share {
+                run: run.clone(),
+                outcome: None,
+            });
+            let published = |s: &Status| matches!(s, Status::Published { .. });
+            assert_eq!(until_shared(&mut rig, &run, published), self::published(1));
+            let posted = tl.0.lock().unwrap();
+            assert_eq!(posted.posts[0], posted.posts[1]);
+            assert_eq!(posted.posts[1].post.outcome, Outcome::Partial);
+        }
+
+        // Review defect 11: the share shows pending while its post is on
+        // its way.
+        #[test]
+        fn ac5_a_share_in_flight_shows_pending() {
+            let mut rig = rig("timeline-in-flight", |repo, _, _| {
+                write_task(repo, "t-1", "フォント")
+            });
+            let tl = Tl::default();
+            let (release, gate) = std::sync::mpsc::channel();
+            tl.0.lock().unwrap().gate = Some(gate);
+            rig.feed.send(link_to(&rig, &tl, None));
+            let run = started(&mut rig);
+            fs::write(runs::result_file(&rig.repo, &run), "結果\n").unwrap();
+            rig.feed.act(Intent::Share {
+                run: run.clone(),
+                outcome: None,
+            });
+            assert_eq!(
+                until_shared(&mut rig, &run, |s| *s == Status::Pending),
+                Status::Pending
+            );
+            release.send(()).unwrap();
+            let published = |s: &Status| matches!(s, Status::Published { .. });
+            assert_eq!(until_shared(&mut rig, &run, published), self::published(1));
+        }
+
+        // Review defect 6: a share sent again at start wakes the screen
+        // when its answer comes, as a share by hand does with its notice.
+        #[test]
+        fn ac5_a_share_resent_at_start_wakes_the_screen_when_answered() {
+            let mut rig = rig("timeline-restart-wake", |repo, _, _| {
+                write_task(repo, "t-1", "フォント")
+            });
+            let tl = Tl::default();
+            let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            rig.feed.send(link_to(&rig, &tl, Some(up.clone())));
+            let run = started(&mut rig);
+            fs::write(runs::result_file(&rig.repo, &run), "結果\n").unwrap();
+            rig.feed.act(Intent::Share {
+                run: run.clone(),
+                outcome: None,
+            });
+            until_shared(&mut rig, &run, Status::failed);
+            up.store(true, Ordering::SeqCst);
+            let (release, gate) = std::sync::mpsc::channel();
+            tl.0.lock().unwrap().gate = Some(gate);
+            let wakes = Arc::new(AtomicU64::new(0));
+            let counted = wakes.clone();
+            rig.feed = second_window_waking(
+                &rig,
+                Arc::new(move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+            rig.feed.send(link_to(&rig, &tl, None));
+            // The resend is in its post: the worker woke for 投稿待ち
+            // before it and does nothing else until the answer.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while tl.0.lock().unwrap().gate.is_some() {
+                assert!(Instant::now() < deadline, "the resend at start");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let before = wakes.load(Ordering::SeqCst);
+            release.send(()).unwrap();
+            let published = |s: &Status| matches!(s, Status::Published { .. });
+            assert_eq!(until_shared(&mut rig, &run, published), self::published(1));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while wakes.load(Ordering::SeqCst) == before {
+                assert!(Instant::now() < deadline, "the answer woke no one");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        // Review defect 2: a run log edited to hold a path for a run id
+        // touches nothing outside the outbox root at start.
+        #[test]
+        fn ac5_a_run_id_that_is_a_path_is_skipped_at_start() {
+            use std::os::unix::fs::PermissionsExt;
+            let outside = Temp::new("timeline-outside");
+            let target = outside.0.join("not-an-outbox");
+            fs::create_dir_all(&target).unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+            let id = target.display().to_string();
+            // What the request-id check alone let through.
+            assert!(noa_ipc::timeline::valid_token(
+                &tasks::timeline::run_request_id("k", &id)
+            ));
+            let mut rig = rig("timeline-path-id", |repo, log, _| {
+                write_task(repo, "t-1", "フォント");
+                runs::append(
+                    log,
+                    &RunEvent::RunStarted {
+                        run: RunId::new(id.clone()),
+                        task: TaskRef::Local("t-1".into()),
+                        agent: AgentKind::Claude,
+                        workdir: repo.to_owned(),
+                        branch: None,
+                        label: runs::label(&RunId::new(id.clone())),
+                        at: 1,
+                    },
+                )
+                .unwrap();
+            });
+            let tl = Tl::default();
+            rig.feed.send(link_to(&rig, &tl, None));
+            // A share of another run: the start was looked at before it.
+            let run = started(&mut rig);
+            fs::write(runs::result_file(&rig.repo, &run), "結果\n").unwrap();
+            rig.feed.act(Intent::Share {
+                run: run.clone(),
+                outcome: None,
+            });
+            let published = |s: &Status| matches!(s, Status::Published { .. });
+            until_shared(&mut rig, &run, published);
+            let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "left as it was");
+            assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+            assert!(rig.feed.timeline().unwrap().get(&RunId::new(id)).is_none());
+        }
     }
 }

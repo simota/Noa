@@ -44,6 +44,9 @@ use tasks::model::types::{
 };
 use tasks::related::Related;
 use tasks::task_links::SessionKind;
+use tasks::timeline::Status;
+
+use noa_ipc::timeline::Outcome;
 
 use columns::Card;
 use forms::{Form, FormOutcome};
@@ -110,6 +113,12 @@ pub enum Intent {
         task: TaskRef,
         id: String,
     },
+    /// 共有: the run's result on its board's timeline, with the outcome
+    /// the person picked; `None` sends the staged share again (再試行).
+    Share {
+        run: RunId,
+        outcome: Option<Outcome>,
+    },
 }
 
 /// Where the screen's data comes from.
@@ -121,6 +130,11 @@ pub trait Feed {
     /// Each task's 関連成果, as of the last View `poll` gave (a feed that
     /// links nothing has none).
     fn related(&self) -> Option<&BTreeMap<TaskRef, Related>> {
+        None
+    }
+    /// Where each shared run's Board Timeline post stands, as of the last
+    /// View `poll` gave (`None`: this feed cannot share, so no 共有).
+    fn timeline(&self) -> Option<&BTreeMap<RunId, Status>> {
         None
     }
 }
@@ -582,7 +596,7 @@ impl Tasks {
                     &mut self.tree,
                     self.detail_host,
                     &task,
-                    &runs,
+                    (&runs, self.feed.timeline()),
                     loaded,
                     related,
                     self.view.now,

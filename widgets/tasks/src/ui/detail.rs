@@ -16,12 +16,16 @@ use noa_gpui_scene::Color;
 
 use tasks::model::column::column;
 use tasks::model::types::{
-    AgentKind, AgentState, GhFailure, Isolation, IssueDetail, Liveness, Millis, ResultFact,
+    AgentKind, AgentState, GhFailure, Isolation, IssueDetail, Liveness, Millis, ResultFact, RunId,
     RunView, State, Task, TaskRef,
 };
 use tasks::related::{self, Related};
 use tasks::runs;
 use tasks::task_links::SessionKind;
+use tasks::timeline::Status;
+
+use noa_ipc::timeline::Outcome;
+use std::collections::BTreeMap;
 
 use super::Intent;
 use super::columns::age;
@@ -33,16 +37,18 @@ const PROBLEM: Color = Color::hex(0xff9f0a);
 /// Fills `host` with `task`'s detail; `runs` are the task's, newest first;
 /// `detail` is an issue's loaded body and comments (`None` until it
 /// loads, and for a local task); `related` its 関連成果 (`None`: nothing
-/// linked). The buttons it made, each with what a click does.
+/// linked); `runs.1` where each run's Board Timeline share stands
+/// ([`Shares`]). The buttons it made, each with what a click does.
 pub(super) fn insert(
     tree: &mut UiTree,
     host: WidgetId,
     task: &Task,
-    runs: &[&RunView],
+    runs: (&[&RunView], Shares<'_>),
     detail: Option<&Result<IssueDetail, GhFailure>>,
     related: Option<&Related>,
     now: Millis,
 ) -> Vec<(WidgetId, Intent)> {
+    let (runs, shares) = runs;
     let mut actions = Vec::new();
     let pane = tree.insert(
         Some(host),
@@ -204,7 +210,8 @@ pub(super) fn insert(
         muted(tree, pane, "まだ実行していません");
     }
     for run in runs {
-        insert_run(tree, pane, run, now, &mut actions);
+        let share = shares.map(|all| all.get(&run.run.run));
+        insert_run(tree, pane, run, share, now, &mut actions);
     }
     actions
 }
@@ -418,12 +425,18 @@ fn insert_related(
     ));
 }
 
+/// Where each run's Board Timeline share stands, as the feed said
+/// ([`super::Feed::timeline`]); `None`: the feed cannot share.
+pub(super) type Shares<'a> = Option<&'a BTreeMap<RunId, Status>>;
+
 /// One run: agent, age and state; its branch or work tree; its buttons;
-/// its report.
+/// its report. `share`: where its timeline share stands (`Some(None)`:
+/// never shared; `None`: the feed cannot share).
 fn insert_run(
     tree: &mut UiTree,
     parent: WidgetId,
     view: &RunView,
+    share: Option<Option<&Status>>,
     now: Millis,
     actions: &mut Vec<(WidgetId, Intent)>,
 ) {
@@ -492,6 +505,80 @@ fn insert_run(
         }
         (None, ResultFact::Written { .. }) => muted(tree, frame, "報告を読めません"),
         (None, ResultFact::Missing) => muted(tree, frame, "報告はまだありません"),
+    }
+    if let Some(share) = share {
+        insert_share(tree, frame, view, share, actions);
+    }
+}
+
+/// The run's 共有 to its board's timeline: the two ways to share a written
+/// result (its outcome left 未判定, or 成功), or where the share stands,
+/// with 再試行 while it is not published.
+fn insert_share(
+    tree: &mut UiTree,
+    frame: WidgetId,
+    view: &RunView,
+    share: Option<&Status>,
+    actions: &mut Vec<(WidgetId, Intent)>,
+) {
+    let run = &view.run.run;
+    let row = tree.insert(Some(frame), Container::wrapping_row(6.0, 6.0));
+    let mut button = |tree: &mut UiTree, label: &str, tooltip: &str, outcome| {
+        let id = tree.insert(
+            Some(row),
+            Button::new(label)
+                .control_size(ControlSize::Small)
+                .tooltip(tooltip),
+        );
+        actions.push((
+            id,
+            Intent::Share {
+                run: run.clone(),
+                outcome,
+            },
+        ));
+    };
+    match share.and_then(Status::label).zip(share) {
+        Some((label, status)) => {
+            tree.insert(
+                Some(row),
+                Label::new(label).font_size(11.0).color(if status.failed() {
+                    Role::Text
+                } else {
+                    Role::Muted
+                }),
+            );
+            // Why it failed or waits, or the post the server stored.
+            if let Some(detail) = status.detail() {
+                tree.insert(
+                    Some(row),
+                    Label::new(detail).font_size(11.0).color(Role::Muted),
+                );
+            }
+            if !matches!(status, Status::Published { .. }) {
+                button(
+                    tree,
+                    "再試行",
+                    "同じ内容でタイムラインへもう一度送ります",
+                    None,
+                );
+            }
+        }
+        None if matches!(view.result, ResultFact::Written { .. }) => {
+            button(
+                tree,
+                "共有",
+                "結果をボードのタイムラインに投稿します（成否は未判定）",
+                Some(Outcome::Unknown),
+            );
+            button(
+                tree,
+                "成功として共有",
+                "結果を成功としてボードのタイムラインに投稿します",
+                Some(Outcome::Succeeded),
+            );
+        }
+        None => {}
     }
 }
 
@@ -1144,5 +1231,147 @@ mod tests {
         );
         assert!(list.contains(&"検証 v2 未登録".to_owned()), "{list:?}");
         assert!(list.contains(&"レビュー v2 未登録".to_owned()), "{list:?}");
+    }
+
+    mod timeline {
+        use super::*;
+
+        /// A feed that can share: its runs' states are `shares`.
+        struct Sharing {
+            view: Option<View>,
+            sent: Rc<RefCell<Vec<Intent>>>,
+            shares: BTreeMap<RunId, Status>,
+        }
+
+        impl Feed for Sharing {
+            fn poll(&mut self) -> Option<View> {
+                self.view.take()
+            }
+
+            fn act(&mut self, intent: Intent) {
+                self.sent.borrow_mut().push(intent);
+            }
+
+            fn timeline(&self) -> Option<&BTreeMap<RunId, Status>> {
+                Some(&self.shares)
+            }
+        }
+
+        /// The states a test feed gives, made from the run shown.
+        type Shares = fn(&RunId) -> BTreeMap<RunId, Status>;
+
+        /// The detail of a demo task whose newest run wrote its result,
+        /// on a feed whose shares are `shares` (`None`: one that cannot
+        /// share).
+        fn detail(shares: Option<Shares>) -> (Tasks, Rc<RefCell<Vec<Intent>>>, TextStore, RunId) {
+            let view = demo::view();
+            let run = view
+                .runs
+                .iter()
+                .find(|v| matches!(v.result, ResultFact::Written { .. }))
+                .expect("a run with a result")
+                .clone();
+            let sent = Rc::new(RefCell::new(Vec::new()));
+            let feed: Box<dyn Feed> = match shares {
+                Some(shares) => Box::new(Sharing {
+                    view: Some(view),
+                    sent: sent.clone(),
+                    shares: shares(&run.run.run),
+                }),
+                None => Box::new(Recorder {
+                    view: Some(view),
+                    sent: sent.clone(),
+                }),
+            };
+            let mut screen = Tasks::new(feed);
+            let mut text = TextStore::new(Default::default());
+            screen.prepare(window(), &mut text);
+            screen.select_ref(&run.run.task);
+            screen.open_detail(run.run.task.clone(), &mut text);
+            screen.prepare(window(), &mut text);
+            (screen, sent, text, run.run.run)
+        }
+
+        #[test]
+        fn ac5_share_offers_two_outcomes_and_says_how_it_stands() {
+            let (mut screen, log, mut text, run) = detail(Some(|_| BTreeMap::new()));
+            let list = shown(&screen);
+            at(&list, "共有");
+            click(&mut screen, &mut text, "成功として共有");
+            assert_eq!(
+                sent(&log),
+                [Intent::Share {
+                    run: run.clone(),
+                    outcome: Some(Outcome::Succeeded),
+                }]
+            );
+            click(&mut screen, &mut text, "共有");
+            assert_eq!(
+                sent(&log),
+                [Intent::Share {
+                    run,
+                    outcome: Some(Outcome::Unknown),
+                }]
+            );
+        }
+
+        #[test]
+        fn ac5_state_visible() {
+            let (mut screen, log, mut text, run) = detail(Some(|run| {
+                BTreeMap::from([(
+                    run.clone(),
+                    Status::Failed {
+                        message: "busy".into(),
+                    },
+                )])
+            }));
+            let list = shown(&screen);
+            at(&list, "タイムライン: 投稿失敗（再試行）");
+            // Why it failed, kept with it.
+            at(&list, "busy");
+            assert!(!list.iter().any(|t| t == "成功として共有"), "{list:?}");
+            click(&mut screen, &mut text, "再試行");
+            assert_eq!(sent(&log), [Intent::Share { run, outcome: None }]);
+
+            let (screen, _, _, _) = detail(Some(|run| {
+                BTreeMap::from([(
+                    run.clone(),
+                    Status::Published {
+                        seq: 4,
+                        post_id: "po-0000000000000004".into(),
+                    },
+                )])
+            }));
+            let list = shown(&screen);
+            at(&list, "タイムライン: 投稿済み #4");
+            // The post the server stored.
+            at(&list, "postId po-0000000000000004");
+            assert!(
+                !list.iter().any(|t| t == "共有" || t == "再試行"),
+                "{list:?}"
+            );
+
+            let (screen, _, _, _) =
+                detail(Some(|run| BTreeMap::from([(run.clone(), Status::Pending)])));
+            at(&shown(&screen), "タイムライン: 投稿待ち");
+
+            // Waiting for a run: why, and 再試行.
+            let (screen, _, _, _) = detail(Some(|run| {
+                BTreeMap::from([(
+                    run.clone(),
+                    Status::Waiting {
+                        why: tasks::timeline::NOT_REGISTERED.into(),
+                    },
+                )])
+            }));
+            let list = shown(&screen);
+            at(&list, "タイムライン: 投稿待ち");
+            at(&list, tasks::timeline::NOT_REGISTERED);
+            at(&list, "再試行");
+
+            // A feed that cannot share (the demo) offers none.
+            let (screen, _, _, _) = detail(None);
+            assert!(!shown(&screen).iter().any(|t| t.contains("共有")));
+        }
     }
 }

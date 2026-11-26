@@ -1,7 +1,8 @@
 //! The 新規 / 編集 / 実行 / 関連を追加 forms, shown in the side pane in place of the
 //! detail. The screen inserts a form once when it opens, passes it every
 //! message, and closes it on `Cancel` (or Escape) and on `Submit`, whose
-//! intent it sends.
+//! intent it sends. 実行 also has 「自動で割り当て」 ([`super::auto`]), whose
+//! result the screen hands over from `woken`.
 
 use std::cell::Cell;
 
@@ -12,9 +13,10 @@ use noa_gpui_core::widgets::{
 };
 use noa_gpui_core::{Message, Role, Style, UiTree, WidgetId};
 
-use tasks::model::types::{AgentKind, Isolation, Task, TaskRef};
+use tasks::model::types::{AgentKind, Isolation, Millis, Task, TaskRef};
 
 use super::Intent;
+use super::auto::{Auto, Env};
 use super::style::{self, DETAIL_WIDTH, gap};
 
 /// What a message did to the form.
@@ -69,8 +71,10 @@ pub(super) struct Form {
     title: String,
     body: String,
     labels: String,
-    /// Set when the widgets are built (`insert` takes `&self`).
+    /// Set when the widgets are built.
     ids: Cell<Option<Ids>>,
+    /// 実行's 「自動で割り当て」.
+    auto: Option<Auto>,
 }
 
 impl Form {
@@ -82,6 +86,7 @@ impl Form {
             body,
             labels,
             ids: Cell::new(None),
+            auto: None,
         }
     }
 
@@ -107,10 +112,11 @@ impl Form {
         )
     }
 
-    /// 実行 on `task`: one of `agents` and the isolation (default `Isolation::Worktree`);
-    /// submits `Intent::Run`.
+    /// 実行 on `task`: one of `agents` (or the one 「自動で割り当て」 picks) and
+    /// the isolation (default `Isolation::Worktree`); submits `Intent::Run`.
+    /// `task` is what the planner reads: an issue's body once loaded.
     pub fn run(task: &Task, agents: &[AgentKind]) -> Form {
-        Form::new(
+        let form = Form::new(
             Kind::Run {
                 task: task.r#ref.clone(),
                 agents: agents.to_vec(),
@@ -119,7 +125,11 @@ impl Form {
             String::new(),
             String::new(),
             String::new(),
-        )
+        );
+        Form {
+            auto: Some(Auto::new(task, agents)),
+            ..form
+        }
     }
 
     /// 関連を追加 on `task`: one field, a PR's URL or number; submits
@@ -135,7 +145,7 @@ impl Form {
     }
 
     /// Builds the form's widgets under `host`.
-    pub fn insert(&self, tree: &mut UiTree, host: WidgetId) {
+    pub fn insert(&mut self, tree: &mut UiTree, host: WidgetId) {
         // Scrolls, as the detail does: the body field grows with its text,
         // and the side pane clips what does not fit.
         let column = tree.insert(
@@ -210,6 +220,9 @@ impl Form {
                     .control_size(ControlSize::Small)
                     .with_selected(&[0]),
                 );
+                if let Some(auto) = &mut self.auto {
+                    auto.insert(tree, column);
+                }
                 muted(tree, "作業場所");
                 let isolation = tree.insert(
                     Some(column),
@@ -255,10 +268,17 @@ impl Form {
     }
 
     /// Takes in `message` (from any widget; the form's own are recognised).
-    pub fn handle(&mut self, message: &Message, tree: &UiTree) -> FormOutcome {
+    /// `env` starts 実行's planner.
+    pub fn handle(&mut self, message: &Message, tree: &mut UiTree, env: &Env) -> FormOutcome {
         let Some(ids) = self.ids.get() else {
             return FormOutcome::Pending;
         };
+        if let (Some(auto), Some((agent, _))) = (&mut self.auto, ids.choices) {
+            let current = chosen_agent(&self.kind, agent, tree);
+            if auto.handle(message, tree, agent, current, env) {
+                return FormOutcome::Pending;
+            }
+        }
         let clicked = message.downcast_ref::<ButtonClicked>().is_some();
         if clicked && message.source == ids.cancel {
             return FormOutcome::Cancel;
@@ -274,6 +294,31 @@ impl Form {
         }
         self.intent(&ids, tree)
             .map_or(FormOutcome::Pending, FormOutcome::Submit)
+    }
+
+    /// Takes 実行's planner result if it came: a valid assignment selects
+    /// its agent's segment; `now` stamps it.
+    pub fn poll_auto(&mut self, tree: &mut UiTree, now: Millis) {
+        let (Some(auto), Some((agent, _))) =
+            (&mut self.auto, self.ids.get().and_then(|i| i.choices))
+        else {
+            return;
+        };
+        let current = chosen_agent(&self.kind, agent, tree);
+        let Some(kind) = auto.poll(tree, current, now) else {
+            return;
+        };
+        if let Kind::Run { agents, .. } = &self.kind
+            && let Some(at) = agents.iter().position(|a| *a == kind)
+        {
+            tree.update::<SegmentedControl, _>(agent, |c, cx| c.set_selected(cx, &[at]));
+        }
+    }
+
+    /// 実行's 「自動で割り当て」 (`None` in the other forms).
+    #[cfg(test)]
+    pub fn auto(&self) -> Option<&Auto> {
+        self.auto.as_ref()
     }
 
     /// What the form submits now; `None` while it may not (an empty title).
@@ -308,17 +353,14 @@ impl Form {
                     },
                 })
             }
-            Kind::Run { task, agents } => {
+            Kind::Run { task, .. } => {
                 let (agent, isolation) = ids.choices?;
-                let chosen = |id| {
-                    tree.get::<SegmentedControl>(id)
-                        .and_then(|c| c.selected().iter().position(|on| *on))
-                        .unwrap_or(0)
-                };
+                let agent = chosen_agent(&self.kind, agent, tree)?;
                 Some(Intent::Run {
                     task: task.clone(),
-                    agent: *agents.get(chosen(agent))?,
-                    isolation: ISOLATIONS.get(chosen(isolation))?.1,
+                    agent,
+                    isolation: ISOLATIONS.get(chosen(tree, isolation))?.1,
+                    auto: self.auto.as_ref().and_then(|a| a.record(Some(agent))),
                 })
             }
             Kind::AddLink { task } => {
@@ -332,6 +374,21 @@ impl Form {
                 })
             }
         }
+    }
+}
+
+/// The segment `id`'s chosen index (the first when none is).
+fn chosen(tree: &UiTree, id: WidgetId) -> usize {
+    tree.get::<SegmentedControl>(id)
+        .and_then(|c| c.selected().iter().position(|on| *on))
+        .unwrap_or(0)
+}
+
+/// 実行's agent as its segment `id` has it now.
+fn chosen_agent(kind: &Kind, id: WidgetId, tree: &UiTree) -> Option<AgentKind> {
+    match kind {
+        Kind::Run { agents, .. } => agents.get(chosen(tree, id)).copied(),
+        _ => None,
     }
 }
 
@@ -609,6 +666,7 @@ mod tests {
                 task: t1.clone(),
                 agent: AgentKind::Codex,
                 isolation: Isolation::Worktree,
+                auto: None,
             }]
         );
 
@@ -628,6 +686,7 @@ mod tests {
                 task: t1,
                 agent: AgentKind::Agy,
                 isolation: Isolation::Here,
+                auto: None,
             }]
         );
 

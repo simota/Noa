@@ -1468,6 +1468,98 @@ fn auto_stop_and_run_while_planning_cancel_the_planner() {
     );
 }
 
+/// Fills the 実行 form with claude's assignment of `pick`, then starts codex
+/// on it: the re-run's caption shows, and the fill's block stays while
+/// codex decides. Returns that block.
+fn fill_then_rerun(
+    screen: &mut Tasks,
+    text: &mut TextStore,
+    planned: &Planned,
+    pick: &Pick,
+) -> String {
+    choose_planner(screen, text, 0);
+    answer(planned, 0, Ok(assignment(pick.clone())));
+    screen.woken(text);
+    assert_eq!(agent_selected(screen), [false, false, true]);
+    let block = format!("{HEADING}\nエージェント: {} — {}", pick.agent, pick.reason);
+    choose_planner(screen, text, 1);
+    let texts = form_texts(screen);
+    assert!(
+        texts.contains(&"codex (gpt-6.2-sol · medium) が割り当てを決めています…".to_owned()),
+        "{texts:?}"
+    );
+    assert!(
+        texts.contains(&block),
+        "kept while codex decides: {texts:?}"
+    );
+    block
+}
+
+/// What 実行 sends after claude's fill of `pick` (agy) is still the form's.
+fn run_with_claudes_fill(pick: Pick) -> Intent {
+    Intent::Run {
+        task: local("t-1"),
+        agent: AgentKind::Agy,
+        isolation: Isolation::Worktree,
+        auto: Some(AutoRecord {
+            planner: "claude (sonnet · medium)".into(),
+            at: ARRIVED,
+            picks: vec![pick],
+            overridden: Vec::new(),
+        }),
+    }
+}
+
+/// L1-2 step 7: a re-run stopped by 中止 leaves the fill it followed: the
+/// form keeps that agent and its block, and 実行 records that fill.
+#[test]
+fn auto_a_stopped_rerun_keeps_the_applied_fill_and_run_records_it() {
+    let (mut screen, log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    let pick = worker("agy", "画面の文言修正だけなので軽いエージェントで足りる");
+    let block = fill_then_rerun(&mut screen, &mut text, &planned, &pick);
+
+    press_button(&mut screen, &mut text, "中止");
+    assert!(
+        planned.borrow()[1]
+            .2
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert_eq!(agent_selected(&screen), [false, false, true]);
+    let texts = form_texts(&screen);
+    assert!(
+        !texts.iter().any(|t| t.contains("決めています")),
+        "{texts:?}"
+    );
+    assert!(texts.contains(&block), "{texts:?}");
+
+    press_button(&mut screen, &mut text, "実行");
+    assert_eq!(sent(&log), [run_with_claudes_fill(pick)]);
+}
+
+/// L1-2 steps 5 and 7: a re-run that fails leaves the fill it followed: its
+/// cause is shown above that fill's block, the form keeps the agent, and
+/// 実行 records that fill.
+#[test]
+fn auto_a_failed_rerun_keeps_the_applied_fill_below_the_failure_and_run_records_it() {
+    let (mut screen, log, mut text, planned) = run_form_with(&AgentKind::ALL);
+    let pick = worker("agy", "画面の文言修正だけなので軽いエージェントで足りる");
+    let block = fill_then_rerun(&mut screen, &mut text, &planned, &pick);
+
+    answer(&planned, 1, Err(PlanError::Timeout(180)));
+    screen.woken(&mut text);
+    assert_eq!(agent_selected(&screen), [false, false, true], "untouched");
+    let note = "自動割り当てに失敗しました: codex (gpt-6.2-sol · medium) が 180 秒以内に割り当てを返しませんでした。手動で選ぶか、別のエージェントで決めてください";
+    let texts = form_texts(&screen);
+    let at = |s: &str| texts.iter().position(|t| t == s);
+    assert!(
+        at(note).zip(at(&block)).is_some_and(|(n, b)| n < b),
+        "the cause above the block: {texts:?}"
+    );
+
+    press_button(&mut screen, &mut text, "実行");
+    assert_eq!(sent(&log), [run_with_claudes_fill(pick)]);
+}
+
 /// The planner reads an issue's body once its detail is loaded, as the
 /// run's agent does (L1-3: the material `runs::brief` writes).
 #[test]
@@ -1587,10 +1679,14 @@ fn auto_in_the_demo_the_canned_answer_shows_without_a_wake() {
     // No `woken` between choosing codex and reading the form.
     choose_planner(&mut screen, &mut text, 1);
     assert!(
-        matches!(
-            screen.form.as_ref().unwrap().auto().unwrap().state(),
-            AutoState::Filled { .. }
-        ),
+        screen
+            .form
+            .as_ref()
+            .unwrap()
+            .auto()
+            .unwrap()
+            .applied()
+            .is_some(),
         "{:?}",
         screen.form.as_ref().unwrap().auto()
     );

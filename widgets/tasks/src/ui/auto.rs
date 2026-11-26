@@ -9,6 +9,10 @@
 //!
 //! The planner reads the task as it is when a planner is chosen, not when
 //! the form opened: an issue's body loaded since is in the request.
+//!
+//! The last assignment applied to the form outlives later attempts: a
+//! planner started after it that is stopped, fails or is refused leaves its
+//! block, and what 実行 records, as they were.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -169,8 +173,11 @@ pub(super) fn failure(err: &PlanError, planner: &Planner) -> String {
     )
 }
 
-/// Where auto-assign is.
+/// Where the current planner attempt is. What an attempt filled in is
+/// [`Auto`]'s `applied`, which outlives it.
 pub(super) enum AutoState {
+    /// None running: none started yet, or the last one filled the form or
+    /// was stopped.
     Idle,
     /// A planner is deciding; `snapshot` is the form's agent when it started.
     Running {
@@ -178,13 +185,14 @@ pub(super) enum AutoState {
         planning: Planning,
         snapshot: Option<AgentKind>,
     },
-    /// The assignment filled the form; `at` is when it arrived.
-    Filled {
-        assignment: Assignment,
-        at: Millis,
-    },
-    /// Why nothing was filled: the note says it.
+    /// Why the last attempt filled nothing: the note says it.
     Failed(String),
+}
+
+/// An assignment applied to the form; `at` is when it arrived.
+struct Fill {
+    assignment: Assignment,
+    at: Millis,
 }
 
 /// The widgets [`Auto::insert`] made.
@@ -193,7 +201,10 @@ struct Ids {
     menu: WidgetId,
     caption: WidgetId,
     stop: WidgetId,
+    /// The attempt's note: a failure, or why no planner can run.
     note: WidgetId,
+    /// The applied fill's assignment block.
+    block: WidgetId,
 }
 
 /// Auto-assign's part of one 実行 form.
@@ -203,6 +214,12 @@ pub(super) struct Auto {
     agents: Vec<AgentKind>,
     planners: Vec<Planner>,
     state: AutoState,
+    /// The last fill applied to the form, kept apart from `state`: an
+    /// attempt after it that is stopped, fails or is refused does not touch
+    /// the form, so this fill's block stays and 実行 records it (while its
+    /// pick is still the form's agent). Only the next applied fill
+    /// replaces it.
+    applied: Option<Fill>,
     ids: Option<Ids>,
 }
 
@@ -211,12 +228,12 @@ impl std::fmt::Debug for Auto {
         let state = match &self.state {
             AutoState::Idle => "Idle",
             AutoState::Running { .. } => "Running",
-            AutoState::Filled { .. } => "Filled",
             AutoState::Failed(_) => "Failed",
         };
         f.debug_struct("Auto")
             .field("planners", &self.planners)
             .field("state", &state)
+            .field("applied", &self.applied.as_ref().map(|f| &f.assignment))
             .finish()
     }
 }
@@ -231,6 +248,7 @@ impl Auto {
             agents: agents.to_vec(),
             planners: auto_assign::planners(&installed),
             state: AutoState::Idle,
+            applied: None,
             ids: None,
         }
     }
@@ -238,6 +256,12 @@ impl Auto {
     #[cfg(test)]
     pub fn state(&self) -> &AutoState {
         &self.state
+    }
+
+    /// The assignment applied to the form last, whatever came after it.
+    #[cfg(test)]
+    pub fn applied(&self) -> Option<&Assignment> {
+        self.applied.as_ref().map(|f| &f.assignment)
     }
 
     /// The pull-down's planners, in its order.
@@ -271,11 +295,18 @@ impl Auto {
             Some(column),
             Label::new("").font_size(12.0).wrap(true).selectable(true),
         );
+        // Below the note: a failed re-run's cause reads above the block of
+        // the fill it left in place.
+        let block = tree.insert(
+            Some(column),
+            Label::new("").font_size(12.0).wrap(true).selectable(true),
+        );
         self.ids = Some(Ids {
             menu,
             caption,
             stop,
             note,
+            block,
         });
         self.render(tree, None);
     }
@@ -353,7 +384,7 @@ impl Auto {
     }
 
     /// Stops a running planner (its process group is killed); the note
-    /// clears.
+    /// clears, and an applied fill stays.
     pub fn cancel(&mut self) {
         if let AutoState::Running { planning, .. } = &self.state {
             planning.cancel.store(true, Ordering::Relaxed);
@@ -362,8 +393,9 @@ impl Auto {
     }
 
     /// Takes a running planner's result, if it came: a valid assignment
-    /// for an unchanged form is the kind to select (and the state is
-    /// `Filled`, stamped `now`); anything else is the note's.
+    /// for an unchanged form is the kind to select (and the applied fill,
+    /// stamped `now`); anything else is the note's and keeps the applied
+    /// fill.
     pub fn poll(
         &mut self,
         tree: &mut UiTree,
@@ -387,7 +419,7 @@ impl Auto {
                 "割り当てのスレッドが止まりました".to_owned(),
             )),
         };
-        let mut fill = None;
+        let mut select = None;
         self.state = match result {
             Err(PlanError::Cancelled) => AutoState::Idle,
             Err(err) => AutoState::Failed(failure(&err, &planner)),
@@ -400,11 +432,12 @@ impl Auto {
                     .and_then(|p| kind_of(p, &self.agents));
                 match kind {
                     Some(kind) => {
-                        fill = Some(kind);
-                        AutoState::Filled {
+                        select = Some(kind);
+                        self.applied = Some(Fill {
                             assignment,
                             at: now,
-                        }
+                        });
+                        AutoState::Idle
                     }
                     // `validate` checked the slot and the agent: not reached.
                     None => AutoState::Failed(failure(
@@ -414,47 +447,53 @@ impl Auto {
                 }
             }
         };
-        self.render(tree, fill.or(current));
-        fill
+        self.render(tree, select.or(current));
+        select
     }
 
-    /// The record 実行 carries: the fill's pick while the form's agent is
-    /// still that pick, the slot as overridden otherwise; `None` without a
-    /// fill or when every pick was changed.
+    /// The record 実行 carries: the applied fill's pick while the form's
+    /// agent is still that pick, the slot as overridden otherwise; `None`
+    /// without a fill or when every pick was changed. An attempt after the
+    /// fill, running, stopped or failed, does not change it.
     pub fn record(&self, current: Option<AgentKind>) -> Option<AutoRecord> {
-        let AutoState::Filled { assignment, at } = &self.state else {
-            return None;
-        };
-        AutoRecord::of(assignment, *at, |pick| unchanged(current, pick))
+        let fill = self.applied.as_ref()?;
+        AutoRecord::of(&fill.assignment, fill.at, |pick| unchanged(current, pick))
     }
 
-    /// The note: the assignment block, a failure, or nothing.
-    pub fn note(&self, current: Option<AgentKind>) -> String {
+    /// The attempt's note: why it filled nothing, why no planner can run,
+    /// or nothing.
+    pub fn note(&self) -> String {
         match &self.state {
             AutoState::Idle | AutoState::Running { .. } if self.planners.is_empty() => {
                 PlanError::NoPlanner.message("")
             }
             AutoState::Idle | AutoState::Running { .. } => String::new(),
             AutoState::Failed(why) => why.clone(),
-            AutoState::Filled { assignment, .. } => {
-                let mut out = format!(
-                    "自動割り当て（{} が決定）— 内容を確認して「{START_LABEL}」を押してください",
-                    assignment.planner
-                );
-                for pick in &assignment.picks {
-                    let edited = if unchanged(current, pick) {
-                        ""
-                    } else {
-                        "（手動で変更）"
-                    };
-                    out.push_str(&format!(
-                        "\n{WORKER_LABEL}: {} — {}{edited}",
-                        pick.agent, pick.reason
-                    ));
-                }
-                out
-            }
         }
+    }
+
+    /// The applied fill's assignment block, a pick that is no longer the
+    /// form's agent marked; empty before the first fill.
+    fn block(&self, current: Option<AgentKind>) -> String {
+        let Some(Fill { assignment, .. }) = &self.applied else {
+            return String::new();
+        };
+        let mut out = format!(
+            "自動割り当て（{} が決定）— 内容を確認して「{START_LABEL}」を押してください",
+            assignment.planner
+        );
+        for pick in &assignment.picks {
+            let edited = if unchanged(current, pick) {
+                ""
+            } else {
+                "（手動で変更）"
+            };
+            out.push_str(&format!(
+                "\n{WORKER_LABEL}: {} — {}{edited}",
+                pick.agent, pick.reason
+            ));
+        }
+        out
     }
 
     fn render(&self, tree: &mut UiTree, current: Option<AgentKind>) {
@@ -473,9 +512,10 @@ impl Auto {
             .map(|p| format!("{p} が割り当てを決めています…"))
             .unwrap_or_default();
         tree.update::<Label, _>(ids.caption, |l, cx| l.set_text(cx, caption));
-        let note = self.note(current);
-        tree.set_hidden(ids.note, note.is_empty());
-        tree.update::<Label, _>(ids.note, |l, cx| l.set_text(cx, note));
+        for (id, text) in [(ids.note, self.note()), (ids.block, self.block(current))] {
+            tree.set_hidden(id, text.is_empty());
+            tree.update::<Label, _>(id, |l, cx| l.set_text(cx, text));
+        }
     }
 }
 
@@ -590,7 +630,7 @@ mod tests {
         let agy = Auto::new(&t.r#ref, &[AgentKind::Agy]);
         assert!(agy.planners.is_empty());
         assert_eq!(
-            agy.note(Some(AgentKind::Agy)),
+            agy.note(),
             "自動割り当てに使えるエージェントがインストールされていません"
         );
     }

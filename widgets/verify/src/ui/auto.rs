@@ -25,7 +25,7 @@ use verify::model::types::{
 };
 
 use super::start::{Detection, Form, Parts};
-use super::{Action, caption, clear_children};
+use super::{Action, clear_children};
 use crate::installed::Installed;
 
 /// The widget's name and run description in the planner's prompt (L1-8).
@@ -127,24 +127,36 @@ enum Line {
     Text(String),
 }
 
-/// What the control shows: the planner deciding, or the pull-down with
-/// these planners, enabled or not.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Control {
-    Running(String),
-    Menu(Vec<&'static str>, bool),
+/// The control's widgets in the agents' header.
+struct ControlParts {
+    /// The pull-down, and the planner of each of its items (fixed when it
+    /// is made: it is made again only when the planners change).
+    menu: WidgetId,
+    planners: Vec<Planner>,
+    /// 「{planner} が割り当てを決めています…」, shown while planning.
+    status: WidgetId,
+    cancel: WidgetId,
+}
+
+fn planner_menu(planners: &[Planner]) -> PullDownButton {
+    let items = planners
+        .iter()
+        .map(|p| MenuItem::new(format!("{} で決める", p.agent)))
+        .collect();
+    PullDownButton::new("自動で割り当て", items).control_size(ControlSize::Small)
 }
 
 pub(super) struct Auto {
     pub(super) state: AutoState,
     filled: Option<Filled>,
     plan: Plan,
-    /// The pull-down while it is shown, and the planner of each item.
-    menu: Option<(WidgetId, Vec<Planner>)>,
-    cancel: Option<WidgetId>,
+    /// The control, made at the first [`Auto::show`] and then kept (L1-2
+    /// item 2): planning hides the pull-down and shows the caption and
+    /// 中止 in its place, so focus and an open menu are not lost to a
+    /// rebuild.
+    control: Option<ControlParts>,
     /// The container this part writes into the start view's note.
     note: Option<WidgetId>,
-    shown_control: Option<Control>,
     shown_note: Option<Vec<Line>>,
 }
 
@@ -154,10 +166,8 @@ impl Auto {
             state: AutoState::Idle,
             filled: None,
             plan,
-            menu: None,
-            cancel: None,
+            control: None,
             note: None,
-            shown_control: None,
             shown_note: None,
         }
     }
@@ -167,14 +177,25 @@ impl Auto {
         self.plan = plan;
     }
 
+    fn running(&self) -> bool {
+        matches!(self.state, AutoState::Running { .. })
+    }
+
     /// The pull-down, while it is shown.
     pub(super) fn menu(&self) -> Option<WidgetId> {
-        self.menu.as_ref().map(|(id, _)| *id)
+        let control = self.control.as_ref().filter(|_| !self.running())?;
+        Some(control.menu)
+    }
+
+    /// 中止, while it is shown.
+    fn cancel_button(&self) -> Option<WidgetId> {
+        let control = self.control.as_ref().filter(|_| self.running())?;
+        Some(control.cancel)
     }
 
     /// The planner of the pull-down's item `index`.
     pub(super) fn chosen(&self, index: usize) -> Option<Planner> {
-        self.menu.as_ref()?.1.get(index).copied()
+        self.control.as_ref()?.planners.get(index).copied()
     }
 
     /// Starts `planner` on `form`'s rows (its verifier rows identified by
@@ -285,45 +306,62 @@ impl Auto {
         let (host, note) = (parts.auto_host, parts.note());
         let planners = planners(detection);
         let blocker = form.target().err();
-        let control = match &self.state {
-            AutoState::Running { planner, .. } => Control::Running(planner.label()),
-            _ => Control::Menu(
-                planners.iter().map(|p| p.agent).collect(),
-                !planners.is_empty() && blocker.is_none(),
-            ),
-        };
-        let control_gone = self
-            .menu()
-            .or(self.cancel)
-            .is_none_or(|id| !tree.contains(id));
-        if self.shown_control.as_ref() != Some(&control) || control_gone {
+        // Focus on the pull-down or 中止 goes to the one shown in its place
+        // (planning starts or ends); focus elsewhere stays where it is.
+        let had_focus = tree.focused().is_some_and(|id| {
+            self.control
+                .as_ref()
+                .is_some_and(|c| id == c.menu || id == c.cancel)
+        });
+        let gone = self.control.as_ref().is_none_or(|c| {
+            [c.menu, c.status, c.cancel]
+                .iter()
+                .any(|id| !tree.contains(*id))
+        });
+        if gone {
             clear_children(tree, host, text);
-            self.menu = None;
-            self.cancel = None;
-            match &control {
-                Control::Running(label) => {
-                    caption(tree, host, format!("{label} が割り当てを決めています…"));
-                    let id = tree.insert(
-                        Some(host),
-                        Button::new("中止").control_size(ControlSize::Small),
-                    );
-                    self.cancel = Some(id);
-                }
-                Control::Menu(_, enabled) => {
-                    let items = planners
-                        .iter()
-                        .map(|p| MenuItem::new(format!("{} で決める", p.agent)))
-                        .collect();
-                    let id = tree.insert(
-                        Some(host),
-                        PullDownButton::new("自動で割り当て", items)
-                            .control_size(ControlSize::Small),
-                    );
-                    tree.set_enabled(id, *enabled);
-                    self.menu = Some((id, planners.clone()));
-                }
+            let menu = tree.insert(Some(host), planner_menu(&planners));
+            let status = tree.insert(
+                Some(host),
+                Label::new("").font_size(11.0).color(Role::Muted),
+            );
+            let cancel = tree.insert(
+                Some(host),
+                Button::new("中止").control_size(ControlSize::Small),
+            );
+            self.control = Some(ControlParts {
+                menu,
+                planners: planners.clone(),
+                status,
+                cancel,
+            });
+        }
+        let running = self.running();
+        let control = self.control.as_mut().expect("made above");
+        // A pull-down's items are fixed when it is made: only the installed
+        // check changes them.
+        if control.planners != planners {
+            tree.remove(control.menu, text);
+            control.menu = tree.insert(Some(host), planner_menu(&planners));
+            control.planners = planners.clone();
+        }
+        tree.set_hidden(control.menu, running);
+        tree.set_hidden(control.status, !running);
+        tree.set_hidden(control.cancel, !running);
+        tree.set_enabled(control.menu, !planners.is_empty() && blocker.is_none());
+        if let AutoState::Running { planner, .. } = &self.state {
+            let caption = format!("{} が割り当てを決めています…", planner.label());
+            if tree.get::<Label>(control.status).map(Label::text) != Some(caption.as_str()) {
+                tree.update::<Label, _>(control.status, |label, cx| label.set_text(cx, caption));
             }
-            self.shown_control = Some(control);
+        }
+        if had_focus {
+            let shown = if running {
+                control.cancel
+            } else {
+                control.menu
+            };
+            tree.set_focus(Some(shown));
         }
         let lines = self.note_lines(form, &parts.row_ids(), detection, &planners, blocker);
         let note_gone = self.note.is_none_or(|id| !tree.contains(id));
@@ -353,7 +391,7 @@ impl Auto {
 
     /// The 中止 button's action, while it is shown.
     pub(super) fn actions(&self, actions: &mut Vec<(WidgetId, Action)>) {
-        if let Some(id) = self.cancel {
+        if let Some(id) = self.cancel_button() {
             actions.push((id, Action::AutoCancel));
         }
     }

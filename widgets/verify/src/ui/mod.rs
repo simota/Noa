@@ -1608,9 +1608,9 @@ impl Verify {
                 }
                 Ok(session) => match self.detection.resume_blocker(&session) {
                     Some(why) => self.toast(why),
-                    None => self.send_cmd(Command::Resume { dir }),
+                    None => self.resume_past(dir, text),
                 },
-                Err(_) => self.send_cmd(Command::Resume { dir }),
+                Err(_) => self.resume_past(dir, text),
             },
             Action::VerifyAgain(dir) => self.verify_again(dir, text),
             Action::MorePast => {
@@ -1988,6 +1988,18 @@ impl Verify {
             panel: form.panel,
             auto,
         });
+        if was_planning {
+            self.rebuild(text);
+        }
+    }
+
+    /// Resumes the unfinished past verification in `dir` from the start
+    /// view's list. It leaves the start view, as 検証を開始 does, so a
+    /// planner still deciding its rows stops.
+    fn resume_past(&mut self, dir: PathBuf, text: &mut TextStore) {
+        let was_planning = matches!(self.auto.state, auto::AutoState::Running { .. });
+        self.auto.cancel();
+        self.send_cmd(Command::Resume { dir });
         if was_planning {
             self.rebuild(text);
         }

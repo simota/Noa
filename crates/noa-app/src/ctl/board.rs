@@ -16,8 +16,10 @@ use super::result::{self, StartError};
 use super::{EXIT_OK, Failure, HOLD_BANNER, SUBMIT_DELAY, journal};
 
 mod insight;
+mod timeline;
 
 use insight::{FileState, Insight, ResultFile, Task};
+use timeline::{PostId, TlAction};
 
 /// How often the pane list is read again.
 const LIST_EVERY: Duration = Duration::from_millis(500);
@@ -355,10 +357,14 @@ pub(crate) struct Report {
     pub(crate) at: Option<Instant>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum View {
     List,
     Detail(u64),
+    /// The board's timeline (`docs/specs/board-timeline.md` AC-3).
+    Timeline,
+    /// One post of the timeline, whole.
+    PostDetail(PostId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -401,6 +407,8 @@ pub(crate) enum Key {
     CtrlU,
     /// Delete the last word of the send line.
     CtrlW,
+    /// Next field of the timeline's filter line.
+    Tab,
     Paste(String),
 }
 
@@ -568,6 +576,11 @@ pub(crate) struct Board {
     result_shown: bool,
     result_scroll: usize,
     result_reach: Cell<usize>,
+    /// The board's timeline (AC-3), and the worker view `t` goes back to.
+    pub(crate) timeline: timeline::Timeline,
+    worker_view: View,
+    /// What the timeline asked of the connection, for the run loop.
+    tl_io: Vec<TlAction>,
 }
 
 impl Board {
@@ -610,6 +623,9 @@ impl Board {
             result_shown: false,
             result_scroll: 0,
             result_reach: Cell::new(0),
+            timeline: timeline::Timeline::new(Lang::Ja, |_| 0),
+            worker_view: View::List,
+            tl_io: Vec::new(),
         }
     }
 
@@ -854,6 +870,12 @@ impl Board {
         {
             self.view = View::List;
         }
+        // The worker view `t` goes back to, while the timeline is shown.
+        if let View::Detail(pane) = self.worker_view
+            && !live.contains(&pane)
+        {
+            self.worker_view = View::List;
+        }
         // The keys typed next were meant for that worker: none may act on
         // the one selected now until the person has seen it went (Esc).
         if let Some((pane, name)) = target
@@ -963,12 +985,103 @@ impl Board {
     /// heads the queue (U3) and the header. `None` for a board that is its
     /// own orchestrator (D20): its own pane is no worker and no lead.
     fn orchestrator(&self) -> Option<u64> {
-        self.of.filter(|_| !self.orchestrates_itself())
+        self.of
+            .filter(|_| !self.orchestrates_itself() && !self.foreign_board())
+    }
+
+    /// Whether the timeline shows a board named by id (`--board-id`) whose
+    /// workers are not the ones this board lists: an archive, a board none
+    /// of these workers is live on, or one whose context has not come in.
+    /// Its worker views then list nobody, so no key there acts on a worker
+    /// of another board (AC-3: an archive's worker list says it has none).
+    fn foreign_board(&self) -> bool {
+        let timeline = &self.timeline;
+        if !timeline.pinned() {
+            return false;
+        }
+        !timeline.context_known()
+            || timeline.archived()
+            || !self
+                .of_listed()
+                .any(|panel| timeline.is_live_pane(panel.pane_id.0))
+    }
+
+    /// Let go of a worker that is not listed because the board the timeline
+    /// names is not theirs ([`Self::foreign_board`], [`Self::listed`]): its
+    /// selection, its opened detail, a prompt for it — as when a worker
+    /// leaves the listing, but before a key acts on it, not at the next
+    /// listing. The orchestrator stays as the listing keeps it: out of the
+    /// queue, its opened detail is still the one the keys act on.
+    fn forget_foreign(&mut self) {
+        if !self.timeline.pinned() {
+            return;
+        }
+        let shown: HashSet<u64> = self
+            .listed()
+            .map(|panel| panel.pane_id.0)
+            .chain(self.orchestrator())
+            .collect();
+        if self.foreign_board() {
+            self.past = 0;
+        }
+        if self.selected.is_some_and(|pane| !shown.contains(&pane)) {
+            self.selected = None;
+        }
+        for view in [&mut self.view, &mut self.worker_view] {
+            if let View::Detail(pane) = view
+                && !shown.contains(pane)
+            {
+                *view = View::List;
+            }
+        }
+        if let Mode::Send(pane, _) | Mode::ConfirmClose(pane) = self.mode
+            && !shown.contains(&pane)
+        {
+            self.mode = Mode::TargetGone(self.name(pane));
+        }
     }
 
     /// The workers this board shows, in listing order: the orchestrator's,
-    /// and theirs (D13).
+    /// and theirs (D13); none for a board the timeline names that is not
+    /// theirs ([`Self::foreign_board`]). A board named by id with no
+    /// orchestrator given lists only the work of the orchestrators whose
+    /// workers are live on it, not every one's.
     fn listed(&self) -> impl Iterator<Item = &Panel> {
+        let foreign = self.foreign_board();
+        let roots: Option<HashSet<u64>> =
+            (self.of.is_none() && self.timeline.pinned()).then(|| {
+                self.of_listed()
+                    .filter(|panel| self.timeline.is_live_pane(panel.pane_id.0))
+                    .map(|panel| self.root_of(panel))
+                    .collect()
+            });
+        self.of_listed().filter(move |panel| {
+            !foreign
+                && roots
+                    .as_ref()
+                    .is_none_or(|roots| roots.contains(&self.root_of(panel)))
+        })
+    }
+
+    /// The pane at the top of `panel`'s parents: the orchestrator its work
+    /// comes from. A listing read from Noa that loops ends at its length.
+    fn root_of(&self, panel: &Panel) -> u64 {
+        let mut root = panel.pane_id.0;
+        let mut parent = panel.parent_pane_id;
+        for _ in 0..self.panels.len() {
+            let Some(up) = parent else {
+                break;
+            };
+            root = up.0;
+            parent = self.panel(up.0).and_then(|panel| panel.parent_pane_id);
+        }
+        root
+    }
+
+    /// The orchestrator's workers and theirs, whatever board the timeline
+    /// shows: also the ones the board ends with, so `q` asks first for
+    /// them (AC-3: quitting does not depend on the board shown).
+    fn of_listed(&self) -> impl Iterator<Item = &Panel> {
         let children: HashSet<u64> = match self.of {
             Some(of) => self
                 .panels
@@ -1008,7 +1121,17 @@ impl Board {
     /// where their subtree is drawn (D15), then by its most urgent worker,
     /// each followed by its own workers by their urgency; ties go by number.
     fn tree(&self) -> Vec<Node<'_>> {
-        let listed: Vec<&Panel> = self.listed().collect();
+        self.tree_of(self.listed().collect())
+    }
+
+    /// The tree of the workers the board ends with ([`Self::of_listed`]),
+    /// whatever board the timeline shows: what `q` hands back or closes.
+    fn own_tree(&self) -> Vec<Node<'_>> {
+        self.tree_of(self.of_listed().collect())
+    }
+
+    /// [`Self::tree`] of `listed`.
+    fn tree_of<'a>(&'a self, listed: Vec<&'a Panel>) -> Vec<Node<'a>> {
         let ids: HashSet<u64> = listed.iter().map(|panel| panel.pane_id.0).collect();
         let listed_parent = |panel: &Panel| {
             panel
@@ -1285,6 +1408,7 @@ impl Board {
                 })
                 .collect(),
             View::Detail(pane) => vec![pane],
+            View::Timeline | View::PostDetail(_) => Vec::new(),
         }
     }
 
@@ -1297,6 +1421,7 @@ impl Board {
     fn target(&self) -> Option<u64> {
         match self.view {
             View::Detail(pane) => Some(pane),
+            View::Timeline | View::PostDetail(_) => None,
             View::List => self.selected,
         }
     }
@@ -1479,7 +1604,7 @@ impl Board {
         if self.orchestrates_itself() {
             return 'y';
         }
-        let tree = self.tree();
+        let tree = self.own_tree();
         let kids = tree
             .iter()
             .filter(|node| matches!(node.branch, Branch::Kid { .. }))
@@ -1527,6 +1652,17 @@ impl Board {
 
     /// A key that arrived at `at`.
     pub(crate) fn key_at(&mut self, key: Key, at: Instant) -> Option<Action> {
+        // Tab means something on the timeline's filter line only; anywhere
+        // else it is dropped, as it was before the key was read at all.
+        if key == Key::Tab
+            && !(self.mode == Mode::Normal
+                && !self.help
+                && self.in_timeline()
+                && self.timeline.takes_tab())
+        {
+            return None;
+        }
+        self.forget_foreign();
         // Only a digit right after a digit makes a two-digit number.
         if !matches!(key, Key::Char('0'..='9')) {
             self.digit = None;
@@ -1614,15 +1750,12 @@ impl Board {
                         }
                     }
                 }
+                if self.in_timeline() {
+                    return self.timeline_key(key);
+                }
                 match key {
-                    Key::Char('q') | Key::CtrlC => {
-                        // Only a listing that worked can say there is no
-                        // worker to hand back.
-                        if self.started && self.offline.is_none() && self.workers().is_empty() {
-                            return Some(Action::Quit);
-                        }
-                        self.mode = Mode::ConfirmQuit;
-                    }
+                    Key::Char('q') | Key::CtrlC => return self.quit_pressed(),
+                    Key::Char('t') => self.open_timeline(),
                     Key::Char('?') => {
                         self.help = true;
                         self.help_scroll = 0;
@@ -1698,6 +1831,107 @@ impl Board {
                 None
             }
         }
+    }
+}
+
+impl Board {
+    /// `q` / Ctrl-C: quit at once when a listing that worked showed no
+    /// worker to hand back, else ask first. The workers are the board's
+    /// own, which a board the timeline names by id does not list.
+    fn quit_pressed(&mut self) -> Option<Action> {
+        if self.started && self.offline.is_none() && self.own_tree().is_empty() {
+            return Some(Action::Quit);
+        }
+        self.mode = Mode::ConfirmQuit;
+        None
+    }
+
+    /// Whether the timeline (or one of its posts) is shown.
+    pub(crate) fn in_timeline(&self) -> bool {
+        matches!(self.view, View::Timeline | View::PostDetail(_))
+    }
+
+    /// `t` from the worker views: the timeline as it was left. A Noa
+    /// without `boardTimelineV1` gets a note and nothing else changes.
+    pub(crate) fn open_timeline(&mut self) {
+        if self.timeline.unsupported {
+            let note = self
+                .lang
+                .pick("タイムライン未対応のNoa", "this Noa has no timeline");
+            self.message = Some(Notice::warn(note.to_string()));
+            return;
+        }
+        self.worker_view = std::mem::replace(&mut self.view, View::Timeline);
+        self.sync_timeline_view();
+    }
+
+    /// Leave the timeline for `to`, storing the visit boundary.
+    fn leave_timeline(&mut self, to: View) {
+        self.tl_io.extend(self.timeline.leave());
+        self.view = to;
+        self.result_shown = false;
+        self.result_scroll = 0;
+    }
+
+    /// The view follows whether a post is open.
+    fn sync_timeline_view(&mut self) {
+        self.view = match self.timeline.detail() {
+            Some(id) => View::PostDetail(id.to_string()),
+            None => View::Timeline,
+        };
+    }
+
+    /// A key in the timeline. The input line takes every key; otherwise
+    /// `q`, `?` and `t` are the board's, and `s`/`x` only point at `w`.
+    fn timeline_key(&mut self, key: Key) -> Option<Action> {
+        if !self.timeline.typing() {
+            // What the timeline's last key said gives way to what this key
+            // brings: the board's own prompt or note.
+            self.timeline.clear_message();
+            match key {
+                Key::Char('q') | Key::CtrlC => return self.quit_pressed(),
+                Key::Char('?') => {
+                    self.help = true;
+                    self.help_scroll = 0;
+                    return None;
+                }
+                Key::Char('t') => {
+                    let to = std::mem::replace(&mut self.worker_view, View::List);
+                    self.leave_timeline(to);
+                    return None;
+                }
+                Key::Char('s' | 'x') => {
+                    let hint = self.lang.pick("w でワーカーへ", "w goes to the worker");
+                    self.message = Some(Notice::ok(hint.to_string()));
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        let action = self.timeline.key(key);
+        self.sync_timeline_view();
+        match action? {
+            TlAction::Focus(pane) => Some(Action::Focus(pane)),
+            TlAction::ShowWorker(pane) => {
+                if self.listed().any(|panel| panel.pane_id.0 == pane) {
+                    self.leave_timeline(View::Detail(pane));
+                    self.select(pane);
+                } else {
+                    let text = timeline::not_on_board(self.lang).to_string();
+                    self.message = Some(Notice::warn(text));
+                }
+                None
+            }
+            other => {
+                self.tl_io.push(other);
+                None
+            }
+        }
+    }
+
+    /// What the timeline asked of the connection since the last call.
+    pub(crate) fn take_timeline_io(&mut self) -> Vec<TlAction> {
+        std::mem::take(&mut self.tl_io)
     }
 }
 
@@ -2024,6 +2258,7 @@ fn char_key(ch: char) -> Option<Key> {
         '\u{3}' => Some(Key::CtrlC),
         '\u{15}' => Some(Key::CtrlU),
         '\u{17}' => Some(Key::CtrlW),
+        '\t' => Some(Key::Tab),
         ch if ch.is_control() => None,
         ch => Some(Key::Char(ch)),
     }
@@ -2474,14 +2709,29 @@ impl Board {
         // only the key list is at the bottom.
         let body_rows = rows - 1;
         let mut help_cut = false;
-        let mut lines = match (self.help, self.view) {
+        let mut lines = match (self.help, &self.view) {
             (true, _) => {
                 let (lines, cut) = self.render_help(cols, body_rows);
                 help_cut = cut;
                 lines
             }
             (false, View::List) => self.render_list(cols, rows, now),
-            (false, View::Detail(pane)) => self.render_detail(pane, cols, rows, now),
+            (false, View::Detail(pane)) => self.render_detail(*pane, cols, rows, now),
+            (false, View::Timeline | View::PostDetail(_)) => {
+                let mut lines = self.timeline.render(cols, rows, now);
+                // A prompt of the board's (quit), what its last action
+                // said, or a lost connection take the line under the
+                // header unless the timeline types or speaks there.
+                let board_notice =
+                    self.mode != Mode::Normal || self.message.is_some() || self.offline.is_some();
+                // A prompt waiting for its key is never hidden.
+                let timeline_speaks = self.timeline.typing()
+                    || (self.mode == Mode::Normal && self.timeline.owns_notice());
+                if board_notice && !timeline_speaks && lines.len() > 2 {
+                    lines[2] = self.notice_line(cols, now);
+                }
+                lines
+            }
         };
         lines.truncate(body_rows);
         while lines.len() < body_rows {
@@ -2607,8 +2857,8 @@ impl Board {
                 line.fg(RED, &fit(&ask, room));
             }
             Mode::ConfirmQuit => {
-                let kids = self
-                    .tree()
+                let own = self.own_tree();
+                let kids = own
                     .iter()
                     .filter(|node| matches!(node.branch, Branch::Kid { .. }))
                     .count();
@@ -2618,7 +2868,7 @@ impl Board {
                 // A worker's own workers close: their parent is a float then
                 // (D13). The key comes first, as an opened worker covers the
                 // footer (D10); the whole prompt fits 80 columns.
-                let all = self.workers().len();
+                let all = own.len();
                 let ask = match (self.lang, self.quit_key(), kids > 0) {
                     (Lang::En, _, _) if self.orchestrates_itself() => {
                         format!("y quits · all {all} workers close with the board")
@@ -2727,7 +2977,7 @@ impl Board {
             );
         let mut lines = vec![Line::default().finish(cols)];
         let l = |ja, en| self.lang.pick(ja, en);
-        let keys: [(&str, &str); 16] = [
+        let keys: [(&str, &str); 24] = [
             ("j k ↑ ↓", l("ワーカーを選ぶ", "select a worker")),
             (
                 "1–20",
@@ -2800,10 +3050,48 @@ impl Board {
                     "end the board (workers go back to the orchestrator)",
                 ),
             ),
+            (
+                "t",
+                l(
+                    "タイムラインとワーカー一覧を切り替える",
+                    "switch between the timeline and the workers",
+                ),
+            ),
             ("", ""),
             (l("送信欄", "Send line"), ""),
             ("Enter / Esc", l("送る / 取り消す", "send / cancel")),
             ("^U / ^W", l("全部消す / 1 語消す", "clear / delete a word")),
+            ("", ""),
+            (l("タイムライン", "Timeline"), ""),
+            ("Enter / Esc", l("投稿を開く / 戻る", "open a post / back")),
+            (
+                "/",
+                l(
+                    "タイトル・要約・本文を検索",
+                    "search titles, summaries and bodies",
+                ),
+            ),
+            (
+                "f",
+                l(
+                    "絞り込み(Tab で項目、←→ で値)",
+                    "filter (Tab: field, ←→: value)",
+                ),
+            ),
+            (
+                "G",
+                l(
+                    "新着を取り込んで最新の投稿へ",
+                    "take in new posts and select the newest",
+                ),
+            ),
+            (
+                "g / w",
+                l(
+                    "投稿したワーカーへ移動 / その詳細へ",
+                    "go to the post's worker / to its details",
+                ),
+            ),
         ];
         // A description too long for the pane goes on under itself (U11).
         for (key, what) in keys {
@@ -2884,6 +3172,11 @@ impl Board {
         // The orchestrator by its pane's name (its session title), which a
         // person recognises; the pane id only when it has none.
         let scope = match self.of {
+            // The board the timeline names, whose workers are not here.
+            _ if self.foreign_board() => self.timeline.board_name(),
+            // A board named by id lists only its own orchestrators' work
+            // ([`Self::listed`]), not every worker's.
+            None if self.timeline.pinned() => self.timeline.board_name(),
             // D20: a board tab's workers are its own; its pane's name is
             // this board's title.
             Some(_) if self.orchestrates_itself() => {
@@ -2957,11 +3250,54 @@ impl Board {
             }
             chips.plain("   ");
         }
+        self.timeline_chip(&mut chips, cols);
         vec![
             title.finish(cols),
             chips.finish(cols),
             self.notice_line(cols, now),
         ]
+    }
+
+    /// The timeline beside the workers (proposal §4.1), at the end of the
+    /// header's sections: its key, and the posts since the person last
+    /// looked, as much of both as the line has room for. Nothing on a Noa
+    /// without `boardTimelineV1`.
+    fn timeline_chip(&self, chips: &mut Line, cols: usize) {
+        if self.timeline.unsupported {
+            return;
+        }
+        let switch = self.lang.pick("t タイムライン", "t timeline");
+        let sep = " · ";
+        let since = self.timeline.since_last_visit();
+        let counts = [
+            self.lang.pick(
+                format!("前回閲覧以降 {since} 件"),
+                format!("{since} since last visit"),
+            ),
+            self.lang.pick(
+                format!("前回以降 {since} 件"),
+                format!("{since} since last"),
+            ),
+        ];
+        // One column is left blank at the end, as the title's count does.
+        let fits = |width: usize| chips.width + width < cols;
+        let count = counts
+            .into_iter()
+            .filter(|_| since > 0)
+            .find(|count| fits(switch.width() + sep.width() + count.width()));
+        let width = switch.width()
+            + count
+                .as_ref()
+                .map_or(0, |count| sep.width() + count.width());
+        if !fits(width) {
+            return;
+        }
+        chips
+            .plain(&" ".repeat(cols - chips.width - width - 1))
+            .fg(DIM, switch);
+        if let Some(count) = count {
+            chips.fg(BORDER, sep).fg(BLUE, &count);
+        }
     }
 
     /// The list (D15): the queue of workers needing someone, the tree of
@@ -3005,8 +3341,16 @@ impl Board {
         let mut empty = Line::default();
         // No worker can come any more once the orchestrator closed; before
         // the first listing none is known not to be there (U12).
-        let note = if !self.started {
+        let note = if !self.started || (self.foreign_board() && !self.timeline.context_known()) {
             self.lang.pick("読み込み中…", "Loading…")
+        } else if self.foreign_board() && self.timeline.archived() {
+            self.lang
+                .pick("アーカイブ: ライブworkerなし", "archive: no live worker")
+        } else if self.foreign_board() {
+            self.lang.pick(
+                "このボードのライブworkerはここにいません",
+                "none of this board's live workers is here",
+            )
         } else if self.orchestrates_itself() {
             self.lang.pick(
                 "ワーカーはまだいません。このボードに浮動ペインが開かれると、ここに並びます。",
@@ -4117,6 +4461,7 @@ impl Board {
                 line.fg(DIM, text);
                 return line.finish(cols);
             }
+            Mode::Normal if self.in_timeline() => self.timeline.footer_keys(),
             Mode::Normal => {
                 let approval = self.target().is_some_and(|pane| self.awaits_answer(pane));
                 let go = if approval {
@@ -4163,11 +4508,12 @@ impl Board {
                         ("r", l("結果", "result"), l("結果", "result")),
                         ("j/k", l("前後", "prev/next"), l("前後", "prev/next")),
                     ]),
+                    View::Timeline | View::PostDetail(_) => {}
                 }
                 keys
             }
         };
-        let help = matches!(self.mode, Mode::Normal);
+        let help = matches!(self.mode, Mode::Normal) && !self.timeline.typing();
         let help_word = self.lang.pick(" ヘルプ", " help");
         let more = if help { 1 + help_word.width() } else { 0 };
         // Every key in full, else every key short, else the most important
@@ -4328,8 +4674,13 @@ impl Polling {
     }
 
     pub(crate) fn succeeded(&mut self, now: Instant) {
+        self.succeeded_after(now, LIST_EVERY);
+    }
+
+    /// A success, with the next read `every` later.
+    pub(crate) fn succeeded_after(&mut self, now: Instant, every: Duration) {
         *self = Self {
-            next: Some(now + LIST_EVERY),
+            next: Some(now + every),
             ..Self::default()
         };
     }
@@ -4474,10 +4825,24 @@ pub(crate) extern "C" fn on_signal(signal: libc::c_int) {
 pub(crate) const TERMINATING_SIGNALS: [libc::c_int; 3] =
     [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
+/// How the board opens (`docs/specs/board-timeline.md` L2-9):
+/// `board --timeline [--board-id B]` starts in the timeline view of the
+/// calling pane's board, or of board `B`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Open {
+    pub timeline: bool,
+    pub board_id: Option<String>,
+}
+
 /// Run the board until `q`. The terminal is restored before returning; a
 /// terminating signal restores it too, then ends the process as that
 /// signal would.
-pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Result<i32, Failure> {
+pub(crate) fn run(
+    client: &mut Client,
+    of: Option<u64>,
+    me: Option<u64>,
+    open: Open,
+) -> Result<i32, Failure> {
     // SAFETY: isatty only inspects the descriptors.
     let ttys = unsafe { (libc::isatty(0) == 1, libc::isatty(1) == 1) };
     if let Some(failure) = terminal_problem(ttys.0, ttys.1) {
@@ -4492,7 +4857,7 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             )
         };
     }
-    let result = run_until_quit(client, of, me);
+    let result = run_until_quit(client, of, me, open);
     let signal = SIGNALED.load(std::sync::atomic::Ordering::Relaxed);
     for signal in TERMINATING_SIGNALS {
         // SAFETY: back to the default disposition.
@@ -4505,9 +4870,25 @@ pub(crate) fn run(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     result
 }
 
-fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Result<i32, Failure> {
+fn run_until_quit(
+    client: &mut Client,
+    of: Option<u64>,
+    me: Option<u64>,
+    open: Open,
+) -> Result<i32, Failure> {
     let mut board = Board::new(of, me);
     board.lang = Lang::detect();
+    board.timeline.lang = board.lang;
+    board.timeline.offset_at = timeline::local_offset_at;
+    board.timeline.unsupported = !client.supports_board_timeline();
+    let visits = noa_config::timeline_visits_path();
+    if open.timeline {
+        board.timeline.set_board_id(open.board_id);
+        board.open_timeline();
+    }
+    // The timeline's reads, while it is shown (D11).
+    let mut tl_polling = Polling::default();
+    let mut tl_shown = false;
     let mut polling = Polling::default();
     let mut reconnect = false;
     let instance = client.server_instance_id().to_string();
@@ -4539,6 +4920,7 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
     let mut reader = KeyReader::default();
     loop {
         if SIGNALED.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+            store_visit_on_exit(&mut board, visits.as_deref());
             return Ok(EXIT_OK);
         }
         let now = Instant::now();
@@ -4565,6 +4947,28 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
         }
         // Journals and result files, at most every few seconds (D18).
         dirty |= board.refresh_files(now);
+        // A connection opened again may reach a Noa that differs in what
+        // it serves.
+        board.timeline.unsupported = !client.supports_board_timeline();
+        let shown = board.in_timeline();
+        if shown && !tl_shown {
+            // Read at once when the timeline opens.
+            tl_polling = Polling::default();
+        }
+        tl_shown = shown;
+        let connected = board.offline.is_none() && !reconnect;
+        dirty |= tick_timeline(
+            client,
+            &mut board,
+            &mut tl_polling,
+            TimelineTick {
+                connected,
+                size,
+                now,
+            },
+            &mut reconnect,
+            visits.as_deref(),
+        );
         let current = Screen::size();
         if current != size {
             size = current;
@@ -4594,7 +4998,11 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
         let (at, keys) = match keys_rx.recv_timeout(wait) {
             Ok((at, bytes)) => (at, reader.feed_at(&bytes, at)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (Instant::now(), reader.flush()),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(EXIT_OK),
+            // The terminal is gone (its pane closed, or stdin ended).
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                store_visit_on_exit(&mut board, visits.as_deref());
+                return Ok(EXIT_OK);
+            }
         };
         for key in keys {
             dirty = true;
@@ -4602,6 +5010,7 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
                 continue;
             };
             if action == Action::Quit {
+                store_visit_on_exit(&mut board, visits.as_deref());
                 return Ok(EXIT_OK);
             }
             if hold_elsewhere(&mut board, &action) {
@@ -4610,6 +5019,279 @@ fn run_until_quit(client: &mut Client, of: Option<u64>, me: Option<u64>) -> Resu
             let (notice, draft) = perform(client, &board, action);
             board.message = Some(notice);
             board.drafts.extend(draft);
+        }
+        if !board.tl_io.is_empty() {
+            timeline_io(client, &mut board, &mut reconnect, visits.as_deref());
+            dirty = true;
+        }
+    }
+}
+
+/// The timeline reads the board makes, so they can be faked in tests.
+pub(crate) trait TimelineReads {
+    /// This connection's `serverInstanceId`.
+    fn instance(&self) -> &str;
+    fn context(
+        &mut self,
+        params: &noa_ipc::timeline::ContextParams,
+    ) -> Result<noa_ipc::timeline::ContextResult, ClientError>;
+    fn list(
+        &mut self,
+        params: &noa_ipc::timeline::ListParams,
+    ) -> Result<noa_ipc::timeline::PageResult, ClientError>;
+    fn get(
+        &mut self,
+        params: &noa_ipc::timeline::GetParams,
+    ) -> Result<noa_ipc::timeline::GetResult, ClientError>;
+    fn changes(
+        &mut self,
+        params: &noa_ipc::timeline::ChangesParams,
+    ) -> Result<noa_ipc::timeline::PageResult, ClientError>;
+}
+
+impl TimelineReads for Client {
+    fn instance(&self) -> &str {
+        self.server_instance_id()
+    }
+    fn context(
+        &mut self,
+        params: &noa_ipc::timeline::ContextParams,
+    ) -> Result<noa_ipc::timeline::ContextResult, ClientError> {
+        self.timeline_context(params)
+    }
+    fn list(
+        &mut self,
+        params: &noa_ipc::timeline::ListParams,
+    ) -> Result<noa_ipc::timeline::PageResult, ClientError> {
+        self.timeline_list(params)
+    }
+    fn get(
+        &mut self,
+        params: &noa_ipc::timeline::GetParams,
+    ) -> Result<noa_ipc::timeline::GetResult, ClientError> {
+        self.timeline_get(params)
+    }
+    fn changes(
+        &mut self,
+        params: &noa_ipc::timeline::ChangesParams,
+    ) -> Result<noa_ipc::timeline::PageResult, ClientError> {
+        self.timeline_changes(params)
+    }
+}
+
+/// What a turn of the run loop knows when it reads the timeline.
+#[derive(Clone, Copy)]
+struct TimelineTick {
+    /// The pane list was read and no reconnect is pending.
+    connected: bool,
+    /// The pane's size, which tells whether a preview is drawn.
+    size: (usize, usize),
+    now: Instant,
+}
+
+/// The timeline's reads for one turn of the run loop. While it is shown: a
+/// poll when one is due, then the body the preview or the open post needs.
+/// Without a connection nothing is read, and what is shown is marked as of
+/// its last success however the loss was noticed (the pane list first,
+/// say). In the worker views: the board's context alone, when one is due,
+/// for the posts since the last visit in the header and for the workers
+/// live on a board named by id. Returns whether the frame may have changed.
+fn tick_timeline(
+    client: &mut impl TimelineReads,
+    board: &mut Board,
+    polling: &mut Polling,
+    tick: TimelineTick,
+    reconnect: &mut bool,
+    visits: Option<&std::path::Path>,
+) -> bool {
+    if !board.in_timeline() {
+        if board.timeline.unsupported || !tick.connected || !polling.due(tick.now) {
+            return false;
+        }
+        match poll_context(client, board, visits) {
+            Ok(_) => polling.succeeded_after(tick.now, timeline::POLL_EVERY),
+            Err(err) => {
+                *reconnect |= lost(&err);
+                board.timeline.on_failure();
+                polling.failed(tick.now);
+            }
+        }
+        return true;
+    }
+    if !tick.connected {
+        return board.timeline.on_unreachable();
+    }
+    let mut dirty = false;
+    if !board.timeline.unsupported && polling.due(tick.now) {
+        match poll_timeline(client, board, visits) {
+            Ok(()) => polling.succeeded_after(tick.now, timeline::POLL_EVERY),
+            Err(err) => {
+                *reconnect |= lost(&err);
+                board.timeline.on_failure();
+                polling.failed(tick.now);
+            }
+        }
+        dirty = true;
+    }
+    if !*reconnect && let Some(params) = board.timeline.wanted_body(tick.size.0, tick.size.1) {
+        match client.get(&params) {
+            Ok(result) => board.timeline.on_get(result),
+            Err(err) => {
+                *reconnect |= lost(&err);
+                board.timeline.on_failure();
+            }
+        }
+        dirty = true;
+    }
+    dirty
+}
+
+/// One timeline poll (D11): the board's context ([`poll_context`]), then
+/// the head page while one is wanted, else up to [`timeline::CHANGES_PAGES`]
+/// pages of new posts, and the pages that judge the ones a query must
+/// ([`timeline::Timeline::take_probe`]).
+fn poll_timeline(
+    client: &mut impl TimelineReads,
+    board: &mut Board,
+    visits: Option<&std::path::Path>,
+) -> Result<(), ClientError> {
+    if !poll_context(client, board, visits)? {
+        return Ok(());
+    }
+    if let Some(params) = board.timeline.take_reload() {
+        let page = client.list(&params)?;
+        board.timeline.on_page(page);
+        return Ok(());
+    }
+    for _ in 0..timeline::CHANGES_PAGES {
+        let Some(params) = board.timeline.changes_params() else {
+            break;
+        };
+        let page = client.changes(&params)?;
+        let more = page.has_more;
+        board.timeline.on_changes(page);
+        if !more {
+            break;
+        }
+    }
+    for _ in 0..timeline::CHANGES_PAGES {
+        let Some(params) = board.timeline.take_probe() else {
+            break;
+        };
+        let page = client.list(&params)?;
+        board.timeline.on_page(page);
+    }
+    Ok(())
+}
+
+/// The board's context (which also names the board when it was asked by
+/// pane, and says which workers are live here), and the visit boundary
+/// once. Returns whether there is a board to read posts of.
+fn poll_context(
+    client: &mut impl TimelineReads,
+    board: &mut Board,
+    visits: Option<&std::path::Path>,
+) -> Result<bool, ClientError> {
+    use noa_ipc::timeline::{ContextParams, TimelineErrorKind};
+    let params = match board.timeline.board_id() {
+        Some(id) => ContextParams {
+            board_id: Some(id.to_string()),
+            pane_id: None,
+        },
+        // The board of the orchestrator shown, else of this pane.
+        None => match board.of.or(board.me) {
+            Some(pane) => ContextParams {
+                board_id: None,
+                pane_id: Some(noa_ipc::WireId(pane)),
+            },
+            None => {
+                board.timeline.on_no_board();
+                return Ok(false);
+            }
+        },
+    };
+    match client.context(&params) {
+        Ok(ctx) => {
+            let same = ctx.server_instance_id == client.instance();
+            board.timeline.on_context(&ctx, &board.panels, same);
+        }
+        // The server answered: the pane is on no board yet, or the board
+        // named by id does not exist. Neither is a lost connection.
+        Err(ClientError::Rpc { code, .. })
+            if TimelineErrorKind::from_code(code) == Some(TimelineErrorKind::NotFound) =>
+        {
+            if params.pane_id.is_some() {
+                board.timeline.on_no_board();
+            } else {
+                board.timeline.on_missing();
+            }
+            return Ok(false);
+        }
+        Err(err) => return Err(err),
+    }
+    if !board.timeline.visit_known()
+        && let Some(id) = board.timeline.board_id()
+    {
+        let seq = visits.map_or(0, |path| timeline::read_visit(path, id));
+        board.timeline.set_visit_boundary(seq);
+    }
+    Ok(true)
+}
+
+/// Carry out what the timeline asked: read a post or a page, or store the
+/// visit boundary. A failed read keeps what is shown, marked stale.
+fn timeline_io(
+    client: &mut impl TimelineReads,
+    board: &mut Board,
+    reconnect: &mut bool,
+    visits: Option<&std::path::Path>,
+) {
+    for io in board.take_timeline_io() {
+        let read = match io {
+            TlAction::Fetch(params) => client
+                .get(&params)
+                .map(|result| board.timeline.on_get(result)),
+            TlAction::Page(params) => client
+                .list(&params)
+                .map(|page| board.timeline.on_page(page)),
+            TlAction::SaveVisit(seq) => {
+                save_visit(board, visits, seq);
+                Ok(())
+            }
+            // Handled by the board as keys come.
+            TlAction::Focus(_) | TlAction::ShowWorker(_) => Ok(()),
+        };
+        if let Err(err) = read {
+            *reconnect |= lost(&err);
+            board.timeline.on_failure();
+        }
+    }
+}
+
+/// Store `seq` as the shown board's visit boundary; a failure is said.
+fn save_visit(board: &mut Board, visits: Option<&std::path::Path>, seq: u64) {
+    if let (Some(path), Some(id)) = (visits, board.timeline.board_id())
+        && let Err(err) = timeline::write_visit(path, id, seq)
+    {
+        let text = board.lang.pick(
+            format!("閲覧位置を保存できませんでした: {err}"),
+            format!("could not store the visit: {err}"),
+        );
+        board.message = Some(Notice::warn(text));
+    }
+}
+
+/// However the board ends — `q`, a terminating signal (SIGHUP when its
+/// pane closes), or the end of its input — the visit of a timeline still
+/// shown is stored, with any boundary a key just before asked to store.
+/// The reads still asked for are of no use any more.
+fn store_visit_on_exit(board: &mut Board, visits: Option<&std::path::Path>) {
+    if board.in_timeline() {
+        board.tl_io.extend(board.timeline.leave());
+    }
+    for io in board.take_timeline_io() {
+        if let TlAction::SaveVisit(seq) = io {
+            save_visit(board, visits, seq);
         }
     }
 }
@@ -5441,7 +6123,7 @@ mod tests {
             board.select(2);
             for cols in [24, 40, 41, 60, 80, 120] {
                 for view in [View::List, View::Detail(2)] {
-                    board.view = view;
+                    board.view = view.clone();
                     for line in board.render(cols, 30, at) {
                         let line = visible(&line);
                         assert_eq!(line.width(), cols, "{view:?} {cols}: {line:?}");
@@ -8597,6 +9279,1467 @@ mod tests {
             all.contains("in details: switch between the screen and the result file"),
             "{all}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeline (docs/specs/board-timeline.md AC-3)
+
+    use noa_ipc::timeline::{ContextResult, ContextWorker, PageResult, PostSummary, Seq};
+
+    const TL_BOARD: &str = "bd-00000000000000aa";
+    const TL_WORKER: &str = "wk-0000000000000001";
+
+    fn tl_post(seq: u64, title: &str) -> PostSummary {
+        serde_json::from_value(serde_json::json!({
+            "artifacts": 0,
+            "author": {"agentKind": "claude", "label": "api", "role": "worker", "workerId": TL_WORKER},
+            "checks": {"failed": 0, "inconclusive": 0, "notRun": 0, "passed": 0},
+            "createdAt": "2026-11-26T05:03:07Z",
+            "kind": "summary",
+            "occurredAt": null,
+            "openIssues": 0,
+            "outcome": "succeeded",
+            "postId": format!("po-{seq:016x}"),
+            "producer": {"id": TL_WORKER, "kind": "worker"},
+            "provenance": "registered",
+            "runId": "rn-0000000000000001",
+            "seq": seq.to_string(),
+            "sourceNamespace": "worker",
+            "summary": format!("{title} summary"),
+            "supersededBy": [],
+            "supersedesPostId": null,
+            "taskRef": null,
+            "title": title,
+            "workerId": TL_WORKER,
+        }))
+        .unwrap()
+    }
+
+    /// A `list` page (newest first) or a `changes` page (oldest first).
+    fn tl_page(posts: Vec<PostSummary>, head: u64) -> PageResult {
+        PageResult {
+            has_more: false,
+            head_seq: Seq(head),
+            next_after_seq: posts.iter().map(|post| post.seq).max(),
+            next_before_seq: posts.iter().map(|post| post.seq).min(),
+            posts,
+        }
+    }
+
+    fn tl_context(workers: Vec<ContextWorker>, archived: bool) -> ContextResult {
+        ContextResult {
+            archived,
+            board_id: TL_BOARD.to_string(),
+            head_seq: Seq(0),
+            me: None,
+            name: "release".to_string(),
+            server_instance_id: "inst".to_string(),
+            workers,
+        }
+    }
+
+    fn tl_worker(pane: u64, surface: &str, live: bool) -> ContextWorker {
+        ContextWorker {
+            agent_kind: Some("claude".to_string()),
+            label: Some("api".to_string()),
+            live,
+            pane_id: Some(WireId(pane)),
+            runs: Vec::new(),
+            surface_id: Some(surface.to_string()),
+            worker_id: TL_WORKER.to_string(),
+        }
+    }
+
+    /// Workers 2 and 3 of orchestrator 1, pane 2 on surface `s-2`.
+    fn tl_listing() -> Vec<Panel> {
+        let mut api = worker(2, 1, "api", Some("running"), 1);
+        api.surface_id = Some("s-2".to_string());
+        vec![api, worker(3, 1, "ui", Some("running"), 1)]
+    }
+
+    /// A board in its timeline with posts `n..=1` loaded.
+    fn tl_board(n: u64) -> Board {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_listing(), Instant::now());
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::Timeline);
+        let ctx = tl_context(vec![tl_worker(2, "s-2", true)], false);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        board
+            .timeline
+            .take_reload()
+            .expect("the head page is read first");
+        let posts = (1..=n)
+            .rev()
+            .map(|seq| tl_post(seq, &format!("post {seq}")));
+        board.timeline.on_page(tl_page(posts.collect(), n));
+        board
+    }
+
+    /// The title line of the selected item.
+    fn tl_selected(all: &str) -> String {
+        all.lines()
+            .filter(|line| line.contains('▌'))
+            .nth(1)
+            .unwrap_or_else(|| panic!("no selection in\n{all}"))
+            .to_string()
+    }
+
+    #[test]
+    fn ac3_t_toggles_views() {
+        let mut board = tl_board(3);
+        board.key(Key::Enter);
+        assert_eq!(
+            board.view,
+            View::PostDetail("po-0000000000000003".to_string())
+        );
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::List);
+        // The timeline comes back as it was left.
+        board.key(Key::Char('t'));
+        assert_eq!(
+            board.view,
+            View::PostDetail("po-0000000000000003".to_string())
+        );
+        board.key(Key::Esc);
+        board.key(Key::Char('t'));
+        // From a worker's detail, and back to it.
+        board.key(Key::Enter);
+        assert_eq!(board.view, View::Detail(2));
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::Timeline);
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::Detail(2));
+    }
+
+    #[test]
+    fn ac3_enter_esc_detail() {
+        let mut board = tl_board(3);
+        board.key(Key::Char('j'));
+        board.key(Key::Enter);
+        let id = "po-0000000000000002".to_string();
+        assert_eq!(board.view, View::PostDetail(id.clone()));
+        let io = board.take_timeline_io();
+        assert!(
+            matches!(&io[..], [TlAction::Fetch(get)] if get.post_id == id && get.board_id == TL_BOARD),
+            "{io:?}"
+        );
+        let all = rendered(&board, 80, 24, Instant::now());
+        assert!(all.contains("投稿 #2"), "{all}");
+        assert!(all.contains("本文を読み込み中"), "{all}");
+        board.key(Key::Esc);
+        assert_eq!(board.view, View::Timeline);
+    }
+
+    #[test]
+    fn ac3_slash_sets_query() {
+        let mut board = tl_board(3);
+        board.key(Key::Char('/'));
+        // The query line takes every key, `q` included.
+        for ch in "bug q".chars() {
+            assert_eq!(board.key(Key::Char(ch)), None);
+        }
+        assert_eq!(board.mode, Mode::Normal);
+        let all = rendered(&board, 80, 24, Instant::now());
+        assert!(all.contains("検索 › bug q█"), "{all}");
+        board.key(Key::Backspace);
+        board.key(Key::Backspace);
+        board.key(Key::Enter);
+        let io = board.take_timeline_io();
+        let [TlAction::Page(list)] = &io[..] else {
+            panic!("{io:?}");
+        };
+        assert_eq!(list.query.as_deref(), Some("bug"));
+        assert_eq!(list.before_seq, None);
+        board
+            .timeline
+            .on_page(tl_page(vec![tl_post(2, "bug fix")], 3));
+        let all = rendered(&board, 80, 24, Instant::now());
+        assert!(all.contains("検索 “bug”"), "{all}");
+        assert!(all.contains("bug fix"), "{all}");
+        assert!(!all.contains("post 3"), "{all}");
+        // Esc closes the line without changing the query.
+        board.key(Key::Char('/'));
+        board.key(Key::CtrlU);
+        board.key(Key::Esc);
+        assert!(board.take_timeline_io().is_empty());
+        assert!(rendered(&board, 80, 24, Instant::now()).contains("検索 “bug”"));
+    }
+
+    #[test]
+    fn ac3_f_cycles_filter() {
+        use noa_ipc::timeline::{Outcome, PostKind};
+        let mut board = tl_board(3);
+        board.key(Key::Char('f'));
+        // worker: the board's one worker.
+        board.key(Key::Right);
+        board.key(Key::Tab);
+        board.key(Key::Tab);
+        // kind: any → summary → milestone; Left from any wraps to the last.
+        board.key(Key::Right);
+        board.key(Key::Right);
+        let all = rendered(&board, 120, 24, Instant::now());
+        assert!(all.contains("[ 種類: 節目 ]"), "{all}");
+        assert!(all.contains("worker: api"), "{all}");
+        board.key(Key::Tab);
+        board.key(Key::Left);
+        assert!(rendered(&board, 120, 24, Instant::now()).contains("[ 結果: 結果不明 ]"));
+        board.key(Key::Enter);
+        let io = board.take_timeline_io();
+        let [TlAction::Page(list)] = &io[..] else {
+            panic!("{io:?}");
+        };
+        let filter = list.filter.clone().expect("a filter is sent");
+        assert_eq!(filter.worker_ids, vec![TL_WORKER.to_string()]);
+        assert!(filter.agent_kinds.is_empty());
+        assert_eq!(filter.kinds, vec![PostKind::Milestone]);
+        assert_eq!(filter.outcomes, vec![Outcome::Unknown]);
+        // Esc cancels: nothing is read, the filter stays.
+        board.key(Key::Char('f'));
+        board.key(Key::Right);
+        board.key(Key::Esc);
+        assert!(board.take_timeline_io().is_empty());
+    }
+
+    #[test]
+    fn ac3_new_posts_merge_only_at_latest() {
+        let mut board = tl_board(3);
+        let now = Instant::now();
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(4, "post 4")], 4));
+        let all = rendered(&board, 80, 30, now);
+        assert!(!all.contains("新着"), "{all}");
+        assert!(tl_selected(&all).contains("post 4"), "{all}");
+        // A post already received is not taken twice.
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(4, "post 4")], 4));
+        // (List alone: a preview would say the summary again.)
+        let all = rendered(&board, 69, 30, now);
+        assert_eq!(all.matches("post 4 summary").count(), 1, "{all}");
+    }
+
+    #[test]
+    fn ac3_pinned_selection_while_reading_old() {
+        let mut board = tl_board(3);
+        let now = Instant::now();
+        board.key(Key::Char('j'));
+        board.key(Key::Char('j'));
+        let before = rendered(&board, 80, 40, now);
+        assert!(tl_selected(&before).contains("post 1"), "{before}");
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(4, "post 4"), tl_post(5, "post 5")], 5));
+        let all = rendered(&board, 80, 40, now);
+        assert!(all.contains("新着 2 (G)"), "{all}");
+        assert!(tl_selected(&all).contains("post 1"), "{all}");
+        assert!(!all.contains("post 4"), "{all}");
+        // Reading a post pins it too.
+        board.key(Key::Char('k'));
+        board.key(Key::Char('k'));
+        board.key(Key::Enter);
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(6, "post 6")], 6));
+        board.key(Key::Esc);
+        let all = rendered(&board, 80, 40, now);
+        assert!(all.contains("新着 3 (G)"), "{all}");
+        assert!(tl_selected(&all).contains("post 3"), "{all}");
+    }
+
+    #[test]
+    fn ac3_capital_g_merges_and_selects_newest() {
+        let mut board = tl_board(3);
+        let now = Instant::now();
+        board.key(Key::Char('j'));
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(4, "post 4")], 4));
+        assert!(rendered(&board, 80, 40, now).contains("新着 1 (G)"));
+        board.key(Key::Char('G'));
+        let all = rendered(&board, 80, 40, now);
+        assert!(!all.contains("新着"), "{all}");
+        assert!(tl_selected(&all).contains("post 4"), "{all}");
+        // Back at the latest position: the next post merges at once.
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(5, "post 5")], 5));
+        let all = rendered(&board, 80, 40, now);
+        assert!(tl_selected(&all).contains("post 5"), "{all}");
+    }
+
+    #[test]
+    fn ac3_g_only_for_live_worker() {
+        let mut board = tl_board(2);
+        assert_eq!(board.key(Key::Char('g')), Some(Action::Focus(2)));
+        let cases = [
+            ("another Noa's context", tl_listing(), "s-2", false),
+            (
+                "another surface under the pane id",
+                tl_listing(),
+                "s-9",
+                true,
+            ),
+            (
+                "the pane gone",
+                vec![worker(3, 1, "ui", Some("running"), 1)],
+                "s-2",
+                true,
+            ),
+        ];
+        for (case, listing, surface, same) in cases {
+            board.update(listing.clone(), Instant::now());
+            let ctx = tl_context(vec![tl_worker(2, surface, true)], false);
+            board.timeline.on_context(&ctx, &listing, same);
+            assert_eq!(board.key(Key::Char('g')), None, "{case}");
+            assert!(
+                rendered(&board, 80, 24, Instant::now())
+                    .contains("このボードにそのワーカーはいません"),
+                "{case}"
+            );
+        }
+        // A worker the context itself says is not live.
+        let ctx = tl_context(vec![tl_worker(2, "s-2", false)], false);
+        board.update(tl_listing(), Instant::now());
+        board.timeline.on_context(&ctx, &tl_listing(), true);
+        assert_eq!(board.key(Key::Char('g')), None);
+    }
+
+    #[test]
+    fn ac3_w_jumps_to_worker_detail() {
+        let mut board = tl_board(2);
+        assert_eq!(board.key(Key::Char('w')), None);
+        assert_eq!(board.view, View::Detail(2));
+        assert_eq!(board.selected(), Some(2));
+        // Leaving the timeline stores the visit.
+        assert_eq!(board.take_timeline_io(), vec![TlAction::SaveVisit(2)]);
+        // A live worker that is not one of this board's workers.
+        let mut board = tl_board(2);
+        let mut elsewhere = worker(2, 7, "api", Some("running"), 1);
+        elsewhere.surface_id = Some("s-2".to_string());
+        board.update(vec![elsewhere.clone()], Instant::now());
+        let ctx = tl_context(vec![tl_worker(2, "s-2", true)], false);
+        board.timeline.on_context(&ctx, &[elsewhere], true);
+        assert_eq!(board.key(Key::Char('w')), None);
+        assert_eq!(board.view, View::Timeline);
+        let all = rendered(&board, 80, 24, Instant::now());
+        assert!(all.contains("このボードにそのワーカーはいません"), "{all}");
+    }
+
+    #[test]
+    fn ac3_s_x_inert_in_timeline() {
+        let mut board = tl_board(2);
+        for key in ['s', 'x'] {
+            assert_eq!(board.key(Key::Char(key)), None);
+            assert_eq!(board.mode, Mode::Normal);
+            assert_eq!(board.view, View::Timeline);
+            let all = rendered(&board, 80, 24, Instant::now());
+            assert!(all.contains("w でワーカーへ"), "{all}");
+        }
+        // q keeps the board's quit path.
+        board.key(Key::Char('q'));
+        assert_eq!(board.mode, Mode::ConfirmQuit);
+        let all = rendered(&board, 80, 24, Instant::now());
+        assert!(
+            all.contains("y で終了") || all.contains("再度 q で終了"),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn ac3_layout_110_70_and_24x6() {
+        let mut board = tl_board(12);
+        let now = Instant::now();
+        for (cols, rows) in [
+            (110, 30),
+            (140, 40),
+            (70, 18),
+            (69, 30),
+            (80, 17),
+            (40, 10),
+            (24, 6),
+        ] {
+            assert_widths(&board, cols, rows, now);
+        }
+        // Wide: the preview is right of the list, 2/5 of the width.
+        let all = rendered(&board, 110, 30, now);
+        let line = line_with(&all, "post 12 summary");
+        assert!(line.contains('│'), "{all}");
+        assert!(all.contains("投稿 #12"), "{all}");
+        // 70×18: under the list.
+        let all = rendered(&board, 70, 18, now);
+        assert!(all.contains("投稿 #12"), "{all}");
+        assert!(!line_with(&all, "post 12 summary").contains('│'), "{all}");
+        // Narrower: the list alone, and Enter shows the post whole.
+        let all = rendered(&board, 69, 30, now);
+        assert!(!all.contains("投稿 #12"), "{all}");
+        board.key(Key::Enter);
+        for (cols, rows) in [(110, 30), (70, 18), (40, 10), (24, 6)] {
+            assert_widths(&board, cols, rows, now);
+        }
+        assert!(rendered(&board, 40, 10, now).contains("投稿 #12"));
+        let all = rendered(&board, 23, 6, now);
+        assert!(all.contains("24×6 以上に"), "{all}");
+        // The selection stays in view far down the list.
+        board.key(Key::Esc);
+        for _ in 0..11 {
+            board.key(Key::Char('j'));
+        }
+        let all = rendered(&board, 69, 20, now);
+        assert!(tl_selected(&all).contains("post 1"), "{all}");
+    }
+
+    #[test]
+    fn ac3_since_last_visit_count() {
+        let mut board = tl_board(5);
+        board.timeline.set_visit_boundary(2);
+        assert_eq!(board.timeline.since_last_visit(), 3);
+        let now = Instant::now();
+        assert!(rendered(&board, 80, 24, now).contains("前回閲覧以降 3 件"));
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(6, "post 6")], 6));
+        // Not lowered while the person looks.
+        assert_eq!(board.timeline.since_last_visit(), 4);
+        // Leaving stores the highest seq shown.
+        board.key(Key::Char('t'));
+        assert_eq!(board.take_timeline_io(), vec![TlAction::SaveVisit(6)]);
+        assert_eq!(board.timeline.since_last_visit(), 0);
+        board.key(Key::Char('t'));
+        assert!(!rendered(&board, 80, 24, now).contains("前回閲覧以降"));
+    }
+
+    #[test]
+    fn ac3_stale_banner_after_failure() {
+        let mut board = tl_board(2);
+        let now = Instant::now();
+        board.timeline.on_changes(tl_page(Vec::new(), 2));
+        board.timeline.on_failure();
+        let all = rendered(&board, 80, 24, now);
+        let line = line_with(&all, "更新停止");
+        let at = line
+            .split("更新停止 ")
+            .nth(1)
+            .and_then(|rest| rest.get(..8))
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            at.len() == 8 && at.chars().filter(|ch| *ch == ':').count() == 2,
+            "{line}"
+        );
+        // What was read stays.
+        assert!(all.contains("post 2") && all.contains("post 1"), "{all}");
+        // The next success clears the banner.
+        board.timeline.on_changes(tl_page(Vec::new(), 2));
+        assert!(!rendered(&board, 80, 24, now).contains("更新停止"));
+    }
+
+    #[test]
+    fn ac3_control_chars_removed() {
+        let mut board = tl_board(0);
+        let mut post = tl_post(1, "evil\x1b[31mred\x07title");
+        post.summary = "line\x1b]2;owned\x07\r\nnext\x08".to_string();
+        post.author.label = Some("lab\x1bel".to_string());
+        board.timeline.on_changes(tl_page(vec![post], 1));
+        for (cols, rows) in [(80, 24), (110, 30)] {
+            for line in board.render(cols, rows, Instant::now()) {
+                assert!(!line.contains('\x07') && !line.contains('\r'), "{line:?}");
+                assert!(
+                    !line.contains("\x1b[31m") && !line.contains("\x1b]2"),
+                    "{line:?}"
+                );
+            }
+        }
+        let all = rendered(&board, 80, 24, Instant::now());
+        assert!(all.contains("evil[31mredtitle"), "{all}");
+        assert!(all.contains("label"), "{all}");
+    }
+
+    #[test]
+    fn ac3_japanese_width() {
+        let mut board = tl_board(0);
+        let mut post = tl_post(
+            1,
+            "日本語のタイトルがとても長い場合でも幅をはみ出さないこと",
+        );
+        post.summary = "要約も全角文字で書かれていて、折り返しと切り詰めが表示幅で正しく行われることを確かめる。"
+            .repeat(3);
+        post.author.label = Some("実装担当".to_string());
+        board.timeline.on_changes(tl_page(vec![post], 1));
+        let now = Instant::now();
+        for (cols, rows) in [(110, 30), (80, 24), (70, 18), (31, 10), (24, 6)] {
+            assert_widths(&board, cols, rows, now);
+        }
+        board.key(Key::Enter);
+        for (cols, rows) in [(110, 30), (31, 10)] {
+            assert_widths(&board, cols, rows, now);
+        }
+        // Up to three summary lines, the last one cut.
+        board.key(Key::Esc);
+        let all = rendered(&board, 69, 30, now);
+        let item: Vec<&str> = all.lines().filter(|line| line.contains('▌')).collect();
+        // Head, title, three summary lines, what it carries.
+        assert_eq!(item.len(), 6, "{all}");
+        assert!(item[4].trim_end().ends_with('…'), "{all}");
+    }
+
+    #[test]
+    fn ac3_archive_mode() {
+        let mut board = tl_board(2);
+        let ctx = tl_context(vec![tl_worker(2, "s-2", true)], true);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        let all = rendered(&board, 80, 24, Instant::now());
+        assert!(all.contains("アーカイブ: ライブworkerなし"), "{all}");
+        for key in ['g', 'w'] {
+            assert_eq!(board.key(Key::Char(key)), None);
+            assert_eq!(board.view, View::Timeline);
+            let all = rendered(&board, 80, 24, Instant::now());
+            assert!(!all.contains("このボードにそのワーカーはいません"), "{all}");
+        }
+    }
+
+    #[test]
+    fn ac3_unsupported_server_message() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_listing(), Instant::now());
+        board.timeline.unsupported = true;
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::List);
+        let all = rendered(&board, 80, 24, Instant::now());
+        assert!(all.contains("タイムライン未対応のNoa"), "{all}");
+        // Everything else is as before.
+        board.key(Key::Char('j'));
+        assert_eq!(board.view, View::List);
+        assert!(!rendered(&board, 80, 24, Instant::now()).contains("タイムライン未対応"));
+        assert!(board.take_timeline_io().is_empty());
+    }
+
+    #[test]
+    fn ac3_older_page_is_read_at_the_end_of_the_list() {
+        let mut board = tl_board(0);
+        let mut page = tl_page(vec![tl_post(30, "post 30"), tl_post(29, "post 29")], 30);
+        page.has_more = true;
+        board.timeline.on_page(page);
+        board.key(Key::Char('j'));
+        assert!(board.take_timeline_io().is_empty());
+        board.key(Key::Char('j'));
+        let io = board.take_timeline_io();
+        let [TlAction::Page(list)] = &io[..] else {
+            panic!("{io:?}");
+        };
+        assert_eq!(list.before_seq, Some(Seq(29)));
+        // A second j while that page is in flight asks nothing more.
+        board.key(Key::Char('j'));
+        assert!(board.take_timeline_io().is_empty());
+        board
+            .timeline
+            .on_page(tl_page(vec![tl_post(28, "post 28")], 30));
+        board.key(Key::Char('j'));
+        let all = rendered(&board, 80, 40, Instant::now());
+        assert!(tl_selected(&all).contains("post 28"), "{all}");
+    }
+
+    #[test]
+    fn ac3_help_says_what_t_does() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.key(Key::Char('?'));
+        let all = rendered(&board, 100, 60, Instant::now());
+        assert!(
+            all.contains("タイムラインとワーカー一覧を切り替える"),
+            "{all}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeline review fixes
+
+    use noa_ipc::timeline::{
+        ChangesParams, ContextParams, GetParams, GetResult, ListParams, TimelineErrorKind,
+    };
+    use std::collections::VecDeque;
+
+    /// A timeline server whose answers are queued; a read with none queued
+    /// fails the test (`changes` answers an empty page).
+    #[derive(Default)]
+    struct FakeReads {
+        contexts: VecDeque<Result<ContextResult, ClientError>>,
+        lists: VecDeque<Result<PageResult, ClientError>>,
+        changes: VecDeque<Result<PageResult, ClientError>>,
+        gets: VecDeque<Result<GetResult, ClientError>>,
+        listed: Vec<ListParams>,
+    }
+
+    impl TimelineReads for FakeReads {
+        fn instance(&self) -> &str {
+            "inst"
+        }
+        fn context(&mut self, _: &ContextParams) -> Result<ContextResult, ClientError> {
+            self.contexts.pop_front().expect("no context queued")
+        }
+        fn list(&mut self, params: &ListParams) -> Result<PageResult, ClientError> {
+            self.listed.push(params.clone());
+            self.lists.pop_front().expect("no list queued")
+        }
+        fn get(&mut self, _: &GetParams) -> Result<GetResult, ClientError> {
+            self.gets.pop_front().expect("no get queued")
+        }
+        fn changes(&mut self, _: &ChangesParams) -> Result<PageResult, ClientError> {
+            self.changes
+                .pop_front()
+                .unwrap_or_else(|| Ok(tl_page(Vec::new(), 0)))
+        }
+    }
+
+    fn tl_tick(connected: bool, size: (usize, usize)) -> TimelineTick {
+        TimelineTick {
+            connected,
+            size,
+            now: Instant::now(),
+        }
+    }
+
+    /// Post `seq` read whole, from a review session.
+    fn tl_get(seq: u64, title: &str) -> GetResult {
+        serde_json::from_value(serde_json::json!({
+            "post": {
+                "artifacts": [],
+                "author": {"agentKind": "claude", "label": "api", "role": "worker", "workerId": TL_WORKER},
+                "basedOnPostIds": [],
+                "boardId": TL_BOARD,
+                "bodyMarkdown": "what was done",
+                "checks": [],
+                "createdAt": "2026-11-26T05:03:07Z",
+                "kind": "summary",
+                "nextActions": [],
+                "occurredAt": null,
+                "openIssues": [],
+                "outcome": "succeeded",
+                "postId": format!("po-{seq:016x}"),
+                "producer": {"id": TL_WORKER, "kind": "worker"},
+                "provenance": "registered",
+                "requestId": "rq-1",
+                "retryOfRunId": null,
+                "runId": "rn-0000000000000001",
+                "schemaVersion": 1,
+                "seq": seq.to_string(),
+                "sourceRef": {
+                    "eventId": "accepted-result-1",
+                    "locator": null,
+                    "namespace": "review",
+                    "runId": "source-run-1",
+                    "sessionId": "source-session-1",
+                },
+                "summary": format!("{title} summary"),
+                "supersedesPostId": null,
+                "taskRef": null,
+                "title": title,
+                "workerId": TL_WORKER,
+            },
+            "supersededBy": [],
+        }))
+        .unwrap()
+    }
+
+    fn tl_type(board: &mut Board, text: &str) {
+        for ch in text.chars() {
+            board.key(Key::Char(ch));
+        }
+    }
+
+    // Review 1: an archive opened by id lists none of the workers of the
+    // orchestrator the board was started for, so no key acts on them.
+    #[test]
+    fn ac3_archive_by_id_lists_no_other_boards_workers() {
+        let now = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_listing(), now);
+        board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+        board.open_timeline();
+        // Until the server answers, nobody is listed.
+        board.key(Key::Char('t'));
+        assert!(board.workers().is_empty());
+        assert!(rendered(&board, 80, 24, now).contains("読み込み中"));
+        board.key(Key::Char('t'));
+        let ctx = tl_context(Vec::new(), true);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::List);
+        let all = rendered(&board, 80, 24, now);
+        assert!(all.contains("アーカイブ: ライブworkerなし"), "{all}");
+        assert!(all.contains("release"), "{all}");
+        assert!(!all.contains("api"), "{all}");
+        assert!(board.workers().is_empty());
+        for key in ['x', 's', 'g', '1'] {
+            assert_eq!(board.key(Key::Char(key)), None, "{key}");
+            assert_eq!(board.mode, Mode::Normal, "{key}");
+        }
+        // Workers 2 and 3 are still the board's own, which go back on
+        // quit whatever board is shown (second review 1): q asks first.
+        assert_eq!(board.key(Key::Char('q')), None);
+        assert_eq!(board.mode, Mode::ConfirmQuit);
+        board.key(Key::Esc);
+
+        // A worker opened, or a close asked for, before the board's context
+        // said it is not theirs: let go before the next key acts.
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_listing(), now);
+        board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+        board.mode = Mode::ConfirmClose(2);
+        let ctx = tl_context(Vec::new(), true);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        assert_eq!(board.key(Key::Char('y')), None);
+        assert!(
+            matches!(board.mode, Mode::TargetGone(_)),
+            "{:?}",
+            board.mode
+        );
+
+        // The orchestrator's own board, named by id: its workers as ever.
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_listing(), now);
+        board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+        board.open_timeline();
+        let ctx = tl_context(vec![tl_worker(2, "s-2", true)], false);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        board.key(Key::Char('t'));
+        assert_eq!(board.workers().len(), 2);
+        board.key(Key::Char('x'));
+        assert!(matches!(board.mode, Mode::ConfirmClose(_)));
+    }
+
+    // Review 2: a new post that matches the query by its body only is
+    // judged by the server, not dropped, and never asked about twice.
+    #[test]
+    fn ac3_query_takes_in_new_posts_that_match_by_body() {
+        let now = Instant::now();
+        let mut board = tl_board(3);
+        board.key(Key::Char('/'));
+        tl_type(&mut board, "timeout");
+        board.key(Key::Enter);
+        assert_eq!(board.take_timeline_io().len(), 1);
+        board
+            .timeline
+            .on_page(tl_page(vec![tl_post(2, "timeout in login")], 3));
+        let ctx = || Ok(tl_context(vec![tl_worker(2, "s-2", true)], false));
+        // #4 says "timeout" in its body only; #5 nowhere. The first verdict
+        // is lost with the connection, and asked for again.
+        let mut fake = FakeReads::default();
+        fake.contexts.push_back(ctx());
+        fake.changes.push_back(Ok(tl_page(
+            vec![tl_post(4, "deploy"), tl_post(5, "docs")],
+            5,
+        )));
+        fake.lists
+            .push_back(Err(ClientError::Transport("gone".to_string())));
+        assert!(poll_timeline(&mut fake, &mut board, None).is_err());
+        board.timeline.on_failure();
+        fake.contexts.push_back(ctx());
+        fake.lists
+            .push_back(Ok(tl_page(vec![tl_post(4, "deploy")], 5)));
+        poll_timeline(&mut fake, &mut board, None).unwrap();
+        assert_eq!(fake.listed.len(), 2);
+        for probe in &fake.listed {
+            assert_eq!(probe.query.as_deref(), Some("timeout"));
+            assert_eq!(probe.before_seq, Some(Seq(6)));
+        }
+        let all = rendered(&board, 69, 40, now);
+        assert!(tl_selected(&all).contains("deploy"), "{all}");
+        assert!(all.contains("timeout in login"), "{all}");
+        assert!(!all.contains("docs"), "{all}");
+        fake.contexts.push_back(ctx());
+        poll_timeline(&mut fake, &mut board, None).unwrap();
+        assert_eq!(fake.listed.len(), 2);
+    }
+
+    // Review 3: a key the board handles takes the line from what the
+    // timeline's last key said.
+    #[test]
+    fn ac3_board_prompt_shows_over_the_timelines_note() {
+        let now = Instant::now();
+        let mut board = tl_board(2);
+        // The post's worker closed.
+        let ctx = tl_context(vec![tl_worker(2, "s-2", false)], false);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        let gone = "このボードにそのワーカーはいません";
+        assert_eq!(board.key(Key::Char('g')), None);
+        assert!(rendered(&board, 80, 24, now).contains(gone));
+        board.key(Key::Char('q'));
+        assert_eq!(board.mode, Mode::ConfirmQuit);
+        let all = rendered(&board, 80, 24, now);
+        assert!(all.contains("再度 q で終了"), "{all}");
+        assert!(!all.contains(gone), "{all}");
+        board.key(Key::Esc);
+        for key in ['s', 'x'] {
+            board.key(Key::Char('g'));
+            board.key(Key::Char(key));
+            let all = rendered(&board, 80, 24, now);
+            assert!(all.contains("w でワーカーへ"), "{key}: {all}");
+            assert!(!all.contains(gone), "{key}: {all}");
+        }
+    }
+
+    // Review 5: the list is marked stalled whichever read notices the loss
+    // first, and a post read whole does not clear the mark.
+    #[test]
+    fn ac3_stalled_however_the_loss_is_noticed() {
+        let now = Instant::now();
+        // The pane list failed first: no timeline read is made at all.
+        let mut board = tl_board(2);
+        board.timeline.on_changes(tl_page(Vec::new(), 2));
+        board.offline = Some(now);
+        let mut fake = FakeReads::default();
+        let (mut polling, mut reconnect) = (Polling::default(), false);
+        let tick = tl_tick(false, (80, 24));
+        assert!(tick_timeline(
+            &mut fake,
+            &mut board,
+            &mut polling,
+            tick,
+            &mut reconnect,
+            None
+        ));
+        let all = rendered(&board, 80, 24, now);
+        let line = line_with(&all, "更新停止");
+        assert!(!line.contains("--:--:--"), "{line}");
+        assert!(all.contains("post 2"), "{all}");
+
+        // `changes` failed, then the preview's body came.
+        let mut board = tl_board(2);
+        board.timeline.on_changes(tl_page(Vec::new(), 2));
+        let mut fake = FakeReads::default();
+        fake.contexts
+            .push_back(Ok(tl_context(vec![tl_worker(2, "s-2", true)], false)));
+        fake.changes
+            .push_back(Err(ClientError::Timeout("late".to_string())));
+        fake.gets.push_back(Ok(tl_get(2, "post 2")));
+        let (mut polling, mut reconnect) = (Polling::default(), false);
+        let tick = tl_tick(true, (110, 30));
+        tick_timeline(
+            &mut fake,
+            &mut board,
+            &mut polling,
+            tick,
+            &mut reconnect,
+            None,
+        );
+        assert!(fake.gets.is_empty(), "the body is read");
+        let all = rendered(&board, 110, 30, now);
+        assert!(all.contains("what was done"), "{all}");
+        assert!(all.contains("更新停止"), "{all}");
+    }
+
+    // Review 6: a filter that still matches the post read keeps it
+    // selected; one that drops it selects the newest.
+    #[test]
+    fn ac3_filter_keeps_the_selected_post() {
+        let now = Instant::now();
+        let mut board = tl_board(10);
+        board.key(Key::Char('j'));
+        board.key(Key::Char('f'));
+        board.key(Key::Tab);
+        board.key(Key::Tab);
+        board.key(Key::Right);
+        board.key(Key::Enter);
+        assert_eq!(board.take_timeline_io().len(), 1);
+        let page = vec![
+            tl_post(10, "post 10"),
+            tl_post(9, "post 9"),
+            tl_post(7, "post 7"),
+        ];
+        board.timeline.on_page(tl_page(page, 10));
+        let all = rendered(&board, 69, 40, now);
+        assert!(tl_selected(&all).contains("post 9"), "{all}");
+        // Not at the latest position: a new post waits.
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(11, "post 11")], 11));
+        let all = rendered(&board, 69, 40, now);
+        assert!(all.contains("新着 1 (G)"), "{all}");
+        assert!(tl_selected(&all).contains("post 9"), "{all}");
+        board.key(Key::Char('/'));
+        tl_type(&mut board, "post 10");
+        board.key(Key::Enter);
+        board.take_timeline_io();
+        board
+            .timeline
+            .on_page(tl_page(vec![tl_post(10, "post 10")], 11));
+        let all = rendered(&board, 69, 40, now);
+        assert!(tl_selected(&all).contains("post 10"), "{all}");
+    }
+
+    // Review 7: back at the newest post, new posts merge again, with the
+    // ones held meanwhile, newest first.
+    #[test]
+    fn ac3_back_at_the_top_new_posts_merge_again() {
+        let now = Instant::now();
+        let mut board = tl_board(3);
+        board.key(Key::Char('j'));
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(4, "post 4")], 4));
+        assert!(rendered(&board, 69, 40, now).contains("新着 1 (G)"));
+        board.key(Key::Char('k'));
+        board
+            .timeline
+            .on_changes(tl_page(vec![tl_post(5, "post 5")], 5));
+        let all = rendered(&board, 69, 40, now);
+        assert!(!all.contains("新着"), "{all}");
+        assert!(tl_selected(&all).contains("post 5"), "{all}");
+        let at = |text: &str| all.find(text).unwrap_or_else(|| panic!("{text}: {all}"));
+        assert!(at("post 5 summary") < at("post 4 summary"), "{all}");
+        assert!(at("post 4 summary") < at("post 3 summary"), "{all}");
+    }
+
+    // Review 8: the boundary stored is the highest seq listed during the
+    // visit, though a search listed none at the end.
+    #[test]
+    fn ac3_visit_keeps_what_a_search_hid() {
+        let mut board = tl_board(10);
+        board.timeline.set_visit_boundary(0);
+        board.key(Key::Char('/'));
+        tl_type(&mut board, "zzz");
+        board.key(Key::Enter);
+        board.take_timeline_io();
+        board.timeline.on_page(tl_page(Vec::new(), 10));
+        board.key(Key::Char('t'));
+        assert_eq!(board.take_timeline_io(), vec![TlAction::SaveVisit(10)]);
+    }
+
+    // Review 10: the visit is stored on every way out, not only `q`.
+    #[test]
+    fn ac3_visit_is_stored_however_the_board_ends() {
+        let dir = std::env::temp_dir().join(format!(
+            "noa-visits-exit-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        let path = dir.join("timeline-visits.json");
+        // Still in the timeline when the pane closes (SIGHUP) or input ends.
+        let mut board = tl_board(4);
+        store_visit_on_exit(&mut board, Some(&path));
+        assert_eq!(timeline::read_visit(&path, TL_BOARD), 4);
+        // Left it with `t` just before: what that key asked is stored.
+        let mut board = tl_board(6);
+        board.key(Key::Char('t'));
+        store_visit_on_exit(&mut board, Some(&path));
+        assert_eq!(timeline::read_visit(&path, TL_BOARD), 6);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Review 11: a worker the board learns of while the filter line is
+    // open does not take the place of the one picked.
+    #[test]
+    fn ac3_filter_pick_stays_on_its_worker() {
+        let mut board = tl_board(2);
+        board.key(Key::Char('f'));
+        board.key(Key::Right);
+        let mut alpha = tl_worker(9, "s-9", false);
+        alpha.worker_id = "wk-00000000000000a1".to_string();
+        alpha.label = Some("alpha".to_string());
+        let ctx = tl_context(vec![tl_worker(2, "s-2", true), alpha], false);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        let all = rendered(&board, 120, 24, Instant::now());
+        assert!(all.contains("[ worker: api ]"), "{all}");
+        board.key(Key::Enter);
+        let io = board.take_timeline_io();
+        let [TlAction::Page(list)] = &io[..] else {
+            panic!("{io:?}");
+        };
+        let filter = list.filter.clone().expect("a filter is sent");
+        assert_eq!(filter.worker_ids, vec![TL_WORKER.to_string()]);
+    }
+
+    // Review 12: at 24×6 each post is its seq and title, the cut is said,
+    // and the filter field being changed is shown.
+    #[test]
+    fn ac3_smallest_size_tells_posts_apart() {
+        let now = Instant::now();
+        // Same minute, same worker.
+        let mut board = tl_board(2);
+        let all = rendered(&board, 24, 6, now);
+        assert!(all.contains("▌ #2 post 2"), "{all}");
+        board.key(Key::Char('j'));
+        let all = rendered(&board, 24, 6, now);
+        assert!(all.contains("▌ #1 post 1"), "{all}");
+        assert!(all.contains("Enter で全文"), "{all}");
+        assert_widths(&board, 24, 6, now);
+        // A post alone says the rest of it is not shown.
+        let all = rendered(&tl_board(1), 24, 6, now);
+        assert!(all.contains("Enter で全文"), "{all}");
+        board.key(Key::Char('f'));
+        for (tabs, shown) in [(0, "worker: すべて"), (3, "結果: すべて")] {
+            for _ in 0..tabs {
+                board.key(Key::Tab);
+            }
+            let all = rendered(&board, 24, 6, now);
+            assert!(all.contains(&format!("[ {shown} ]")), "{all}");
+            assert_widths(&board, 24, 6, now);
+        }
+        board.key(Key::Right);
+        assert!(rendered(&board, 24, 6, now).contains("[ 結果: 成功 ]"));
+    }
+
+    // Review 13: the post read whole ends with where it came from.
+    #[test]
+    fn ac3_post_detail_shows_its_source() {
+        let now = Instant::now();
+        let mut board = tl_board(1);
+        board.key(Key::Enter);
+        board.take_timeline_io();
+        board.timeline.on_get(tl_get(1, "post 1"));
+        // Drawn once, it knows how far it scrolls.
+        rendered(&board, 40, 12, now);
+        for _ in 0..40 {
+            board.key(Key::Char('j'));
+        }
+        let all = rendered(&board, 40, 12, now);
+        assert!(
+            !all.contains("post 1 summary"),
+            "scrolled to the end: {all}"
+        );
+        for text in [
+            "出典",
+            "review",
+            "session source-session-1",
+            "run source-run-1",
+            "event accepted-result-1",
+        ] {
+            assert!(all.contains(text), "{text}: {all}");
+        }
+    }
+
+    // Review 15: Tab is dropped outside the timeline's filter line, as
+    // before it was read: it cancels no prompt and closes no help.
+    #[test]
+    fn tab_is_ignored_outside_the_timelines_filter_line() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_listing(), Instant::now());
+        board.key(Key::Char('x'));
+        let Mode::ConfirmClose(pane) = board.mode else {
+            panic!("{:?}", board.mode);
+        };
+        assert_eq!(board.key(Key::Tab), None);
+        assert_eq!(board.mode, Mode::ConfirmClose(pane));
+        assert_eq!(board.key(Key::Char('y')), Some(Action::Close(pane)));
+        board.key(Key::Char('q'));
+        board.key(Key::Tab);
+        assert_eq!(board.mode, Mode::ConfirmQuit);
+        board.key(Key::Esc);
+        board.key(Key::Char('?'));
+        board.key(Key::Tab);
+        assert!(board.help);
+        // In the timeline too, but on its filter line.
+        let mut board = tl_board(2);
+        board.key(Key::Tab);
+        assert!(!board.timeline.typing());
+        board.key(Key::Char('/'));
+        board.key(Key::Tab);
+        assert!(rendered(&board, 80, 24, Instant::now()).contains("検索 › █"));
+    }
+
+    // Review 16: a board id the server does not know is said so, not
+    // shown as loading or stalled.
+    #[test]
+    fn ac3_missing_board_is_said_not_stalled() {
+        let now = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_listing(), now);
+        board
+            .timeline
+            .set_board_id(Some("bd-00000000000000ff".to_string()));
+        board.open_timeline();
+        let mut fake = FakeReads::default();
+        let code = TimelineErrorKind::NotFound.code().code();
+        fake.contexts.push_back(Err(ClientError::Rpc {
+            code,
+            message: "not_found".to_string(),
+        }));
+        let (mut polling, mut reconnect) = (Polling::default(), false);
+        let tick = tl_tick(true, (80, 24));
+        tick_timeline(
+            &mut fake,
+            &mut board,
+            &mut polling,
+            tick,
+            &mut reconnect,
+            None,
+        );
+        assert!(!reconnect);
+        let all = rendered(&board, 80, 24, now);
+        assert!(
+            all.contains("ボード bd-00000000000000ff は見つかりません"),
+            "{all}"
+        );
+        assert!(
+            !all.contains("読み込み中") && !all.contains("更新停止"),
+            "{all}"
+        );
+        // Its worker list lists nobody either.
+        board.key(Key::Char('t'));
+        assert!(board.workers().is_empty());
+        assert!(!rendered(&board, 80, 24, now).contains("読み込み中"));
+    }
+
+    // Second review 1: an archive shown by id lists no worker, but the
+    // workers the board ends with are its own: q asks first and counts them.
+    #[test]
+    fn ac3_quit_asks_for_the_boards_own_workers_whatever_board_is_shown() {
+        let now = Instant::now();
+        // `--of self`: floats of this pane, which close with it.
+        let floats = || {
+            vec![
+                worker(2, 8, "api", Some("running"), 1),
+                worker(3, 8, "ui", Some("running"), 1),
+            ]
+        };
+        let mut board = Board::new(Some(8), Some(8));
+        board.update(floats(), now);
+        board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+        board.open_timeline();
+        let ctx = tl_context(Vec::new(), true);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        for key in [Key::Char('q'), Key::CtrlC] {
+            assert_eq!(board.key(key.clone()), None, "{key:?}");
+            assert_eq!(board.mode, Mode::ConfirmQuit, "{key:?}");
+            let all = rendered(&board, 80, 24, now);
+            assert!(
+                all.contains("ワーカー 2 件はボードと一緒にすべて閉じます"),
+                "{all}"
+            );
+            // Any key but y keeps the board.
+            assert_eq!(board.key(Key::Char('q')), None);
+            assert_eq!(board.mode, Mode::Normal);
+        }
+        // From the archive's empty worker list too, and y quits.
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::List);
+        assert!(board.workers().is_empty());
+        assert_eq!(board.key(Key::Char('q')), None);
+        assert_eq!(board.mode, Mode::ConfirmQuit);
+        assert_eq!(board.key(Key::Char('y')), Some(Action::Quit));
+
+        // With none of its own, q still ends it at once.
+        let mut board = Board::new(Some(8), Some(8));
+        board.update(Vec::new(), now);
+        board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+        board.open_timeline();
+        board.timeline.on_context(&ctx, &board.panels, true);
+        assert_eq!(board.key(Key::Char('q')), Some(Action::Quit));
+    }
+
+    // Second review 2: a board named by id, from a pane no orchestrator is
+    // given for, lists the work of its own orchestrator only.
+    #[test]
+    fn ac3_board_by_id_lists_only_its_orchestrators_workers() {
+        let now = Instant::now();
+        let top = |pane: u64| {
+            let mut panel = worker(pane, 0, "lead", Some("running"), 1);
+            panel.parent_pane_id = None;
+            panel
+        };
+        let listing = || {
+            let mut b1 = worker(5, 4, "b-api", Some("running"), 1);
+            b1.surface_id = Some("s-5".to_string());
+            vec![
+                top(1),
+                worker(2, 1, "a-api", Some("running"), 1),
+                top(4),
+                b1,
+                // A worker's worker shares its parent's board (D9).
+                worker(6, 5, "b-sub", Some("running"), 1),
+            ]
+        };
+        let mut board = Board::new(None, Some(8));
+        board.update(listing(), now);
+        board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+        board.open_timeline();
+        let ctx = tl_context(vec![tl_worker(5, "s-5", true)], false);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        board.update(listing(), now);
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::List);
+        let mut listed: Vec<u64> = board.workers().iter().map(|p| p.pane_id.0).collect();
+        listed.sort_unstable();
+        assert_eq!(listed, vec![5, 6]);
+        assert!(!board.picks().contains(&2), "{:?}", board.picks());
+        let all = rendered(&board, 120, 30, now);
+        assert!(!all.contains("a-api"), "{all}");
+        // No key reaches A's worker: not by number, not by stepping.
+        for key in ['1', '2', '3'] {
+            board.key(Key::Char(key));
+            assert_ne!(board.selected, Some(2), "{key}");
+        }
+        for _ in 0..4 {
+            board.key(Key::Char('j'));
+            assert_ne!(board.selected, Some(2));
+            board.key(Key::Char('x'));
+            let Mode::ConfirmClose(pane) = board.mode else {
+                panic!("{:?}", board.mode);
+            };
+            assert!([5, 6].contains(&pane), "{pane}");
+            board.key(Key::Esc);
+            board.key(Key::Char('s'));
+            let Mode::Send(pane, _) = board.mode else {
+                panic!("{:?}", board.mode);
+            };
+            assert!([5, 6].contains(&pane), "{pane}");
+            board.key(Key::Esc);
+        }
+        // A prompt for a worker of another board, from before its context
+        // came in, is let go before its key acts.
+        board.mode = Mode::ConfirmClose(2);
+        assert_eq!(board.key(Key::Char('y')), None);
+        assert!(
+            matches!(board.mode, Mode::TargetGone(_)),
+            "{:?}",
+            board.mode
+        );
+    }
+
+    // Second review 4: in the worker views the board's context is still
+    // read, so a worker that joins a board named by id is listed there.
+    #[test]
+    fn ac3_a_worker_joining_a_board_by_id_is_listed_from_the_worker_view() {
+        let now = Instant::now();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_listing(), now);
+        board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+        board.open_timeline();
+        board
+            .timeline
+            .on_context(&tl_context(Vec::new(), false), &board.panels, true);
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::List);
+        assert!(board.workers().is_empty());
+        let all = rendered(&board, 80, 24, now);
+        assert!(
+            all.contains("このボードのライブworkerはここにいません"),
+            "{all}"
+        );
+        // Worker 2 registers on the board. No post is read meanwhile (no
+        // list is queued: one would fail the fake).
+        let mut fake = FakeReads::default();
+        fake.contexts
+            .push_back(Ok(tl_context(vec![tl_worker(2, "s-2", true)], false)));
+        let (mut polling, mut reconnect) = (Polling::default(), false);
+        assert!(tick_timeline(
+            &mut fake,
+            &mut board,
+            &mut polling,
+            tl_tick(true, (80, 24)),
+            &mut reconnect,
+            None,
+        ));
+        assert!(fake.contexts.is_empty(), "the context is read");
+        // Not again before it is due.
+        assert!(!tick_timeline(
+            &mut fake,
+            &mut board,
+            &mut polling,
+            tl_tick(true, (80, 24)),
+            &mut reconnect,
+            None,
+        ));
+        board.update(tl_listing(), now);
+        assert_eq!(board.workers().len(), 2);
+        assert!(board.selected.is_some());
+        board.key(Key::Char('x'));
+        assert!(
+            matches!(board.mode, Mode::ConfirmClose(_)),
+            "{:?}",
+            board.mode
+        );
+    }
+
+    // Second review 7: `j` (or Down) at the last post of a page steps onto
+    // the next page once it comes, not a press later.
+    #[test]
+    fn ac3_j_at_the_end_of_a_page_steps_onto_the_next_one() {
+        let now = Instant::now();
+        for step in [Key::Char('j'), Key::Down] {
+            let mut board = tl_board(0);
+            let head: Vec<PostSummary> = (11..=30)
+                .rev()
+                .map(|seq| tl_post(seq, &format!("post {seq}")))
+                .collect();
+            board.timeline.on_page(PageResult {
+                has_more: true,
+                ..tl_page(head, 30)
+            });
+            for _ in 0..19 {
+                assert_eq!(board.key(step.clone()), None);
+            }
+            let all = rendered(&board, 69, 40, now);
+            assert!(tl_selected(&all).contains("post 11"), "{all}");
+            board.key(step.clone());
+            let io = board.take_timeline_io();
+            let [TlAction::Page(list)] = &io[..] else {
+                panic!("{io:?}");
+            };
+            assert_eq!(list.before_seq, Some(Seq(11)));
+            let older: Vec<PostSummary> = (1..=10)
+                .rev()
+                .map(|seq| tl_post(seq, &format!("post {seq}")))
+                .collect();
+            board.timeline.on_page(tl_page(older, 30));
+            let all = rendered(&board, 69, 40, now);
+            assert!(tl_selected(&all).contains("post 10"), "{step:?}: {all}");
+            board.key(step.clone());
+            let all = rendered(&board, 69, 40, now);
+            assert!(tl_selected(&all).contains("post 9"), "{step:?}: {all}");
+        }
+        // A step back while the page is read is where the selection stays.
+        let mut board = tl_board(0);
+        let head: Vec<PostSummary> = (11..=30)
+            .rev()
+            .map(|seq| tl_post(seq, &format!("post {seq}")))
+            .collect();
+        board.timeline.on_page(PageResult {
+            has_more: true,
+            ..tl_page(head, 30)
+        });
+        for _ in 0..20 {
+            board.key(Key::Char('j'));
+        }
+        assert_eq!(board.take_timeline_io().len(), 1);
+        board.key(Key::Char('k'));
+        let older = (1..=10).rev().map(|seq| tl_post(seq, "old")).collect();
+        board.timeline.on_page(tl_page(older, 30));
+        let all = rendered(&board, 69, 40, now);
+        assert!(tl_selected(&all).contains("post 12"), "{all}");
+    }
+
+    // Second review 8: the worker list's header names the timeline's key
+    // and the posts since the last visit, read from the board's context.
+    #[test]
+    fn ac3_worker_header_shows_the_timeline_and_posts_since_the_last_visit() {
+        let now = Instant::now();
+        let dir = std::env::temp_dir().join(format!(
+            "noa-visits-header-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        let path = dir.join("timeline-visits.json");
+        timeline::write_visit(&path, TL_BOARD, 2).unwrap();
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_listing(), now);
+        let all = rendered(&board, 120, 24, now);
+        let chips = line_with(&all, "要対応");
+        assert!(chips.contains("t タイムライン"), "{chips}");
+        assert!(!chips.contains("前回"), "{chips}");
+        // Five posts, two of them seen: no post is read for it.
+        let mut fake = FakeReads::default();
+        let mut ctx = tl_context(vec![tl_worker(2, "s-2", true)], false);
+        ctx.head_seq = Seq(5);
+        fake.contexts.push_back(Ok(ctx));
+        let (mut polling, mut reconnect) = (Polling::default(), false);
+        tick_timeline(
+            &mut fake,
+            &mut board,
+            &mut polling,
+            tl_tick(true, (120, 24)),
+            &mut reconnect,
+            Some(&path),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(board.view, View::List);
+        let all = rendered(&board, 120, 24, now);
+        let chips = line_with(&all, "要対応");
+        assert!(
+            chips.contains("t タイムライン · 前回閲覧以降 3 件"),
+            "{chips}"
+        );
+        // At 80 columns, shorter; narrower, the key alone, then nothing.
+        let chips = line_with(&rendered(&board, 80, 24, now), "要対応");
+        assert!(chips.contains("t タイムライン · 前回以降 3 件"), "{chips}");
+        let chips = line_with(&rendered(&board, 64, 24, now), "要対応");
+        assert!(
+            chips.contains("t タイムライン") && !chips.contains("前回"),
+            "{chips}"
+        );
+        for (cols, rows) in [(120, 24), (80, 24), (64, 24), (50, 12), (24, 6)] {
+            assert_widths(&board, cols, rows, now);
+        }
+        board.lang = Lang::En;
+        let chips = line_with(&rendered(&board, 120, 24, now), "needs you");
+        assert!(chips.contains("t timeline · 3 since last visit"), "{chips}");
+        // A Noa without the timeline: no key for it.
+        board.lang = Lang::Ja;
+        board.timeline.unsupported = true;
+        let chips = line_with(&rendered(&board, 120, 24, now), "要対応");
+        assert!(!chips.contains("タイムライン"), "{chips}");
+    }
+
+    // Third review 2: the orchestrator's detail, opened from the queue on
+    // its own board named by id, stays the one the keys act on once its
+    // approval is answered.
+    #[test]
+    fn ac3_the_orchestrators_detail_on_a_board_by_id_outlasts_its_approval() {
+        let now = Instant::now();
+        let with = |state: &str| {
+            let mut me = worker(1, 0, "", Some(state), 3);
+            me.parent_pane_id = None;
+            me.label = None;
+            let mut panels = tl_listing();
+            panels.push(me);
+            panels
+        };
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(with("permission"), now);
+        board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+        board.open_timeline();
+        let ctx = tl_context(vec![tl_worker(2, "s-2", true)], false);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::List);
+        board.key(Key::Char('n'));
+        assert_eq!(board.selected(), Some(1));
+        board.key(Key::Enter);
+        assert_eq!(board.view, View::Detail(1));
+        // Approved in its own pane: it leaves the queue, the selection
+        // moves on, and its detail stays open.
+        board.update(with("running"), now);
+        assert_ne!(board.selected(), Some(1));
+        assert_eq!(board.view, View::Detail(1));
+        assert_eq!(board.key(Key::Char('g')), Some(Action::Focus(1)));
+        assert_eq!(board.view, View::Detail(1));
+    }
+
+    // Third review 5: a board named by id from a parentless pane lists one
+    // orchestrator's work, and its header says that board, not every worker.
+    #[test]
+    fn ac3_the_header_of_a_board_by_id_names_the_board_not_all_workers() {
+        let now = Instant::now();
+        let top = |pane: u64| {
+            let mut panel = worker(pane, 0, "lead", Some("running"), 1);
+            panel.parent_pane_id = None;
+            panel
+        };
+        let mut b1 = worker(5, 4, "b-api", Some("running"), 1);
+        b1.surface_id = Some("s-5".to_string());
+        let listing = vec![
+            top(1),
+            worker(2, 1, "a-api", Some("running"), 1),
+            top(4),
+            b1,
+        ];
+        let mut board = Board::new(None, Some(8));
+        board.update(listing.clone(), now);
+        let header = visible(&board.render(80, 24, now)[0]);
+        assert!(header.contains("すべてのワーカー"), "{header}");
+        board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+        board.open_timeline();
+        let ctx = tl_context(vec![tl_worker(5, "s-5", true)], false);
+        board.timeline.on_context(&ctx, &board.panels, true);
+        board.update(listing, now);
+        board.key(Key::Char('t'));
+        assert_eq!(board.view, View::List);
+        assert_eq!(board.workers().len(), 1);
+        let header = visible(&board.render(80, 24, now)[0]);
+        assert!(!header.contains("すべてのワーカー"), "{header}");
+        assert!(header.contains("release"), "{header}");
+        assert!(header.contains("ワーカー 1"), "{header}");
     }
 }
 

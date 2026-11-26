@@ -224,6 +224,33 @@ fn whole_text(event: &serde_json::Value) -> Option<String> {
     (event["bytes"].as_u64() == Some(text.len() as u64)).then(|| text.to_string())
 }
 
+/// The displayable start of one send, even when the journal kept only a prefix.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TaskPreview {
+    pub(crate) text: String,
+    pub(crate) cut: bool,
+}
+
+impl TaskPreview {
+    fn from_send(event: &serde_json::Value) -> Option<Self> {
+        let (sent, journal_cut) = match event["full"].as_str() {
+            Some(full) => (full, false),
+            None => {
+                let start = event["text"].as_str()?;
+                let cut = match event["bytes"].as_u64() {
+                    Some(bytes) => bytes > start.len() as u64,
+                    None => start.chars().count() >= TEXT_CHARS,
+                };
+                (start, cut)
+            }
+        };
+        let body = super::run_attr::strip_header(sent);
+        let text = clip(body);
+        let cut = journal_cut || text.len() < body.len();
+        Some(Self { text, cut })
+    }
+}
+
 /// What the journal knows of one worker.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Worker {
@@ -235,14 +262,16 @@ pub(crate) struct Worker {
     pub(crate) worktree: Option<String>,
     pub(crate) branch: Option<String>,
     pub(crate) result: Option<String>,
-    /// The last text sent that was not an answer.
-    pub(crate) last_task: Option<String>,
+    /// Up to `TEXT_CHARS` of the last non-answer send, without its timeline header.
+    pub(crate) last_task: Option<TaskPreview>,
     /// The last task sent, whole: the last send that was not an answer, not
     /// `--raw` keys and not empty. `None` when there was none, or the
     /// journal kept only its start ([`whole_text`]).
     pub(crate) task: Option<String>,
     /// The worker `retry` replaced with this one.
     pub(crate) retry_of: Option<u64>,
+    /// Latest timeline run registered for this worker.
+    pub(crate) run_id: Option<String>,
     /// The report count before the last send.
     pub(crate) last_sent_seq: Option<u64>,
     /// `{reason, seq, ts}` of the last wait outcome.
@@ -303,11 +332,18 @@ pub(crate) fn workers(events: &[serde_json::Value]) -> Vec<Worker> {
                     ..Worker::default()
                 };
             }
+            Some("run") => {
+                if let Some(id) = event["runId"].as_str()
+                    && noa_ipc::timeline::valid_id(noa_ipc::timeline::IdKind::Run, id)
+                {
+                    worker.run_id = Some(id.to_owned());
+                }
+            }
             Some("send") => {
                 if event["answer"].as_bool() == Some(true) {
                     worker.answers += 1;
                 } else {
-                    worker.last_task = text_field(event, "text");
+                    worker.last_task = TaskPreview::from_send(event);
                     let keys = event["raw"].as_bool() == Some(true);
                     let empty = event["bytes"].as_u64() == Some(0)
                         || event["text"].as_str().is_some_and(str::is_empty);
@@ -417,7 +453,12 @@ impl Worker {
         };
         put("tier", self.tier.clone().map(Into::into));
         put("argv", self.argv.clone());
-        put("lastTask", self.last_task.clone().map(Into::into));
+        put(
+            "lastTask",
+            self.last_task
+                .as_ref()
+                .map(|task| task.text.as_str().into()),
+        );
         put("lastSentSeq", self.last_sent_seq.map(Into::into));
         put("lastOutcome", self.last_outcome.clone());
         put("answers", Some(self.answers.into()));
@@ -434,6 +475,25 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ac4_run_events_follow_the_spawned_worker() {
+        let spawn = serde_json::json!({"ev":"spawn", "pane":4});
+        let registration = |pane, id| serde_json::json!({"ev":"run", "pane":pane, "runId":id});
+        let mut events = vec![
+            registration(2, "rn-0000000000000000"),
+            spawn.clone(),
+            registration(4, "rn-0000000000000001"),
+            registration(4, "rn-0000000000000002"),
+            registration(4, "broken"),
+            serde_json::json!({"ev":"close", "pane":4}),
+        ];
+        let recorded = workers(&events);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].run_id.as_deref(), Some("rn-0000000000000002"));
+        events.push(spawn);
+        assert_eq!(workers(&events)[0].run_id, None);
+    }
 
     fn temp_path(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("noa-journal-{name}-{}", std::process::id()));
@@ -602,7 +662,7 @@ mod tests {
         assert_eq!(fix.pane, 4);
         assert_eq!(fix.tier.as_deref(), Some("light"));
         assert_eq!(fix.branch.as_deref(), Some("orch/fix"));
-        assert_eq!(fix.last_task.as_deref(), Some("do it"));
+        assert_eq!(fix.last_task.as_ref().unwrap().text, "do it");
         assert_eq!(fix.last_sent_seq, Some(2));
         assert_eq!(fix.answers, 1);
         assert_eq!(fix.last_outcome.as_ref().unwrap()["reason"], "permission");
@@ -695,6 +755,31 @@ mod tests {
         event
     }
 
+    #[test]
+    fn ac4_status_clips_the_task_after_removing_its_header() {
+        let body = "界".repeat(TEXT_CHARS + 1);
+        let sent = crate::ctl::run_attr::with_longest_header(&body);
+        let mut send = send_event(4, &sent, false, false);
+        send["ev"] = "send".into();
+        let mut events = vec![serde_json::json!({"ev":"spawn", "pane":4}), send];
+        let status = |events: &[serde_json::Value]| {
+            let mut line = serde_json::json!({});
+            workers(events)[0].add_to(&mut line);
+            line["lastTask"].clone()
+        };
+        assert_eq!(status(&events), clip(&body));
+
+        // A subsequent raw send is the last send, even though retry keeps the earlier task.
+        events.push(serde_json::json!({"ev":"send", "pane":4, "text":"x", "raw":true}));
+        assert_eq!(status(&events), "x");
+        events.pop();
+
+        // A journal that retained only the original prefix has fewer body characters.
+        events[1].as_object_mut().unwrap().remove("full");
+        let prefix = clip(&sent);
+        assert_eq!(status(&events), crate::ctl::run_attr::strip_header(&prefix));
+    }
+
     // `retry` sends a worker's last task again, so the journal keeps it
     // whole (to 64 KiB), and only a task: not an answer, keys or nothing.
     #[test]
@@ -711,7 +796,7 @@ mod tests {
             journal.append("send", send_event(4, text, false, false));
             let worker = &workers(&journal.events())[0];
             assert_eq!(worker.task, want);
-            assert_eq!(worker.last_task, Some(clip(text)));
+            assert_eq!(worker.last_task.as_ref().unwrap().text, clip(text));
             assert_eq!(worker.retry_of, Some(2));
         }
         let events = journal.events();
@@ -734,7 +819,7 @@ mod tests {
         journal.append("send", send_event(4, &over, false, false));
         let worker = &workers(&journal.events())[0];
         assert_eq!(worker.task, None);
-        assert_eq!(worker.last_task, Some(clip(&over)));
+        assert_eq!(worker.last_task.as_ref().unwrap().text, clip(&over));
         assert_eq!(mode(&path), 0o600);
 
         let mut line = serde_json::json!({});
@@ -779,7 +864,7 @@ mod tests {
         ));
         let worker = &workers(&events)[0];
         assert_eq!(worker.task, None);
-        assert_eq!(worker.last_task.as_deref(), Some("\u{1b}"));
+        assert_eq!(worker.last_task.as_ref().unwrap().text, "\u{1b}");
     }
 
     #[test]

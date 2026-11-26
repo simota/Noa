@@ -577,6 +577,39 @@ fn card_container() -> Container {
     .radius(10.0)
 }
 
+const PAST_WIDTH: f32 = 380.0;
+const PAST_HEIGHT: f32 = 600.0;
+
+/// The card beside the form that lists the past runs; returns the list's
+/// column.
+fn insert_past_card(tree: &mut UiTree, parent: WidgetId) -> WidgetId {
+    let card = tree.insert(
+        Some(parent),
+        Container::new(Style {
+            flex_direction: FlexDirection::Column,
+            flex_shrink: 1.0,
+            size: LayoutSize {
+                width: length(PAST_WIDTH),
+                height: length(PAST_HEIGHT),
+            },
+            min_size: LayoutSize {
+                width: length(0.0),
+                height: length(0.0),
+            },
+            max_size: LayoutSize {
+                width: percent(1.0),
+                height: percent(1.0),
+            },
+            ..Default::default()
+        })
+        .background(Role::Surface)
+        .border(1.0, Role::Separator)
+        .radius(10.0),
+    );
+    super::heading(tree, card, "過去のレビュー");
+    super::scroll_column(tree, card, 12.0)
+}
+
 fn section(tree: &mut UiTree, parent: WidgetId, title: &str) -> WidgetId {
     let col = tree.insert(Some(parent), Container::column().gap(6.0));
     tree.insert(Some(col), Label::new(title).font_size(13.0).weight(600));
@@ -599,21 +632,43 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
             ..super::fill()
         }),
     );
-    let column = tree.insert(
+    let centered = tree.insert(
         Some(root),
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::CENTER,
-            gap: gap(16.0),
             padding: LayoutRect::length(24.0),
             size: LayoutSize {
+                width: percent(1.0),
+                height: auto(),
+            },
+            min_size: LayoutSize {
+                width: auto(),
+                height: percent(1.0),
+            },
+            ..Default::default()
+        }),
+    );
+    let cards = tree.insert(
+        Some(centered),
+        Container::new(Style {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::START,
+            gap: gap(16.0),
+            margin: LayoutRect {
+                left: length(0.0),
+                right: length(0.0),
+                top: auto(),
+                bottom: auto(),
+            },
+            max_size: LayoutSize {
                 width: percent(1.0),
                 height: auto(),
             },
             ..Default::default()
         }),
     );
-    let card = tree.insert(Some(column), card_container());
+    let card = tree.insert(Some(cards), card_container());
     tree.insert(
         Some(card),
         Label::new("新しいレビュー").font_size(17.0).weight(600),
@@ -780,7 +835,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Some(foot),
         Button::new("レビューを開始").default_button(true),
     );
-    let past = tree.insert(Some(column), card_container());
+    let past = insert_past_card(tree, cards);
     let mut parts = Parts {
         root,
         kind,
@@ -1319,10 +1374,6 @@ pub(super) fn rebuild_past(
     text: &mut TextStore,
 ) {
     clear_children(tree, parts.past, text);
-    tree.insert(
-        Some(parts.past),
-        Label::new("過去のレビュー").font_size(15.0).weight(600),
-    );
     if past.is_empty() {
         super::note(tree, parts.past, "まだレビューはありません");
         return;

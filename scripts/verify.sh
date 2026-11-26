@@ -62,12 +62,14 @@ sys.exit(1 if bad else 0)'
 }
 
 # widgets/agent-dashboard, widgets/repo-browser, widgets/discussion,
-# widgets/competition, widgets/review, widgets/verify, widgets/tasks and
-# widgets/agent-usage are crates of their own, outside the workspace. Each is
-# built with its tests everywhere; the tests run on macOS only, because some
-# expect the text widths of macOS's system fonts. The exception is
-# widgets/agent-usage and widgets/tasks (no font-dependent test), whose tests
-# run everywhere; only widgets/agent-usage ships on Linux.
+# widgets/competition, widgets/review, widgets/verify, widgets/tasks,
+# widgets/scaffold and widgets/agent-usage are crates of their own, outside the
+# workspace. Each is built with its tests everywhere; the tests run on macOS
+# only, because some expect the text widths of macOS's system fonts. The
+# exception is widgets/agent-usage, widgets/tasks and widgets/scaffold (no
+# font-dependent test), whose tests run everywhere. Which widget ships on which
+# platform is dev/scaffold/registry.json's to say, checked by the registration
+# checker.
 dashboard=widgets/agent-dashboard/Cargo.toml
 browser=widgets/repo-browser/Cargo.toml
 discussion=widgets/discussion/Cargo.toml
@@ -75,6 +77,7 @@ competition=widgets/competition/Cargo.toml
 review=widgets/review/Cargo.toml
 verify=widgets/verify/Cargo.toml
 tasks=widgets/tasks/Cargo.toml
+scaffold=widgets/scaffold/Cargo.toml
 usage=widgets/agent-usage/Cargo.toml
 widget_check() {
   cargo build --manifest-path "$1" --locked --all-targets || return
@@ -99,6 +102,8 @@ done < <({ git diff --name-only "${VERIFY_BASE:-$(git merge-base HEAD main)}" --
 
 run format cargo fmt --all -- --check
 run boundaries boundaries
+# Every widget is registered wherever dev/scaffold/registry.json says it should be.
+run registration python3 -I -B scripts/check-widget-registration.py
 
 if [ "$full" = 1 ]; then
   # CI gates clippy on Linux only: on macOS, Linux-only code is dead and
@@ -114,15 +119,17 @@ if [ "$full" = 1 ]; then
   run review widget_check "$review"
   run verify widget_check "$verify"
   run tasks usage_check "$tasks"
+  run scaffold usage_check "$scaffold"
   run usage usage_check "$usage"
   run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
+  run registration-test python3 -I -B -m unittest discover -s scripts/tests -p 'test_check_widget_registration.py'
   if [ "$os" = Linux ]; then
     run desktop-files sh -c 'desktop-file-validate dist/linux/com.simota.noa.desktop &&
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
 elif [ "${#changed[@]}" -gt 0 ]; then
-  pkgs=() hook=0 skill=0 dash=0 rb=0 disc=0 comp=0 rev=0 ver=0 tsk=0 use=0
+  pkgs=() hook=0 skill=0 reg=0 dash=0 rb=0 disc=0 comp=0 rev=0 ver=0 tsk=0 scf=0 use=0
   for path in "${changed[@]}"; do
     p=$(package_of "$path"); [ -n "$p" ] && pkgs+=("$p")
     case $path in widgets/agent-dashboard/*) dash=1 ;; esac
@@ -133,9 +140,13 @@ elif [ "${#changed[@]}" -gt 0 ]; then
     case $path in widgets/verify/*) ver=1 ;; esac
     # The tasks widget's tests read the noa-tasks skill's examples (AC-9).
     case $path in widgets/tasks/* | skills/noa-tasks/*) tsk=1 ;; esac
+    # The scaffold widget's parity test reads the checker's fixture repos and
+    # the registry it round-trips.
+    case $path in widgets/scaffold/* | scripts/tests/fixtures/widget-registration/* | dev/scaffold/*) scf=1 ;; esac
     case $path in widgets/agent-usage/*) use=1 ;; esac
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
     case $path in scripts/install-agent-skill.sh | scripts/test_install_agent_skill.py | skills/*) skill=1 ;; esac
+    case $path in scripts/check-widget-registration.py | scripts/tests/* | dev/scaffold/*) reg=1 ;; esac
   done
   if [ "${#pkgs[@]}" -gt 0 ]; then
     # The changed packages plus every workspace package that depends on them.
@@ -189,6 +200,12 @@ elif [ "${#changed[@]}" -gt 0 ]; then
       echo "verify: cannot list the tasks' packages; checking it anyway"
       tsk=1
     fi
+    if uses=$(widget_uses "$scaffold"); then
+      for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && scf=1; done
+    else
+      echo "verify: cannot list the scaffold's packages; checking it anyway"
+      scf=1
+    fi
     if uses=$(widget_uses "$usage"); then
       for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && use=1; done
     else
@@ -203,9 +220,11 @@ elif [ "${#changed[@]}" -gt 0 ]; then
   [ "$rev" = 1 ] && run review widget_check "$review"
   [ "$ver" = 1 ] && run verify widget_check "$verify"
   [ "$tsk" = 1 ] && run tasks usage_check "$tasks"
+  [ "$scf" = 1 ] && run scaffold usage_check "$scaffold"
   [ "$use" = 1 ] && run usage usage_check "$usage"
   [ "$hook" = 1 ] && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
   [ "$skill" = 1 ] && run skill-install-test python3 -I -B scripts/test_install_agent_skill.py
+  [ "$reg" = 1 ] && run registration-test python3 -I -B -m unittest discover -s scripts/tests -p 'test_check_widget_registration.py'
 fi
 
 summary="verify: ok"; [ "${#failed[@]}" -gt 0 ] && summary="verify: FAILED: ${failed[*]}"

@@ -424,6 +424,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenReview
         | AppCommand::OpenVerify
         | AppCommand::OpenTasks
+        | AppCommand::OpenScaffold
         | AppCommand::OpenAgentUsage
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
@@ -493,6 +494,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenReview
         | AppCommand::OpenVerify
         | AppCommand::OpenTasks
+        | AppCommand::OpenScaffold
         | AppCommand::OpenAgentUsage
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar => CommandScope::App,

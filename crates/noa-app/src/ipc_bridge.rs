@@ -23,7 +23,8 @@ use noa_grid::{Cell, Row as GridRow, Terminal};
 use noa_ipc::protocol::{Span, SpanColor};
 use noa_ipc::{
     Attr, GridResult, IpcBackend, IpcError, PaneRef, Panel, PanelAgent, PanelExit, Row as WireRow,
-    SpawnParams, SpawnTarget, SplitDirection, TextResult, TextSource, WindowRef, WireId,
+    SpawnParams, SpawnTarget, SplitDirection, TextResult, TextSource, TimelineCall, TimelineError,
+    WindowRef, WireId,
 };
 
 use crate::events::UserEvent;
@@ -374,9 +375,21 @@ pub(crate) struct AppIpcBackend {
     pub(crate) proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     pub(crate) pending: IpcPendingTable,
     pub(crate) next_request: Arc<AtomicU64>,
+    /// The board timeline service (`docs/specs/board-timeline.md` D2/D5);
+    /// `None` when it did not start. The capability is absent then, and
+    /// while its store did not open.
+    pub(crate) timeline: Option<crate::timeline::TimelineHandle>,
 }
 
 impl AppIpcBackend {
+    /// The timeline service when its store opened (L2-5: a store that
+    /// cannot be opened leaves the capability out, as a service that did
+    /// not start does). Waits for the service's first answer, on the
+    /// connection thread.
+    fn open_timeline(&self) -> Option<&crate::timeline::TimelineHandle> {
+        self.timeline.as_ref().filter(|timeline| timeline.opened())
+    }
+
     /// Resolve a pane's ipc id to its live `terminals` read handle under a
     /// single `IpcShared` lock (P2 review round 11) — see
     /// [`IpcShared::resolve_terminal`] for why the resolution and the handle
@@ -530,6 +543,25 @@ impl IpcBackend for AppIpcBackend {
         self.resolve_attach_pane(pane)?.validate()?;
         self.submit(IpcActionKind::ResizePane { pane, cols, rows })
             .map(|_| ())
+    }
+
+    /// Answered by the timeline service thread, never the main thread: the
+    /// panels snapshot `IpcShared` already publishes (as `listPanels`
+    /// reads it) goes with the call, for its live bindings.
+    fn timeline(&self, call: TimelineCall) -> Result<serde_json::Value, TimelineError> {
+        let Some(timeline) = self.open_timeline() else {
+            return Err(TimelineError::unsupported());
+        };
+        let panels = Arc::clone(&self.shared.lock().panels);
+        timeline.call(call, panels)
+    }
+
+    fn capabilities(&self) -> Vec<&'static str> {
+        if self.open_timeline().is_some() {
+            vec![noa_ipc::CAPABILITY_BOARD_TIMELINE_V1]
+        } else {
+            Vec::new()
+        }
     }
 }
 

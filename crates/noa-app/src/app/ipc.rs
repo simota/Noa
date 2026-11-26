@@ -21,6 +21,27 @@ use noa_ipc::{ChangedPanel, FieldMask, Panel};
 /// (mirrors `APPLESCRIPT_SNAPSHOT_REFRESH` in `app/applescript.rs`).
 const IPC_SNAPSHOT_REFRESH: Duration = Duration::from_millis(500);
 
+/// Starts the board timeline service on `<data-dir>/noa/boards/`
+/// (`docs/specs/board-timeline.md` L2-5). This runs on the UI thread, so it
+/// only resolves the path and starts the service thread, which creates the
+/// directory. `None`, logged once, when the data dir cannot be resolved or
+/// the thread cannot start; a directory the service cannot open is logged
+/// there. Either way the server answers `noa.timeline.*` as `unsupported`
+/// and advertises no `boardTimelineV1`.
+fn start_timeline() -> Option<crate::timeline::TimelineHandle> {
+    let Some(root) = noa_config::timeline_boards_dir() else {
+        log::warn!("timeline: cannot resolve the data dir, board timeline disabled");
+        return None;
+    };
+    match crate::timeline::start(root) {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            log::warn!("timeline: service not started, board timeline disabled: {err}");
+            None
+        }
+    }
+}
+
 impl App {
     /// Start the `noa-ipc` server once, after the app is running
     /// (mirrors `install_applescript_if_needed`). A no-op when
@@ -73,6 +94,7 @@ impl App {
             proxy: self.proxy.clone(),
             pending: self.ipc_pending.clone(),
             next_request: self.ipc_next_request.clone(),
+            timeline: start_timeline(),
         };
         let config = noa_ipc::ServerConfig {
             port: self.config.server_port,

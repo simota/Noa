@@ -2819,3 +2819,458 @@ fn an_older_connections_version_arriving_late_does_not_win() {
     screen.poll_live(&mut TextStore::new(Default::default()));
     assert!(!fix_actions(&screen).is_empty());
 }
+
+mod auto_assign {
+    use super::*;
+    use noa_gpui_core::{Key, widgets::Menu};
+    use review::auto_assign::{
+        self as core, Assignment, Cancel, PlanError, Planning, RawPick, Request,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{self, Receiver, Sender};
+
+    struct Plan {
+        request: Request,
+        answer: Assignment,
+        tx: Sender<Result<Assignment, PlanError>>,
+        cancel: Cancel,
+    }
+
+    fn fake_planner(screen: &mut Review) -> Receiver<Plan> {
+        let (jobs, rx) = mpsc::channel();
+        screen.auto.spawn = Box::new(move |job, _wake| {
+            let request = (job.request)();
+            let (tx, rx) = mpsc::channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let raw = request
+                .slots
+                .iter()
+                .enumerate()
+                .map(|(i, slot)| {
+                    let k = &request.candidates[(i + 1) % request.candidates.len()];
+                    RawPick {
+                        slot: slot.id.clone(),
+                        agent: k.agent.clone(),
+                        model: k.models.first().cloned(),
+                        effort: Some("high".into()),
+                        reason: format!("{} の担当理由", slot.id),
+                    }
+                })
+                .collect();
+            let answer = core::validate(raw, &request, &job.planner, &*job.check).unwrap();
+            jobs.send(Plan {
+                request,
+                answer,
+                tx,
+                cancel: cancel.clone(),
+            })
+            .unwrap();
+            Planning { rx, cancel }
+        });
+        rx
+    }
+
+    fn ready() -> (Review, crate::live::FakeLink, Receiver<Plan>, TextStore) {
+        let (mut screen, link, tx, mut text) = live_pending();
+        let form = start::Form {
+            request: "境界条件を確認".into(),
+            ..document_form()
+        };
+        start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+        report(&mut screen, &tx, found(&AgentKind::ALL), &mut text);
+        let jobs = fake_planner(&mut screen);
+        (screen, link, jobs, text)
+    }
+
+    fn note_lines(screen: &Review) -> Vec<String> {
+        labels_under(&screen.tree, screen.start.auto_note)
+    }
+
+    #[test]
+    fn menu_follows_detection_and_target_and_only_lists_installed_planners() {
+        for (kinds, expected) in [
+            (vec![AgentKind::Agy], vec![]),
+            (
+                vec![AgentKind::Agy, AgentKind::Codex],
+                vec!["codex で決める"],
+            ),
+            (
+                AgentKind::ALL.to_vec(),
+                vec!["claude で決める", "codex で決める"],
+            ),
+        ] {
+            let (mut screen, _, tx, mut text) = live_pending();
+            assert!(!screen.tree.is_enabled(screen.auto.control()));
+            report(&mut screen, &tx, found(&kinds), &mut text);
+            assert!(!screen.tree.is_enabled(screen.auto.control()));
+            if expected.is_empty() {
+                assert!(note_lines(&screen).contains(&PlanError::NoPlanner.message("")));
+                continue;
+            }
+            assert!(
+                note_lines(&screen)
+                    .iter()
+                    .any(|s| s.contains("リポジトリを指定してください"))
+            );
+            start::fill(
+                &mut screen.tree,
+                &mut screen.start,
+                &document_form(),
+                &mut text,
+            );
+            screen.rebuild(&mut text);
+            let id = screen.auto.control();
+            assert!(screen.tree.is_enabled(id));
+            screen.tree.set_focus(Some(id));
+            press(&mut screen, Key::Space);
+            let menu = screen
+                .tree
+                .overlays()
+                .find_map(|id| screen.tree.get::<Menu>(id))
+                .unwrap();
+            assert_eq!(
+                menu.items()
+                    .iter()
+                    .map(|item| item.label())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let jobs = fake_planner(&mut screen);
+            press(&mut screen, Key::ArrowDown);
+            press(&mut screen, Key::Enter);
+            let plan = jobs.try_recv().unwrap();
+            assert!(
+                plan.answer
+                    .planner
+                    .starts_with(expected[0].split_whitespace().next().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn fill_shows_every_choice_and_reason_and_start_records_only_unchanged_slots() {
+        let (mut screen, link, jobs, mut text) = ready();
+        let before = start::read(&screen.tree, &screen.start);
+        act(&mut screen, Action::AutoAssign(1));
+        let plan = jobs.try_recv().unwrap();
+        assert_eq!(plan.request.slots.len(), before.panel.len() + 1);
+        assert!(plan.request.content.contains(&before.request));
+        assert!(plan.request.content.contains(&before.text));
+        assert!(
+            plan.request.slots[1]
+                .role
+                .contains(review::model::types::BuiltinLens::Correctness.checklist())
+        );
+        assert!(plan.request.candidates.iter().any(|c| c.agent == "agy"));
+        assert!(
+            labels_under(&screen.tree, screen.start.auto_host)
+                .iter()
+                .any(|s| s.contains("codex が割り当てを決めています"))
+        );
+        assert!(screen.tree.is_enabled(screen.start.start_button));
+        let arrival = system_now();
+        plan.tx.send(Ok(plan.answer.clone())).unwrap();
+        screen.poll_live(&mut text);
+        assert!(commands(&link).is_empty());
+        let form = start::read(&screen.tree, &screen.start);
+        let lines = note_lines(&screen);
+        assert!(lines[0].contains(&plan.answer.planner) && lines[0].contains("レビューを開始"));
+        assert_eq!(lines.len(), plan.answer.picks.len() + 1);
+        for (i, (agent, pick)) in std::iter::once(&form.lead)
+            .chain(form.panel.iter().map(|row| &row.agent))
+            .zip(&plan.answer.picks)
+            .enumerate()
+        {
+            assert_eq!(agent.kind.command(), pick.agent);
+            assert_eq!(agent.setup.model, pick.model);
+            assert_eq!(agent.setup.effort, pick.effort);
+            let slot = if i == 0 {
+                "リード".into()
+            } else {
+                format!("レビュアー {i}")
+            };
+            assert_eq!(
+                lines[i + 1],
+                format!("{slot}: {} — {}", agent.label(), pick.reason)
+            );
+        }
+        assert_eq!(form.request, before.request);
+        assert_eq!(form.text, before.text);
+        assert!(
+            form.panel
+                .iter()
+                .zip(&before.panel)
+                .all(|(a, b)| a.lens == b.lens)
+        );
+        let effort = screen.start.panel[0].setup.effort;
+        press_down(&mut screen, effort, &mut text);
+        assert!(note_lines(&screen)[2].ends_with("（手動で変更）"));
+        let edited = start::read(&screen.tree, &screen.start);
+        act(&mut screen, Action::Start);
+        let [
+            Command::Start {
+                auto: Some(auto),
+                lead,
+                panel,
+                ..
+            },
+        ] = &commands(&link)[..]
+        else {
+            panic!("expected an assigned start")
+        };
+        assert_eq!(lead, &edited.lead);
+        assert_eq!(panel, &edited.panel);
+        assert!((arrival..=system_now()).contains(&auto.at));
+        assert_eq!(auto.planner, plan.answer.planner);
+        assert_eq!(auto.overridden, ["reviewer-1"]);
+        assert_eq!(
+            auto.picks,
+            plan.answer
+                .picks
+                .into_iter()
+                .filter(|p| p.slot != "reviewer-1")
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn deleting_a_filled_row_preserves_the_other_reviewers_reasons() {
+        let (mut screen, link, jobs, mut text) = ready();
+        act(&mut screen, Action::AutoAssign(0));
+        let plan = jobs.try_recv().unwrap();
+        let [lead, removed, second, third] = plan.answer.picks.as_slice() else {
+            panic!("expected three reviewers")
+        };
+        plan.tx.send(Ok(plan.answer.clone())).unwrap();
+        screen.poll_live(&mut text);
+        act(&mut screen, Action::RemovePanelRow(0));
+        let lines = note_lines(&screen);
+        act(&mut screen, Action::Start);
+        let [Command::Start { auto: Some(auto), .. }] = &commands(&link)[..] else {
+            panic!("expected an assigned start")
+        };
+        assert_eq!(auto.overridden, [removed.slot.clone()]);
+        assert_eq!(auto.picks, [lead.clone(), second.clone(), third.clone()]);
+        assert!(lines[2].ends_with(&format!("{}（手動で変更）", removed.reason)));
+        assert!(lines[3].ends_with(&second.reason));
+        assert!(lines[4].ends_with(&third.reason));
+    }
+
+    #[test]
+    fn starting_during_a_replan_keeps_the_applied_assignment() {
+        let (mut screen, link, jobs, mut text) = ready();
+        act(&mut screen, Action::AutoAssign(0));
+        let first = jobs.try_recv().unwrap();
+        first.tx.send(Ok(first.answer.clone())).unwrap();
+        screen.poll_live(&mut text);
+        let applied = start::read(&screen.tree, &screen.start);
+        let block = note_lines(&screen);
+        act(&mut screen, Action::AutoAssign(1));
+        let pending = jobs.try_recv().unwrap();
+        let during_replan = note_lines(&screen);
+        act(&mut screen, Action::Start);
+        assert!(pending.cancel.load(Ordering::Acquire));
+        assert!(pending.tx.send(Ok(pending.answer)).is_err());
+        let [Command::Start { auto: Some(auto), lead, panel, .. }] = &commands(&link)[..] else {
+            panic!("expected the first planner's assignment at start")
+        };
+        assert_eq!((lead, panel), (&applied.lead, &applied.panel));
+        assert_eq!(auto.planner, first.answer.planner);
+        assert_eq!(auto.picks, first.answer.picks);
+        assert!(auto.overridden.is_empty());
+        assert_eq!(during_replan, block);
+    }
+
+    #[test]
+    fn keyboard_planner_selection_and_cancel_keep_focus_across_rebuilds() {
+        let (mut screen, _, jobs, mut text) = ready();
+        let menu = screen.auto.control();
+        screen.tree.set_focus(Some(menu));
+        press(&mut screen, Key::Space);
+        press(&mut screen, Key::ArrowDown);
+        press(&mut screen, Key::ArrowDown);
+        screen.rebuild(&mut text);
+        press(&mut screen, Key::Enter);
+        let plan = jobs.try_recv().expect("the open menu keeps its choice");
+        assert_eq!(plan.answer.planner, core::PLANNERS[1].label());
+        let cancel = screen.auto.control();
+        assert_eq!(screen.tree.focused(), Some(cancel));
+        screen.rebuild(&mut text);
+        press(&mut screen, Key::Space);
+        assert!(plan.cancel.load(Ordering::Acquire));
+        assert_eq!(screen.tree.focused(), Some(menu));
+    }
+
+    #[test]
+    fn request_uses_the_active_target_and_only_the_bounded_review_material() {
+        let (mut screen, _, jobs, mut text) = ready();
+        let dir = temp_dir("planner-targets");
+        let path = dir.join("plan.md");
+        let capture = |screen: &mut Review, form: &start::Form, text: &mut TextStore| {
+            start::fill(&mut screen.tree, &mut screen.start, form, text);
+            act(screen, Action::AutoAssign(0));
+            let plan = jobs.try_recv().unwrap();
+            act(screen, Action::CancelAuto);
+            plan.request
+        };
+
+        std::fs::write(&path, format!("{}hidden tail", "x".repeat(16 * 1024))).unwrap();
+        let form = start::Form {
+            kind: TargetKind::Document,
+            document_file: path.display().to_string(),
+            ..Default::default()
+        };
+        let document = capture(&mut screen, &form, &mut text).content;
+        assert!(document.ends_with(&"x".repeat(16 * 1024)));
+        assert!(!document.contains("hidden tail"));
+
+        let mut form = start::Form {
+            kind: TargetKind::Files,
+            root: dir.display().to_string(),
+            paths: "plan.md".into(),
+            ..form
+        };
+        form.panel[0].lens = LensChoice::Custom("観".repeat(320));
+        let files = capture(&mut screen, &form, &mut text);
+        assert!(
+            files
+                .content
+                .contains(&format!("root: {}\npaths:\nplan.md", dir.display()))
+        );
+        assert!(files.slots[1].role.ends_with(&"観".repeat(300)));
+        assert!(!files.slots[1].role.contains(&"観".repeat(301)));
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "plan.md"]);
+        git(&["commit", "-qm", "before"]);
+        std::fs::write(&path, "PRIVATE PATCH BODY").unwrap();
+        let mut form = start::Form {
+            kind: TargetKind::Git,
+            repo: dir.display().to_string(),
+            filter: "plan.md".into(),
+            ..form
+        };
+        let worktree = capture(&mut screen, &form, &mut text).content;
+        assert!(worktree.contains("base: main") && worktree.contains("1 file changed"));
+        assert!(!worktree.contains("PRIVATE PATCH BODY"));
+        git(&["commit", "-qam", "after"]);
+        form.base = "HEAD~1".into();
+        form.head = "HEAD".into();
+        assert!(
+            capture(&mut screen, &form, &mut text)
+                .content
+                .contains("1 file changed")
+        );
+        form.base = "missing".into();
+        assert!(
+            capture(&mut screen, &form, &mut text)
+                .content
+                .contains("(diff summary unavailable)")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failure_names_the_cause_and_keeps_the_manual_form() {
+        let (mut screen, link, jobs, mut text) = ready();
+        let before = start::read(&screen.tree, &screen.start);
+        act(&mut screen, Action::AutoAssign(0));
+        let plan = jobs.try_recv().unwrap();
+        plan.tx
+            .send(Err(PlanError::Invalid(
+                "reviewer-1 の割り当てがありません".into(),
+            )))
+            .unwrap();
+        screen.poll_live(&mut text);
+        assert_eq!(start::read(&screen.tree, &screen.start), before);
+        assert!(
+            note_lines(&screen)
+                .iter()
+                .any(|s| s.contains("自動割り当てに失敗しました")
+                    && s.contains("reviewer-1 の割り当てがありません"))
+        );
+        assert!(commands(&link).is_empty());
+    }
+
+    #[test]
+    fn changed_agent_rows_refuse_the_entire_fill() {
+        for change in 0..3 {
+            let (mut screen, link, jobs, mut text) = ready();
+            act(&mut screen, Action::AutoAssign(0));
+            let plan = jobs.try_recv().unwrap();
+            match change {
+                0 => act(&mut screen, Action::RemovePanelRow(1)),
+                1 => act(&mut screen, Action::AddPanelRow),
+                _ => {
+                    let lead = screen.start.lead;
+                    press_down(&mut screen, lead, &mut text);
+                }
+            }
+            let edited = start::read(&screen.tree, &screen.start);
+            plan.tx.send(Ok(plan.answer)).unwrap();
+            screen.poll_live(&mut text);
+            assert_eq!(start::read(&screen.tree, &screen.start), edited);
+            assert!(
+                note_lines(&screen)
+                    .iter()
+                    .any(|s| s.contains("選択が変わったため反映しませんでした"))
+            );
+            assert!(commands(&link).is_empty());
+        }
+    }
+
+    #[test]
+    fn cancel_and_manual_start_discard_pending_generations() {
+        let (mut screen, link, jobs, mut text) = ready();
+        let manual = start::read(&screen.tree, &screen.start);
+        act(&mut screen, Action::AutoAssign(0));
+        let first = jobs.try_recv().unwrap();
+        let cancel = screen.auto.control();
+        screen.tree.set_focus(Some(cancel));
+        press(&mut screen, Key::Space);
+        assert!(first.cancel.load(Ordering::Acquire));
+        act(&mut screen, Action::AutoAssign(1));
+        let second = jobs.try_recv().unwrap();
+        assert!(first.tx.send(Ok(first.answer)).is_err());
+        second.tx.send(Ok(second.answer)).unwrap();
+        act(&mut screen, Action::Start);
+        assert!(second.cancel.load(Ordering::Acquire));
+        screen.poll_live(&mut text);
+        let [
+            Command::Start {
+                auto: None,
+                lead,
+                panel,
+                ..
+            },
+        ] = &commands(&link)[..]
+        else {
+            panic!("expected a manual start")
+        };
+        assert_eq!(lead, &manual.lead);
+        assert_eq!(panel, &manual.panel);
+    }
+}

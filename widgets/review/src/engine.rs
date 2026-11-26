@@ -427,6 +427,17 @@ impl Engine {
         config: Config,
         now: Millis,
     ) -> Result<(Engine, Output), EngineError> {
+        Self::create_in_with_auto(id, setup, dir, config, now, None)
+    }
+
+    pub fn create_in_with_auto(
+        id: SessionId,
+        setup: Setup<'_>,
+        dir: &Path,
+        config: Config,
+        now: Millis,
+        auto: Option<crate::auto_assign::AutoRecord>,
+    ) -> Result<(Engine, Output), EngineError> {
         if let Err(why) = check_panel(&setup.lead, setup.panel) {
             return rejected(why);
         }
@@ -443,7 +454,7 @@ impl Engine {
             request: setup.request.trim().to_owned(),
             target: Box::new(setup.target),
             manifest: Box::new(setup.manifest),
-            workdir: setup.workdir,
+            workdir: reduce::CreationContext::new(setup.workdir, auto),
             max_rounds: setup.max_rounds,
             lead,
             reviewers,

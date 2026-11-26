@@ -1500,6 +1500,7 @@ fn workdir_of(target: &Target) -> Result<Option<PathBuf>, String> {
 /// What a new review starts from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewReview {
+    pub auto: Option<review::auto_assign::AutoRecord>,
     pub request: String,
     pub target: Target,
     pub max_rounds: RoundNo,
@@ -1515,6 +1516,7 @@ pub struct NewReview {
 /// behind when the capture or the setup is refused.
 fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, Store), String> {
     let NewReview {
+        auto,
         request,
         target,
         max_rounds,
@@ -1555,7 +1557,7 @@ fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, St
         lead,
         panel: &panel,
     };
-    let (engine, output) = match Engine::create_in(id, setup, &dir, config, now) {
+    let (engine, output) = match Engine::create_in_with_auto(id, setup, &dir, config, now, auto) {
         Ok(created) => created,
         Err(e) => {
             undo();
@@ -2323,6 +2325,7 @@ mod tests {
         max_rounds: RoundNo,
     ) -> Start {
         Start::New(Box::new(NewReview {
+            auto: None,
             request: "Review the migration plan".into(),
             target,
             max_rounds,
@@ -2335,6 +2338,55 @@ mod tests {
 
     fn new_start(root: &Path, panel: Vec<AgentChoice>) -> Start {
         new_start_on(root, document("# Plan\n\n1. Move the data\n"), panel, 2)
+    }
+
+    #[test]
+    fn created_record_survives_store_replay_and_manual_logs_omit_auto() {
+        use review::auto_assign::{AutoRecord, Pick};
+
+        let root = temp_root();
+        let record = AutoRecord {
+            planner: "claude (sonnet · medium)".into(),
+            at: 4,
+            picks: vec![Pick {
+                slot: "lead".into(),
+                agent: "claude".into(),
+                model: None,
+                effort: None,
+                reason: "指摘を取りまとめるため".into(),
+            }],
+            overridden: vec!["reviewer-1".into(), "reviewer-2".into()],
+        };
+        for auto in [None, Some(record)] {
+            let Start::New(mut new) = new_start(
+                &root,
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+            ) else {
+                unreachable!()
+            };
+            let workdir = root.join("workspace");
+            fs::create_dir_all(&workdir).unwrap();
+            new.target.workdir = Some(workdir.clone());
+            new.auto = auto.clone();
+            let (engine, store) = new_review(*new, CONFIG, 5).unwrap();
+            assert_eq!(engine.session().auto, auto);
+            let dir = store.dir().to_owned();
+            drop(store);
+            let line = fs::read_to_string(dir.join(store::EVENTS_FILE)).unwrap();
+            let batch: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(batch[0]["event"], "created");
+            assert_eq!(batch[0]["workdir"], serde_json::json!(workdir));
+            assert_eq!(
+                batch[0].get("auto").cloned(),
+                auto.as_ref().map(|a| serde_json::to_value(a).unwrap())
+            );
+            let loaded = store::read_session(&dir).unwrap();
+            assert_eq!(loaded.workdir, Some(workdir));
+            assert_eq!(loaded.auto, auto);
+            let resumed = Engine::resume(loaded, &dir, CONFIG);
+            assert_eq!(resumed.session().auto, auto);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn rig_on(fake: &Fake, start: Start) -> Wired {
@@ -3355,6 +3407,7 @@ mod tests {
         let empty = root.join("empty");
         fs::create_dir_all(&empty).unwrap();
         let new = NewReview {
+            auto: None,
             request: "r".into(),
             target: Target {
                 kind: TargetKind::Files,

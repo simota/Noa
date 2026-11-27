@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.21] - 2026-11-27
+
+A native visual editor and runner for the development cycle, and typed text
+and packaged images in repository widgets.
+
+### Added
+
+- Workflow: View → Workflow on macOS, or Open Workflow in the command
+  palette, opens a native editor that lays out a development cycle as
+  connected stages with typed inputs and outputs. The standard graph plans
+  and implements a change, reviews and verifies it in separate worktrees,
+  waits for a person's approval of that exact target and evidence, and
+  creates a draft pull request. Runs record the graph version and repository
+  state each result belongs to, and stage reports and evidence open in a
+  read-only viewer that checks their recorded SHA-256. Agents cannot approve
+  a run, and the runner does not accept agent permission prompts. The
+  `Noa Workflow` helper ships in the macOS bundle and the Linux package. See
+  `docs/WORKFLOW.md`. (#282)
+- Repository widgets gain a `text-input` component whose typed text a button
+  sends in its event payload, and an `image` component that shows PNG, JPEG
+  or still WebP files packaged under the widget's `assets/` directory. Caret,
+  selection and an in-progress IME composition survive live data updates.
+  Assets are size-bounded and covered by the definition digest. See
+  `docs/REPOSITORY_WIDGETS.md`. (#283)
+
 ### Fixed
 
 - The board timeline follows its live orchestrator when it is rebound to a

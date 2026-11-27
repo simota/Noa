@@ -3455,7 +3455,7 @@ fn compact_layout_reuses_panes_and_preserves_the_search_draft() {
     assert!(screen.compact);
     assert!(!screen.tree.is_hidden(screen.navigation));
     for pane in 0..3 {
-        act(&mut screen, Action::CompactPane(pane));
+        screen.handle_action(Action::CompactPane(pane), &mut text);
         screen.prepare(noa_gpui_scene::Size::new(720.0, 700.0), &mut text);
         assert_eq!(screen.pane_roots, panes);
         assert!(!screen.tree.is_hidden(panes[pane]));
@@ -3472,9 +3472,10 @@ fn find_from_a_compact_detail_reveals_and_focuses_the_existing_search() {
     let mut text = TextStore::new(Default::default());
     let size = noa_gpui_scene::Size::new(720.0, 700.0);
     screen.prepare(size, &mut text);
-    act(&mut screen, Action::CompactPane(2));
+    // Layout and subsequent mutations share shaped text, as in the native app.
+    screen.handle_action(Action::CompactPane(2), &mut text);
     screen.prepare(size, &mut text);
-    act(&mut screen, Action::ToggleSearch);
+    screen.handle_action(Action::ToggleSearch, &mut text);
     screen.prepare(size, &mut text);
     assert_eq!(screen.compact_pane, 1);
     assert!(screen.search_open);

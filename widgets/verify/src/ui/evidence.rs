@@ -897,13 +897,15 @@ pub(super) fn media_card(
                 .font_size(crate::appearance::font(18.0))
                 .color(Role::Muted),
         );
-        tree.insert(
-            Some(preview),
-            Label::new(format!("{} · {}", media.label(), media.name()))
-                .font_size(crate::appearance::font(11.5))
-                .weight(600),
-        );
     }
+    // Keep the media type visible while decoding and after a failed decode,
+    // as well as alongside a thumbnail or an unsupported-format fallback.
+    tree.insert(
+        Some(preview),
+        Label::new(format!("{} · {}", media.label(), media.name()))
+            .font_size(crate::appearance::font(11.5))
+            .weight(600),
+    );
     if !caption_text.is_empty() {
         tree.insert(
             Some(card),

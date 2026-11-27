@@ -3469,6 +3469,19 @@ mod tests {
         let task = local_ref("t-1");
         let base = start::head_of(&rig.repo).unwrap();
         let run = run_t1(&mut rig, Isolation::Worktree);
+        // The fixture starts a board tab and the original agent float.
+        // Opening either setup form must preserve that exact spawn record.
+        let started_panes = rig.noa.with(|state| state.spawned.clone());
+        assert!(
+            matches!(
+                started_panes.as_slice(),
+                [
+                    (ipc::Placement::Board, _, _),
+                    (ipc::Placement::Float(_), _, _)
+                ]
+            ),
+            "{started_panes:?}"
+        );
         let first = commit_in(&run.workdir, "first change");
         rig.feed.act(Intent::Refresh);
         rig.until_related(&task, "the recorded revision", |related| {
@@ -3484,6 +3497,11 @@ mod tests {
                 commit: first.clone(),
             });
             rig.settle();
+            assert_eq!(
+                rig.noa.with(|state| state.spawned.clone()),
+                started_panes,
+                "opening the {kind:?} setup form must not start another pane"
+            );
         }
         let launches = rig.launched.lock().unwrap().clone();
         assert_eq!(launches.len(), 2);
@@ -3522,9 +3540,9 @@ mod tests {
         });
         assert_eq!(rig.launched.lock().unwrap().len(), 2);
         assert_eq!(
-            rig.noa.with(|state| state.spawned.len()),
-            1,
-            "opening a setup form must not start an agent"
+            rig.noa.with(|state| state.spawned.clone()),
+            started_panes,
+            "refusing a stale version must not start another pane"
         );
     }
 

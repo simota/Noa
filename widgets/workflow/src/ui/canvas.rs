@@ -12,7 +12,6 @@ use workflow::model::{NodeKind, NodeState, Run, WorkflowDefinition};
 
 pub(super) const CARD_W: f32 = 204.0;
 pub(super) const CARD_H: f32 = 132.0;
-const MIN_PORT_TARGET: f32 = 32.0;
 const OVERVIEW_ZOOM: f32 = 0.8;
 
 struct Wire {
@@ -203,7 +202,7 @@ pub(super) fn insert(
             } else {
                 1
             };
-        let port_target = (22.0 * zoom).max(MIN_PORT_TARGET);
+        let port_target = (22.0 * zoom).max(style::MIN_CONNECTION_TARGET);
         let x = node.position.x * zoom;
         let y = node.position.y * zoom;
         let is_selected = selected == Some(node.id.as_str());

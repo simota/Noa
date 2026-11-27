@@ -5,6 +5,8 @@ use noa_gpui_core::{Appearance, Style, Theme};
 use noa_gpui_scene::Color;
 use workflow::model::NodeState;
 
+pub(super) const MIN_CONNECTION_TARGET: f32 = 32.0;
+
 pub(super) fn fill() -> Style {
     Style {
         flex_grow: 1.0,

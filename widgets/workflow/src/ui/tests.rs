@@ -32,6 +32,38 @@ fn minimum_zoom_keeps_connection_targets_and_accessible_stage_labels() {
 }
 
 #[test]
+fn inspector_connection_controls_keep_the_same_minimum_target_as_ports() {
+    let (mut screen, mut text) = prepared("editor");
+    screen
+        .act(Action::Source("task".into()), &mut text)
+        .unwrap();
+    screen
+        .act(Action::Select("plan".into()), &mut text)
+        .unwrap();
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    let mut checked = [false; 3];
+    for (id, action) in &screen.actions {
+        let Some(button) = screen.tree.get::<Button>(*id) else {
+            continue;
+        };
+        let index = match action {
+            Action::Source(_) => 0,
+            Action::Connect(_) => 1,
+            Action::Disconnect(_, _) => 2,
+            _ => continue,
+        };
+        checked[index] = true;
+        let rect = screen.bounds(*id).unwrap();
+        assert!(
+            rect.width >= 32.0 && rect.height >= 32.0,
+            "{}: {rect:?}",
+            button.label()
+        );
+    }
+    assert_eq!(checked, [true; 3]);
+}
+
+#[test]
 fn presets_roundtrip_assignments_without_overwriting_graph_edits() {
     let (mut screen, mut text) = prepared("editor");
     screen

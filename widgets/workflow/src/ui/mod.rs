@@ -14,7 +14,9 @@ use noa_gpui_core::widgets::{
     Button, ButtonClicked, Container, ControlSize, Label, PopUpButton, ScrollView,
     SelectionChanged, TextArea, TextChanged, TextField, TextView,
 };
-use noa_gpui_core::{Event, Key, Message, PointerButton, Role, Style, UiTree, WidgetId};
+use noa_gpui_core::{
+    Event, Key, Length, Message, PointerButton, Role, Style, StylePatch, UiTree, WidgetId,
+};
 use noa_gpui_platform::Screen;
 use noa_gpui_scene::{Point, Rect, Size};
 use noa_gpui_text::TextStore;
@@ -433,6 +435,17 @@ impl WorkflowScreen {
             Some(parent),
             Button::new(title).control_size(ControlSize::Small),
         );
+        if matches!(
+            action,
+            Action::Source(_) | Action::Connect(_) | Action::Disconnect(_, _)
+        ) {
+            // Inspector alternatives must be as easy to target as canvas ports.
+            // Keep a minimum rather than a fixed height so enlarged text can grow.
+            let mut patch = StylePatch::default();
+            patch.min_width = Some(Length::Px(style::MIN_CONNECTION_TARGET));
+            patch.min_height = Some(Length::Px(style::MIN_CONNECTION_TARGET));
+            self.tree.set_inline_style(id, patch);
+        }
         self.actions.push((id, action));
         id
     }

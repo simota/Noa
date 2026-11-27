@@ -318,6 +318,9 @@ mod tests {
     #[test]
     fn result_reference_keeps_its_provenance_and_target() {
         let temp = tempfile::tempdir().unwrap();
+        // macOS temporary paths can start at /var, a system symlink. Match the
+        // canonical roots required by the link-refusing persistence adapter.
+        let root = std::fs::canonicalize(temp.path()).unwrap();
         let mut run = Run::demo();
         run.origin_task = Some(TaskOrigin {
             repo: run.repository.clone(),
@@ -326,9 +329,8 @@ mod tests {
             title: "Improve widgets".into(),
             objective_digest: digest_bytes(run.objective.as_bytes()),
         });
-        publish_in(temp.path(), &run).unwrap();
-        let path = temp
-            .path()
+        publish_in(&root, &run).unwrap();
+        let path = root
             .join(repo_key(&run.repository))
             .join("workflow-results")
             .join(format!("{}.json", run.id));

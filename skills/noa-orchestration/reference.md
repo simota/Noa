@@ -121,12 +121,18 @@ again if this pane has no worker.
 PATH"). Without one, the worker gets the user's shell. For a shell pipeline,
 use `-- sh -c '…'`.
 
-### `send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer] [--queue] [--any-pane] [--] TEXT|-`
+### `send PANE [--enter] [--raw] [--replace] [--wait [wait options]] [--answer] [--queue] [--new-run] [--any-pane] [--] TEXT|-`
 
 Types `TEXT` (or stdin with `-`) into the pane as a paste. `--enter` then sends
 Enter 150 ms later, which submits a prompt in agent TUIs. `--raw` types the text
 as keystrokes instead of a bracketed paste.
 
+- `--new-run` starts a new piece of work on a timeline-capable Noa: after the
+  send's preflight checks, it registers a run and prepends its board/run header
+  to the task. Use it for the first task after a plain `spawn`, and for a later
+  new task. Follow-ups, approval responses and question answers continue the
+  current run without it. Combining it with `--answer`, `--raw`, `--queue` or
+  `--replace` is refused before anything is sent (exit 1).
 - Without `--wait`: prints `{"paneId":"…","seq":N}`, the report count before
   sending. `wait PANE --after N` then waits for this turn without missing a quick
   reply.
@@ -461,6 +467,90 @@ and result files every 2 seconds, reads a journal again only when its time or
 length changed, and reads a result's text only while it is shown, so a task
 sent or a report written shows within about 2 seconds.
 
+### Board timeline
+
+On a server with `boardTimelineV1`, `spawn --task` / `--task-file`,
+`send --new-run` and `retry` register a run before sending the task. The worker
+gets a `[noa-timeline board=… run=…]` header. A plain `spawn` followed by
+`send` does not register one. A failed registration warns on stderr and still
+delivers the task without the header; a server without the capability keeps
+the earlier spawn/send behavior.
+
+`report finished`, a notification and writing `$NOA_RESULT` do not publish a
+post. The worker publishes explicitly, or a widget publishes at its own
+confirmed event (Tasks uses its result's 共有 action).
+
+From the orchestrator, `noa timeline context --pane PANE` shows a worker's
+board and registered runs. In the worker's pane, `noa timeline context` uses
+that pane. `noa timeline list --board BOARD_ID` reads the board's posts;
+`noa timeline boards` lists a page of boards. A `not_found` context error says
+whether the pane is closed or has no registered board; a registered board
+with no posts returns an empty list.
+Use these reads to distinguish missing registration from a result that has
+not been published.
+
+#### Publishing a worker summary
+
+Run this from the worker's own Noa pane after it has written its report.
+Take the run ID from the task's header; never invent one or pick another
+worker's run. Save this minimal `PostInput` as `summary.json` in a scratch
+directory, replacing the example run ID in `sessionId` and the report text:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "summary",
+  "title": "Task report",
+  "summary": "The work is ready for review.",
+  "outcome": "unknown",
+  "sourceRef": {
+    "namespace": "worker",
+    "sessionId": "rn-0123456789abcdef",
+    "eventId": "summary"
+  }
+}
+```
+
+```sh
+"$NOA_BIN" +ctl timeline post --run rn-0123456789abcdef --file /absolute/path/summary.json
+```
+
+Replace the command's run ID too. The CLI resolves the board and producer
+from the pane's context. `--run` may be omitted only when this pane has
+exactly one registered run; pass it explicitly when the pane is reused.
+
+The six top-level fields in the example are required. `schemaVersion` is
+`1`; `kind` is `summary`, `milestone`, `blocker`, `decision` or `handoff`;
+`outcome` is `succeeded`, `partial`, `failed`, `cancelled` or `unknown`.
+Report only the outcome supported by the work. `title` and `summary` must
+be nonblank, at most 120 and 400 characters respectively. `sourceRef` requires
+`namespace`, `sessionId` and `eventId`: each is a nonempty token of at most
+128 bytes using ASCII letters, digits, `.`, `_`, `-`, `:`, or `/`. Its `runId` and
+`locator` are optional; the CLI's `--run` identifies the registered Noa run.
+
+Optional top-level fields are `bodyMarkdown` (defaults to empty, at most
+32 KiB), `checks`, `artifacts`, `openIssues`, `nextActions`, `basedOnPostIds`
+(default empty lists), and `author`, `occurredAt`, `retryOfRunId`,
+`supersedesPostId`, `taskRef` (default null). Each list has at most 100 items.
+The full post request must fit in 64 KiB. Unknown top-level fields are
+rejected: put neither `boardId`, `runId`, `producerId` nor a `post` wrapper
+in this file. The CLI supplies those request fields.
+
+Keep the same `sourceRef` and unchanged JSON when retrying the same post.
+The default request ID is derived from the board, run, producer and canonical
+post, so rerunning the command resends it under the same ID; an explicit
+`--request-id` must also stay the same. Success (exit 0) prints `postId`,
+`seq` and `duplicate`; a repeat returns the original post. A run has one
+initial summary. A correction uses a new `sourceRef.eventId` and names the
+original post in `supersedesPostId`; changing a payload under a used event
+or request ID is a conflict, not an update.
+
+An unconfirmed timeline request (`outcome_unknown` or a request timeout)
+exits 1 and tells you to rerun the same command. Publication failures after
+the post is staged also exit 1, with the staged post kept for retry. Missing
+timeline support exits 3; connection or scope failures during setup or context
+reads can also exit 3. Keep the report file and read stderr before retrying.
+
 ### `report STATE [[--] DETAIL]`
 
 Writes an agent-state report for the pane this process runs in. `STATE` is
@@ -477,6 +567,11 @@ succeeds.
 | 1 | Error: bad arguments, unknown pane, refused input, a pane that is not yours, a spawn over `--max-children`, a request over Noa's size limit ("Noa closed the connection because a request was over its size limit"). An argument error prints only its message and a pointer to `--help` |
 | 2 | `wait` timed out, or was interrupted (`"interrupted":true`) |
 | 3 | Server disabled, unreachable, missing a scope, gone mid-command, full, or not answering a request within 5 s ("did not answer in time"), or a request Noa did not confirm in time (`-32009`, "it may still have taken effect"). After either of the last two, check with `ls` or `read` before retrying. stderr says which: "sandbox likely blocks loopback" (your shell's sandbox refused the connection; run `+ctl` outside it), "not listening" (Noa's server is off), "too many control connections open" (see below), or a message naming the config to add |
+
+Timeline commands have one exception: an unconfirmed timeline request exits
+1, not 3, and an unchanged post can be resent with the same request ID.
+Missing `boardTimelineV1` support exits 3. See "Publishing a worker summary"
+for staged publication failures and retry behavior.
 
 Noa holds 32 connections at once; each running `wait`, `send --wait`, board and
 attach holds one. A connect refused at that limit, or one Noa drops during the
@@ -562,8 +657,8 @@ Several workers, handling whichever stops first (workers that report turns):
 noa() { "$NOA_BIN" +ctl "$@"; }
 a=$(noa spawn --label api --ready 30 -- claude | jq -r .paneId)   # check "ready" and "screen"
 b=$(noa spawn --label ui --ready 30 -- codex | jq -r .paneId)
-sa=$(noa send "$a" --enter - < "$d/task-api.txt" | jq -r .seq)
-sb=$(noa send "$b" --enter - < "$d/task-ui.txt" | jq -r .seq)
+sa=$(noa send "$a" --new-run --enter - < "$d/task-api.txt" | jq -r .seq)
+sb=$(noa send "$b" --new-run --enter - < "$d/task-ui.txt" | jq -r .seq)
 noa wait --children --after "$a=$sa" --after "$b=$sb" --settle 10 --stall 300 --timeout 100
 ```
 
@@ -575,8 +670,8 @@ raises `attention` and finishes before a `wait` starts is never seen. For such
 workers run one `send --wait` each with your tool's background mode:
 
 ```sh
-noa send "$a" --enter --wait --timeout 1800 - < "$d/task-a.txt" > "$d/a.json" &
-noa send "$b" --enter --wait --timeout 1800 - < "$d/task-b.txt" > "$d/b.json" &
+noa send "$a" --new-run --enter --wait --timeout 1800 - < "$d/task-a.txt" > "$d/a.json" &
+noa send "$b" --new-run --enter --wait --timeout 1800 - < "$d/task-b.txt" > "$d/b.json" &
 wait
 ```
 
@@ -586,7 +681,7 @@ call is only for your tool's background mode, since the tool's limit covers the
 whole call:
 
 ```sh
-out=$(noa send "$a" --enter --wait --timeout 100 "…task…")
+out=$(noa send "$a" --new-run --enter --wait --timeout 100 "…task…")
 while [ $? -eq 2 ]; do
   seq=$(echo "$out" | jq -r '.baseline[0].seq')
   out=$(noa wait "$a" --after "$a=$seq" --timeout 100)

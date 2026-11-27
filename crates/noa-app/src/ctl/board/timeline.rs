@@ -9,11 +9,11 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use noa_ipc::Panel;
 use noa_ipc::timeline::{
     ChangesParams, ContextResult, Filter, GetParams, GetResult, LIST_MAX, ListParams,
     MAX_QUERY_CHARS, Outcome, PageResult, PostKind, PostSummary, Provenance, Seq,
 };
+use noa_ipc::{ClientError, Panel};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -85,6 +85,8 @@ enum Request {
 /// What a key or a poll asks `board.rs` to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TlAction {
+    /// Re-resolve the board and read the head page with the current conditions.
+    Refresh,
     /// Read a post whole (`noa.timeline.get`).
     Fetch(GetParams),
     /// Read a page of posts (`noa.timeline.list`).
@@ -153,6 +155,8 @@ pub(crate) struct Timeline {
     detail: Option<PostId>,
     bodies: HashMap<PostId, GetResult>,
     body_order: Vec<PostId>,
+    /// A failed body read remains visible until that post is read successfully.
+    body_errors: HashMap<PostId, String>,
     /// The post whose body was last asked for, so a failing read is not
     /// asked again for the same post.
     tried: Option<PostId>,
@@ -161,6 +165,7 @@ pub(crate) struct Timeline {
     agents: HashMap<String, String>,
     last_ok_unix: Option<i64>,
     stale: bool,
+    read_error: Option<String>,
     message: Option<String>,
 }
 
@@ -200,12 +205,14 @@ impl Timeline {
             detail: None,
             bodies: HashMap::new(),
             body_order: Vec::new(),
+            body_errors: HashMap::new(),
             tried: None,
             live: HashMap::new(),
             labels: HashMap::new(),
             agents: HashMap::new(),
             last_ok_unix: None,
             stale: false,
+            read_error: None,
             message: None,
         }
     }
@@ -272,7 +279,7 @@ impl Timeline {
     /// Whether the line under the header is the timeline's own (its input
     /// line or what its last key said).
     pub(crate) fn owns_notice(&self) -> bool {
-        self.input.is_some() || self.message.is_some()
+        self.input.is_some() || self.message.is_some() || self.read_error.is_some()
     }
 
     pub(crate) fn visit_known(&self) -> bool {
@@ -353,6 +360,9 @@ impl Timeline {
 
     /// The body the preview or the full post needs, when not read yet.
     pub(crate) fn wanted_body(&mut self, cols: usize, rows: usize) -> Option<GetParams> {
+        if self.no_board || self.missing {
+            return None;
+        }
         let previews = cols >= WIDE_COLS || (cols >= STACKED_COLS && rows >= STACKED_ROWS);
         let post_id = match &self.detail {
             Some(id) => id.clone(),
@@ -391,6 +401,32 @@ impl Timeline {
         self.take_reload().map(TlAction::Page)
     }
 
+    /// Retry the current view. A full post stays open even when it is older
+    /// than the head page; reloading that page must not discard its summary.
+    fn refresh(&mut self) -> TlAction {
+        let post_id = self
+            .detail
+            .clone()
+            .or_else(|| self.current().map(|post| post.post_id.clone()));
+        if let Some(id) = post_id {
+            self.bodies.remove(&id);
+            self.body_order.retain(|cached| cached != &id);
+            self.tried = None;
+            if self.detail.is_some()
+                && let Some(board_id) = self.board_id.clone()
+            {
+                self.tried = Some(id.clone());
+                return TlAction::Fetch(GetParams {
+                    board_id,
+                    post_id: id,
+                });
+            }
+        }
+        self.reload = true;
+        self.requested = None;
+        TlAction::Refresh
+    }
+
     fn mark_ok(&mut self) {
         // A body that failed to load while the connection did is asked
         // for again.
@@ -399,6 +435,7 @@ impl Timeline {
         }
         self.last_ok_unix = Some(unix_now());
         self.stale = false;
+        self.read_error = None;
     }
 
     /// A `list` result: the head page (a reload), an older page, or the
@@ -569,9 +606,10 @@ impl Timeline {
         listing: &[Panel],
         same_instance: bool,
     ) {
-        if self.board_id.is_none() {
-            self.board_id = Some(ctx.board_id.clone());
+        if self.board_id.as_ref().is_some_and(|id| id != &ctx.board_id) {
+            self.reset_board();
         }
+        self.board_id = Some(ctx.board_id.clone());
         self.known = true;
         self.no_board = false;
         self.missing = false;
@@ -601,15 +639,38 @@ impl Timeline {
         }
     }
 
+    /// Sequence numbers, worker filters and visit boundaries belong to one
+    /// board. A pane rebound to another board must not carry them across.
+    fn reset_board(&mut self) {
+        let compact = self.compact;
+        let pinned = self.pinned;
+        *self = Self::new(self.lang, self.offset_at);
+        self.compact = compact;
+        self.pinned = pinned;
+    }
+
     /// The calling pane is on no board yet.
     pub(crate) fn on_no_board(&mut self) {
+        if self.board_id.is_some() {
+            self.reset_board();
+        }
+        self.known = true;
         self.no_board = true;
+        self.mark_ok();
     }
 
     /// The server answered that the board named by id does not exist.
     pub(crate) fn on_missing(&mut self) {
         self.missing = true;
         self.known = true;
+        self.detail = None;
+        self.live.clear();
+        self.bodies.clear();
+        self.body_order.clear();
+        self.body_errors.clear();
+        self.tried = None;
+        self.reload = true;
+        self.requested = None;
         self.mark_ok();
     }
 
@@ -617,6 +678,7 @@ impl Timeline {
     /// updating stays marked so, as of its own last success.
     pub(crate) fn on_get(&mut self, result: GetResult) {
         let id = result.post.post_id.clone();
+        self.body_errors.remove(&id);
         if self.bodies.insert(id.clone(), result).is_none() {
             self.body_order.push(id);
         }
@@ -638,6 +700,20 @@ impl Timeline {
         }
     }
 
+    /// Keep the cause of a context or list failure beside the retained posts.
+    pub(crate) fn on_read_failure(&mut self, error: &ClientError) {
+        self.read_error = Some(clean(&error.to_string()));
+        self.on_failure();
+    }
+
+    /// A successful poll does not repair a failed body read. Keep its error
+    /// with that post until `get` succeeds, including during an explicit retry.
+    pub(crate) fn on_body_failure(&mut self, post_id: &str, error: &ClientError) {
+        self.body_errors
+            .insert(post_id.to_string(), clean(&error.to_string()));
+        self.on_failure();
+    }
+
     /// Noa cannot be reached, so no read is made: what is shown is marked
     /// as of the last success. Returns whether that is new.
     pub(crate) fn on_unreachable(&mut self) -> bool {
@@ -650,6 +726,7 @@ impl Timeline {
             return self.input_key(input, key);
         }
         match key {
+            Key::Char('r') => Some(self.refresh()),
             Key::Char('j') | Key::Down if self.detail.is_some() => {
                 self.detail_scroll = (self.detail_scroll + 1).min(self.detail_reach.get());
                 None
@@ -663,7 +740,7 @@ impl Timeline {
             }
             Key::Char('j') | Key::Down => self.move_selection(1),
             Key::Char('k') | Key::Up => self.move_selection(-1),
-            Key::Enter if self.detail.is_none() => {
+            Key::Enter if self.detail.is_none() && !self.no_board && !self.missing => {
                 let post = self.posts.get(self.selected)?;
                 let id = post.post_id.clone();
                 self.detail = Some(id.clone());
@@ -730,7 +807,7 @@ impl Timeline {
     /// The live pane of the selected (or open) post's worker. Says why
     /// there is none, except on an archived board, where `g`/`w` are inert.
     fn post_worker(&mut self) -> Option<u64> {
-        if self.archived {
+        if self.archived || self.no_board || self.missing {
             return None;
         }
         let post = self.current()?;
@@ -856,6 +933,7 @@ impl Timeline {
         match field {
             0 => {
                 let mut ids: BTreeSet<&String> = self.labels.keys().collect();
+                ids.extend(self.filter.worker_ids.iter());
                 ids.extend(self.posts.iter().filter_map(|post| post.worker_id.as_ref()));
                 let mut options: Vec<(String, String)> = ids
                     .into_iter()
@@ -869,6 +947,7 @@ impl Timeline {
             }
             1 => {
                 let mut kinds: BTreeSet<&String> = self.agents.values().collect();
+                kinds.extend(self.filter.agent_kinds.iter());
                 kinds.extend(
                     self.posts
                         .iter()
@@ -945,6 +1024,9 @@ impl Timeline {
                     format!("no board {id}"),
                 );
                 missing.as_str()
+            } else if !self.loaded && self.stale {
+                self.lang
+                    .pick("投稿を取得できません", "posts could not be loaded")
             } else if !self.loaded {
                 self.lang.pick("読み込み中…", "Loading…")
             } else if self.filter_set() || self.query.is_some() {
@@ -958,6 +1040,42 @@ impl Timeline {
                 .fg(DIM, &fit(note, cols.saturating_sub(3)));
             lines.push(Line::default().finish(cols));
             lines.push(line.finish(cols));
+            let hint = if self.no_board {
+                self.lang.pick(
+                    "spawn --task または send --new-run でタスクを登録すると作成されます。r で再読み込みできます。",
+                    "Register a task with spawn --task or send --new-run to create a board. Press r to reload.",
+                )
+            } else if self.missing {
+                self.lang.pick(
+                    "ボードIDを確認してください。r で再読み込みできます。",
+                    "Check the board ID. Press r to reload.",
+                )
+            } else if !self.loaded {
+                if self.stale {
+                    self.lang
+                        .pick("r で再読み込みできます。", "Press r to retry.")
+                } else {
+                    ""
+                }
+            } else if self.filter_set() || self.query.is_some() {
+                self.lang.pick(
+                    "F で検索・絞り込みを解除できます。",
+                    "Press F to clear the search and filters.",
+                )
+            } else {
+                self.lang.pick(
+                    "ワーカーの状態報告はここには追加されません。+ctl timeline post または対応ウィジェットの結果投稿が表示されます。",
+                    "Worker status reports are not posts. Publish with +ctl timeline post or a supported widget's result publication.",
+                )
+            };
+            for text in wrap(hint, cols.saturating_sub(3).max(1))
+                .into_iter()
+                .take(room.saturating_sub(2))
+            {
+                let mut line = Line::default();
+                line.plain("   ").fg(DIM, &text);
+                lines.push(line.finish(cols));
+            }
             return lines;
         }
         if cols >= WIDE_COLS {
@@ -1149,6 +1267,14 @@ impl Timeline {
             None => match &self.message {
                 Some(message) => {
                     line.fg(ORANGE, &fit(&clean(message), room));
+                }
+                None if self.read_error.is_some() => {
+                    let error = self.read_error.as_deref().unwrap_or_default();
+                    let text = self.lang.pick(
+                        format!("取得失敗 · r 再読み込み: {error}"),
+                        format!("Read failed · r retry: {error}"),
+                    );
+                    line.fg(ORANGE, &fit(&text, room));
                 }
                 None => {
                     let hint = if self.filter_set() || self.query.is_some() {
@@ -1506,6 +1632,16 @@ impl Timeline {
         };
         let hint = full.then(|| self.lang.pick("Esc で一覧", "Esc list"));
         let head = rule(cols, &title, hint);
+        let body_error = self.body_errors.get(id);
+        if let Some(error) = body_error {
+            let label = self.lang.pick(
+                "本文取得に失敗 · r で再読み込み",
+                "Body read failed · r to retry",
+            );
+            push_wrapped(&mut text, Some(ORANGE), label);
+            push_wrapped(&mut text, Some(ORANGE), error);
+            text.push((None, String::new()));
+        }
         if let Some(post) = post {
             push_wrapped(&mut text, None, &clean(&post.title));
             let meta = format!(
@@ -1598,7 +1734,7 @@ impl Timeline {
                     push_wrapped(&mut text, None, &line);
                 }
             }
-            None if full => {
+            None if full && body_error.is_none() => {
                 text.push((None, String::new()));
                 text.push((
                     Some(DIM),
@@ -1668,6 +1804,7 @@ impl Timeline {
             None if self.detail.is_some() => vec![
                 ("Esc", l("一覧", "list"), l("一覧", "list")),
                 ("j/k", l("スクロール", "scroll"), l("スクロール", "scroll")),
+                ("r", l("再読み込み", "reload"), l("再読込", "reload")),
                 ("g", l("移動", "go"), l("移動", "go")),
                 ("w", l("ワーカー", "worker"), l("ワーカー", "worker")),
                 ("F", l("条件解除", "clear filters"), l("解除", "clear")),
@@ -1678,6 +1815,7 @@ impl Timeline {
             None => vec![
                 ("Enter", l("開く", "open"), l("開く", "open")),
                 ("j/k", l("選択", "select"), l("選択", "select")),
+                ("r", l("再読み込み", "reload"), l("再読込", "reload")),
                 ("c", l("表示切替", "density"), l("表示", "density")),
                 ("/", l("検索", "search"), l("検索", "search")),
                 ("f", l("絞り込み", "filter"), l("絞込", "filter")),
@@ -1973,6 +2111,43 @@ mod tests {
         }
     }
 
+    fn body(seq: u64) -> GetResult {
+        let p = post(seq, &format!("item {seq}"));
+        serde_json::from_value(serde_json::json!({
+            "post": {
+                "author": p.author,
+                "boardId": "bd-0000000000000001",
+                "bodyMarkdown": "The full result is available.",
+                "createdAt": p.created_at,
+                "kind": p.kind,
+                "outcome": p.outcome,
+                "postId": p.post_id,
+                "producer": p.producer,
+                "provenance": p.provenance,
+                "requestId": "rq-body",
+                "schemaVersion": 1,
+                "seq": p.seq,
+                "sourceRef": {"namespace": "manual", "sessionId": "test", "eventId": "body"},
+                "summary": p.summary,
+                "title": p.title,
+                "workerId": p.worker_id,
+            },
+        }))
+        .unwrap()
+    }
+
+    fn context(board: u64, head: u64) -> ContextResult {
+        ContextResult {
+            archived: false,
+            board_id: format!("bd-{board:016x}"),
+            head_seq: Seq(head),
+            me: None,
+            name: "board".to_string(),
+            server_instance_id: "instance".to_string(),
+            workers: Vec::new(),
+        }
+    }
+
     fn timeline(n: u64) -> Timeline {
         let mut tl = Timeline::new(Lang::Ja, |_| 0);
         tl.set_board_id(Some("bd-0000000000000001".to_string()));
@@ -2002,6 +2177,201 @@ mod tests {
             }
         }
         plain
+    }
+
+    #[test]
+    fn refresh_keeps_conditions_and_selection_and_refetches_the_preview() {
+        let mut tl = timeline(3);
+        tl.query = Some("item".to_string());
+        tl.filter.kinds.push(PostKind::Summary);
+        tl.key(Key::Down);
+        tl.on_get(body(2));
+        assert_eq!(tl.wanted_body(110, 30), None);
+
+        assert_eq!(tl.key(Key::Char('r')), Some(TlAction::Refresh));
+        let request = tl.take_reload().unwrap();
+        assert_eq!(request.query.as_deref(), Some("item"));
+        assert_eq!(request.filter.unwrap().kinds, vec![PostKind::Summary]);
+        assert_eq!(request.before_seq, None);
+        tl.on_page(page(
+            (1..=3).rev().map(|seq| post(seq, "item")).collect(),
+            3,
+        ));
+        assert_eq!(tl.current().unwrap().seq, Seq(2));
+        let request = tl.wanted_body(110, 30).unwrap();
+        assert_eq!(request.post_id, "po-0000000000000002");
+        tl.on_get(body(2));
+        assert_eq!(tl.wanted_body(110, 30), None);
+        assert_eq!(tl.body_order, vec![request.post_id]);
+    }
+
+    #[test]
+    fn failed_body_stays_failed_after_a_poll_and_refresh_recovers_in_place() {
+        let mut tl = timeline(3);
+        tl.key(Key::Down);
+        tl.key(Key::Down);
+        tl.key(Key::Enter);
+        let id = tl.detail.clone().unwrap();
+        let error = ClientError::Timeout("body deadline".to_string());
+        tl.on_body_failure(&id, &error);
+        tl.on_changes(page(Vec::new(), 3));
+        let text = visible(&tl.render(80, 30, Instant::now()).join("\n"));
+        assert!(text.contains("本文取得に失敗"), "{text}");
+        assert!(text.contains("body deadline"), "{text}");
+        assert!(!text.contains("本文を読み込み中"), "{text}");
+        assert_eq!(
+            tl.key(Key::Char('r')),
+            Some(TlAction::Fetch(GetParams {
+                board_id: "bd-0000000000000001".to_string(),
+                post_id: id.clone(),
+            }))
+        );
+        assert_eq!(tl.detail(), Some(id.as_str()));
+        assert!(tl.body_errors.contains_key(&id));
+        assert_eq!(
+            tl.take_reload(),
+            None,
+            "a full post does not reload the head page"
+        );
+        tl.on_get(body(1));
+        let text = visible(&tl.render(80, 30, Instant::now()).join("\n"));
+        assert!(text.contains("The full result is available."), "{text}");
+        assert!(!text.contains("本文取得に失敗"), "{text}");
+        assert_eq!(tl.detail(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn initial_read_failure_has_a_reason_and_retry_instead_of_loading_forever() {
+        let mut tl = Timeline::new(Lang::Ja, |_| 0);
+        tl.set_board_id(Some("bd-0000000000000001".to_string()));
+        tl.take_reload();
+        tl.on_read_failure(&ClientError::Rpc {
+            code: -32050,
+            message: "service unavailable\x1b]2;unsafe\x07".to_string(),
+        });
+        let text = visible(&tl.render(100, 20, Instant::now()).join("\n"));
+        assert!(text.contains("投稿を取得できません"), "{text}");
+        assert!(text.contains("r 再読み込み"), "{text}");
+        assert!(text.contains("service unavailable"), "{text}");
+        assert!(!text.contains("読み込み中"), "{text}");
+        assert!(!text.contains('\x07') && !text.contains("\x1b]"));
+        assert_eq!(tl.key(Key::Char('r')), Some(TlAction::Refresh));
+        tl.take_reload().unwrap();
+        tl.on_page(page(Vec::new(), 0));
+        let text = visible(&tl.render(100, 20, Instant::now()).join("\n"));
+        assert!(!text.contains("取得失敗"), "{text}");
+        assert!(text.contains("+ctl timeline post"), "{text}");
+
+        let mut unbound = Timeline::new(Lang::Ja, |_| 0);
+        unbound.on_no_board();
+        assert_eq!(unbound.key(Key::Char('r')), Some(TlAction::Refresh));
+        assert_eq!(unbound.take_reload(), None);
+    }
+
+    #[test]
+    fn active_filters_survive_an_empty_search_and_reopening_the_picker() {
+        let mut tl = timeline(1);
+        tl.key(Key::Char('f'));
+        tl.key(Key::Right);
+        tl.key(Key::Tab);
+        tl.key(Key::Right);
+        tl.key(Key::Enter);
+        let filter = tl.filter.clone();
+        assert_eq!(filter.worker_ids, vec!["wk-0000000000000001"]);
+        assert_eq!(filter.agent_kinds, vec!["claude"]);
+        tl.on_page(page(vec![post(1, "item")], 1));
+        tl.key(Key::Char('/'));
+        tl.key(Key::Char('r'));
+        let Some(TlAction::Page(request)) = tl.key(Key::Enter) else {
+            panic!("r is literal search text while the query line is open");
+        };
+        assert_eq!(request.query.as_deref(), Some("r"));
+        tl.on_page(page(Vec::new(), 1));
+        assert_eq!(tl.current_picks(), [1, 1, 0, 0]);
+        tl.key(Key::Char('f'));
+        let Some(TlAction::Page(request)) = tl.key(Key::Enter) else {
+            panic!("reapplying the filter requests the same conditions");
+        };
+        assert_eq!(request.filter, Some(filter));
+        assert_eq!(request.query.as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn a_new_board_discards_old_history_filters_and_visit_state() {
+        let mut tl = timeline(3);
+        tl.pinned = false;
+        tl.compact = true;
+        tl.query = Some("old board".to_string());
+        tl.filter.worker_ids.push("wk-0000000000000001".to_string());
+        tl.set_visit_boundary(50);
+        tl.on_get(body(3));
+        tl.key(Key::Enter);
+        tl.on_context(&context(2, 1), &[], true);
+        assert!(tl.compact);
+        assert!(!tl.pinned());
+        assert_eq!(tl.detail(), None);
+        assert!(!tl.visit_known());
+        assert!(tl.bodies.is_empty());
+        assert_eq!(tl.changes_params(), None);
+        let request = tl.take_reload().unwrap();
+        assert_eq!(request.board_id, "bd-0000000000000002");
+        assert_eq!(request.query, None);
+        assert_eq!(request.filter, None);
+        assert_eq!(request.before_seq, None);
+        tl.on_page(page(vec![post(1, "new board")], 1));
+        assert_eq!(tl.leave(), Some(TlAction::SaveVisit(1)));
+    }
+
+    #[test]
+    fn losing_a_board_clears_the_old_content_and_can_discover_a_new_one() {
+        let mut tl = timeline(3);
+        tl.pinned = false;
+        tl.on_read_failure(&ClientError::Timeout("context".to_string()));
+        tl.on_no_board();
+        assert!(tl.context_known());
+        assert_eq!(tl.board_id(), None);
+        assert!(tl.posts.is_empty());
+        assert!(!tl.stale);
+        assert!(tl.read_error.is_none());
+        assert_eq!(tl.leave(), None);
+        tl.on_context(&context(2, 1), &[], true);
+        assert!(!tl.no_board);
+        assert_eq!(tl.take_reload().unwrap().board_id, "bd-0000000000000002");
+    }
+
+    #[test]
+    fn a_missing_board_closes_details_and_drops_live_links_until_it_returns() {
+        let mut tl = timeline(3);
+        tl.live
+            .insert("wk-0000000000000001".to_string(), LiveWorker { pane: 2 });
+        tl.on_get(body(3));
+        tl.key(Key::Enter);
+        assert_eq!(tl.key(Key::Char('g')), Some(TlAction::Focus(2)));
+
+        tl.on_missing();
+
+        assert_eq!(tl.detail(), None);
+        assert_eq!(tl.key(Key::Char('g')), None);
+        assert_eq!(tl.key(Key::Char('w')), None);
+        assert_eq!(tl.key(Key::Enter), None);
+        assert_eq!(tl.wanted_body(110, 30), None);
+        assert!(tl.bodies.is_empty());
+        let text = visible(&tl.render(80, 30, Instant::now()).join("\n"));
+        assert!(text.contains("は見つかりません"), "{text}");
+        assert!(!text.contains("item 3"), "{text}");
+
+        tl.on_context(&context(1, 4), &[], true);
+        let request = tl.take_reload().unwrap();
+        assert_eq!(request.board_id, "bd-0000000000000001");
+        assert_eq!(request.before_seq, None);
+        tl.on_page(page(vec![post(4, "restored result")], 4));
+        let text = visible(&tl.render(80, 30, Instant::now()).join("\n"));
+        assert!(text.contains("restored result"), "{text}");
+        assert!(!text.contains("は見つかりません"), "{text}");
+        assert_eq!(
+            tl.wanted_body(110, 30).unwrap().post_id,
+            "po-0000000000000004"
+        );
     }
 
     #[test]

@@ -3139,6 +3139,13 @@ impl Board {
                 ),
             ),
             (
+                "r",
+                l(
+                    "現在の検索・絞り込みで再読込 / 投稿の本文を再取得",
+                    "reload the current search and filters / retry the open post",
+                ),
+            ),
+            (
                 "g / w",
                 l(
                     "投稿したワーカーへ移動 / その詳細へ",
@@ -5214,7 +5221,7 @@ fn tick_timeline(
             Ok(_) => polling.succeeded_after(tick.now, timeline::POLL_EVERY),
             Err(err) => {
                 *reconnect |= lost(&err);
-                board.timeline.on_failure();
+                board.timeline.on_read_failure(&err);
                 polling.failed(tick.now);
             }
         }
@@ -5229,7 +5236,7 @@ fn tick_timeline(
             Ok(()) => polling.succeeded_after(tick.now, timeline::POLL_EVERY),
             Err(err) => {
                 *reconnect |= lost(&err);
-                board.timeline.on_failure();
+                board.timeline.on_read_failure(&err);
                 polling.failed(tick.now);
             }
         }
@@ -5240,7 +5247,7 @@ fn tick_timeline(
             Ok(result) => board.timeline.on_get(result),
             Err(err) => {
                 *reconnect |= lost(&err);
-                board.timeline.on_failure();
+                board.timeline.on_body_failure(&params.post_id, &err);
             }
         }
         dirty = true;
@@ -5295,27 +5302,57 @@ fn poll_context(
     visits: Option<&std::path::Path>,
 ) -> Result<bool, ClientError> {
     use noa_ipc::timeline::{ContextParams, TimelineErrorKind};
-    let params = match board.timeline.board_id() {
-        Some(id) => ContextParams {
+    let pane = board.of.or(board.me);
+    // A live root can be rebound to a different board, for example after
+    // the old history was removed. Only --board-id pins the identity.
+    // Once the root closes, retain its board so its history stays readable.
+    let follow_pane = !board.timeline.pinned()
+        && (board.timeline.board_id().is_none()
+            || pane.is_some_and(|pane| board.panels.iter().any(|panel| panel.pane_id.0 == pane)));
+    let params = match (follow_pane, pane, board.timeline.board_id()) {
+        (true, Some(pane), _) => ContextParams {
+            board_id: None,
+            pane_id: Some(noa_ipc::WireId(pane)),
+        },
+        (_, _, Some(id)) => ContextParams {
             board_id: Some(id.to_string()),
             pane_id: None,
         },
-        // The board of the orchestrator shown, else of this pane.
-        None => match board.of.or(board.me) {
-            Some(pane) => ContextParams {
-                board_id: None,
-                pane_id: Some(noa_ipc::WireId(pane)),
-            },
-            None => {
-                board.timeline.on_no_board();
-                return Ok(false);
-            }
-        },
+        _ => {
+            board.timeline.on_no_board();
+            return Ok(false);
+        }
     };
-    match client.context(&params) {
+    let context = match client.context(&params) {
+        Err(ClientError::Rpc { code, .. })
+            if params.pane_id.is_some()
+                && TimelineErrorKind::from_code(code) == Some(TimelineErrorKind::NotFound)
+                && board.timeline.board_id().is_some() =>
+        {
+            // The root can close after the last pane listing. Its history
+            // still exists, so do not discard the only ID that can read it.
+            client.context(&ContextParams {
+                board_id: board.timeline.board_id().map(str::to_string),
+                pane_id: None,
+            })
+        }
+        result => result,
+    };
+    match context {
         Ok(ctx) => {
+            if board
+                .timeline
+                .board_id()
+                .is_some_and(|id| id != ctx.board_id)
+                && let Some(TlAction::SaveVisit(seq)) = board.timeline.leave()
+            {
+                save_visit(board, visits, seq);
+            }
             let same = ctx.server_instance_id == client.instance();
             board.timeline.on_context(&ctx, &board.panels, same);
+            if board.in_timeline() {
+                board.sync_timeline_view();
+            }
         }
         // The server answered: the pane is on no board yet, or the board
         // named by id does not exist. Neither is a lost connection.
@@ -5323,9 +5360,18 @@ fn poll_context(
             if TimelineErrorKind::from_code(code) == Some(TimelineErrorKind::NotFound) =>
         {
             if params.pane_id.is_some() {
+                if let Some(TlAction::SaveVisit(seq)) = board.timeline.leave() {
+                    save_visit(board, visits, seq);
+                }
                 board.timeline.on_no_board();
+                if board.in_timeline() {
+                    board.sync_timeline_view();
+                }
             } else {
                 board.timeline.on_missing();
+                if board.in_timeline() {
+                    board.sync_timeline_view();
+                }
             }
             return Ok(false);
         }
@@ -5348,24 +5394,46 @@ fn timeline_io(
     reconnect: &mut bool,
     visits: Option<&std::path::Path>,
 ) {
-    for io in board.take_timeline_io() {
+    let actions = board.take_timeline_io();
+    // Keys in one terminal read can ask to refresh and then leave. Store
+    // their visit before a refresh can resolve a different board, otherwise
+    // the old board's seq would mark the new board's posts as already seen.
+    for action in &actions {
+        if let TlAction::SaveVisit(seq) = action {
+            save_visit(board, visits, *seq);
+        }
+    }
+    for io in actions {
         let read = match io {
-            TlAction::Fetch(params) => client
-                .get(&params)
-                .map(|result| board.timeline.on_get(result)),
-            TlAction::Page(params) => client
-                .list(&params)
-                .map(|page| board.timeline.on_page(page)),
-            TlAction::SaveVisit(seq) => {
-                save_visit(board, visits, seq);
-                Ok(())
+            TlAction::Fetch(params) => {
+                if board.timeline.board_id() != Some(params.board_id.as_str()) {
+                    continue;
+                }
+                match client.get(&params) {
+                    Ok(result) => board.timeline.on_get(result),
+                    Err(err) => {
+                        *reconnect |= lost(&err);
+                        board.timeline.on_body_failure(&params.post_id, &err);
+                    }
+                }
+                continue;
             }
+            TlAction::Page(params) => {
+                if board.timeline.board_id() != Some(params.board_id.as_str()) {
+                    continue;
+                }
+                client
+                    .list(&params)
+                    .map(|page| board.timeline.on_page(page))
+            }
+            TlAction::Refresh => poll_timeline(client, board, visits),
+            TlAction::SaveVisit(_) => Ok(()),
             // Handled by the board as keys come.
             TlAction::Focus(_) | TlAction::ShowWorker(_) => Ok(()),
         };
         if let Err(err) = read {
             *reconnect |= lost(&err);
-            board.timeline.on_failure();
+            board.timeline.on_read_failure(&err);
         }
     }
 }
@@ -9980,20 +10048,24 @@ mod tests {
         changes: VecDeque<Result<PageResult, ClientError>>,
         gets: VecDeque<Result<GetResult, ClientError>>,
         listed: Vec<ListParams>,
+        requested_contexts: Vec<ContextParams>,
+        requested_gets: Vec<GetParams>,
     }
 
     impl TimelineReads for FakeReads {
         fn instance(&self) -> &str {
             "inst"
         }
-        fn context(&mut self, _: &ContextParams) -> Result<ContextResult, ClientError> {
+        fn context(&mut self, params: &ContextParams) -> Result<ContextResult, ClientError> {
+            self.requested_contexts.push(params.clone());
             self.contexts.pop_front().expect("no context queued")
         }
         fn list(&mut self, params: &ListParams) -> Result<PageResult, ClientError> {
             self.listed.push(params.clone());
             self.lists.pop_front().expect("no list queued")
         }
-        fn get(&mut self, _: &GetParams) -> Result<GetResult, ClientError> {
+        fn get(&mut self, params: &GetParams) -> Result<GetResult, ClientError> {
+            self.requested_gets.push(params.clone());
             self.gets.pop_front().expect("no get queued")
         }
         fn changes(&mut self, _: &ChangesParams) -> Result<PageResult, ClientError> {
@@ -10057,6 +10129,219 @@ mod tests {
         for ch in text.chars() {
             board.key(Key::Char(ch));
         }
+    }
+
+    fn tl_live_root_listing() -> Vec<Panel> {
+        let mut panels = tl_listing();
+        let mut root = worker(1, 0, "lead", Some("running"), 1);
+        root.parent_pane_id = None;
+        panels.push(root);
+        panels
+    }
+
+    #[test]
+    fn timeline_follows_a_rebound_live_root_and_saves_the_previous_visit() {
+        let now = Instant::now();
+        let next_board = "bd-00000000000000bb";
+        let dir = std::env::temp_dir().join(format!(
+            "noa-visits-rebound-{}-{:?}",
+            std::process::id(),
+            SystemTime::now()
+        ));
+        let path = dir.join("timeline-visits.json");
+        let mut board = tl_board(3);
+        board.update(tl_live_root_listing(), now);
+        board.key(Key::Enter);
+        board.take_timeline_io();
+        let mut ctx = tl_context(vec![tl_worker(2, "s-2", true)], false);
+        ctx.board_id = next_board.to_string();
+        ctx.name = "new board".to_string();
+        ctx.head_seq = Seq(1);
+        let mut fake = FakeReads::default();
+        fake.contexts.push_back(Ok(ctx));
+        fake.lists
+            .push_back(Ok(tl_page(vec![tl_post(1, "new result")], 1)));
+
+        poll_timeline(&mut fake, &mut board, Some(&path)).unwrap();
+
+        assert_eq!(fake.requested_contexts[0].pane_id, Some(WireId(1)));
+        assert_eq!(fake.requested_contexts[0].board_id, None);
+        assert_eq!(fake.listed.len(), 1, "the new board needs its head page");
+        assert_eq!(fake.listed[0].board_id, next_board);
+        assert_eq!(fake.listed[0].before_seq, None);
+        assert_eq!(board.timeline.board_id(), Some(next_board));
+        assert_eq!(board.timeline.since_last_visit(), 1);
+        assert_eq!(board.view, View::Timeline, "the old post must close");
+        assert_eq!(timeline::read_visit(&path, TL_BOARD), 3);
+        assert_eq!(timeline::read_visit(&path, next_board), 0);
+        let all = rendered(&board, 90, 30, now);
+        assert!(all.contains("new result"), "{all}");
+        assert!(!all.contains("post 3"), "{all}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn timeline_keeps_a_pinned_board_and_a_closed_roots_history() {
+        for pinned in [false, true] {
+            let mut board = tl_board(2);
+            if pinned {
+                board.update(tl_live_root_listing(), Instant::now());
+                board.timeline.set_board_id(Some(TL_BOARD.to_string()));
+            }
+            let mut fake = FakeReads::default();
+            fake.contexts.push_back(Ok(tl_context(Vec::new(), true)));
+            poll_timeline(&mut fake, &mut board, None).unwrap();
+            assert_eq!(fake.requested_contexts[0].pane_id, None);
+            assert_eq!(
+                fake.requested_contexts[0].board_id.as_deref(),
+                Some(TL_BOARD)
+            );
+            assert!(rendered(&board, 90, 30, Instant::now()).contains("post 2"));
+        }
+    }
+
+    #[test]
+    fn timeline_keeps_history_when_the_root_closes_after_the_pane_listing() {
+        let mut board = tl_board(2);
+        board.update(tl_live_root_listing(), Instant::now());
+        let mut fake = FakeReads::default();
+        fake.contexts.push_back(Err(ClientError::Rpc {
+            code: TimelineErrorKind::NotFound.code().code(),
+            message: "pane 1 is not open".to_string(),
+        }));
+        fake.contexts.push_back(Ok(tl_context(Vec::new(), true)));
+
+        poll_timeline(&mut fake, &mut board, None).unwrap();
+
+        assert_eq!(fake.requested_contexts.len(), 2);
+        assert_eq!(fake.requested_contexts[0].pane_id, Some(WireId(1)));
+        assert_eq!(
+            fake.requested_contexts[1].board_id.as_deref(),
+            Some(TL_BOARD)
+        );
+        assert_eq!(board.timeline.board_id(), Some(TL_BOARD));
+        assert!(board.timeline.archived());
+        assert!(rendered(&board, 90, 30, Instant::now()).contains("post 2"));
+
+        board.update(tl_listing(), Instant::now());
+        fake.contexts.push_back(Ok(tl_context(Vec::new(), true)));
+        poll_timeline(&mut fake, &mut board, None).unwrap();
+        assert_eq!(
+            fake.requested_contexts[2].board_id.as_deref(),
+            Some(TL_BOARD)
+        );
+    }
+
+    #[test]
+    fn timeline_refresh_then_leave_never_saves_an_old_seq_on_the_new_board() {
+        let next_board = "bd-00000000000000bb";
+        let dir = std::env::temp_dir().join(format!(
+            "noa-visits-refresh-leave-{}-{:?}",
+            std::process::id(),
+            SystemTime::now()
+        ));
+        let path = dir.join("timeline-visits.json");
+        let mut board = tl_board(3);
+        board.update(tl_live_root_listing(), Instant::now());
+        // The run loop handles every key from one read before the queued I/O.
+        board.key(Key::Char('r'));
+        board.key(Key::Char('t'));
+        let mut ctx = tl_context(Vec::new(), false);
+        ctx.board_id = next_board.to_string();
+        let mut fake = FakeReads::default();
+        fake.contexts.push_back(Ok(ctx));
+        fake.lists.push_back(Ok(tl_page(Vec::new(), 0)));
+        let mut reconnect = false;
+
+        timeline_io(&mut fake, &mut board, &mut reconnect, Some(&path));
+
+        assert_eq!(timeline::read_visit(&path, TL_BOARD), 3);
+        assert_eq!(timeline::read_visit(&path, next_board), 0);
+        assert_eq!(board.view, View::List);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn timeline_refresh_discards_reads_queued_for_the_previous_board() {
+        for next_key in [Key::Char('j'), Key::Enter] {
+            let mut board = tl_board(3);
+            board.update(tl_live_root_listing(), Instant::now());
+            let mut page = tl_page(vec![tl_post(3, "old result")], 3);
+            page.has_more = true;
+            board.timeline.on_page(page);
+            // One key read can ask to refresh and then page/open the old post.
+            board.key(Key::Char('r'));
+            board.key(next_key);
+            assert_eq!(board.tl_io.len(), 2);
+            let mut ctx = tl_context(Vec::new(), false);
+            ctx.board_id = "bd-00000000000000bb".to_string();
+            let mut fake = FakeReads::default();
+            fake.contexts.push_back(Ok(ctx));
+            fake.lists
+                .push_back(Ok(tl_page(vec![tl_post(1, "new result")], 1)));
+            let mut reconnect = false;
+
+            timeline_io(&mut fake, &mut board, &mut reconnect, None);
+
+            assert_eq!(fake.listed.len(), 1);
+            assert!(fake.requested_gets.is_empty());
+            let all = rendered(&board, 90, 30, Instant::now());
+            assert!(all.contains("new result"), "{all}");
+            assert!(!all.contains("old result"), "{all}");
+        }
+    }
+
+    #[test]
+    fn timeline_refresh_discovers_a_board_after_its_first_registration() {
+        let mut board = Board::new(Some(1), Some(8));
+        board.update(tl_live_root_listing(), Instant::now());
+        board.open_timeline();
+        let mut fake = FakeReads::default();
+        fake.contexts.push_back(Err(ClientError::Rpc {
+            code: TimelineErrorKind::NotFound.code().code(),
+            message: "pane 1 is on no board".to_string(),
+        }));
+        poll_timeline(&mut fake, &mut board, None).unwrap();
+        assert_eq!(board.timeline.board_id(), None);
+        fake.contexts.push_back(Ok(tl_context(Vec::new(), false)));
+        fake.lists
+            .push_back(Ok(tl_page(vec![tl_post(1, "first result")], 1)));
+
+        board.key(Key::Char('r'));
+        let mut reconnect = false;
+        timeline_io(&mut fake, &mut board, &mut reconnect, None);
+
+        assert!(!reconnect);
+        assert_eq!(fake.requested_contexts.len(), 2);
+        assert_eq!(fake.listed.len(), 1);
+        assert!(rendered(&board, 90, 30, Instant::now()).contains("first result"));
+    }
+
+    #[test]
+    fn timeline_retries_a_failed_post_without_leaving_its_details() {
+        let mut board = tl_board(2);
+        let mut fake = FakeReads::default();
+        fake.gets.push_back(Err(ClientError::Rpc {
+            code: TimelineErrorKind::Busy.code().code(),
+            message: "service busy".to_string(),
+        }));
+        board.key(Key::Enter);
+        let mut reconnect = false;
+        timeline_io(&mut fake, &mut board, &mut reconnect, None);
+        assert!(!reconnect);
+        assert!(rendered(&board, 90, 30, Instant::now()).contains("service busy"));
+        let selected = board.view.clone();
+        fake.gets.push_back(Ok(tl_get(2, "post 2")));
+
+        board.key(Key::Char('r'));
+        timeline_io(&mut fake, &mut board, &mut reconnect, None);
+
+        assert_eq!(fake.requested_gets.len(), 2);
+        assert_eq!(fake.requested_gets[0], fake.requested_gets[1]);
+        assert_eq!(board.view, selected);
+        let all = rendered(&board, 90, 30, Instant::now());
+        assert!(all.contains("what was done"), "{all}");
+        assert!(!all.contains("service busy"), "{all}");
     }
 
     // Review 1: an archive opened by id lists none of the workers of the

@@ -158,7 +158,7 @@ for the turn like `send --enter --wait`. The first line is the spawn's
   instructions cover it, or the directory is a worktree you made with
   `spawn --worktree` (see "Running without the human"); a login prompt is the
   human's. Then send the task yourself:
-  `noa send PANE --enter --wait --settle 10 --stall 300 --timeout 100 - < "$d/fix-tests.txt"`.
+  `noa send PANE --new-run --enter --wait --settle 10 --stall 300 --timeout 100 - < "$d/fix-tests.txt"`.
 - `--settle 10` holds a `finished` until the work above the input box has
   stayed still for 10 s: Claude Code workers have been seen to keep working
   after reporting `finished`.
@@ -167,9 +167,12 @@ for the turn like `send --enter --wait`. The first line is the spawn's
   `"result":{"path","bytes"}` once the worker wrote it during that wait (or,
   with `--after SEQ`, since the send that SEQ came from); without it, the file
   is missing or left from an earlier task.
-- For a later task, `send PANE --enter --wait …`. It subscribes before typing,
+- For a later new task, `send PANE --new-run --enter --wait …`. It subscribes before typing,
   so a fast reply cannot be missed; a separate `send` then `wait` can miss a
   turn that ends in between (except with `--after`, "Several workers").
+  Follow-up instructions and answers stay in the current run: leave out
+  `--new-run`. It cannot be combined with `--answer`, `--raw`, `--queue` or
+  `--replace`.
 - `read` the pane before every later `send`. `send` itself refuses a pane whose
   agent is working (wait for its turn to end; `--queue` only when you mean to
   queue, and then the wait may end with the turn already running) and one
@@ -195,6 +198,21 @@ for the turn like `send --enter --wait`. The first line is the spawn's
   SEQ` on stderr once the text is in. A notification (`attention`) is not
   carried over: for a worker that only notifies, `read` it after a timeout.
 
+## Board timeline reports
+
+On a Noa with board timeline support, `spawn --task` / `--task-file`,
+`send --new-run` and `retry` register a run before delivering its task. The
+worker receives its board and run IDs in a `[noa-timeline …]` header. A plain
+`spawn` followed by `send` registers nothing: use `--new-run` for that first
+task, as in the parallel examples below.
+
+Run registration, agent-state reports and writing `$NOA_RESULT` do not publish
+a timeline post. To have the worker share its result there, include the
+[worker summary example and publication command](reference.md#publishing-a-worker-summary)
+in its task. Keep writing `$NOA_RESULT` for the report you read with `result`.
+After an uncertain post response, retry the same post; do not send the task
+again with `--new-run`.
+
 ## After your context was compacted
 
 Run `noa status` before anything else: one line per worker with its state,
@@ -212,8 +230,8 @@ for the slowest:
 ```sh
 noa spawn --label api --ready 30 -- claude   # "paneId" A; check "ready" and "screen" as above
 noa spawn --label ui --ready 30 -- codex     # B
-noa send A --enter - < "$d/api.txt"          # {"paneId":"A","seq":SA}
-noa send B --enter - < "$d/ui.txt"           # SB
+noa send A --new-run --enter - < "$d/api.txt" # {"paneId":"A","seq":SA}
+noa send B --new-run --enter - < "$d/ui.txt"  # SB
 noa wait --children --after A=SA --after B=SB --settle 10 --stall 300 --timeout 100
 ```
 
@@ -226,8 +244,8 @@ never report (an agent too old, or one that only notifies), run one
 `send --wait` per worker with your tool's background mode instead:
 
 ```sh
-noa send A --enter --wait --timeout 1800 - < "$d/api.txt" > "$d/api.json" &
-noa send B --enter --wait --timeout 1800 - < "$d/ui.txt" > "$d/ui.json" &
+noa send A --new-run --enter --wait --timeout 1800 - < "$d/api.txt" > "$d/api.json" &
+noa send B --new-run --enter --wait --timeout 1800 - < "$d/ui.txt" > "$d/ui.json" &
 wait
 ```
 

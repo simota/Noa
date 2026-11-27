@@ -73,7 +73,8 @@ Every component has `type` and `id`.
 | `progress` | Bindable numeric `value` | Bindable numeric `max` (default 1), bindable string `label` |
 | `table` | Array/binding `rows`, `rowKey`, nonempty `columns` | None |
 | `list` | Array/binding `items`, `itemKey`, `textPointer` | None |
-| `button` | Bindable string `label`, declared `action` ID | Object/binding `payload` (default `{}`) |
+| `button` | Bindable string `label`, declared `action` ID | Object/binding `payload` (default `{}`), `inputs`, boolean `clearInputs` |
+| `text-input` | None | Bindable string `label`, literal `placeholder`, boolean `multiline`, positive `maxLength`, `submit` button ID |
 
 `gap` is `none`, `xs`, `sm`, `md`, or `lg`. `tone` is `default`, `muted`,
 `success`, `warning`, or `error`. Progress requires `0 <= value <= max` and
@@ -112,6 +113,24 @@ implemented. An object containing `source` or `pointer` is treated as a
 binding, so put business payloads with those keys in data and bind them as
 one object.
 
+To let a person type the request, add `text-input` nodes and list them in
+the button's `inputs` (payload property → text-input node ID). The host puts
+each input's current text into the payload as a string. Declare each such
+property in `payloadSchema` with `"type":"string"` and a `maxLength`, keep it
+out of the button's own `payload`, and keep the input's `maxLength` at most
+the schema's. Set the input's `submit` to that button so Enter (Cmd+Enter in
+a `multiline` input) sends it; Enter during an IME conversion never sends.
+`clearInputs: true` clears the inputs after the event is accepted. Typed text
+is not widget data: it is not stored in instance state and survives data
+updates only on screen. Tell the handling agent, in the README, that the
+property is free text to read, never a command or path to run.
+
+```json
+{"type":"text-input","id":"note","label":"Note","maxLength":500,"submit":"send"},
+{"type":"button","id":"send","label":"Send","action":"note",
+ "inputs":{"note":"note"},"clearInputs":true}
+```
+
 Document how the agent handles each action in the package README. The host
 only queues an event; the agent performs authorized work through its normal
 tools and publishes new data. The host never executes a command or fetches
@@ -128,6 +147,7 @@ deduplication and acknowledgment after work is durably recorded; load
 | JSON depth / JSON nodes | 32 / 20,000 |
 | One JSON string | 64 KiB |
 | View nodes / actions | 512 / 64 |
+| Text inputs per button / text-input `maxLength` / placeholder | 16 / 16,384 / 200 characters |
 | Table columns / table or list rows | 32 / 1,000 |
 | Expanded nodes, rows and cells across the view | 8,192 |
 | Displayed text across the view | 512 KiB |

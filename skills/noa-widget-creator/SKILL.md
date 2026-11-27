@@ -33,7 +33,9 @@ skill was installed as a symlink outside the target repository.
    stable IDs for table/list records. Bound strings and arrays in dataSchema.
 4. Define each button as a named intent the agent can handle. Document its
    payload and meaning. Do not place a shell command, script, URL fetch or
-   executable entry point in the manifest.
+   executable entry point in the manifest. When the person must write the
+   request, add a `text-input` and send it through the button's `inputs`
+   (see the reference); its text arrives only as a payload string.
 5. Choose a unique lowercase-hyphen package ID and stable `major.minor.patch`
    version. Match the directory name to the manifest ID.
 

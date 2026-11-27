@@ -137,11 +137,53 @@ set `gap` to `none`, `xs`, `sm`, `md` or `lg`.
 | `progress` | Numeric `value`, optional positive `max` (default 1) and `label` |
 | `table` | Object-array `rows`, `rowKey` pointer, `columns` with `title` and row-relative `pointer` |
 | `list` | Object-array `items`, `itemKey` pointer and row-relative `textPointer` |
-| `button` | `label`, declared `action`, optional object `payload` (default `{}`) |
+| `button` | `label`, declared `action`, optional object `payload` (default `{}`), `inputs` and `clearInputs` |
+| `text-input` | Optional `label`, literal `placeholder`, `multiline`, `maxLength` and `submit` |
 
 Tones are `default`, `muted`, `success`, `warning` and `error` where supported.
 Table/list keys must exist and be unique in the supplied rows. Keep row IDs
 stable when updating the same logical items.
+
+### Text inputs
+
+A `text-input` lets a person type free text that a button sends to the agent
+inside its event payload. It has no value in the data: the text is never
+written into instance data or state, and the host never executes or
+evaluates it.
+
+```json
+{"type": "text-input", "id": "subject", "label": "件名",
+ "placeholder": "例: 失敗したテストの原因を調べて", "maxLength": 120, "submit": "send"},
+{"type": "button", "id": "send", "label": "送信", "action": "request",
+ "payload": {"kind": "request"}, "inputs": {"subject": "subject"}, "clearInputs": true}
+```
+
+| Field | Contract |
+| --- | --- |
+| `label` | Optional bindable string shown above the input |
+| `placeholder` | Optional literal string, at most 200 characters |
+| `multiline` | Boolean, default `false`; a multi-line input grows with its text |
+| `maxLength` | Positive integer, in characters |
+| `submit` | ID of a button in the view whose `inputs` list this input |
+
+A button's `inputs` maps payload property names to text-input node IDs; its
+`clearInputs` (default `false`) clears those inputs once the event is
+accepted. On a click the host resolves `payload` as before, then inserts each
+input's current text, as a string, under its property. `widget validate`
+requires every target to be a text-input, the action's `payloadSchema` to
+declare each property with type `string`, the property to be absent from the
+button's payload (a literal object, or the schema of a bound one), and an
+input's `maxLength` not to exceed that property's `maxLength`. Input
+properties may be listed in the action's `required`: the host supplies them.
+
+Enter in a single-line input presses its `submit` button. In a multi-line
+input Enter inserts a line break and Cmd+Enter (Ctrl+Enter off macOS) submits.
+Neither submits while an input method composition, such as a Japanese
+conversion, is in progress. Before sending, the host checks the input's
+`maxLength` and validates the complete payload against the action schema and
+the 16 KiB limit; a failure sends nothing and the footer says why. Typed text
+is kept across live data updates. The service validates the final payload as
+for any other event.
 
 ### Actions
 
@@ -268,6 +310,7 @@ describe this release as a sandbox for untrusted controller clients.
 | Resource | Limit |
 | --- | ---: |
 | Manifest / current data / action payload | 64 / 128 / 16 KiB |
+| Text inputs per button / text-input `maxLength` / placeholder | 16 / 16,384 characters / 200 characters |
 | Schema/view depth / view nodes | 32 / 512 |
 | Definitions per worktree | 128 |
 | Rows per table or list | 1,000 |

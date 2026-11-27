@@ -1,8 +1,10 @@
 //! Canonical instance data only changes on a validated parent snapshot.
 //! Button clicks are requests, not optimistic data mutations.
 
-use noa_gpui_core::widgets::{Button, ButtonClicked, Container, Label, ScrollView, Tag};
-use noa_gpui_core::{Appearance, Message, Role, Style, Theme, UiTree, WidgetId};
+use noa_gpui_core::widgets::{
+    Button, ButtonClicked, Container, Label, ScrollView, Tag, TextSubmitted,
+};
+use noa_gpui_core::{Appearance, Event, Key, Message, Role, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::Screen;
 use noa_gpui_text::TextStore;
 use noa_ipc::widget::{HostMessage, HostRequest};
@@ -27,6 +29,9 @@ struct Pending {
     request_id: String,
     request: HostRequest,
     uncertain: bool,
+    /// Inputs to clear once the service accepts the event: (node id, the
+    /// text that was sent). Text typed since then is kept.
+    clear: Vec<(String, String)>,
 }
 
 pub struct WidgetScreen {
@@ -39,6 +44,7 @@ pub struct WidgetScreen {
     manifest: Manifest,
     data: Value,
     actions: Vec<(WidgetId, Action)>,
+    inputs: render::Inputs,
     preview_events: Vec<Action>,
     instance: Option<Instance>,
     bridge: Option<Bridge>,
@@ -134,7 +140,8 @@ impl WidgetScreen {
             Container::new(style::wide(style::column(16.0))).padding(20.0),
         );
         let mut actions = Vec::new();
-        render::insert(&mut tree, body, &view, &mut actions);
+        let mut inputs = render::Inputs::default();
+        render::insert(&mut tree, body, &view, &mut actions, &mut inputs);
         let footer = tree.insert(
             Some(root),
             Container::new(style::wide(style::column(8.0)))
@@ -162,6 +169,7 @@ impl WidgetScreen {
             manifest,
             data,
             actions,
+            inputs,
             preview_events: Vec::new(),
             instance,
             bridge: None,
@@ -246,11 +254,40 @@ impl WidgetScreen {
             .map_err(|error| error.to_string())?;
         let view = render::resolve(&self.manifest.view, &data)?;
         if data != self.data {
+            // Typed text is not instance data: carry it over by node id.
+            let typed: Vec<_> = self
+                .inputs
+                .fields
+                .iter()
+                .map(|field| (field.id.clone(), field.text(&self.tree)))
+                .collect();
+            let focused = self.tree.focused().and_then(|focus| {
+                self.inputs
+                    .fields
+                    .iter()
+                    .find(|field| field.widget == focus)
+                    .map(|field| field.id.clone())
+            });
             for child in self.tree.children(self.body).to_vec() {
                 self.tree.remove(child, text);
             }
             self.actions.clear();
-            render::insert(&mut self.tree, self.body, &view, &mut self.actions);
+            self.inputs = render::Inputs::default();
+            render::insert(
+                &mut self.tree,
+                self.body,
+                &view,
+                &mut self.actions,
+                &mut self.inputs,
+            );
+            for field in self.inputs.fields.clone() {
+                if let Some((_, typed)) = typed.iter().find(|(id, _)| *id == field.id) {
+                    field.set_text(&mut self.tree, typed.clone());
+                }
+                if focused.as_ref() == Some(&field.id) {
+                    self.tree.set_focus(Some(field.widget));
+                }
+            }
         }
         self.data = data;
         let instance = self.instance.as_mut().expect("checked above");
@@ -307,9 +344,12 @@ impl WidgetScreen {
                     self.update_buttons();
                     return;
                 }
-                instance.pending = None;
+                let pending = instance.pending.take().expect("matched above");
                 if let Some(button) = self.retry.take() {
                     self.tree.remove(button, text);
+                }
+                if ok {
+                    self.clear_inputs(&pending.clear);
                 }
                 self.notice(if ok {
                     "操作を担当エージェントに送信しました。".into()
@@ -336,6 +376,77 @@ impl WidgetScreen {
     }
 
     fn activate(&mut self, action: Action) {
+        self.activate_with(action, Vec::new());
+    }
+
+    /// Send a button's event with its inputs' current text inserted into the
+    /// payload. The text is only a payload string; nothing evaluates it.
+    fn submit_form(&mut self, button: &str) {
+        let Some(form) = self.inputs.buttons.iter().find(|form| form.id == button) else {
+            return;
+        };
+        let Some((_, action)) = self.actions.iter().find(|(id, _)| *id == form.widget) else {
+            return;
+        };
+        if !self.tree.is_enabled(form.widget) {
+            return;
+        }
+        let mut action = action.clone();
+        let payload = action
+            .payload
+            .as_object_mut()
+            .expect("validated button payloads are objects");
+        let mut sent = Vec::new();
+        for (property, input) in &form.inputs {
+            let field = self
+                .inputs
+                .fields
+                .iter()
+                .find(|field| field.id == *input)
+                .expect("validated inputs name text-input nodes");
+            let value = field.text(&self.tree);
+            let count = value.chars().count();
+            if let Some(max) = field.max_length
+                && count > max
+            {
+                self.notice(format!(
+                    "入力 {input} は {max} 文字以内にしてください（現在 {count} 文字）。送信していません。"
+                ));
+                return;
+            }
+            payload.insert(property.clone(), Value::String(value.clone()));
+            sent.push((input.clone(), value));
+        }
+        let clear = if form.clear { sent } else { Vec::new() };
+        self.activate_with(action, clear);
+    }
+
+    fn clear_inputs(&mut self, sent: &[(String, String)]) {
+        for (input, value) in sent {
+            if let Some(field) = self.inputs.fields.iter().find(|field| field.id == *input)
+                && field.text(&self.tree) == *value
+            {
+                field.clone().set_text(&mut self.tree, String::new());
+            }
+        }
+    }
+
+    /// The submit button of the focused input, unless an IME composition is
+    /// in progress: Enter then confirms the conversion instead of sending.
+    fn focused_submit(&self, multiline: bool) -> Option<String> {
+        let focus = self.tree.focused()?;
+        let field = self
+            .inputs
+            .fields
+            .iter()
+            .find(|field| field.widget == focus && field.multiline == multiline)?;
+        if field.composing(&self.tree) {
+            return None;
+        }
+        field.submit.clone()
+    }
+
+    fn activate_with(&mut self, action: Action, clear: Vec<(String, String)>) {
         if let Err(error) = self.manifest.validate_action(&action.id, &action.payload) {
             self.notice(format!("操作の入力が不正です: {error}"));
             return;
@@ -350,6 +461,7 @@ impl WidgetScreen {
                 "プレビューイベント: {} {payload}（実行していません）",
                 action.id
             ));
+            self.clear_inputs(&clear);
             return;
         };
         if !instance.valid || instance.pending.is_some() || self.close {
@@ -374,6 +486,7 @@ impl WidgetScreen {
                     request_id,
                     request,
                     uncertain: false,
+                    clear,
                 });
                 self.notice("操作を送信しています…");
             }
@@ -437,10 +550,49 @@ impl Screen for WidgetScreen {
             return;
         }
         if message.downcast_ref::<ButtonClicked>().is_some()
+            && let Some(form) = self
+                .inputs
+                .buttons
+                .iter()
+                .find(|form| form.widget == message.source)
+        {
+            self.submit_form(&form.id.clone());
+            return;
+        }
+        if message.downcast_ref::<ButtonClicked>().is_some()
             && let Some((_, action)) = self.actions.iter().find(|(id, _)| *id == message.source)
         {
             self.activate(action.clone());
         }
+        // A single-line field emits TextSubmitted on Return only when no IME
+        // composition is in progress.
+        if message.downcast_ref::<TextSubmitted>().is_some()
+            && self.tree.focused() == Some(message.source)
+            && let Some(button) = self.focused_submit(false)
+        {
+            self.submit_form(&button);
+        }
+    }
+
+    fn dispatch(&mut self, event: Event, text: &mut TextStore) {
+        // A multi-line input inserts a line break on Return, Cmd+Return too,
+        // so the submit shortcut is taken before the event reaches it.
+        if let Event::KeyDown {
+            key: Key::Enter,
+            modifiers,
+        } = &event
+            && modifiers.command
+            && let Some(button) = self.focused_submit(true)
+        {
+            self.submit_form(&button);
+            self.after_input();
+            return;
+        }
+        self.tree.dispatch(event, text);
+        for message in self.tree.take_messages() {
+            self.handle(message, text);
+        }
+        self.after_input();
     }
 
     fn woken(&mut self, text: &mut TextStore) {
@@ -460,6 +612,9 @@ impl Screen for WidgetScreen {
         }
     }
 }
+
+#[cfg(test)]
+mod text_input_tests;
 
 #[cfg(test)]
 mod tests {

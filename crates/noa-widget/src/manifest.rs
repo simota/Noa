@@ -14,6 +14,8 @@ use crate::{
 const MAX_JSON_NODES: usize = 20_000;
 const MAX_STRING_BYTES: usize = 64 * 1024;
 const MAX_COLUMNS: usize = 32;
+/// A button sends at most this many text inputs with its event.
+const MAX_BUTTON_INPUTS: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -94,6 +96,7 @@ impl Manifest {
             &mut 0,
             0,
         )?;
+        validate_text_inputs(&self.view, &self.data_schema, &self.actions)?;
         self.validate_data(&self.initial_data)
     }
 
@@ -118,6 +121,28 @@ impl Manifest {
             .ok_or_else(|| WidgetError::new(format!("unknown action {action_id:?}")))?;
         check_json(payload, MAX_ACTION_BYTES, "action payload")?;
         validate_value(&action.payload_schema, payload, "action payload", 0)
+    }
+
+    /// The literal or bound part of a payload whose text-input properties the
+    /// host fills in at click time: those properties may be absent here, and
+    /// the complete payload is validated again when the event is submitted.
+    fn validate_partial_action(
+        &self,
+        action_id: &str,
+        payload: &Value,
+        inputs: &Map<String, Value>,
+    ) -> Result<(), WidgetError> {
+        let action = self
+            .actions
+            .iter()
+            .find(|a| a.id == action_id)
+            .ok_or_else(|| WidgetError::new(format!("unknown action {action_id:?}")))?;
+        let mut schema = action.payload_schema.clone();
+        if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+            required.retain(|key| key.as_str().is_none_or(|key| !inputs.contains_key(key)));
+        }
+        check_json(payload, MAX_ACTION_BYTES, "action payload")?;
+        validate_value(&schema, payload, "action payload", 0)
     }
 
     /// Canonical object key ordering makes whitespace and key ordering
@@ -606,7 +631,8 @@ fn validate_node(
         "progress" => &["value", "max", "label"],
         "table" => &["rows", "rowKey", "columns"],
         "list" => &["items", "itemKey", "textPointer"],
-        "button" => &["label", "action", "payload"],
+        "button" => &["label", "action", "payload", "inputs", "clearInputs"],
+        "text-input" => &["label", "placeholder", "multiline", "maxLength", "submit"],
         _ => return fail(format!("unsupported component {kind:?}")),
     };
     let allowed: Vec<_> = ["type", "id"]
@@ -721,8 +747,181 @@ fn validate_node(
             if let Some(payload) = node.get("payload") {
                 expression(payload, schema, &["object"], "button payload")?;
             }
+            validate_button_inputs(node, id)?;
         }
+        "text-input" => validate_text_input_fields(node, schema, id)?,
         _ => unreachable!(),
+    }
+    Ok(())
+}
+
+/// Field shapes of a `text-input` node. References to other nodes are checked
+/// by [`validate_text_inputs`] once every node ID is known.
+fn validate_text_input_fields(
+    node: &Map<String, Value>,
+    schema: &Value,
+    id: &str,
+) -> Result<(), WidgetError> {
+    if let Some(label) = node.get("label") {
+        expression(label, schema, &["string"], "text-input label")?;
+    }
+    if let Some(placeholder) = node.get("placeholder") {
+        bounded_text(
+            string(placeholder, &format!("text-input {id} placeholder"))?,
+            200,
+            &format!("text-input {id} placeholder"),
+            true,
+        )?;
+    }
+    if node.get("multiline").is_some_and(|v| !v.is_boolean()) {
+        return fail(format!("text-input {id} multiline must be a boolean"));
+    }
+    if let Some(max) = node.get("maxLength")
+        && !max
+            .as_u64()
+            .is_some_and(|n| (1..=MAX_ACTION_BYTES as u64).contains(&n))
+    {
+        return fail(format!(
+            "text-input {id} maxLength must be an integer in 1..={MAX_ACTION_BYTES}"
+        ));
+    }
+    if let Some(submit) = node.get("submit") {
+        check_id(string(submit, "text-input submit")?)?;
+    }
+    Ok(())
+}
+
+fn validate_button_inputs(node: &Map<String, Value>, id: &str) -> Result<(), WidgetError> {
+    if node.get("clearInputs").is_some_and(|v| !v.is_boolean()) {
+        return fail(format!("button {id} clearInputs must be a boolean"));
+    }
+    let Some(inputs) = node.get("inputs") else {
+        return Ok(());
+    };
+    let inputs = object(inputs, &format!("button {id} inputs"))?;
+    if inputs.is_empty() || inputs.len() > MAX_BUTTON_INPUTS {
+        return fail(format!(
+            "button {id} inputs must map 1..={MAX_BUTTON_INPUTS} payload properties"
+        ));
+    }
+    for (property, input) in inputs {
+        if property.is_empty() {
+            return fail(format!("button {id} inputs has an empty property name"));
+        }
+        check_id(string(input, &format!("button {id} inputs.{property}"))?)?;
+    }
+    Ok(())
+}
+
+fn collect_nodes<'a>(node: &'a Value, nodes: &mut Vec<(&'a str, &'a Value)>) {
+    if let Some(id) = node["id"].as_str() {
+        nodes.push((id, node));
+    }
+    for child in node["children"].as_array().into_iter().flatten() {
+        collect_nodes(child, nodes);
+    }
+}
+
+/// Cross-node rules for text inputs: a button's `inputs` name text-input
+/// nodes and string properties its action declares, and a `submit` names a
+/// button that sends the input. Input text is only ever a payload string.
+fn validate_text_inputs(
+    view: &Value,
+    data_schema: &Value,
+    actions: &[Action],
+) -> Result<(), WidgetError> {
+    let mut nodes = Vec::new();
+    collect_nodes(view, &mut nodes);
+    let find = |id: &str| nodes.iter().find(|(node, _)| *node == id).map(|(_, n)| *n);
+    // Buttons first: a wrong `inputs` entry is reported before the
+    // `submit` that it consequently fails to satisfy.
+    let buttons = nodes.iter().filter(|(_, node)| node["type"] == "button");
+    let others = nodes.iter().filter(|(_, node)| node["type"] != "button");
+    for (id, node) in buttons.chain(others) {
+        match node["type"].as_str() {
+            Some("button") => {
+                let Some(inputs) = node.get("inputs").and_then(Value::as_object) else {
+                    continue;
+                };
+                let action_id = node["action"].as_str().unwrap_or_default();
+                let action = actions
+                    .iter()
+                    .find(|a| a.id == action_id)
+                    .ok_or_else(|| WidgetError::new(format!("unknown action {action_id:?}")))?;
+                // A bound payload's schema shows which properties it may carry.
+                let payload_properties = match node.get("payload") {
+                    None => None,
+                    Some(payload) => match binding_pointer(payload)? {
+                        Some(pointer) => schema_pointer(data_schema, pointer)?
+                            .get("properties")
+                            .and_then(Value::as_object),
+                        None => payload.as_object(),
+                    },
+                };
+                for (property, input_id) in inputs {
+                    let input_id = input_id.as_str().unwrap_or_default();
+                    let input = find(input_id).ok_or_else(|| {
+                        WidgetError::new(format!(
+                            "button {id} inputs.{property} refers to unknown node {input_id:?}"
+                        ))
+                    })?;
+                    if input["type"] != "text-input" {
+                        return fail(format!(
+                            "button {id} inputs.{property} refers to {input_id:?}, which is not a text-input"
+                        ));
+                    }
+                    let target = action
+                        .payload_schema
+                        .get("properties")
+                        .and_then(|p| p.get(property))
+                        .filter(|p| p["type"] == "string")
+                        .ok_or_else(|| {
+                            WidgetError::new(format!(
+                                "button {id} inputs.{property}: action {action_id} payloadSchema must declare {property:?} with type string"
+                            ))
+                        })?;
+                    if payload_properties.is_some_and(|p| p.contains_key(property)) {
+                        return fail(format!(
+                            "button {id} inputs.{property} is also set by the button payload"
+                        ));
+                    }
+                    if let (Some(own), Some(limit)) = (
+                        input.get("maxLength").and_then(Value::as_u64),
+                        target.get("maxLength").and_then(Value::as_u64),
+                    ) && own > limit
+                    {
+                        return fail(format!(
+                            "text-input {input_id} maxLength {own} exceeds action {action_id} {property:?} maxLength {limit}"
+                        ));
+                    }
+                }
+            }
+            Some("text-input") => {
+                let Some(submit) = node.get("submit").and_then(Value::as_str) else {
+                    continue;
+                };
+                let button = find(submit).ok_or_else(|| {
+                    WidgetError::new(format!(
+                        "text-input {id} submit refers to unknown node {submit:?}"
+                    ))
+                })?;
+                if button["type"] != "button" {
+                    return fail(format!(
+                        "text-input {id} submit refers to {submit:?}, which is not a button"
+                    ));
+                }
+                let sends = button
+                    .get("inputs")
+                    .and_then(Value::as_object)
+                    .is_some_and(|inputs| inputs.values().any(|v| v == id));
+                if !sends {
+                    return fail(format!(
+                        "text-input {id} submit button {submit:?} does not list {id:?} in its inputs"
+                    ));
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -876,7 +1075,19 @@ fn validate_rendered(
         "button" => {
             resolved(&node["label"], data, &["string"], "button label")?;
             let payload = resolve(node.get("payload").unwrap_or(&json!({})), data)?;
-            manifest.validate_action(string(&node["action"], "button action")?, &payload)?;
+            let action = string(&node["action"], "button action")?;
+            match node.get("inputs").and_then(Value::as_object) {
+                Some(inputs) => manifest.validate_partial_action(action, &payload, inputs)?,
+                None => manifest.validate_action(action, &payload)?,
+            }
+        }
+        "text-input" => {
+            if let Some(label) = node.get("label") {
+                resolved(label, data, &["string"], "text-input label")?;
+            }
+            if let Some(placeholder) = node.get("placeholder") {
+                remaining.value(placeholder)?;
+            }
         }
         _ => return fail(format!("unsupported component {kind:?}")),
     }
@@ -1049,9 +1260,17 @@ pub fn schema_document() -> Value {
             &["list"],
         ),
         node(
-            json!({"label":text,"action":{"$ref":"#/$defs/id"},"payload":{"type":"object"}}),
+            json!({"label":text,"action":{"$ref":"#/$defs/id"},"payload":{"type":"object"},
+                "inputs":{"type":"object","minProperties":1,"maxProperties":MAX_BUTTON_INPUTS,"propertyNames":{"minLength":1},"additionalProperties":{"$ref":"#/$defs/id"}},
+                "clearInputs":{"type":"boolean"}}),
             &["label", "action"],
             &["button"],
+        ),
+        node(
+            json!({"label":text,"placeholder":{"type":"string","maxLength":200},"multiline":{"type":"boolean"},
+                "maxLength":{"type":"integer","minimum":1,"maximum":MAX_ACTION_BYTES},"submit":{"$ref":"#/$defs/id"}}),
+            &[],
+            &["text-input"],
         ),
     ];
     json!({

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.20] - 2026-11-27
+
+Repository-defined widgets that agents open and update from a JSON
+manifest, and guided project setup in Scaffold.
+
+### Added
+
+- Repository widgets: agents share declarative
+  `.noa-widgets/<id>/widget.json` packages, render native views with the
+  bundled `widget-host`, and use `Noa +ctl widget` to open instances, replace
+  schema-validated data with revision checks, and consume durable button
+  events. `Repository Widgets…` opens the current worktree's catalog; schema,
+  validation and fixture/PNG previews work without the control server. A
+  manifest cannot run a shell, JavaScript, HTML, a repository binary or an
+  arbitrary network request. The `noa-widgets` and `noa-widget-creator`
+  repository skills cover using and authoring packages. See
+  `docs/REPOSITORY_WIDGETS.md`. (#278)
+- Scaffold guides setting up a project before it has a Noa registry: it shows
+  which development instructions, rules and verification entry points are
+  present, the next step for anything missing, and registers assets or hands
+  a setup task to Tasks. It reads files only; it does not install tools, run
+  project commands or start an agent. See `docs/SCAFFOLD.md`. (#279)
+
 ## [0.9.19] - 2026-11-27
 
 A Linear-style planning workspace in Tasks, a scaffold widget that checks

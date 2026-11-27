@@ -1345,6 +1345,77 @@ fn r4_well_formed_json_that_is_not_a_valid_request_is_invalid_request() {
     let _ = sock.close(None);
 }
 
+#[test]
+fn positional_request_envelope_cannot_complete_hello() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+
+    let request = json!([
+        "2.0",
+        1,
+        "noa.hello",
+        { "protocolVersion": PROTOCOL_VERSION, "token": "tok", "scopes": ["read"] }
+    ]);
+    sock.send(Message::Text(request.to_string())).unwrap();
+    let response = recv_json(&mut sock);
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(response["id"], Value::Null);
+
+    send_rpc(&mut sock, 2, "noa.listPanels", json!({}));
+    assert_eq!(recv_json(&mut sock)["error"]["code"], -32001);
+
+    let response = hello(&mut sock, 3, PROTOCOL_VERSION, Some("tok"), &["read"]);
+    assert_eq!(response["result"]["grantedScopes"], json!(["read"]));
+    let _ = sock.close(None);
+}
+
+#[test]
+fn positional_request_envelopes_cannot_dispatch_side_effects() {
+    let backend = Arc::new(MockBackend::default());
+    let scopes = ScopeSet::parse_list("read,input,control");
+    let handle = start_test_server(backend.clone(), "tok", scopes);
+    let mut sock = connect_plain(handle.port());
+    hello(
+        &mut sock,
+        1,
+        PROTOCOL_VERSION,
+        Some("tok"),
+        &["read", "input", "control"],
+    );
+
+    for (method, params) in [
+        (
+            "noa.sendText",
+            json!({ "paneId": "1", "text": "must not be sent" }),
+        ),
+        ("noa.focusPane", json!({ "paneId": "1" })),
+        ("noa.closePane", json!({ "paneId": "1" })),
+    ] {
+        let request = json!(["2.0", 2, method, params]);
+        sock.send(Message::Text(request.to_string())).unwrap();
+        let response = recv_json(&mut sock);
+        assert_eq!(response["error"]["code"], -32600, "{method}: {response}");
+        assert_eq!(response["id"], Value::Null);
+    }
+    assert!(backend.sent_text.lock().unwrap().is_empty());
+    assert!(backend.focused.lock().unwrap().is_empty());
+    assert!(backend.closed_panes.lock().unwrap().is_empty());
+
+    send_rpc(
+        &mut sock,
+        3,
+        "noa.sendText",
+        json!({ "paneId": "1", "text": "valid request" }),
+    );
+    assert_eq!(recv_json(&mut sock)["result"]["ok"], true);
+    assert_eq!(
+        *backend.sent_text.lock().unwrap(),
+        vec![(1, "valid request".to_string(), true)]
+    );
+    let _ = sock.close(None);
+}
+
 // ---- header-based auth (pre-authed via Authorization: Bearer) ----
 
 #[test]

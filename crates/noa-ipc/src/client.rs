@@ -19,8 +19,8 @@ use tungstenite::{Message, WebSocket};
 use crate::attach::{ATTACH_BINARY_CHUNK_BYTES, MAX_ATTACH_SEED_BYTES};
 use crate::auth::ScopeSet;
 use crate::protocol::{
-    AttachResult, EventKind, GetTextResult, HelloResult, ListPanelsResult, OkResult, PaneIdResult,
-    Panel, PanelField, SpawnConfig, SpawnParams, SplitDirection, SplitPlacement, TextSource,
+    AttachResult, EventKind, GetTextResult, HelloResult, ListPanelsResult, PaneIdResult, Panel,
+    PanelField, SpawnConfig, SpawnParams, SplitDirection, SplitPlacement, TextSource,
     UpdateSubscriptionParams, WireId,
 };
 use crate::server::ATTACH_HANDSHAKE_CLOSE_REASON;
@@ -104,6 +104,8 @@ fn board_tab_params(
 
 /// A connected JSON-RPC control client. Reconnect/backoff belongs to
 /// `noa-app`; this type represents one live transport attempt.
+/// Requests that exceed the server's frame limit are rejected locally with
+/// [`ClientError::InvalidInput`], leaving the connection usable.
 pub struct Client {
     socket: Socket,
     next_id: u64,
@@ -220,11 +222,10 @@ impl Client {
     }
 
     pub fn focus_pane(&mut self, pane: u64) -> Result<(), ClientError> {
-        let _: OkResult = self.request(
+        self.request_ok(
             "noa.focusPane",
             serde_json::json!({ "paneId": WireId(pane) }),
-        )?;
-        Ok(())
+        )
     }
 
     pub fn new_tab(&mut self, window: Option<u64>) -> Result<u64, ClientError> {
@@ -445,8 +446,7 @@ impl Client {
         if options.refuse_shell {
             params["refuseShell"] = Value::Bool(true);
         }
-        let _: OkResult = self.request("noa.sendText", params)?;
-        Ok(())
+        self.request_ok("noa.sendText", params)
     }
 
     /// `noa.subscribe`; `panes: None` subscribes to every pane. Returns the
@@ -496,13 +496,7 @@ impl Client {
         &mut self,
         params: &UpdateSubscriptionParams,
     ) -> Result<(), ClientError> {
-        let result: Value = self.request("noa.updateSubscription", params)?;
-        match result.as_object().and_then(|object| object.get("ok")) {
-            Some(Value::Bool(true)) => Ok(()),
-            _ => Err(ClientError::Protocol(
-                "noa.updateSubscription did not answer an object with ok:true".to_string(),
-            )),
-        }
+        self.request_ok("noa.updateSubscription", params)
     }
 
     /// The next notification, waiting up to `timeout`. `Ok(None)` when none
@@ -599,9 +593,7 @@ impl Client {
     }
 
     pub fn detach(&mut self, pane: u64) -> Result<(), ClientError> {
-        let _: OkResult =
-            self.request("noa.detach", serde_json::json!({ "paneId": WireId(pane) }))?;
-        Ok(())
+        self.request_ok("noa.detach", serde_json::json!({ "paneId": WireId(pane) }))
     }
 
     pub fn resize_pane(&mut self, pane: u64, cols: u16, rows: u16) -> Result<(), ClientError> {
@@ -610,23 +602,31 @@ impl Client {
                 "remote pane dimensions must be non-zero".to_string(),
             ));
         }
-        let _: OkResult = self.request(
+        self.request_ok(
             "noa.resizePane",
             serde_json::json!({
                 "paneId": WireId(pane),
                 "cols": cols,
                 "rows": rows,
             }),
-        )?;
-        Ok(())
+        )
     }
 
     pub fn close_pane(&mut self, pane: u64) -> Result<(), ClientError> {
-        let _: OkResult = self.request(
+        self.request_ok(
             "noa.closePane",
             serde_json::json!({ "paneId": WireId(pane) }),
-        )?;
-        Ok(())
+        )
+    }
+
+    fn request_ok(&mut self, method: &str, params: impl Serialize) -> Result<(), ClientError> {
+        let result: Value = self.request(method, params)?;
+        match result.as_object().and_then(|object| object.get("ok")) {
+            Some(Value::Bool(true)) => Ok(()),
+            _ => Err(ClientError::Protocol(format!(
+                "{method} did not answer an object with ok:true"
+            ))),
+        }
     }
 
     fn request<T: DeserializeOwned>(
@@ -644,15 +644,26 @@ impl Client {
         timeout: Duration,
     ) -> Result<T, ClientError> {
         let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": method,
             "params": params,
-        });
+        })
+        .to_string();
+        // Each request is one unfragmented text frame. Check its encoded
+        // size, including JSON escaping and the envelope, before sending:
+        // a 1009 close would also interrupt subscriptions on this socket.
+        if request.len() > crate::server::MAX_WS_FRAME_SIZE {
+            return Err(ClientError::InvalidInput(format!(
+                "{method} request exceeds the {} byte frame limit ({} bytes)",
+                crate::server::MAX_WS_FRAME_SIZE,
+                request.len()
+            )));
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
         self.socket
-            .send(Message::Text(request.to_string()))
+            .send(Message::Text(request))
             .map_err(ClientError::transport)?;
 
         let deadline = Instant::now() + timeout;
@@ -1344,6 +1355,7 @@ impl ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::OkResult;
     use std::net::TcpListener;
     use std::thread;
 
@@ -1520,6 +1532,155 @@ mod tests {
             },
         });
         assert!(request.to_string().len() <= crate::server::MAX_WS_FRAME_SIZE);
+    }
+
+    fn client_with_replies(replies: Vec<Value>) -> (Client, thread::JoinHandle<Vec<Value>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let config = WebSocketConfig {
+                max_frame_size: Some(crate::server::MAX_WS_FRAME_SIZE),
+                ..WebSocketConfig::default()
+            };
+            let mut socket = tungstenite::accept_with_config(stream, Some(config)).unwrap();
+            let hello = serde_json::json!({
+                "protocolVersion": crate::protocol::PROTOCOL_VERSION,
+                "grantedScopes": [],
+                "serverVersion": "t",
+            });
+            let mut requests = Vec::new();
+            for result in std::iter::once(hello).chain(replies) {
+                let Message::Text(text) = socket.read().unwrap() else {
+                    panic!("text request expected");
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "id": request["id"], "result": result,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        let client = Client::connect_with_timeouts(
+            &url,
+            "token",
+            ScopeSet::empty(),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        (client, server)
+    }
+
+    #[test]
+    fn oversized_requests_are_not_sent_and_leave_the_connection_usable() {
+        let (mut client, server) = client_with_replies(vec![
+            serde_json::json!({ "ok": true }),
+            serde_json::json!({ "panels": [] }),
+        ]);
+        let overhead = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "noa.sendText",
+            "params": { "paneId": "7", "text": "", "paste": false },
+        })
+        .to_string()
+        .len();
+        let at_limit = "x".repeat(crate::server::MAX_WS_FRAME_SIZE - overhead);
+        client.send_text(7, &at_limit, false).unwrap();
+
+        // The whole encoded frame is bounded, including its envelope,
+        // escaping and multibyte text, rather than just the input length.
+        for oversized in [
+            format!("{at_limit}x"),
+            "\n".repeat(crate::server::MAX_WS_FRAME_SIZE / 2),
+            "あ".repeat(crate::server::MAX_WS_FRAME_SIZE / 3 + 1),
+        ] {
+            let result = client.send_text(7, &oversized, false);
+            assert!(matches!(result, Err(ClientError::InvalidInput(_))), "{result:?}");
+        }
+        let spawn = client.spawn_tab(
+            None,
+            &SpawnParams {
+                config: Some(SpawnConfig {
+                    env: [(
+                        "PROMPT".to_string(),
+                        "x".repeat(crate::server::MAX_WS_FRAME_SIZE),
+                    )]
+                    .into(),
+                    ..SpawnConfig::default()
+                }),
+                ..SpawnParams::default()
+            },
+        );
+        assert!(matches!(spawn, Err(ClientError::InvalidInput(_))), "{spawn:?}");
+        assert!(client.list_panels().unwrap().is_empty());
+        drop(client);
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1]["method"], "noa.sendText");
+        assert_eq!(requests[1]["params"]["text"], at_limit);
+        assert_eq!(requests[2]["method"], "noa.listPanels");
+    }
+
+    #[test]
+    fn mutation_methods_require_an_object_with_ok_true() {
+        type Operation = fn(&mut Client) -> Result<(), ClientError>;
+        let operations: [(&str, Operation); 6] = [
+            ("noa.focusPane", |client| client.focus_pane(7)),
+            ("noa.sendText", |client| client.send_text(7, "hello", false)),
+            ("noa.detach", |client| client.detach(7)),
+            ("noa.resizePane", |client| client.resize_pane(7, 80, 24)),
+            ("noa.closePane", |client| client.close_pane(7)),
+            ("noa.updateSubscription", |client| {
+                client.update_subscription(&UpdateSubscriptionParams {
+                    subscription_id: WireId(1),
+                    events: None,
+                    pane_ids: None,
+                    fields: None,
+                })
+            }),
+        ];
+        let rejected = [
+            serde_json::json!({ "ok": false }),
+            serde_json::json!([true]),
+            serde_json::json!({}),
+            serde_json::json!({ "ok": "true" }),
+        ];
+        let replies = rejected
+            .iter()
+            .cloned()
+            .chain(std::iter::once(serde_json::json!({ "ok": true })))
+            .flat_map(|reply| std::iter::repeat_n(reply, operations.len()))
+            .collect();
+        let (mut client, server) = client_with_replies(replies);
+        for response in rejected {
+            for (method, operation) in operations {
+                let result = operation(&mut client);
+                assert!(
+                    matches!(&result, Err(ClientError::Protocol(message)) if message.contains(method)),
+                    "{method} accepted {response}: {result:?}"
+                );
+            }
+        }
+        for (_, operation) in operations {
+            operation(&mut client).unwrap();
+        }
+        drop(client);
+        let requests = server.join().unwrap();
+        for (index, request) in requests.iter().skip(1).enumerate() {
+            assert_eq!(request["method"], operations[index % operations.len()].0);
+        }
     }
 
     #[test]

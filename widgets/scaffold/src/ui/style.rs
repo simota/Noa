@@ -14,7 +14,7 @@ pub const GUTTER: f32 = 16.0;
 /// The detail pane's width.
 pub const DETAIL_WIDTH: f32 = 440.0;
 /// The opacity of a resolved candidate's row.
-pub const RESOLVED_OPACITY: f32 = 0.45;
+pub const RESOLVED_OPACITY: f32 = 0.9;
 
 pub fn gap(px: f32) -> LayoutSize<LengthPercentage> {
     LayoutSize {

@@ -15,6 +15,7 @@ use scaffold::registry::{self, Loaded, Registry, WidgetIntent};
 use scaffold::scan::{
     Evidence, Explained, Finding, REGISTRY, Report, SCOPE, SourceReport, SourceState, WidgetReport,
 };
+use scaffold::setup::{Check, CheckState, Setup};
 use scaffold::time::Millis;
 
 use crate::ui::backend::{Action, Backend, State};
@@ -204,6 +205,112 @@ pub fn registry() -> Loaded {
     }
 }
 
+/// Built from values only: demo snapshots never inspect a real project.
+fn setup() -> Setup {
+    let check =
+        |id: &str, title: &str, description: &str, path: Option<&str>, next_step: &str| Check {
+            id: id.into(),
+            title: title.into(),
+            description: description.into(),
+            state: if path.is_some() {
+                CheckState::Found
+            } else {
+                CheckState::Missing
+            },
+            evidence: path.map(|p| vec![ev(p, 1)]).unwrap_or_default(),
+            next_step: next_step.into(),
+        };
+    let checks = vec![
+        check(
+            "getting-started",
+            "導入手順",
+            "初めて参加する人のための入口",
+            Some("README.md"),
+            "README のインストール手順を、初めて使う環境で確認します。",
+        ),
+        check(
+            "working-agreements",
+            "作業ルール",
+            "人とエージェントが共有する約束",
+            Some("AGENTS.md"),
+            "変更範囲に対応する検証手順を確認します。",
+        ),
+        check(
+            "dependencies",
+            "依存の定義",
+            "プロジェクトが使う言語とライブラリ",
+            Some("Cargo.toml"),
+            "Cargo.toml と Cargo.lock を確認し、必要なツールを用意します。",
+        ),
+        check(
+            "runtime",
+            "実行環境の指定",
+            "開発者間でツールの版を揃える",
+            None,
+            "README の前提に合わせて Rust のバージョンを指定し、導入手順に必要なツールを記載します。",
+        ),
+        check(
+            "verification",
+            "検証の入口",
+            "変更後に何を確認するか",
+            Some("scripts/verify.sh"),
+            "検証スクリプトを読んでから実行し、結果を Verify に関連付けます。",
+        ),
+        check(
+            "continuous-integration",
+            "CI の設定",
+            "同じ確認を変更のたびに続ける",
+            None,
+            "ローカルの検証手順と一致する CI を整備し、必要な環境と成功条件を記録します。",
+        ),
+    ];
+    let sources = checks
+        .iter()
+        .flat_map(|check| &check.evidence)
+        .map(|e| SourceReport {
+            path: e.path.clone(),
+            state: SourceState::Ok,
+            error: None,
+        })
+        .collect();
+    let assets = [
+        (
+            "readme",
+            AssetKind::Runbook,
+            "プロジェクトの導入手順",
+            "README.md",
+        ),
+        (
+            "agent-rules",
+            AssetKind::Rule,
+            "エージェントの作業ルール",
+            "AGENTS.md",
+        ),
+        (
+            "verify-entry",
+            AssetKind::Checker,
+            "変更後の検証",
+            "scripts/verify.sh",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, kind, title, path)| Asset {
+        id: id.into(),
+        kind,
+        title: title.into(),
+        path: path.into(),
+        decisions: Vec::new(),
+    })
+    .collect();
+    Setup {
+        stacks: vec!["Rust".into()],
+        checks,
+        assets,
+        sources,
+        registration_applicable: true,
+    }
+}
+
 fn improvement(
     rule: &str,
     widget: &str,
@@ -248,6 +355,7 @@ pub fn state() -> State {
         repo: PathBuf::from(REPO),
         commit: Some(COMMIT.into()),
         scanned_at: NOW,
+        setup: setup(),
         report,
         registry: Ok(registry()),
         improvements,

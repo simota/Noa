@@ -1606,7 +1606,10 @@ mod tests {
             "あ".repeat(crate::server::MAX_WS_FRAME_SIZE / 3 + 1),
         ] {
             let result = client.send_text(7, &oversized, false);
-            assert!(matches!(result, Err(ClientError::InvalidInput(_))), "{result:?}");
+            assert!(
+                matches!(result, Err(ClientError::InvalidInput(_))),
+                "{result:?}"
+            );
         }
         let spawn = client.spawn_tab(
             None,
@@ -1622,7 +1625,10 @@ mod tests {
                 ..SpawnParams::default()
             },
         );
-        assert!(matches!(spawn, Err(ClientError::InvalidInput(_))), "{spawn:?}");
+        assert!(
+            matches!(spawn, Err(ClientError::InvalidInput(_))),
+            "{spawn:?}"
+        );
         assert!(client.list_panels().unwrap().is_empty());
         drop(client);
 

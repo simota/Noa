@@ -10,6 +10,7 @@ use noa_gpui_core::{Paint, PaintCx, Role, Style, UiTree, Widget, WidgetId};
 use noa_gpui_scene::{Border, Color, Rect};
 use serde_json::{Value, json};
 
+use crate::images::{self, Picture};
 use crate::style;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +59,59 @@ pub enum Node {
         label: String,
         action: Action,
     },
+    Image {
+        asset: String,
+        alt: String,
+        width: f32,
+        height: f32,
+        shape: Shape,
+        /// Filled in by `Images::attach`; `None` draws the alt text.
+        picture: Option<Picture>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Shape {
+    Square,
+    Circle,
+}
+
+fn image(view: &Value, data: &Value) -> Result<Node, String> {
+    let (width, height) = image_box(view)?;
+    Ok(Node::Image {
+        asset: bound(view, "src", data)?
+            .as_str()
+            .ok_or("image src must resolve to an asset id")?
+            .to_owned(),
+        alt: display(&bound(view, "alt", data)?)?,
+        width,
+        height,
+        shape: match view.get("shape").and_then(Value::as_str) {
+            Some("circle") => Shape::Circle,
+            _ => Shape::Square,
+        },
+        picture: None,
+    })
+}
+
+/// The logical box of an image node: `width`/`height`, else `size` (md).
+fn image_box(view: &Value) -> Result<(f32, f32), String> {
+    if let (Some(width), Some(height)) = (view.get("width"), view.get("height")) {
+        let side = |value: &Value| {
+            value
+                .as_u64()
+                .filter(|n| (1..=noa_widget::manifest::MAX_IMAGE_BOX).contains(n))
+                .map(|n| n as f32)
+                .ok_or("image width and height must be integers 1..=1024")
+        };
+        return Ok((side(width)?, side(height)?));
+    }
+    let size = view.get("size").and_then(Value::as_str).unwrap_or("md");
+    noa_widget::manifest::IMAGE_SIZES
+        .iter()
+        .find(|(name, _)| *name == size)
+        .map(|(_, side)| (*side as f32, *side as f32))
+        .ok_or_else(|| format!("unsupported image size {size:?}"))
 }
 
 fn field<'a>(view: &'a Value, key: &str) -> Result<&'a Value, String> {
@@ -241,6 +295,7 @@ pub fn resolve(view: &Value, data: &Value) -> Result<Node, String> {
                 },
             },
         }),
+        "image" => image(view, data),
         other => Err(format!("unsupported component {other:?}")),
     }
 }
@@ -398,6 +453,23 @@ pub fn insert(
         Node::Button { label, action } => {
             let button = tree.insert(Some(parent), Button::new(label));
             actions.push((button, action.clone()));
+        }
+        Node::Image {
+            alt,
+            width,
+            height,
+            shape,
+            picture,
+            ..
+        } => {
+            images::insert(
+                tree,
+                parent,
+                alt,
+                (*width, *height),
+                *shape,
+                picture.as_ref(),
+            );
         }
     }
 }

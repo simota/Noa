@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -28,6 +28,16 @@ pub struct Manifest {
     pub view: Value,
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// Images packaged beside the manifest. Absent (not empty) for packages
+    /// without images, so their canonical form and digest are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<BTreeMap<String, AssetRef>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRef {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +96,7 @@ impl Manifest {
                 ));
             }
         }
+        crate::assets::validate_declarations(self.assets.as_ref())?;
         validate_node(
             &self.view,
             &self.data_schema,
@@ -94,6 +105,7 @@ impl Manifest {
             &mut 0,
             0,
         )?;
+        validate_image_sources(&self.view, &self.data_schema, &self.asset_ids())?;
         self.validate_data(&self.initial_data)
     }
 
@@ -120,8 +132,18 @@ impl Manifest {
         validate_value(&action.payload_schema, payload, "action payload", 0)
     }
 
+    /// Declared asset ids, empty when the manifest has no `assets`.
+    pub fn asset_ids(&self) -> BTreeSet<&str> {
+        self.assets
+            .iter()
+            .flat_map(|assets| assets.keys().map(String::as_str))
+            .collect()
+    }
+
     /// Canonical object key ordering makes whitespace and key ordering
     /// irrelevant. This digest identifies content, never grants authority.
+    /// It covers the manifest only: a package with `assets` is identified by
+    /// [`crate::assets::definition_digest`], which also covers image bytes.
     pub fn digest(&self) -> String {
         let value = serde_json::to_value(self).expect("a manifest is JSON serializable");
         let bytes = serde_json::to_vec(&canonical(value)).expect("a manifest is JSON serializable");
@@ -451,16 +473,15 @@ fn validate_value(
         Value::String(text) => {
             length_bounds(schema, text.chars().count(), "minLength", "maxLength", at)?
         }
-        Value::Number(_) => {
+        Value::Number(_)
             if schema
                 .get("minimum")
                 .is_some_and(|n| number_cmp(value, n).is_lt())
                 || schema
                     .get("maximum")
-                    .is_some_and(|n| number_cmp(value, n).is_gt())
-            {
-                return fail(format!("{at} is outside its numeric bounds"));
-            }
+                    .is_some_and(|n| number_cmp(value, n).is_gt()) =>
+        {
+            return fail(format!("{at} is outside its numeric bounds"));
         }
         _ => {}
     }
@@ -607,6 +628,7 @@ fn validate_node(
         "table" => &["rows", "rowKey", "columns"],
         "list" => &["items", "itemKey", "textPointer"],
         "button" => &["label", "action", "payload"],
+        "image" => &["src", "alt", "size", "width", "height", "shape"],
         _ => return fail(format!("unsupported component {kind:?}")),
     };
     let allowed: Vec<_> = ["type", "id"]
@@ -722,6 +744,7 @@ fn validate_node(
                 expression(payload, schema, &["object"], "button payload")?;
             }
         }
+        "image" => validate_image(node, schema)?,
         _ => unreachable!(),
     }
     Ok(())
@@ -878,6 +901,7 @@ fn validate_rendered(
             let payload = resolve(node.get("payload").unwrap_or(&json!({})), data)?;
             manifest.validate_action(string(&node["action"], "button action")?, &payload)?;
         }
+        "image" => validate_rendered_image(node, data, manifest, remaining)?,
         _ => return fail(format!("unsupported component {kind:?}")),
     }
     Ok(())
@@ -929,6 +953,115 @@ fn render_budget(remaining: &mut RenderBudget, count: usize) -> Result<(), Widge
         .checked_sub(count)
         .ok_or_else(|| WidgetError::new("expanded view exceeds 8192 nodes, rows and cells"))?;
     Ok(())
+}
+
+/// Square box sizes for `image.size`, in logical pixels.
+pub const IMAGE_SIZES: [(&str, u32); 3] = [("sm", 48), ("md", 96), ("lg", 192)];
+/// Largest explicit `image.width` / `image.height`, in logical pixels.
+pub const MAX_IMAGE_BOX: u64 = 1024;
+
+/// Image field checks that do not depend on the declared assets; the asset
+/// references themselves are checked by `validate_image_sources`.
+fn validate_image(node: &Map<String, Value>, schema: &Value) -> Result<(), WidgetError> {
+    let id = string(field(node, "id")?, "node id")?;
+    if let Some(target) = expression(field(node, "src")?, schema, &["string"], "image src")?
+        && target.get("enum").is_none()
+    {
+        return fail(format!(
+            "image {id:?} src binding must point to a string schema whose enum lists asset ids"
+        ));
+    }
+    let alt = field(node, "alt")?;
+    expression(alt, schema, &["string"], "image alt")?;
+    if let Some(alt) = alt.as_str() {
+        bounded_text(alt, 500, "image alt", false)?;
+    }
+    if let Some(size) = node.get("size") {
+        let size = string(size, "image size")?;
+        if !IMAGE_SIZES.iter().any(|(name, _)| *name == size) {
+            return fail(format!("image {id:?} size must be sm, md or lg"));
+        }
+        if node.contains_key("width") || node.contains_key("height") {
+            return fail(format!(
+                "image {id:?} takes either size or width/height, not both"
+            ));
+        }
+    }
+    match (node.get("width"), node.get("height")) {
+        (None, None) => {}
+        (Some(width), Some(height)) => {
+            for value in [width, height] {
+                if !value
+                    .as_u64()
+                    .is_some_and(|n| (1..=MAX_IMAGE_BOX).contains(&n))
+                {
+                    return fail(format!(
+                        "image {id:?} width and height must be integers 1..={MAX_IMAGE_BOX}"
+                    ));
+                }
+            }
+        }
+        _ => {
+            return fail(format!(
+                "image {id:?} width and height must be given together"
+            ));
+        }
+    }
+    if let Some(shape) = node.get("shape")
+        && !matches!(string(shape, "image shape")?, "square" | "circle")
+    {
+        return fail(format!("image {id:?} shape must be square or circle"));
+    }
+    Ok(())
+}
+
+/// Every image source must name a declared asset: a literal directly, a data
+/// binding through its schema enum. Runs after `validate_node` accepted the
+/// tree's shape.
+fn validate_image_sources(
+    node: &Value,
+    schema: &Value,
+    assets: &BTreeSet<&str>,
+) -> Result<(), WidgetError> {
+    if node["type"] == "image" {
+        let id = node["id"].as_str().unwrap_or_default();
+        let src = &node["src"];
+        let ids: Vec<&Value> = match binding_pointer(src)? {
+            None => vec![src],
+            Some(pointer) => schema_pointer(schema, pointer)?["enum"]
+                .as_array()
+                .map(|values| values.iter().collect())
+                .unwrap_or_default(),
+        };
+        for value in ids {
+            let asset = string(value, "image src")?;
+            if !assets.contains(asset) {
+                return fail(format!(
+                    "image {id:?} refers to undeclared asset {asset:?}; declare it in assets"
+                ));
+            }
+        }
+    }
+    if let Some(children) = node.get("children").and_then(Value::as_array) {
+        for child in children {
+            validate_image_sources(child, schema, assets)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_rendered_image(
+    node: &Value,
+    data: &Value,
+    manifest: &Manifest,
+    remaining: &mut RenderBudget,
+) -> Result<(), WidgetError> {
+    let src = resolved(&node["src"], data, &["string"], "image src")?;
+    let src = src.as_str().expect("checked string");
+    if !manifest.asset_ids().contains(src) {
+        return fail(format!("image src {src:?} is not a declared asset"));
+    }
+    remaining.value(&resolved(&node["alt"], data, &["string"], "image alt")?)
 }
 
 struct StrictValue(Value);
@@ -1012,7 +1145,7 @@ pub fn schema_document() -> Value {
     let tone = json!({"enum":["default","muted","success","warning","error"]});
     let children =
         json!({"type":"array","maxItems":MAX_VIEW_NODES,"items":{"$ref":"#/$defs/node"}});
-    let nodes = vec![
+    let mut nodes = vec![
         node(
             json!({"children":children,"gap":gap}),
             &["children"],
@@ -1054,6 +1187,13 @@ pub fn schema_document() -> Value {
             &["button"],
         ),
     ];
+    let pixels = json!({"type":"integer","minimum":1,"maximum":MAX_IMAGE_BOX});
+    nodes.push(node(
+        json!({"src":{"anyOf":[{"$ref":"#/$defs/id"},{"$ref":"#/$defs/binding"}]},"alt":text,
+            "size":{"enum":["sm","md","lg"]},"width":pixels,"height":pixels,"shape":{"enum":["square","circle"]}}),
+        &["src", "alt"],
+        &["image"],
+    ));
     json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",
         "title":"Noa repository widget v1",
@@ -1069,6 +1209,8 @@ pub fn schema_document() -> Value {
             "dataSchema":{"$ref":"#/$defs/dataSchema"},
             "initialData":{"type":"object"},
             "view":{"$ref":"#/$defs/node"},
+            "assets":{"type":"object","minProperties":1,"maxProperties":crate::assets::MAX_ASSETS,"propertyNames":{"$ref":"#/$defs/id"},
+                "additionalProperties":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","maxLength":crate::assets::MAX_PATH_BYTES,"pattern":"^assets(/[^/.\\\\][^/\\\\]*)+$"}}}},
             "actions":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["id","kind","payloadSchema"],"properties":{"id":{"$ref":"#/$defs/id"},"kind":{"const":"agent-event"},"payloadSchema":{"$ref":"#/$defs/dataSchema"}}}}
         },
         "$defs":{

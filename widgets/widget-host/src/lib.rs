@@ -4,6 +4,7 @@
 pub mod args;
 pub mod bridge;
 pub mod catalog;
+pub mod images;
 pub mod render;
 pub mod screen;
 mod style;

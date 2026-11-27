@@ -1,21 +1,26 @@
 //! Canonical instance data only changes on a validated parent snapshot.
 //! Button clicks are requests, not optimistic data mutations.
 
+use std::collections::BTreeMap;
+
 use noa_gpui_core::widgets::{Button, ButtonClicked, Container, Label, ScrollView, Tag};
 use noa_gpui_core::{Appearance, Message, Role, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::Screen;
+use noa_gpui_scene::ImageId;
 use noa_gpui_text::TextStore;
 use noa_ipc::widget::{HostMessage, HostRequest};
-use noa_widget::Manifest;
+use noa_widget::{Asset, Manifest};
 use serde_json::Value;
 
 use crate::bridge::{Bridge, Update};
+use crate::images::Images;
 use crate::render::{self, Action};
 use crate::style;
 
 struct Instance {
     id: String,
     digest: String,
+    asset_digests: BTreeMap<String, String>,
     revision: u64,
     pending: Option<Pending>,
     nonce: String,
@@ -43,14 +48,30 @@ pub struct WidgetScreen {
     instance: Option<Instance>,
     bridge: Option<Bridge>,
     close: bool,
+    images: Images,
 }
 
 impl WidgetScreen {
     pub fn preview(manifest: Manifest, data: Value) -> Result<Self, String> {
-        Self::new(manifest, data, None)
+        Self::new(manifest, data, None, &[])
+    }
+
+    /// An offline preview of a package, with its images read by noa-widget.
+    pub fn preview_package(
+        manifest: Manifest,
+        data: Value,
+        assets: &[Asset],
+    ) -> Result<Self, String> {
+        Self::new(manifest, data, None, assets)
     }
 
     pub fn from_snapshot(snapshot: HostMessage) -> Result<Self, String> {
+        Self::from_bridge(snapshot, &[])
+    }
+
+    /// A live instance: the snapshot's definition digest must cover both
+    /// the manifest and exactly the asset bytes received before it.
+    pub fn from_bridge(snapshot: HostMessage, assets: &[Asset]) -> Result<Self, String> {
         let HostMessage::Snapshot {
             instance_id,
             definition_digest,
@@ -62,8 +83,12 @@ impl WidgetScreen {
             return Err("live widget needs an initial snapshot".into());
         };
         let manifest = parse_manifest(&manifest)?;
-        if manifest.digest() != definition_digest {
-            return Err("snapshot definition digest does not match its manifest".into());
+        let asset_digests = noa_widget::assets::digests(assets);
+        if noa_widget::definition_digest(&manifest, &asset_digests)
+            .map_err(|error| error.to_string())?
+            != definition_digest
+        {
+            return Err("snapshot definition digest does not match its manifest and assets".into());
         }
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -72,20 +97,28 @@ impl WidgetScreen {
         let instance = Instance {
             id: instance_id,
             digest: definition_digest,
+            asset_digests,
             revision: data_revision,
             pending: None,
             nonce: format!("ui-{}-{nanos}", std::process::id()),
             next_action: 0,
             valid: true,
         };
-        Self::new(manifest, data, Some(instance))
+        Self::new(manifest, data, Some(instance), assets)
     }
 
-    fn new(manifest: Manifest, data: Value, instance: Option<Instance>) -> Result<Self, String> {
+    fn new(
+        manifest: Manifest,
+        data: Value,
+        instance: Option<Instance>,
+        assets: &[Asset],
+    ) -> Result<Self, String> {
         manifest
             .validate_data(&data)
             .map_err(|error| error.to_string())?;
-        let view = render::resolve(&manifest.view, &data)?;
+        let images = Images::new(assets, &manifest.view);
+        let mut view = render::resolve(&manifest.view, &data)?;
+        images.attach(&mut view);
         let mut tree = UiTree::new();
         tree.set_theme(Theme::for_appearance(Appearance::Dark));
         let root = tree.insert(
@@ -143,10 +176,10 @@ impl WidgetScreen {
         );
         let status = tree.insert(
             Some(footer),
-            Label::new(if instance.is_some() {
-                "操作は担当エージェントへ送信されます。"
-            } else {
-                "プレビューでは操作のイベントを表示します。処理は実行されません。"
+            Label::new(match images.failures().first() {
+                Some(error) => format!("画像を表示できません: {error}"),
+                None if instance.is_some() => "操作は担当エージェントへ送信されます。".into(),
+                None => "プレビューでは操作のイベントを表示します。処理は実行されません。".into(),
             })
             .font_size(12.0)
             .color(Role::Muted)
@@ -166,7 +199,14 @@ impl WidgetScreen {
             instance,
             bridge: None,
             close: false,
+            images,
         })
+    }
+
+    /// Upload the decoded images. Call once, where the screen is set up
+    /// (the app's `Setup`, or a headless renderer before a snapshot).
+    pub fn upload_images(&mut self, create: &mut dyn FnMut(u32, u32, &[u8]) -> ImageId) {
+        self.images.upload(create);
     }
 
     pub fn attach_bridge(&mut self, bridge: Bridge) {
@@ -231,7 +271,10 @@ impl WidgetScreen {
         if instance.id != instance_id || instance.digest != definition_digest {
             return Err("the live widget's pinned identity changed".into());
         }
-        if parse_manifest(&manifest)?.digest() != instance.digest {
+        if noa_widget::definition_digest(&parse_manifest(&manifest)?, &instance.asset_digests)
+            .map_err(|error| error.to_string())?
+            != instance.digest
+        {
             return Err("the live widget's pinned definition changed".into());
         }
         if data_revision < instance.revision
@@ -244,7 +287,8 @@ impl WidgetScreen {
         self.manifest
             .validate_data(&data)
             .map_err(|error| error.to_string())?;
-        let view = render::resolve(&self.manifest.view, &data)?;
+        let mut view = render::resolve(&self.manifest.view, &data)?;
+        self.images.attach(&mut view);
         if data != self.data {
             for child in self.tree.children(self.body).to_vec() {
                 self.tree.remove(child, text);
@@ -319,6 +363,15 @@ impl WidgetScreen {
                         error.unwrap_or_else(|| "理由不明".into())
                     )
                 });
+                self.update_buttons();
+            }
+            Update::Message(HostMessage::Asset { .. }) => {
+                // Images are pinned with the initial snapshot; a later frame
+                // is a protocol error, never a replacement image.
+                if let Some(instance) = &mut self.instance {
+                    instance.valid = false;
+                }
+                self.notice("更新を表示できません: 画像は初期スナップショットでのみ受け付けます");
                 self.update_buttons();
             }
             Update::Message(HostMessage::Closed) => {
@@ -467,6 +520,7 @@ mod tests {
     use noa_gpui_core::widgets::Button;
     use noa_gpui_core::{Event, Key, Modifiers};
     use serde_json::json;
+    use std::path::Path;
 
     fn manifest() -> Manifest {
         Manifest::from_slice(include_bytes!(
@@ -645,5 +699,117 @@ mod tests {
         );
         assert!(screen.instance.as_ref().unwrap().pending.is_none());
         assert!(screen.retry.is_none());
+    }
+
+    fn gallery() -> (Manifest, Vec<Asset>) {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.noa-widgets/image-gallery");
+        let manifest =
+            Manifest::from_slice(&std::fs::read(dir.join("widget.json")).unwrap()).unwrap();
+        let assets = noa_widget::assets::load(&dir, &manifest).unwrap();
+        (manifest, assets)
+    }
+
+    fn gallery_snapshot(
+        manifest: &Manifest,
+        assets: &[Asset],
+        revision: u64,
+        data: Value,
+    ) -> HostMessage {
+        let digest =
+            noa_widget::definition_digest(manifest, &noa_widget::assets::digests(assets)).unwrap();
+        HostMessage::Snapshot {
+            instance_id: "wi_0123456789abcdef0123456789abcdef".into(),
+            definition_digest: digest,
+            data_revision: revision,
+            manifest: serde_json::to_value(manifest).unwrap(),
+            data,
+        }
+    }
+
+    #[test]
+    fn a_live_definition_with_assets_is_pinned_to_the_received_bytes() {
+        let (manifest, assets) = gallery();
+        let data = manifest.initial_data.clone();
+        let snapshot = gallery_snapshot(&manifest, &assets, 1, data.clone());
+        assert!(WidgetScreen::from_bridge(snapshot.clone(), &assets).is_ok());
+        // Missing, extra or different bytes do not match the pinned digest.
+        assert!(WidgetScreen::from_bridge(snapshot.clone(), &assets[1..]).is_err());
+        let mut changed = assets.clone();
+        let mut bytes = changed[0].bytes.clone();
+        *bytes.last_mut().unwrap() ^= 1;
+        changed[0] = Asset::verify(&changed[0].id, bytes, None).unwrap();
+        assert!(WidgetScreen::from_bridge(snapshot.clone(), &changed).is_err());
+        // A manifest-only digest cannot stand in for one covering the assets.
+        let manifest_only = HostMessage::Snapshot {
+            instance_id: "wi_0123456789abcdef0123456789abcdef".into(),
+            definition_digest: manifest.digest(),
+            data_revision: 1,
+            manifest: serde_json::to_value(&manifest).unwrap(),
+            data,
+        };
+        assert!(WidgetScreen::from_bridge(manifest_only, &assets).is_err());
+    }
+
+    #[test]
+    fn a_data_update_can_point_an_image_at_another_declared_asset() {
+        let (manifest, assets) = gallery();
+        let mut screen = WidgetScreen::from_bridge(
+            gallery_snapshot(&manifest, &assets, 1, manifest.initial_data.clone()),
+            &assets,
+        )
+        .unwrap();
+        let mut uploaded = 0;
+        screen.upload_images(&mut |_, _, _| {
+            uploaded += 1;
+            ImageId(uploaded)
+        });
+        // Three assets, each square and (the view has a circle) round.
+        assert_eq!(uploaded, 6);
+        let mut text = TextStore::new(Default::default());
+        let data = json!({"featured":"pattern","caption":"Pattern"});
+        screen
+            .apply_snapshot(
+                gallery_snapshot(&manifest, &assets, 2, data.clone()),
+                &mut text,
+            )
+            .unwrap();
+        assert_eq!(screen.data, data);
+        assert!(labels(&screen.tree, screen.body).contains(&"Pattern".into()));
+        // An undeclared asset id never reaches the tree.
+        let invalid = json!({"featured":"missing","caption":"Missing"});
+        assert!(
+            screen
+                .apply_snapshot(gallery_snapshot(&manifest, &assets, 3, invalid), &mut text)
+                .is_err()
+        );
+        assert_eq!(screen.data, data);
+    }
+
+    #[test]
+    fn an_asset_frame_after_the_snapshot_invalidates_the_instance() {
+        let (manifest, assets) = gallery();
+        let mut screen = WidgetScreen::from_bridge(
+            gallery_snapshot(&manifest, &assets, 1, manifest.initial_data.clone()),
+            &assets,
+        )
+        .unwrap();
+        let late = noa_ipc::widget::asset_frames("logo", &assets[1].digest, &assets[1].bytes);
+        screen.receive(
+            Update::Message(late[0].clone()),
+            &mut TextStore::new(Default::default()),
+        );
+        assert!(!screen.instance.as_ref().unwrap().valid);
+    }
+
+    #[test]
+    fn images_without_their_bytes_show_alt_text() {
+        let (manifest, _) = gallery();
+        // Without asset bytes (e.g. the catalogue's preview windows), every
+        // image falls back to its alt text.
+        let screen =
+            WidgetScreen::preview(manifest.clone(), manifest.initial_data.clone()).unwrap();
+        let shown = labels(&screen.tree, screen.body);
+        assert!(shown.contains(&"Noa ring logo, small".into()));
+        assert!(shown.contains(&"A packaged JPEG landscape".into()));
     }
 }

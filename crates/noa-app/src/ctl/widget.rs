@@ -13,7 +13,7 @@ use noa_ipc::widget::{
     MAX_EVENT_PAGE, OpenParams, SetParams, WidgetCall,
 };
 use noa_ipc::{Client, ClientError, WireId};
-use noa_widget::{MAX_DATA_BYTES, MAX_MANIFEST_BYTES, Manifest};
+use noa_widget::{Asset, MAX_DATA_BYTES, MAX_MANIFEST_BYTES, Manifest, assets, definition_digest};
 use serde_json::{Value, json};
 
 use super::{Args, EXIT_ERROR, EXIT_OK, Failure, parse_u64, print_json};
@@ -40,6 +40,9 @@ Forget removes a stopped, fully acknowledged instance and its retry history;
 it is idempotent by instance id and does not need a separate request id.
 Validation and preview work with the control server disabled.
 ";
+
+const INLINE_ASSETS: &str = "a definition with assets cannot be opened with --definition-file: \
+     commit it as .noa-widgets/<id>/ and open it by id, so its images come from the package";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WidgetCommand {
@@ -365,9 +368,22 @@ pub(crate) fn execute_local(command: WidgetCommand) -> Result<i32, Failure> {
                 }
                 Ok(manifest)
             });
+            let validated = validated.and_then(|manifest| {
+                let assets = package_assets(&file, &manifest)?;
+                let digest = definition_digest(&manifest, &assets::digests(&assets))
+                    .map_err(|e| Failure::error(e.to_string()))?;
+                Ok((manifest, assets, digest))
+            });
             match validated {
-                Ok(manifest) => print_json(&json!({
-                    "valid": true, "id": manifest.id, "definitionDigest": manifest.digest()
+                Ok((manifest, assets, digest)) if assets.is_empty() => print_json(&json!({
+                    "valid": true, "id": manifest.id, "definitionDigest": digest
+                })),
+                Ok((manifest, assets, digest)) => print_json(&json!({
+                    "valid": true, "id": manifest.id, "definitionDigest": digest,
+                    "assets": assets.iter().map(|a| json!({
+                        "id": a.id, "format": a.format, "width": a.width, "height": a.height,
+                        "bytes": a.bytes.len(), "digest": a.digest
+                    })).collect::<Vec<_>>()
                 })),
                 Err(error) => {
                     print_json(&json!({"valid": false, "errors": [{
@@ -389,6 +405,8 @@ pub(crate) fn execute_local(command: WidgetCommand) -> Result<i32, Failure> {
                     .validate_data(&read_data(data)?)
                     .map_err(|e| Failure::error(e.to_string()))?;
             }
+            // Report asset problems here; the helper reads the same files.
+            package_assets(&file, &manifest)?;
             let file = absolute(&file)?;
             let mut args = vec![format!("--manifest={}", file.display())];
             if let Some(data) = data {
@@ -427,6 +445,24 @@ pub(crate) fn execute_local(command: WidgetCommand) -> Result<i32, Failure> {
         }
     }
     Ok(EXIT_OK)
+}
+
+/// Assets live beside the manifest in its package directory. Stdin has no
+/// package directory, so a definition with assets cannot come from it.
+fn package_assets(file: &Path, manifest: &Manifest) -> Result<Vec<Asset>, Failure> {
+    if manifest.assets.is_none() {
+        return Ok(Vec::new());
+    }
+    if file == Path::new("-") {
+        return Err(Failure::error(
+            "a definition with assets must be read from its package's widget.json, not stdin",
+        ));
+    }
+    let file = absolute(file)?;
+    let package = file
+        .parent()
+        .ok_or_else(|| Failure::error("manifest file has no package directory"))?;
+    assets::load(package, manifest).map_err(|e| Failure::error(e.to_string()))
 }
 
 fn absolute(path: &Path) -> Result<PathBuf, Failure> {
@@ -487,8 +523,11 @@ pub(crate) fn execute(
         } => {
             let definition = definition
                 .map(|path| {
-                    serde_json::to_value(read_definition(&path)?)
-                        .map_err(|e| Failure::error(e.to_string()))
+                    let manifest = read_definition(&path)?;
+                    if manifest.assets.is_some() {
+                        return Err(Failure::error(INLINE_ASSETS));
+                    }
+                    serde_json::to_value(manifest).map_err(|e| Failure::error(e.to_string()))
                 })
                 .transpose()?;
             WidgetCall::Open(OpenParams {
@@ -738,5 +777,28 @@ mod tests {
                 .needs_own_pane()
         );
         assert!(!parse_list(&["get", "wi_x"]).unwrap().needs_own_pane());
+    }
+
+    #[test]
+    fn assets_are_read_from_the_manifest_package_and_never_from_stdin() {
+        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.noa-widgets/image-gallery/widget.json");
+        let manifest = read_definition(&file).unwrap();
+        let loaded = package_assets(&file, &manifest).unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert_ne!(
+            definition_digest(&manifest, &assets::digests(&loaded)).unwrap(),
+            manifest.digest()
+        );
+        assert!(
+            package_assets(Path::new("-"), &manifest)
+                .unwrap_err()
+                .message
+                .contains("not stdin")
+        );
+        let summary = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.noa-widgets/test-summary/widget.json");
+        let plain = read_definition(&summary).unwrap();
+        assert!(package_assets(Path::new("-"), &plain).unwrap().is_empty());
     }
 }

@@ -5,6 +5,7 @@
 - [Package and top-level contract](#package-and-top-level-contract)
 - [Schema subset](#schema-subset)
 - [Bindings and components](#bindings-and-components)
+- [Images](#images)
 - [Actions and runtime](#actions-and-runtime)
 - [Limits and review](#limits-and-review)
 
@@ -17,7 +18,7 @@ never falls back to another worktree's definition.
 
 Required fields are `apiVersion`, `id`, `version`, `title`, `description`,
 `dataSchema`, `initialData`, and `view`. Include `actions` explicitly, using
-`[]` for a display-only widget. `apiVersion` is exactly `noa.widget/v1`.
+`[]` for a display-only widget. Add `assets` only when the view shows images. `apiVersion` is exactly `noa.widget/v1`.
 `version` is a stable numeric `major.minor.patch`; prerelease/build suffixes
 are not supported. Do not add a top-level `$schema`, permissions, collectors,
 scripts or dependencies: unknown fields are rejected.
@@ -74,6 +75,7 @@ Every component has `type` and `id`.
 | `table` | Array/binding `rows`, `rowKey`, nonempty `columns` | None |
 | `list` | Array/binding `items`, `itemKey`, `textPointer` | None |
 | `button` | Bindable string `label`, declared `action` ID | Object/binding `payload` (default `{}`) |
+| `image` | Asset ID or enum-bound `src`, bindable string `alt` | `size` or `width`+`height`, `shape` |
 
 `gap` is `none`, `xs`, `sm`, `md`, or `lg`. `tone` is `default`, `muted`,
 `success`, `warning`, or `error`. Progress requires `0 <= value <= max` and
@@ -95,6 +97,39 @@ values are scalars; do not bind a table cell to an object or nested array.
   "columns": [{"title": "Result", "pointer": "/label"}]
 }
 ```
+
+## Images
+
+Declare packaged images at the top level and reference them by asset ID:
+
+```json
+"assets": {
+  "logo": {"path": "assets/logo.png"},
+  "chart": {"path": "assets/chart.webp"}
+}
+```
+
+```json
+{"type": "image", "id": "logo", "src": "logo", "alt": "Project logo", "size": "sm"}
+```
+
+- Asset IDs follow the node ID rules. Paths start with `assets/`, are
+  relative to the package directory, and have no `..`, hidden names,
+  backslashes or symlinks. Formats are PNG, JPEG (baseline/progressive) and
+  still WebP, detected by content, not extension.
+- `src` is a literal asset ID, or a binding to a string property whose schema
+  `enum` lists only declared asset IDs (for example
+  `{"type":"string","enum":["logo","chart"]}`). Data can switch between
+  declared images; it cannot add one.
+- `alt` is required. It is the accessible name and is shown in the same box
+  when a picture cannot be drawn.
+- `size` is `sm` (48), `md` (96, default) or `lg` (192 logical pixels,
+  square). Or give `width` and `height` together (1–1024), not with `size`.
+- `shape` is `square` (default) or `circle` (centered square crop). Pictures
+  keep their aspect ratio inside the box.
+- Changing an image's bytes changes the definition digest; reopen live
+  instances to use new images. `open --definition-file` rejects manifests
+  with `assets`.
 
 ## Actions and runtime
 
@@ -131,6 +166,8 @@ deduplication and acknowledgment after work is durably recorded; load
 | Table columns / table or list rows | 32 / 1,000 |
 | Expanded nodes, rows and cells across the view | 8,192 |
 | Displayed text across the view | 512 KiB |
+| Assets per package / bytes per asset / per package | 16 / 512 KiB / 2 MiB |
+| Asset dimensions / explicit image box | 2,048 px / 1,024 logical px per side |
 
 Repeated bindings count toward expanded-content limits. A small data array
 referenced by many tables can still exceed the budget. `widget schema`

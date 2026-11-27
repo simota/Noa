@@ -480,7 +480,8 @@ mod tests {
             "# Example\n\nDevelopment instructions.\n",
         );
         let state = Live::new(repo.path().to_owned(), None).scan();
-        assert_eq!(state.repo, repo.path());
+        // The platform's temp directory can itself be an alias (macOS /var).
+        assert_eq!(state.repo, repo.path().canonicalize().unwrap());
         assert!(state.unregistered());
         assert!(!state.setup.registration_applicable);
         assert!(!state.setup.checks.is_empty());
@@ -497,21 +498,27 @@ mod tests {
     }
 
     #[test]
-    fn a_project_alias_opens_the_same_repository() {
-        let repo = tempfile::tempdir().unwrap();
+    fn project_and_parent_aliases_open_the_same_repository() {
+        let workspace = tempfile::tempdir().unwrap();
+        let repo = workspace.path().join("project");
         let aliases = tempfile::tempdir().unwrap();
-        put(repo.path(), "README.md", "# Project\n");
+        put(&repo, "README.md", "# Project\n");
         let alias = aliases.path().join("project");
-        std::os::unix::fs::symlink(repo.path(), &alias).unwrap();
-        let state = Live::new(alias, None).scan();
-        assert_eq!(state.repo, repo.path().canonicalize().unwrap());
-        assert!(
-            state
-                .setup
-                .sources
-                .iter()
-                .any(|source| source.path == "README.md" && source.state == SourceState::Ok)
-        );
+        std::os::unix::fs::symlink(&repo, &alias).unwrap();
+        let parent_alias = aliases.path().join("workspace");
+        std::os::unix::fs::symlink(workspace.path(), &parent_alias).unwrap();
+        let expected = repo.canonicalize().unwrap();
+        for dir in [repo, alias, parent_alias.join("project")] {
+            let state = Live::new(dir, None).scan();
+            assert_eq!(state.repo, expected);
+            assert!(
+                state
+                    .setup
+                    .sources
+                    .iter()
+                    .any(|source| source.path == "README.md" && source.state == SourceState::Ok)
+            );
+        }
     }
 
     #[test]

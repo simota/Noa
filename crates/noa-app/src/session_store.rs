@@ -170,16 +170,15 @@ pub struct WallClock {
     pub minute: u32,
 }
 
-/// The status dot color for a card (FR-11). Semantics: `Blue` = busy (a
-/// program is running), `Green` = idle, `Yellow` = an unread bell is pending,
-/// `Red` = an unread notification or an explicitly reported request/error.
-/// Precedence is attention > bell > busy > idle (see [`status_dot`]).
+/// A card's activity or pending notification, independent of its visual
+/// presentation. Precedence is attention > bell > busy > idle (see
+/// [`session_activity`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StatusDot {
-    Blue,
-    Green,
-    Yellow,
-    Red,
+pub enum SessionActivity {
+    Busy,
+    Idle,
+    Bell,
+    Attention,
 }
 
 /// One auto-approve audit entry shown on the session card. The store keeps the
@@ -1023,18 +1022,18 @@ impl SessionStore {
     }
 }
 
-/// Map a card's state to its status dot color (FR-11/FR-16). Precedence is
+/// Resolve a card's activity (FR-11/FR-16). Precedence is
 /// attention > bell > busy > idle: a pending interaction request wins over an
 /// unread bell, which wins over a running program, which wins over idle.
-pub fn status_dot(card: &SessionCard) -> StatusDot {
+pub fn session_activity(card: &SessionCard) -> SessionActivity {
     if card.attention || card.agent_needs_attention() {
-        StatusDot::Red
+        SessionActivity::Attention
     } else if card.unread_bell {
-        StatusDot::Yellow
+        SessionActivity::Bell
     } else if card.is_running() {
-        StatusDot::Blue
+        SessionActivity::Busy
     } else {
-        StatusDot::Green
+        SessionActivity::Idle
     }
 }
 
@@ -1413,9 +1412,9 @@ mod tests {
         assert_eq!(store.get(&id).unwrap().name, "reborn");
     }
 
-    // AC-13 (FR-11): status-dot color mapping with bell > busy > idle.
+    // AC-13 (FR-11): activity precedence is attention > bell > busy > idle.
     #[test]
-    fn status_dot_maps_state_to_color() {
+    fn session_activity_prioritizes_notifications_over_running_and_idle() {
         let base = SessionCard {
             name: "s".to_string(),
             name_override: None,
@@ -1441,19 +1440,19 @@ mod tests {
             activity: 0,
         };
 
-        assert_eq!(status_dot(&base), StatusDot::Green);
+        assert_eq!(session_activity(&base), SessionActivity::Idle);
 
         let busy = SessionCard {
             busy: true,
             ..base.clone()
         };
-        assert_eq!(status_dot(&busy), StatusDot::Blue);
+        assert_eq!(session_activity(&busy), SessionActivity::Busy);
 
         let bell = SessionCard {
             unread_bell: true,
             ..base.clone()
         };
-        assert_eq!(status_dot(&bell), StatusDot::Yellow);
+        assert_eq!(session_activity(&bell), SessionActivity::Bell);
 
         // Bell wins over busy.
         let bell_and_busy = SessionCard {
@@ -1461,7 +1460,7 @@ mod tests {
             busy: true,
             ..base.clone()
         };
-        assert_eq!(status_dot(&bell_and_busy), StatusDot::Yellow);
+        assert_eq!(session_activity(&bell_and_busy), SessionActivity::Bell);
 
         // Attention (FR-16) wins over everything.
         let attention = SessionCard {
@@ -1470,7 +1469,7 @@ mod tests {
             busy: true,
             ..base
         };
-        assert_eq!(status_dot(&attention), StatusDot::Red);
+        assert_eq!(session_activity(&attention), SessionActivity::Attention);
     }
 
     #[test]

@@ -425,6 +425,7 @@ fn right_aligned_run(
 /// A single status label, shown on the name row. Routine activity stays
 /// neutral; semantic color is reserved for a request that needs attention.
 fn card_state_label(card: &SessionCard) -> Option<(&'static str, Rgb)> {
+    use crate::session_store::{SessionActivity, session_activity};
     use noa_grid::AgentState;
     if let Some(report) = &card.agent_status
         && report.state.needs_attention()
@@ -437,20 +438,20 @@ fn card_state_label(card: &SessionCard) -> Option<(&'static str, Rgb)> {
         };
         return Some((label, chrome().dot_red));
     }
-    if card.attention {
-        return Some((ATTENTION_LABEL, chrome().dot_red));
+    match session_activity(card) {
+        SessionActivity::Attention => Some((ATTENTION_LABEL, chrome().dot_red)),
+        SessionActivity::Bell => Some(("bell", chrome().dim_fg)),
+        SessionActivity::Busy => Some(("running", chrome().dim_fg)),
+        SessionActivity::Idle
+            if card
+                .agent_status
+                .as_ref()
+                .is_some_and(|report| report.state == AgentState::Finished) =>
+        {
+            Some(("done", chrome().dim_fg))
+        }
+        SessionActivity::Idle => None,
     }
-    if card.unread_bell {
-        return Some(("bell", chrome().dim_fg));
-    }
-    if card
-        .agent_status
-        .as_ref()
-        .is_some_and(|report| report.state == AgentState::Finished)
-    {
-        return Some(("done", chrome().dim_fg));
-    }
-    card.is_running().then_some(("running", chrome().dim_fg))
 }
 
 fn working_directory_name(cwd: &str) -> &str {
@@ -685,6 +686,7 @@ fn mark_float_card(lines: &mut CardLines, is_float: bool) {
 mod tests {
     use super::*;
     use crate::session_store::{AutoApproveAuditEntry, PreviewSpan, SessionStore, WallClock};
+    use crate::sidebar::{SidebarCardMode, SidebarCardSpec};
     use noa_core::Color;
 
     #[test]

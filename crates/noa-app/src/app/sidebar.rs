@@ -11,8 +11,8 @@
 use super::*;
 use crate::session_store::{AgentKind, SessionCard, SessionDelta};
 use crate::sidebar::{
-    CARD_MENU_ITEMS, CardLines, CardRects, SidebarCardMode, SidebarCardSpec, SidebarMetrics,
-    SidebarRect, agent_display_name, card_lines,
+    CARD_MENU_ITEMS, CardLines, CardRects, SidebarMetrics, SidebarRect, agent_display_name,
+    card_lines,
 };
 use noa_core::Rgb;
 use std::collections::HashSet;

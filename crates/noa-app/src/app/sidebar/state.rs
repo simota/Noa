@@ -1,5 +1,38 @@
 use super::*;
 
+fn sidebar_card_mode(
+    selected: bool,
+    preview_lines: usize,
+    status: Option<&noa_grid::AgentStatus>,
+) -> crate::sidebar::SidebarCardMode {
+    use crate::sidebar::SidebarCardMode;
+    if selected {
+        SidebarCardMode::Expanded
+    } else if preview_lines > 0
+        && status.is_some_and(|status| {
+            status.state.needs_attention() && !status.detail.trim().is_empty()
+        })
+    {
+        SidebarCardMode::Attention
+    } else {
+        SidebarCardMode::Compact
+    }
+}
+
+fn sidebar_card_spec(
+    id: SessionCardId,
+    selected: bool,
+    preview_lines: usize,
+    status: Option<&noa_grid::AgentStatus>,
+    drag: Option<&SidebarDrag>,
+) -> crate::sidebar::SidebarCardSpec {
+    let mode = drag.filter(|drag| drag.card == id).map_or_else(
+        || sidebar_card_mode(selected, preview_lines, status),
+        |drag| drag.mode,
+    );
+    crate::sidebar::SidebarCardSpec { id, mode }
+}
+
 fn arm_attention_flash(
     flashes: &mut HashMap<SessionCardId, Instant>,
     id: SessionCardId,
@@ -327,9 +360,8 @@ impl App {
                 }
                 let metrics = self.sidebar_metrics(window_id);
                 let bounds = self.sidebar_layout_bounds(window_id, inset);
-                let windows = self.session_windows_for_window(window_id);
-                let ids = self.session_store.ordered_ids_for_windows(&windows);
-                metrics.hit_test(bounds, &ids, state.sidebar_scroll, point)
+                let specs = self.sidebar_card_specs(window_id);
+                metrics.hit_test_cards(bounds, &specs, state.sidebar_scroll, point)
             });
         let hovered = matches!(hit, Some(crate::sidebar::SidebarHit::NewSession));
         let hovered_card = match hit {
@@ -538,6 +570,33 @@ impl App {
         metrics.with_cell_height(cell_h)
     }
 
+    /// Selection expands one card; actionable detail gets one compact
+    /// summary row. Every drawing and interaction path consumes this policy.
+    pub(in crate::app) fn sidebar_card_specs(
+        &self,
+        window_id: WindowId,
+    ) -> Vec<crate::sidebar::SidebarCardSpec> {
+        let state = self.windows.get(&window_id);
+        let selected = state.map(|state| Self::session_card_id(window_id, state.focused_pane));
+        let drag = state.and_then(|state| state.sidebar_drag.as_ref());
+        let windows = self.session_windows_for_window(window_id);
+        self.session_store
+            .ordered_ids_for_windows(&windows)
+            .into_iter()
+            .map(|id| {
+                sidebar_card_spec(
+                    id,
+                    Some(id) == selected,
+                    self.config.sidebar_preview_lines,
+                    self.session_store
+                        .get(&id)
+                        .and_then(|card| card.agent_status.as_ref()),
+                    drag,
+                )
+            })
+            .collect()
+    }
+
     /// Recompute the app-wide io-thread gate: on while any eligible window
     /// shows its sidebar (Omen T1 — a distinct flag from the overview gate).
     pub(in crate::app) fn refresh_sidebar_visible_gate(&self) {
@@ -643,6 +702,97 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_and_active_drags_keep_their_mode_while_other_cards_update() {
+        use crate::sidebar::SidebarCardMode;
+        let id = SessionCardId::new(SessionWindowId(1), PaneId::new(2));
+        let other = SessionCardId::new(SessionWindowId(1), PaneId::new(3));
+        for active in [false, true] {
+            for mode in [
+                SidebarCardMode::Compact,
+                SidebarCardMode::Attention,
+                SidebarCardMode::Expanded,
+            ] {
+                let drag = SidebarDrag {
+                    card: id,
+                    mode,
+                    start_y: 30,
+                    grab_dy: 18,
+                    current_y: 50,
+                    active,
+                };
+                let mut report = status(noa_grid::AgentState::Permission);
+                report.detail = "Review this command".to_string();
+                for selected in [false, true] {
+                    assert_eq!(
+                        sidebar_card_spec(id, selected, 5, Some(&report), Some(&drag)).mode,
+                        mode
+                    );
+                }
+                assert_eq!(
+                    sidebar_card_spec(other, false, 5, Some(&report), Some(&drag)).mode,
+                    SidebarCardMode::Attention
+                );
+                report.state = noa_grid::AgentState::Running;
+                assert_eq!(
+                    sidebar_card_spec(id, false, 5, Some(&report), Some(&drag)).mode,
+                    mode
+                );
+                assert_eq!(
+                    sidebar_card_spec(other, false, 5, Some(&report), Some(&drag)).mode,
+                    SidebarCardMode::Compact
+                );
+                assert_eq!(
+                    sidebar_card_spec(id, false, 5, Some(&report), None).mode,
+                    SidebarCardMode::Compact
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn card_detail_expands_only_for_selection_or_actionable_nonempty_reports() {
+        use crate::sidebar::SidebarCardMode;
+        use noa_grid::AgentState;
+
+        for preview_lines in [0, 1, 5, 20] {
+            assert_eq!(
+                sidebar_card_mode(true, preview_lines, None),
+                SidebarCardMode::Expanded
+            );
+            assert_eq!(
+                sidebar_card_mode(false, preview_lines, None),
+                SidebarCardMode::Compact
+            );
+        }
+        for (state, expected) in [
+            (AgentState::Running, SidebarCardMode::Compact),
+            (AgentState::Finished, SidebarCardMode::Compact),
+            (AgentState::Permission, SidebarCardMode::Attention),
+            (AgentState::Input, SidebarCardMode::Attention),
+            (AgentState::Error, SidebarCardMode::Attention),
+        ] {
+            let mut report = status(state);
+            report.detail = "Review the pending request".to_string();
+            assert_eq!(sidebar_card_mode(false, 5, Some(&report)), expected);
+            assert_eq!(
+                sidebar_card_mode(false, 0, Some(&report)),
+                SidebarCardMode::Compact
+            );
+            assert_eq!(
+                sidebar_card_mode(true, 0, Some(&report)),
+                SidebarCardMode::Expanded
+            );
+            for detail in ["", " \n\t"] {
+                report.detail = detail.to_string();
+                assert_eq!(
+                    sidebar_card_mode(false, 5, Some(&report)),
+                    SidebarCardMode::Compact
+                );
+            }
+        }
+    }
 
     #[test]
     fn unread_notifications_are_suppressed_only_for_the_selected_pane() {

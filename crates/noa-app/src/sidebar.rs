@@ -12,7 +12,7 @@
 pub use crate::split_tree::{Point, Rect as SidebarRect};
 
 use crate::session_store::{
-    AgentKind, IconKind, SessionCard, SessionCardId, WallClock, format_relative_time,
+    AgentKind, SessionCard, SessionCardId, WallClock, format_relative_time,
 };
 
 // All the `SIDEBAR_*`/`CARD_*` metrics below are the design values at scale
@@ -49,29 +49,24 @@ const CARD_PAD: u32 = 12;
 /// Extra left inset for the terminal-output preview rows, on top of `CARD_PAD`.
 /// The preview echoes raw shell/agent output (a prompt, `../noa main`, …) which
 /// otherwise starts flush against the card's left pad and reads as cramped; a
-/// small indent sets it apart from the dot-anchored name/cwd/meta rows above.
+/// small indent sets it apart from the aligned name/meta/context rows above.
 const CARD_PREVIEW_INSET: u32 = 8;
-const CARD_ICON_W: u32 = 18;
-const CARD_DOT_D: u32 = 8;
 const CARD_MENU_W: u32 = 22;
 const CARD_LINE_H: u32 = 15;
-const CARD_NAME_H: u32 = 18;
+const CARD_NAME_H: u32 = 15;
 /// Width of the right-aligned updated-time region on the name row (fits
 /// `Yday 23:47`, the widest form `format_relative_time` emits, in the
 /// sidebar's small font).
 const CARD_UPDATED_W: u32 = 78;
 
-// Card interior row baselines (top-relative): the name row (dot, icon, name,
-// right-aligned updated-time, `…`), the agent/status row, the working-context
-// row (branch + cwd), then a configured number of last-output preview lines. All
-// rows are always reserved for the configured card height and left blank when
-// a field is absent.
-const CARD_NAME_Y: u32 = 8;
+// Card interior row baselines (top-relative): identity and state are always
+// present. A selected card adds context and the configured preview rows;
+// an unselected actionable report adds just one detail row.
+const CARD_NAME_Y: u32 = 12;
 const CARD_META_Y: u32 = 28;
 const CARD_CONTEXT_Y: u32 = 44;
-/// Separate output from the metadata while keeping the default five-row card
-/// close to its previous height. Preview rows retain a regular cell-sized step.
-const CARD_PREVIEW_START_Y: u32 = 72;
+/// Output follows context on the next row without reserving an empty row.
+const CARD_PREVIEW_START_Y: u32 = 60;
 const CARD_PREVIEW_LINE_STEP: u32 = 16;
 const CARD_BOTTOM_PAD: u32 = 12;
 
@@ -120,6 +115,20 @@ pub struct SidebarBands {
     pub viewport: SidebarRect,
 }
 
+/// Detail is determined by selection and an actionable report, never hover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarCardMode {
+    Compact,
+    Attention,
+    Expanded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SidebarCardSpec {
+    pub id: SessionCardId,
+    pub mode: SidebarCardMode,
+}
+
 /// Sub-rects of one laid-out session card, in window space, each clipped to the
 /// scrolling viewport (a card scrolled partly off-screen yields clipped, and
 /// possibly zero-size, sub-rects).
@@ -127,6 +136,9 @@ pub struct SidebarBands {
 pub struct CardRects {
     pub id: SessionCardId,
     pub bounds: SidebarRect,
+    /// The unclipped height, which can differ from neighboring cards.
+    pub full_h: u32,
+    pub expanded: bool,
     /// Pixels clipped from the full card's top. The texture sampler needs this
     /// independently of `bounds.h` when both ends lie outside a short viewport.
     pub clipped_top: u32,
@@ -172,20 +184,18 @@ pub struct SidebarMetrics {
     /// differ across platforms, so scaled design-space baselines alone can put
     /// two metadata lines on the same terminal row.
     cell_h: Option<f32>,
-    /// Number of last-output preview rows each card reserves.
+    /// Number of last-output preview rows the selected card reserves.
     pub preview_lines: usize,
     /// Header band height (scaled).
     pub header_h: u32,
     /// Toolbar band height (scaled).
     pub toolbar_h: u32,
-    /// One card's height (scaled).
+    /// The maximum (expanded) card height, also the shared texture height.
     pub card_h: u32,
     /// Vertical gap between cards (scaled).
     pub card_gutter: u32,
     /// Horizontal card margin from the sidebar edges (scaled).
     pub card_margin_x: u32,
-    /// Card-to-card stride (`card_h + card_gutter`).
-    pub card_stride: u32,
     /// `…` menu popup width (scaled).
     pub menu_w: u32,
     /// `…` menu item-row height (scaled).
@@ -193,10 +203,8 @@ pub struct SidebarMetrics {
 }
 
 impl SidebarMetrics {
-    /// Resolve the design metrics for `scale` (a non-finite or non-positive
-    /// value falls back to 1.0). `card_stride` is derived from the scaled parts
-    /// so it always equals `card_h + card_gutter` exactly (the layout and
-    /// hit-test both rely on that identity).
+    /// Resolve the default-preview design metrics for `scale` (a non-finite or
+    /// non-positive value falls back to 1.0).
     #[cfg(test)]
     pub fn new(scale: f32) -> Self {
         Self::new_with_preview_lines(scale, DEFAULT_SIDEBAR_PREVIEW_LINES)
@@ -220,7 +228,6 @@ impl SidebarMetrics {
             toolbar_h: s(SIDEBAR_TOOLBAR_H),
             card_h,
             card_gutter,
-            card_stride: card_h + card_gutter,
             card_margin_x: s(SIDEBAR_CARD_MARGIN_X),
             menu_w: s(SIDEBAR_MENU_W),
             menu_item_h: s(SIDEBAR_MENU_ITEM_H),
@@ -232,9 +239,8 @@ impl SidebarMetrics {
         ((v as f32) * self.scale).round() as u32
     }
 
-    /// Snap card rows to the sidebar font's real cell grid. Keep one blank row
-    /// between working context and output; a zero-preview card ends directly
-    /// after context. Layout, texture sizing and hit-testing share these rows.
+    /// Snap card rows to the sidebar font's real cell grid. Layout, texture
+    /// sizing and hit-testing share these rows and a one-cell top inset.
     pub fn with_cell_height(mut self, cell_h: f32) -> Self {
         if !cell_h.is_finite() || cell_h <= 0.0 {
             return self;
@@ -248,14 +254,13 @@ impl SidebarMetrics {
         self.card_h = last_y
             .saturating_add(self.card_line_h())
             .saturating_add(self.s(CARD_BOTTOM_PAD));
-        self.card_stride = self.card_h.saturating_add(self.card_gutter);
         self
     }
 
     fn card_row_y(&self, row_offset: u32, design_y: u32) -> u32 {
         match self.cell_h {
             Some(cell_h) => {
-                let name_row = (self.s(CARD_NAME_Y) as f32 / cell_h).round();
+                let name_row = (self.s(CARD_NAME_Y) as f32 / cell_h).round().max(1.0);
                 ((name_row + row_offset as f32) * cell_h).round() as u32
             }
             None => self.s(design_y),
@@ -265,7 +270,7 @@ impl SidebarMetrics {
     fn preview_row_y(&self, index: usize) -> u32 {
         let index = u32::try_from(index).unwrap_or(u32::MAX);
         self.card_row_y(
-            index.saturating_add(4),
+            index.saturating_add(3),
             CARD_PREVIEW_START_Y.saturating_add(index.saturating_mul(CARD_PREVIEW_LINE_STEP)),
         )
     }
@@ -278,6 +283,25 @@ impl SidebarMetrics {
     fn card_name_h(&self) -> u32 {
         self.cell_h
             .map_or_else(|| self.s(CARD_NAME_H), |cell_h| cell_h.ceil() as u32)
+    }
+
+    fn card_height(&self, mode: SidebarCardMode) -> u32 {
+        let last_y = match mode {
+            SidebarCardMode::Compact => self.card_row_y(1, CARD_META_Y),
+            SidebarCardMode::Attention if self.preview_lines > 0 => {
+                self.card_row_y(2, CARD_CONTEXT_Y)
+            }
+            SidebarCardMode::Attention => self.card_row_y(1, CARD_META_Y),
+            SidebarCardMode::Expanded => return self.card_h,
+        };
+        last_y
+            .saturating_add(self.card_line_h())
+            .saturating_add(self.s(CARD_BOTTOM_PAD))
+    }
+
+    /// A stable wheel step independent of which card is expanded.
+    pub fn compact_card_height(&self) -> u32 {
+        self.card_height(SidebarCardMode::Compact)
     }
 
     /// Carve `bounds` into the header / toolbar / viewport bands. Each band
@@ -321,36 +345,41 @@ impl SidebarMetrics {
         SidebarRect::new(x, y, btn_w.min(toolbar.w), h)
     }
 
-    /// Total scrollable content height for `card_count` stacked cards.
-    pub fn content_height(&self, card_count: usize) -> u32 {
-        (card_count as u32).saturating_mul(self.card_stride)
+    /// All consumers use the same per-card heights, including offscreen cards.
+    pub fn content_height_cards(&self, cards: &[SidebarCardSpec]) -> u32 {
+        cards.iter().fold(0u32, |height, card| {
+            height.saturating_add(self.card_height(card.mode).saturating_add(self.card_gutter))
+        })
     }
 
     /// Lay out the sidebar: header/toolbar chrome plus every card at least
     /// partially visible after applying `scroll_offset` (clamped). Cards fully
     /// scrolled out are omitted; partly-visible cards are clipped to the
     /// viewport.
-    pub fn layout(
+    pub fn layout_cards(
         &self,
         bounds: SidebarRect,
-        ids: &[SessionCardId],
+        specs: &[SidebarCardSpec],
         scroll_offset: u32,
     ) -> SidebarLayout {
         let bands = self.bands(bounds);
-        let content_h = self.content_height(ids.len());
+        let content_h = self.content_height_cards(specs);
         let scroll = clamp_scroll(scroll_offset, content_h, bands.viewport.h);
         let vp = bands.viewport;
 
         let mut cards = Vec::new();
-        for (index, &id) in ids.iter().enumerate() {
+        let mut offset = 0u32;
+        for &spec in specs {
             // Window-space top of this card (may fall above/below the viewport).
-            let top = vp.y as i64 + (index as i64) * self.card_stride as i64 - scroll as i64;
-            let bottom = top + self.card_h as i64;
+            let top = vp.y as i64 + offset as i64 - scroll as i64;
+            let card_h = self.card_height(spec.mode);
+            let bottom = top + card_h as i64;
+            offset = offset.saturating_add(card_h.saturating_add(self.card_gutter));
             // Skip cards entirely outside the viewport.
             if bottom <= vp.y as i64 || top >= vp.bottom() as i64 {
                 continue;
             }
-            cards.push(self.card_rects(id, top, vp));
+            cards.push(self.card_rects(spec, top, vp));
         }
 
         SidebarLayout {
@@ -364,11 +393,11 @@ impl SidebarMetrics {
     /// One card's sub-rects in its own texture space (origin at the card's
     /// top-left, width `card_w`), unclipped. The per-card overlay renderer draws
     /// each card into its own texture and positions text with these. The
-    /// window-space rects from [`layout`](Self::layout) determine its visible
+    /// window-space rects from [`layout_cards`](Self::layout_cards) determine its visible
     /// slice and interactive regions.
-    pub fn card_local_rects(&self, id: SessionCardId, card_w: u32) -> CardRects {
-        let vp = SidebarRect::new(0, 0, card_w, self.card_h);
-        self.card_rects_at(id, 0, card_w as i64, 0, vp)
+    pub fn card_local_rects_for(&self, spec: SidebarCardSpec, card_w: u32) -> CardRects {
+        let vp = SidebarRect::new(0, 0, card_w, self.card_height(spec.mode));
+        self.card_rects_at(spec, 0, card_w as i64, 0, vp)
     }
 
     /// The width of one card for a sidebar `sidebar_w` wide: the full width
@@ -381,11 +410,11 @@ impl SidebarMetrics {
     /// Build one card's clipped sub-rects from its (possibly off-viewport)
     /// window top `top` and the viewport `vp`, inset from the viewport edges by
     /// the horizontal card margin.
-    fn card_rects(&self, id: SessionCardId, top: i64, vp: SidebarRect) -> CardRects {
+    fn card_rects(&self, spec: SidebarCardSpec, top: i64, vp: SidebarRect) -> CardRects {
         let margin = self.card_margin_x as i64;
         let lx = vp.x as i64 + margin;
         let w = (vp.w as i64 - 2 * margin).max(0);
-        self.card_rects_at(id, lx, w, top, vp)
+        self.card_rects_at(spec, lx, w, top, vp)
     }
 
     /// The interior of one card whose left edge is `lx` and width `w` (window
@@ -394,36 +423,30 @@ impl SidebarMetrics {
     /// fit its scaled height on a Retina display.
     fn card_rects_at(
         &self,
-        id: SessionCardId,
+        spec: SidebarCardSpec,
         lx: i64,
         w: i64,
         top: i64,
         vp: SidebarRect,
     ) -> CardRects {
         let pad = self.s(CARD_PAD) as i64;
-        let dot_d = self.s(CARD_DOT_D) as i64;
-        let icon_w = self.s(CARD_ICON_W) as i64;
         let card_menu_w = self.s(CARD_MENU_W) as i64;
         let line_h = self.card_line_h() as i64;
         let name_h = self.card_name_h() as i64;
         let gap6 = self.s(6) as i64;
 
-        // Name row, left to right: status dot, project icon, display name,
-        // right-aligned updated-time, `…` hit region. The dot sits at the
-        // card's left edge (mockup parity) as a small color chip; the icon and
-        // name follow it.
-        let dot_x = lx + pad;
-        let icon_x = dot_x + dot_d + self.s(8) as i64;
-        let name_x = icon_x + icon_w + gap6;
+        // Identity owns the left edge. Status is conveyed on the metadata row,
+        // so it no longer takes a second icon column away from the name.
+        let name_x = lx + pad;
         let menu_x = lx + w - pad - card_menu_w;
         let updated_w = self.s(CARD_UPDATED_W) as i64;
-        let updated_x = menu_x - gap6 - updated_w;
+        let updated_x = menu_x - self.s(12) as i64 - updated_w;
         let name_w = updated_x - name_x - gap6;
 
         let body_w = w - 2 * pad;
         let row = |y: u32| iclip(lx + pad, top + y as i64, body_w, line_h, vp);
         // Preview rows carry an extra left inset so raw terminal output sits a
-        // touch inboard of the dot-anchored rows above (mockup parity).
+        // touch inboard of the aligned metadata rows above.
         let preview_inset = self.s(CARD_PREVIEW_INSET) as i64;
         let preview_row = |y: u32| {
             iclip(
@@ -437,131 +460,198 @@ impl SidebarMetrics {
 
         let name_y = top + self.card_row_y(0, CARD_NAME_Y) as i64;
 
-        let preview = (0..self.preview_lines)
-            .map(|index| preview_row(self.preview_row_y(index)))
-            .collect();
+        let preview = match spec.mode {
+            SidebarCardMode::Compact => Vec::new(),
+            SidebarCardMode::Attention if self.preview_lines > 0 => {
+                vec![row(self.card_row_y(2, CARD_CONTEXT_Y))]
+            }
+            SidebarCardMode::Attention => Vec::new(),
+            SidebarCardMode::Expanded => (0..self.preview_lines)
+                .map(|index| preview_row(self.preview_row_y(index)))
+                .collect(),
+        };
+        let full_h = self.card_height(spec.mode);
+        let empty = SidebarRect::new(name_x.max(0) as u32, name_y.max(0) as u32, 0, 0);
 
         CardRects {
-            id,
-            bounds: iclip(lx, top, w, self.card_h as i64, vp),
-            clipped_top: (vp.y as i64 - top).clamp(0, self.card_h as i64) as u32,
-            icon: iclip(icon_x, name_y, icon_w, name_h, vp),
+            id: spec.id,
+            bounds: iclip(lx, top, w, full_h as i64, vp),
+            full_h,
+            expanded: spec.mode == SidebarCardMode::Expanded,
+            clipped_top: (vp.y as i64 - top).clamp(0, full_h as i64) as u32,
+            icon: empty,
             name_line: iclip(name_x, name_y, name_w, name_h, vp),
             meta: row(self.card_row_y(1, CARD_META_Y)),
-            context: row(self.card_row_y(2, CARD_CONTEXT_Y)),
+            context: if spec.mode == SidebarCardMode::Expanded {
+                row(self.card_row_y(2, CARD_CONTEXT_Y))
+            } else {
+                empty
+            },
             preview,
             updated: iclip(updated_x, name_y, updated_w, name_h, vp),
-            // The dot rect shares the name row's y (not a centered sub-rect):
-            // the draw path converts rect origins to cell rows by rounding, so
-            // a vertically-centered y could land the dot one cell row below
-            // the name it belongs to.
-            dot: iclip(dot_x, name_y, dot_d, name_h, vp),
+            dot: empty,
             menu_button: iclip(menu_x, name_y, card_menu_w, name_h, vp),
         }
     }
 
-    /// Resolve a click at `point` against the sidebar (FR-3/AC-4). Checks the
-    /// toolbar buttons first, then the scrolling card region: within a card, the
-    /// per-card `…` button wins over the card body (callers need not fall back
-    /// like the overview's separate close hit-test). Returns `None` for the
-    /// header, any configured gutters between cards, or any point outside the
-    /// sidebar.
+    /// Resolve clicks against the same visible rectangles used for rendering.
+    pub fn hit_test_cards(
+        &self,
+        bounds: SidebarRect,
+        specs: &[SidebarCardSpec],
+        scroll_offset: u32,
+        point: Point,
+    ) -> Option<SidebarHit> {
+        let layout = self.layout_cards(bounds, specs, scroll_offset);
+        if layout.new_button.contains(point) {
+            return Some(SidebarHit::NewSession);
+        }
+        if !layout.viewport.contains(point) {
+            return None;
+        }
+        let card = layout
+            .cards
+            .iter()
+            .find(|card| card.bounds.contains(point))?;
+        if card.menu_button.contains(point) {
+            Some(SidebarHit::CardMenu(card.id))
+        } else {
+            Some(SidebarHit::Card(card.id))
+        }
+    }
+
+    /// Choose the gap before or after each card using its actual midpoint.
+    /// The dragged card keeps its slot, so the insertion targets stay still.
+    pub fn drop_index_cards(
+        &self,
+        viewport: SidebarRect,
+        specs: &[SidebarCardSpec],
+        scroll_offset: u32,
+        pointer_y: u32,
+    ) -> usize {
+        let scroll = clamp_scroll(scroll_offset, self.content_height_cards(specs), viewport.h);
+        let py = pointer_y.clamp(viewport.y, viewport.bottom());
+        let cy = u64::from(py - viewport.y) + u64::from(scroll);
+        let mut top = 0u64;
+        for (index, spec) in specs.iter().enumerate() {
+            let stride = u64::from(self.card_height(spec.mode)) + u64::from(self.card_gutter);
+            if cy < top + stride / 2 {
+                return index;
+            }
+            top += stride;
+        }
+        specs.len()
+    }
+
+    /// Draw insertion feedback at the same cumulative gap used by hit-testing.
+    pub fn drop_indicator_y_cards(
+        &self,
+        viewport: SidebarRect,
+        specs: &[SidebarCardSpec],
+        scroll_offset: u32,
+        index: usize,
+    ) -> Option<u32> {
+        let scroll = clamp_scroll(scroll_offset, self.content_height_cards(specs), viewport.h);
+        let offset = self.content_height_cards(&specs[..index.min(specs.len())]);
+        let top = i64::from(offset) - i64::from(scroll) + i64::from(viewport.y);
+        Some(top.clamp(i64::from(viewport.y), i64::from(viewport.bottom())) as u32)
+    }
+
+    /// Keep a selected card at its former viewport-relative top while cards
+    /// before it collapse or expand. Clamp only when a content edge prevents it.
+    pub fn scroll_for_card_anchor(
+        &self,
+        specs: &[SidebarCardSpec],
+        anchor: SessionCardId,
+        top_in_viewport: i64,
+        viewport_h: u32,
+    ) -> Option<u32> {
+        let index = specs.iter().position(|spec| spec.id == anchor)?;
+        let top = self.content_height_cards(&specs[..index]);
+        let desired = (i64::from(top) - top_in_viewport).clamp(0, i64::from(u32::MAX)) as u32;
+        Some(clamp_scroll(
+            desired,
+            self.content_height_cards(specs),
+            viewport_h,
+        ))
+    }
+
+    #[cfg(test)]
+    fn expanded_specs(ids: &[SessionCardId]) -> Vec<SidebarCardSpec> {
+        ids.iter()
+            .map(|&id| SidebarCardSpec {
+                id,
+                mode: SidebarCardMode::Expanded,
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn uniform_specs(count: usize) -> Vec<SidebarCardSpec> {
+        vec![
+            SidebarCardSpec {
+                id: SessionCardId::new(
+                    crate::session_store::SessionWindowId(0),
+                    crate::split_tree::PaneId::new(0)
+                ),
+                mode: SidebarCardMode::Expanded,
+            };
+            count
+        ]
+    }
+
+    #[cfg(test)]
+    pub fn content_height(&self, card_count: usize) -> u32 {
+        self.content_height_cards(&Self::uniform_specs(card_count))
+    }
+
+    #[cfg(test)]
+    pub fn layout(&self, bounds: SidebarRect, ids: &[SessionCardId], scroll: u32) -> SidebarLayout {
+        self.layout_cards(bounds, &Self::expanded_specs(ids), scroll)
+    }
+
+    #[cfg(test)]
+    pub fn card_local_rects(&self, id: SessionCardId, card_w: u32) -> CardRects {
+        self.card_local_rects_for(
+            SidebarCardSpec {
+                id,
+                mode: SidebarCardMode::Expanded,
+            },
+            card_w,
+        )
+    }
+
+    #[cfg(test)]
     pub fn hit_test(
         &self,
         bounds: SidebarRect,
         ids: &[SessionCardId],
-        scroll_offset: u32,
+        scroll: u32,
         point: Point,
     ) -> Option<SidebarHit> {
-        let bands = self.bands(bounds);
-
-        if self.new_button_rect(bands.toolbar).contains(point) {
-            return Some(SidebarHit::NewSession);
-        }
-
-        let vp = bands.viewport;
-        if !vp.contains(point) {
-            return None;
-        }
-
-        let content_h = self.content_height(ids.len());
-        let scroll = clamp_scroll(scroll_offset, content_h, vp.h);
-
-        // Translate the point into scroll-content space (origin at the viewport
-        // top-left, offset by the scroll). Both terms are non-negative because
-        // the point is inside the viewport.
-        let cx = point.x - vp.x;
-        let cy = (point.y - vp.y) + scroll;
-
-        let index = (cy / self.card_stride) as usize;
-        if index >= ids.len() || cy % self.card_stride >= self.card_h {
-            // Past the last card, or in a configured gutter between cards.
-            return None;
-        }
-        let id = ids[index];
-
-        // Per-card `…` button, in content space (same math as `card_rects`).
-        let card_top = index as u32 * self.card_stride;
-        let menu_x =
-            vp.w.saturating_sub(self.card_margin_x)
-                .saturating_sub(self.s(CARD_PAD))
-                .saturating_sub(self.s(CARD_MENU_W));
-        let menu = SidebarRect::new(
-            menu_x,
-            card_top + self.card_row_y(0, CARD_NAME_Y),
-            self.s(CARD_MENU_W),
-            self.card_name_h(),
-        );
-        if menu.contains(Point::new(cx, cy)) {
-            return Some(SidebarHit::CardMenu(id));
-        }
-        Some(SidebarHit::Card(id))
+        self.hit_test_cards(bounds, &Self::expanded_specs(ids), scroll, point)
     }
 
-    /// The insertion index a drag-reorder drop at `pointer_y` (window px) maps
-    /// to, in `[0, card_count]`: 0 drops before the first card, `card_count`
-    /// past the last. The pointer is clamped into the viewport and translated to
-    /// scroll-content space, then snapped to the nearest card *gap* (half-stride
-    /// rounding) so a drop lands where the drop indicator is drawn. The caller
-    /// turns the index into a neighbor id for
-    /// [`SessionStore::move_card_before`](crate::session_store::SessionStore::move_card_before).
+    #[cfg(test)]
     pub fn drop_index(
         &self,
         viewport: SidebarRect,
-        card_count: usize,
-        scroll_offset: u32,
+        count: usize,
+        scroll: u32,
         pointer_y: u32,
     ) -> usize {
-        if self.card_stride == 0 {
-            return 0;
-        }
-        let content_h = self.content_height(card_count);
-        let scroll = clamp_scroll(scroll_offset, content_h, viewport.h);
-        let py = pointer_y.clamp(viewport.y, viewport.bottom());
-        let cy = (py - viewport.y) as u64 + scroll as u64;
-        // Round to the nearest gap: the gap before card `i` sits at `i * stride`.
-        let idx = ((cy + self.card_stride as u64 / 2) / self.card_stride as u64) as usize;
-        idx.min(card_count)
+        self.drop_index_cards(viewport, &Self::uniform_specs(count), scroll, pointer_y)
     }
 
-    /// The y of the drop-indicator line (window px) for insertion `index`, or
-    /// `None` when it would fall outside the viewport. Mirrors
-    /// [`drop_index`](Self::drop_index)'s gap positions: index `i` sits at the
-    /// top of card `i` (`i * stride`), clamped to the viewport edges.
+    #[cfg(test)]
     pub fn drop_indicator_y(
         &self,
         viewport: SidebarRect,
-        card_count: usize,
-        scroll_offset: u32,
+        count: usize,
+        scroll: u32,
         index: usize,
     ) -> Option<u32> {
-        let content_h = self.content_height(card_count);
-        let scroll = clamp_scroll(scroll_offset, content_h, viewport.h);
-        let top = index as i64 * self.card_stride as i64 - scroll as i64 + viewport.y as i64;
-        // Clamp to the viewport so a drop at the very top/bottom still shows a
-        // line flush with the edge.
-        let clamped = top.clamp(viewport.y as i64, viewport.bottom() as i64);
-        Some(clamped as u32)
+        self.drop_indicator_y_cards(viewport, &Self::uniform_specs(count), scroll, index)
     }
 
     /// Place a card's `…` menu below its button, or above it near the sidebar's
@@ -664,7 +754,7 @@ pub fn card_menu_label(item: CardMenuItem) -> &'static str {
 }
 
 /// What a click on the sidebar resolves to (FR-3/FR-6/FR-7). A miss returns
-/// `None` from [`SidebarMetrics::hit_test`].
+/// `None` from [`SidebarMetrics::hit_test_cards`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarHit {
     /// A card body: switch focus to this session (FR-3).
@@ -679,8 +769,8 @@ pub enum SidebarHit {
 /// `Instant::now()`) so the relative-time line is pure and testable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CardLines {
-    /// Display name — the project icon has its own rect. The per-card rename shadows
-    /// everything; a manual tab title shadows the shell-driven name. A
+    /// Display name. The per-card rename shadows everything; a manual tab
+    /// title shadows the shell-driven name. A
     /// shell-driven name is normalized (prompt-like titles fall back to the
     /// cwd's tail segment; a ` | <branch>` suffix duplicating the context row's
     /// branch is stripped).
@@ -715,8 +805,7 @@ pub fn card_lines(
     home: Option<&str>,
     tab_title: Option<&str>,
 ) -> CardLines {
-    // The project icon is rendered from its own rect (`CardRects::icon`), so the
-    // display name here carries no glyph prefix. Name precedence: an explicit
+    // Name precedence: an explicit
     // per-card rename (FR-7) wins, then the tab's manual title, then the
     // shell-driven session name. Only the shell-driven fallback is normalized —
     // a name the user typed is shown verbatim.
@@ -867,26 +956,6 @@ pub fn format_cwd(cwd: &str, home: Option<&str>, max: usize) -> String {
     truncate_tail(&abbreviated, max)
 }
 
-/// Project-icon glyph for a card (FR-9). Nerd Font glyphs (mockup parity);
-/// `noa-font` embeds the vendored Symbols Nerd Font Mono face as a permanent
-/// fallback face in its font stack, so these private-use codepoints render
-/// even on a machine with no Nerd Font family installed (AC-21 [manual],
-/// NFR-5) — the app logic here still never depends on the glyph being
-/// present, since the coverage guarantee lives in the font stack, not this
-/// call site. The codepoints are Nerd Font private-use area (`nf-seti-*` /
-/// `nf-dev-*`).
-pub fn icon_glyph(icon: IconKind) -> &'static str {
-    match icon {
-        IconKind::Rust => "\u{e7a8}",      // nf-dev-rust
-        IconKind::Node => "\u{e718}",      // nf-dev-nodejs_small
-        IconKind::Terraform => "\u{e69a}", // nf-seti-terraform
-        IconKind::Go => "\u{e627}",        // nf-seti-go
-        IconKind::Python => "\u{e606}",    // nf-seti-python
-        IconKind::Git => "\u{e702}",       // nf-dev-git
-        IconKind::Folder => "\u{e5ff}",    // nf-custom-folder
-    }
-}
-
 /// Whether a window should host a sidebar (FR-14/AC-16b): quick-terminal
 /// windows are excluded, so they never get a card in the store nor a width
 /// inset. Kept as a predicate so the exclusion rule lives in one place.
@@ -907,7 +976,7 @@ pub fn sidebar_inset(visible: bool, eligible: bool, width_px: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::session_store::{
-        PreviewLine, PreviewSpan, SessionDelta, SessionStore, SessionWindowId,
+        IconKind, PreviewLine, PreviewSpan, SessionDelta, SessionStore, SessionWindowId,
     };
     use crate::split_tree::PaneId;
     use noa_core::Color;
@@ -986,10 +1055,10 @@ mod tests {
         )
     }
 
-    // AC-3 (FR-2): the card lines carry `[icon] name`, `cwd … branch`, and the
+    // AC-3 (FR-2): the card lines carry name, cwd, branch, and the
     // relative updated-time.
     #[test]
-    fn card_lines_include_icon_name_cwd_branch_and_time() {
+    fn card_lines_include_name_cwd_branch_and_time() {
         let card = sample_card(
             "build",
             "/Users/dev/repos/github.com/example/very-long-project",
@@ -997,10 +1066,8 @@ mod tests {
         );
         let lines = card_lines(&card, wall(10, 3), None, None);
 
-        // The name line is the display name (the icon renders from its own
-        // rect, so no glyph prefix here); the icon glyph stays resolvable.
+        // Identity is the display name without a decorative glyph prefix.
         assert_eq!(lines.name, "build");
-        assert!(!icon_glyph(IconKind::Rust).is_empty());
 
         // Keep the full path here: the renderer knows how many cells remain
         // beside the branch and truncates only as much as that width requires.
@@ -1228,7 +1295,7 @@ mod tests {
 
         // First card `…` button (top-right corner of the card).
         let menu_x = vp.w - CARD_PAD - CARD_MENU_W;
-        let card_menu = Point::new(vp.x + menu_x + 5, vp.y + 11);
+        let card_menu = Point::new(vp.x + menu_x + 5, vp.y + CARD_NAME_Y + 1);
         assert_eq!(
             m1().hit_test(bounds, &ids, 0, card_menu),
             Some(SidebarHit::CardMenu(ids[0]))
@@ -1492,24 +1559,24 @@ mod tests {
         assert_eq!(clamped.cards, m1().layout(bounds, &ids, max).cards);
     }
 
-    // FR-2 mockup parity: the name row carries, left to right, the status dot,
-    // icon, name, right-aligned updated-time region, and the `…` hit region —
-    // all sharing one y — with the agent, context and preview rows below.
+    // Identity begins at the common text edge; updated time and the menu stay
+    // separate on the same row, with metadata/context/output below.
     #[test]
-    fn card_rects_place_dot_left_and_updated_on_the_name_row() {
+    fn card_rects_align_identity_and_reserve_space_before_the_menu() {
         let (bounds, ids) = six_id_bounds();
         let layout = m1().layout(bounds, &ids, 0);
         let card = &layout.cards[0];
 
-        // Dot is the leftmost element, ahead of the icon and name, and shares
-        // the name row's y so the draw path lands them on one cell row.
-        assert!(card.dot.x < card.icon.x);
-        assert!(card.icon.x < card.name_line.x);
-        assert_eq!(card.dot.y, card.name_line.y);
+        assert_eq!(card.name_line.x, card.bounds.x + CARD_PAD);
+        assert_eq!(card.name_line.x, card.meta.x);
+        assert_eq!(
+            (card.dot.w, card.dot.h, card.icon.w, card.icon.h),
+            (0, 0, 0, 0)
+        );
 
         // Name, then the updated-time region, then the `…` hit region.
         assert!(card.name_line.right() <= card.updated.x);
-        assert!(card.updated.right() <= card.menu_button.x);
+        assert_eq!(card.updated.right() + 12, card.menu_button.x);
         assert_eq!(card.updated.y, card.name_line.y);
         assert!(card.updated.w > 0);
 
@@ -1535,9 +1602,8 @@ mod tests {
         assert_eq!(m2.card_h, 2 * SIDEBAR_CARD_H);
         assert_eq!(m2.card_gutter, 2 * SIDEBAR_CARD_GUTTER);
         assert_eq!(m2.card_margin_x, 2 * SIDEBAR_CARD_MARGIN_X);
-        // Stride stays exactly card + gutter at any scale.
-        assert_eq!(m2.card_stride, m2.card_h + m2.card_gutter);
-        assert_eq!(m2.card_stride, 2 * SIDEBAR_CARD_STRIDE);
+        assert_eq!(m2.content_height(1), m2.card_h + m2.card_gutter);
+        assert_eq!(m2.content_height(1), 2 * SIDEBAR_CARD_STRIDE);
         assert_eq!(m2.menu_item_h, 2 * SIDEBAR_MENU_ITEM_H);
 
         assert_eq!(SidebarMetrics::new(0.0).card_h, SIDEBAR_CARD_H);
@@ -1562,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_cards_end_after_context_and_full_cards_keep_all_preview_rows() {
+    fn expanded_cards_end_after_their_last_configured_row() {
         for scale in [1.0, 1.5, 2.0] {
             for width in [200, 360, 600] {
                 for preview_lines in [0, 1, 5, 20] {
@@ -1579,7 +1645,10 @@ mod tests {
                     let bottom_pad = card.bounds.bottom() - last_row.bottom();
                     assert!(bottom_pad.abs_diff(metrics.s(CARD_BOTTOM_PAD)) <= 1);
                     if preview_lines == 0 {
-                        assert!(card.bounds.h < metrics.s(CARD_PREVIEW_START_Y));
+                        assert_eq!(
+                            card.bounds.h,
+                            metrics.s(CARD_CONTEXT_Y + CARD_LINE_H + CARD_BOTTOM_PAD)
+                        );
                     } else {
                         assert!(card.context.bottom() < card.preview[0].y);
                     }
@@ -1606,7 +1675,7 @@ mod tests {
                     assert_eq!(cell_row(card.context), name_row + 2);
                     assert_eq!(card.context.h, cell_h.ceil() as u32);
                     for (index, preview) in card.preview.iter().enumerate() {
-                        assert_eq!(cell_row(*preview), name_row + 4 + index as u32);
+                        assert_eq!(cell_row(*preview), name_row + 3 + index as u32);
                         assert_eq!(preview.h, cell_h.ceil() as u32);
                         assert!(preview.bottom() <= card.bounds.bottom());
                     }
@@ -1618,7 +1687,10 @@ mod tests {
                     // The texture's floor-sized grid must contain the last row,
                     // including a fractional font height rounded to pixels.
                     assert!((metrics.card_h as f32 / cell_h).floor() as u32 > cell_row(*last_row));
-                    assert_eq!(metrics.card_stride, metrics.card_h + metrics.card_gutter);
+                    assert_eq!(
+                        metrics.content_height(1),
+                        metrics.card_h + metrics.card_gutter
+                    );
                 }
             }
         }
@@ -1644,6 +1716,242 @@ mod tests {
                 Some(SidebarHit::Card(ids[0]))
             );
         }
+    }
+
+    fn mixed_card_specs() -> Vec<SidebarCardSpec> {
+        [
+            SidebarCardMode::Compact,
+            SidebarCardMode::Expanded,
+            SidebarCardMode::Attention,
+            SidebarCardMode::Compact,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, mode)| SidebarCardSpec {
+            id: card_id(1, index as u64),
+            mode,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn card_modes_reserve_only_their_visible_rows_on_the_actual_font_grid() {
+        for cell_h in [12.0, 14.0, 15.0, 17.5, 18.0, 24.0, 36.0] {
+            for scale in [1.0, 1.5, 2.0] {
+                for preview_lines in [0, 1, 5, 20] {
+                    let metrics = SidebarMetrics::new_with_preview_lines(scale, preview_lines)
+                        .with_cell_height(cell_h);
+                    let specs = mixed_card_specs();
+                    for width in [200, 360, 600] {
+                        let compact = metrics.card_local_rects_for(specs[0], metrics.s(width));
+                        let expanded = metrics.card_local_rects_for(specs[1], metrics.s(width));
+                        let attention = metrics.card_local_rects_for(specs[2], metrics.s(width));
+                        assert!(!compact.expanded && !attention.expanded && expanded.expanded);
+                        assert_eq!(compact.context.h, 0);
+                        assert_eq!(attention.context.h, 0);
+                        assert!(compact.preview.is_empty());
+                        assert_eq!(attention.preview.len(), usize::from(preview_lines > 0));
+                        assert_eq!(expanded.preview.len(), preview_lines);
+                        if preview_lines == 0 {
+                            assert_eq!(compact.full_h, attention.full_h);
+                        } else {
+                            assert!(compact.full_h < attention.full_h);
+                        }
+                        assert!(attention.full_h <= expanded.full_h);
+                        assert_eq!(metrics.compact_card_height(), compact.full_h);
+                        for card in [&compact, &attention, &expanded] {
+                            let cell_row =
+                                |rect: SidebarRect| (rect.y as f32 / cell_h).round() as u32;
+                            let name_row = cell_row(card.name_line);
+                            assert!(name_row >= 1);
+                            assert_eq!(cell_row(card.meta), name_row + 1);
+                            assert_eq!(card.name_line.x, metrics.s(CARD_PAD));
+                            assert_eq!(card.name_line.x, card.meta.x);
+                            assert_eq!(card.full_h, card.bounds.h);
+                            assert_eq!(card.clipped_top, 0);
+                            if card.expanded {
+                                assert_eq!(cell_row(card.context), name_row + 2);
+                            }
+                            for (index, preview) in card.preview.iter().enumerate() {
+                                let offset = if card.expanded { 3 } else { 2 };
+                                assert_eq!(cell_row(*preview), name_row + offset + index as u32);
+                                assert!(preview.right() <= card.bounds.right());
+                            }
+                            let last = card.preview.last().unwrap_or(if card.expanded {
+                                &card.context
+                            } else {
+                                &card.meta
+                            });
+                            assert_eq!(card.full_h - last.bottom(), metrics.s(CARD_BOTTOM_PAD));
+                            assert!((card.full_h as f32 / cell_h).floor() as u32 > cell_row(*last));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_card_heights_share_stacking_clipping_and_hit_regions() {
+        let metrics = SidebarMetrics::new(1.0).with_cell_height(18.0);
+        let specs = mixed_card_specs();
+        let local: Vec<_> = specs
+            .iter()
+            .map(|&spec| metrics.card_local_rects_for(spec, 200))
+            .collect();
+        let expected_h: u32 = local
+            .iter()
+            .map(|card| card.full_h + metrics.card_gutter)
+            .sum();
+        assert_eq!(metrics.content_height_cards(&specs), expected_h);
+        let bounds = SidebarRect::new(10, 40, 200, metrics.toolbar_h + 140);
+        let vp = metrics.bands(bounds).viewport;
+        let mut top = 0;
+        for (index, card) in local.iter().enumerate() {
+            let all = metrics.layout_cards(
+                SidebarRect::new(10, 40, 200, metrics.toolbar_h + expected_h),
+                &specs,
+                0,
+            );
+            assert_eq!(all.cards[index].bounds.y, vp.y + top);
+            assert_eq!(all.cards[index].full_h, card.full_h);
+            top += card.full_h + metrics.card_gutter;
+        }
+        for scroll in [0, 40, local[0].full_h + 32, u32::MAX] {
+            let layout = metrics.layout_cards(bounds, &specs, scroll);
+            assert_eq!(layout.content_h, expected_h);
+            for card in &layout.cards {
+                assert!(card.clipped_top + card.bounds.h <= card.full_h);
+                assert!(card.bounds.y >= vp.y && card.bounds.bottom() <= vp.bottom());
+                if card.menu_button.h > 0 {
+                    let menu = card.menu_button;
+                    assert_eq!(
+                        metrics.hit_test_cards(
+                            bounds,
+                            &specs,
+                            scroll,
+                            Point::new(menu.x, menu.bottom() - 1)
+                        ),
+                        Some(SidebarHit::CardMenu(card.id))
+                    );
+                }
+            }
+            // Every visible pixel belongs to the same card in draw and hit-test,
+            // including the boundary between a compact and an expanded card.
+            for y in vp.y..vp.bottom() {
+                let point = Point::new(vp.x + 1, y);
+                let expected = layout
+                    .cards
+                    .iter()
+                    .find(|card| card.bounds.contains(point))
+                    .map(|card| SidebarHit::Card(card.id));
+                assert_eq!(
+                    metrics.hit_test_cards(bounds, &specs, scroll, point),
+                    expected
+                );
+            }
+        }
+        let clipped = metrics.layout_cards(bounds, &specs, local[0].full_h + 12);
+        assert_eq!(clipped.cards[0].id, specs[1].id);
+        assert_eq!(clipped.cards[0].clipped_top, 12);
+        assert_eq!(clipped.cards[0].bounds.h, vp.h);
+        assert!(clipped.cards[0].clipped_top + vp.h < clipped.cards[0].full_h);
+    }
+
+    #[test]
+    fn mixed_card_drop_targets_use_each_cards_midpoint_and_cumulative_gap() {
+        let metrics = SidebarMetrics::new(1.0).with_cell_height(18.0);
+        let specs = mixed_card_specs();
+        let content = metrics.content_height_cards(&specs);
+        let vp = SidebarRect::new(0, 30, 360, content);
+        let mut top = vp.y;
+        for (index, &spec) in specs.iter().enumerate() {
+            let height = metrics.card_local_rects_for(spec, vp.w).full_h;
+            let midpoint = top + (height + metrics.card_gutter) / 2;
+            assert_eq!(metrics.drop_index_cards(vp, &specs, 0, midpoint - 1), index);
+            assert_eq!(metrics.drop_index_cards(vp, &specs, 0, midpoint), index + 1);
+            assert_eq!(
+                metrics.drop_indicator_y_cards(vp, &specs, 0, index),
+                Some(top)
+            );
+            top += height + metrics.card_gutter;
+        }
+        assert_eq!(
+            metrics.drop_index_cards(vp, &specs, 0, vp.bottom()),
+            specs.len()
+        );
+        assert_eq!(
+            metrics.drop_indicator_y_cards(vp, &specs, 0, specs.len()),
+            Some(vp.bottom())
+        );
+
+        let short = SidebarRect::new(vp.x, vp.y, vp.w, 80);
+        let scroll = metrics.compact_card_height() + 10;
+        let midpoint = short.y + metrics.card_h / 2 - 10;
+        assert_eq!(
+            metrics.drop_index_cards(short, &specs, scroll, midpoint - 1),
+            1
+        );
+        assert_eq!(metrics.drop_index_cards(short, &specs, scroll, midpoint), 2);
+        assert_eq!(
+            metrics.drop_indicator_y_cards(short, &specs, scroll, 1),
+            Some(short.y)
+        );
+        assert_eq!(
+            metrics.drop_indicator_y_cards(short, &specs, scroll, 2),
+            Some(short.bottom())
+        );
+    }
+
+    #[test]
+    fn changing_selection_preserves_the_clicked_card_screen_position() {
+        let metrics = SidebarMetrics::new(1.0).with_cell_height(18.0);
+        let mut before = mixed_card_specs();
+        before.extend((4..12).map(|pane| SidebarCardSpec {
+            id: card_id(1, pane),
+            mode: SidebarCardMode::Compact,
+        }));
+        let mut after = before.clone();
+        after[1].mode = SidebarCardMode::Compact;
+        after[3].mode = SidebarCardMode::Expanded;
+        let bounds = SidebarRect::new(0, 0, 360, metrics.toolbar_h + 250);
+        let old_scroll = 180;
+        let old_layout = metrics.layout_cards(bounds, &before, old_scroll);
+        let old = old_layout
+            .cards
+            .iter()
+            .find(|card| card.id == after[3].id)
+            .unwrap();
+        let relative_top =
+            i64::from(old.bounds.y) - i64::from(old.clipped_top) - i64::from(old_layout.viewport.y);
+        let new_scroll = metrics
+            .scroll_for_card_anchor(&after, after[3].id, relative_top, old_layout.viewport.h)
+            .unwrap();
+        assert!(
+            new_scroll < old_scroll,
+            "the expanded card above the click collapsed"
+        );
+        let new_layout = metrics.layout_cards(bounds, &after, new_scroll);
+        let new = new_layout
+            .cards
+            .iter()
+            .find(|card| card.id == after[3].id)
+            .unwrap();
+        assert_eq!(old.bounds.y, new.bounds.y);
+        assert!(new.expanded);
+
+        assert_eq!(
+            metrics.scroll_for_card_anchor(&after, after[0].id, 30, 250),
+            Some(0)
+        );
+        assert_eq!(
+            metrics.scroll_for_card_anchor(&after, after[11].id, -200, 250),
+            Some(metrics.content_height_cards(&after) - 250)
+        );
+        assert_eq!(
+            metrics.scroll_for_card_anchor(&after, card_id(99, 99), 0, 250),
+            None
+        );
     }
 
     #[test]
@@ -1737,7 +2045,11 @@ mod tests {
         // order, with every preview row fitting inside the card.
         let card = &layout.cards[0];
         assert_eq!(card.bounds.h, m2.card_h);
-        assert!(card.dot.x < card.icon.x && card.icon.x < card.name_line.x);
+        assert_eq!(card.name_line.x, card.bounds.x + m2.s(CARD_PAD));
+        assert_eq!(
+            (card.dot.w, card.dot.h, card.icon.w, card.icon.h),
+            (0, 0, 0, 0)
+        );
         assert_eq!(card.updated.y, card.name_line.y);
         assert!(card.name_line.bottom() <= card.meta.y);
         assert!(card.meta.bottom() <= card.context.y);
@@ -1760,7 +2072,7 @@ mod tests {
             Some(SidebarHit::Card(ids[0]))
         );
         let menu_x = vp.w - m2.card_margin_x - m2.s(CARD_PAD) - m2.s(CARD_MENU_W);
-        let card_menu = Point::new(vp.x + menu_x + 5, vp.y + 20);
+        let card_menu = Point::new(vp.x + menu_x + 5, vp.y + m2.s(CARD_NAME_Y) + 1);
         assert_eq!(
             m2.hit_test(bounds, &ids, 0, card_menu),
             Some(SidebarHit::CardMenu(ids[0]))

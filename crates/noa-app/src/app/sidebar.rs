@@ -9,10 +9,10 @@
 //! (NFR-1/AC-17).
 
 use super::*;
-use crate::session_store::{AgentKind, SessionCard, SessionDelta, StatusDot, status_dot};
+use crate::session_store::{AgentKind, SessionCard, SessionDelta};
 use crate::sidebar::{
-    CARD_MENU_ITEMS, CardLines, CardRects, SidebarMetrics, SidebarRect, agent_display_name,
-    card_lines, icon_glyph,
+    CARD_MENU_ITEMS, CardLines, CardRects, SidebarCardMode, SidebarCardSpec, SidebarMetrics,
+    SidebarRect, agent_display_name, card_lines,
 };
 use noa_core::Rgb;
 use std::collections::HashSet;
@@ -65,8 +65,8 @@ const SIDEBAR_GRID_PADDING: GridPadding = GridPadding::ZERO;
 // Flat card color tuning. The base row mostly follows the resolved terminal
 // panel background so it does not read as a separate navy card surface.
 const SIDEBAR_CARD_PANEL_BG_MIX: f32 = 0.08;
-const SIDEBAR_CARD_SELECTED_BG_MIX: f32 = 0.20;
-const SIDEBAR_CARD_HOVER_BG_MIX: f32 = 0.10;
+const SIDEBAR_CARD_SELECTED_BG_MIX: f32 = 0.065;
+const SIDEBAR_CARD_HOVER_BG_MIX: f32 = 0.035;
 const SIDEBAR_CARD_AUTO_FLASH_ACCENT_MIX: f32 = 0.12;
 const SIDEBAR_CARD_ATTENTION_FLASH_MIX: f32 = 0.10;
 const SIDEBAR_CARD_PROGRESS_FLASH_MIX: f32 = 0.12;
@@ -92,74 +92,6 @@ const SIDEBAR_DRAG_THRESHOLD: f32 = 5.0;
 /// Thickness (logical px, scaled) of the drop-indicator line drawn at the
 /// insertion gap during an active card drag.
 const SIDEBAR_DROP_INDICATOR_H: f32 = 2.0;
-
-// Brand accents for recognized AI agents (agent branding). Truecolor, applied
-// to the process row + header whenever the process classifies, busy or idle.
-const AGENT_CLAUDE_FG: Rgb = Rgb::new(0xd9, 0x77, 0x57); // Anthropic clay
-const AGENT_CODEX_FG: Rgb = Rgb::new(0x10, 0xa3, 0x7f); // OpenAI teal
-const AGENT_AGY_FG: Rgb = Rgb::new(0x42, 0x85, 0xf4); // Google blue
-
-/// The glyph + accent color + display label for a card's running process. A
-/// recognized agent gets its brand glyph/color/name regardless of busy; a
-/// generic process keeps the busy/idle dot semantics (green `✳` while running,
-/// dim `❯` while idle). Glyphs: `✳` (proven), `◆` for Codex (a hexagon risks
-/// tofu), `✦` for agy (a distinct four-point star; `★` is the safe fallback).
-fn process_badge(kind: AgentKind, process: &str, busy: bool) -> (String, Rgb) {
-    match kind {
-        AgentKind::ClaudeCode => (
-            format!("✳ {}", agent_display_name(AgentKind::ClaudeCode, process)),
-            AGENT_CLAUDE_FG,
-        ),
-        AgentKind::Codex => (
-            format!("◆ {}", agent_display_name(AgentKind::Codex, process)),
-            AGENT_CODEX_FG,
-        ),
-        AgentKind::Agy => (
-            format!("✦ {}", agent_display_name(AgentKind::Agy, process)),
-            AGENT_AGY_FG,
-        ),
-        AgentKind::Generic => {
-            let glyph = if busy { "✳" } else { "❯" };
-            let fg = if busy {
-                chrome().dot_green
-            } else {
-                chrome().dim_fg
-            };
-            (format!("{glyph} {process}"), fg)
-        }
-    }
-}
-
-/// A project icon's tint (FR-9 mockup parity), so the icon column carries a
-/// little color rather than flat gray.
-fn icon_color(icon: crate::session_store::IconKind) -> Rgb {
-    use crate::session_store::IconKind;
-    match icon {
-        IconKind::Rust => Rgb::new(0xd9, 0x82, 0x5a),
-        IconKind::Node => Rgb::new(0x6c, 0xc2, 0x4a),
-        IconKind::Terraform => Rgb::new(0x84, 0x4f, 0xba),
-        IconKind::Go => Rgb::new(0x4c, 0xb9, 0xd4),
-        IconKind::Python => Rgb::new(0x5a, 0x9f, 0xd4),
-        IconKind::Git => Rgb::new(0xe0, 0x6c, 0x4e),
-        IconKind::Folder => chrome().dim_fg,
-    }
-}
-
-/// Categorical status-rail geometry. The rail deliberately never represents a
-/// percentage: `Activity` is segmented, `UnreadBell` is a short notch, and
-/// `Attention` is a solid full-height marker. Idle cards have no rail.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StatusRailKind {
-    Activity,
-    UnreadBell,
-    Attention,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct StatusRail {
-    kind: StatusRailKind,
-    color: Rgb,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProgressBarKind {
@@ -197,30 +129,6 @@ fn card_progress_bar(card: &SessionCard) -> Option<ProgressBar> {
     Some(ProgressBar { kind, color })
 }
 
-/// The status rail along a card's left edge. Precedence mirrors
-/// [`status_dot`]: attention > bell > busy > idle.
-fn card_status_rail(card: &SessionCard) -> Option<StatusRail> {
-    if card.attention || card.agent_needs_attention() {
-        return Some(StatusRail {
-            kind: StatusRailKind::Attention,
-            color: chrome().dot_red,
-        });
-    }
-    if card.unread_bell {
-        return Some(StatusRail {
-            kind: StatusRailKind::UnreadBell,
-            color: chrome().dot_yellow,
-        });
-    }
-    if card.is_running() {
-        return Some(StatusRail {
-            kind: StatusRailKind::Activity,
-            color: chrome().dot_blue,
-        });
-    }
-    None
-}
-
 /// Linear mix of two chrome tones (`t` = 0 → `a`, 1 → `b`), for derived states
 /// the palette has no dedicated slot for (the card hover face sits between the
 /// resting and selected faces).
@@ -234,19 +142,11 @@ fn sidebar_card_bg(panel_bg: Rgb) -> Rgb {
 }
 
 fn sidebar_selected_card_bg(panel_bg: Rgb) -> Rgb {
-    mix_rgb(
-        sidebar_card_bg(panel_bg),
-        chrome().card_selected,
-        SIDEBAR_CARD_SELECTED_BG_MIX,
-    )
+    mix_rgb(panel_bg, chrome().fg, SIDEBAR_CARD_SELECTED_BG_MIX)
 }
 
 fn sidebar_hover_card_bg(panel_bg: Rgb) -> Rgb {
-    mix_rgb(
-        sidebar_card_bg(panel_bg),
-        chrome().card_selected,
-        SIDEBAR_CARD_HOVER_BG_MIX,
-    )
+    mix_rgb(panel_bg, chrome().fg, SIDEBAR_CARD_HOVER_BG_MIX)
 }
 
 fn sidebar_auto_flash_card_bg(panel_bg: Rgb) -> Rgb {
@@ -279,21 +179,10 @@ fn sidebar_progress_flash_card_bg(panel_bg: Rgb, selected: bool, kind: ProgressF
     mix_rgb(base, accent, SIDEBAR_CARD_PROGRESS_FLASH_MIX)
 }
 
-/// A fixed-slot status indicator with shape and color redundancy. The Nerd Font
-/// fallback already bundled by `noa-font` covers these Font Awesome codepoints.
-fn status_indicator(dot: StatusDot) -> (&'static str, Rgb) {
-    match dot {
-        StatusDot::Blue => ("\u{f04b}", chrome().dot_blue), // play
-        StatusDot::Green => ("\u{f10c}", chrome().dot_green), // circle-o
-        StatusDot::Yellow => ("\u{f0f3}", chrome().dot_yellow), // bell
-        StatusDot::Red => ("\u{f12a}", chrome().dot_red),   // exclamation
-    }
-}
-
 /// OSC 9/777 means a notification exists, not necessarily that a program is
 /// blocked on user input. Keep the label accurate until a dedicated
 /// response-required protocol exists.
-const ATTENTION_LABEL: &str = "notification";
+const ATTENTION_LABEL: &str = "notice";
 
 fn rgb_to_rgba(color: Rgb) -> [f32; 4] {
     [
@@ -344,15 +233,8 @@ struct SidebarCardDraw {
     flash_fill: bool,
     selected: bool,
     hovered: bool,
-    /// A pending interaction request (FR-16), carried by its status glyph,
-    /// label and rail independently of the selected card's focus stroke.
-    attention: bool,
-    /// Categorical status marker along the card's left edge, or `None` for
-    /// idle. Its shape, not its filled length, carries the meaning.
-    status_rail: Option<StatusRail>,
     /// Actual `OSC 9;4` progress along the card's bottom edge. This is kept
-    /// separate from the categorical left rail so percentage and status are
-    /// never encoded by the same geometry.
+    /// separate from the textual state so progress remains unambiguous.
     progress_bar: Option<ProgressBar>,
     runs: Vec<SidebarTextRun>,
     /// Source-UV sub-rect `[u, v, w, h]` for sampling the full-height card

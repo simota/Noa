@@ -2,10 +2,8 @@ use std::fmt::Write as _;
 
 use super::*;
 
-const SIDEBAR_CARD_RULE_HEIGHT: f32 = 1.0;
-const SIDEBAR_CARD_RULE_BORDER_MIX: f32 = 0.34;
-const SIDEBAR_PROGRESS_HEIGHT: f32 = 3.0;
-const SIDEBAR_PROGRESS_INSET_X: f32 = 5.0;
+const SIDEBAR_PROGRESS_HEIGHT: f32 = 2.0;
+const SIDEBAR_PROGRESS_INSET_X: f32 = 12.0;
 
 /// Filled portions of the bottom progress track. Determinate progress uses a
 /// validated percentage; indeterminate progress uses a static three-segment
@@ -55,11 +53,30 @@ fn sidebar_model_has_progress(model: &SidebarDrawModel) -> bool {
             .is_some_and(|card| card.progress_bar.is_some())
 }
 
+fn sidebar_card_scratch_size(model: &SidebarDrawModel) -> Option<PixelSize> {
+    (!model.cards.is_empty() || model.dragging.is_some()).then_some(PixelSize {
+        w: model.card_w.max(1),
+        h: model.card_h.max(1),
+    })
+}
+
 fn sidebar_card_fill_opacity(flash_fill: bool, selected: bool, hovered: bool) -> f32 {
     if flash_fill || selected || hovered {
         1.0
     } else {
         0.0
+    }
+}
+
+fn sidebar_card_style(panel_bg: Rgb) -> CardStyle {
+    CardStyle {
+        background: chrome().surface_rgba(sidebar_card_bg(panel_bg)),
+        border_color: [0.0; 4],
+        focus_color: [0.0; 4],
+        corner_radius: 0.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 0.0,
     }
 }
 
@@ -74,54 +91,6 @@ fn sidebar_card_fill_opacity(flash_fill: bool, selected: bool, hovered: bool) ->
 /// palettes carry `1.0`, so every call is a no-op with `glassmorphism` off.
 fn chrome_raster_alpha(base: f32, palette_alpha: f32) -> f32 {
     (base * palette_alpha).clamp(0.0, 1.0)
-}
-
-/// Resolve categorical status-rail geometry. Activity is deliberately broken
-/// into three equal-looking segments so it cannot be mistaken for a 100%
-/// progress bar; bell is a centered notch; attention is a solid rail.
-fn status_rail_rects(card: SidebarRect, kind: StatusRailKind, rail_w: u32) -> Vec<SidebarRect> {
-    let rail_w = rail_w.min(card.w);
-    if rail_w == 0 || card.h == 0 {
-        return Vec::new();
-    }
-    match kind {
-        StatusRailKind::Attention => {
-            vec![SidebarRect::new(card.x, card.y, rail_w, card.h)]
-        }
-        StatusRailKind::UnreadBell => {
-            let notch_h = (card.h / 3).max(rail_w.saturating_mul(2)).min(card.h);
-            vec![SidebarRect::new(
-                card.x,
-                card.y + (card.h - notch_h) / 2,
-                rail_w,
-                notch_h,
-            )]
-        }
-        StatusRailKind::Activity => {
-            // Fewer than three one-pixel segments plus two two-pixel gaps
-            // cannot preserve the segmented silhouette; degrade to a rail.
-            if card.h < 7 {
-                return vec![SidebarRect::new(card.x, card.y, rail_w, card.h)];
-            }
-            let gap = rail_w.max(2).min(card.h / 4);
-            let total_gap = gap.saturating_mul(2);
-            if card.h <= total_gap {
-                return vec![SidebarRect::new(card.x, card.y, rail_w, card.h)];
-            }
-            let usable = card.h - total_gap;
-            let base_h = usable / 3;
-            let remainder = usable % 3;
-            let mut y = card.y;
-            (0..3)
-                .filter_map(|index| {
-                    let h = base_h + u32::from(index < remainder);
-                    let rect = (h > 0).then(|| SidebarRect::new(card.x, y, rail_w, h));
-                    y = y.saturating_add(h).saturating_add(gap);
-                    rect
-                })
-                .collect()
-        }
-    }
 }
 
 /// Rasterize one synthetic sidebar grid (background + positioned text/dots)
@@ -427,23 +396,6 @@ fn composite_sidebar_band_cache(
     );
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SidebarCardFrame {
-    Resting,
-    Selected,
-    Attention,
-}
-
-fn sidebar_card_frame(selected: bool, attention: bool) -> SidebarCardFrame {
-    if selected {
-        SidebarCardFrame::Selected
-    } else if attention {
-        SidebarCardFrame::Attention
-    } else {
-        SidebarCardFrame::Resting
-    }
-}
-
 /// Rasterize the sidebar and composite it onto `view` at the window's left
 /// inset via the reused card pipeline: a flat backdrop matching the terminal
 /// theme's background (so the band reads as one surface with the panes), then
@@ -497,13 +449,12 @@ pub(in crate::app) fn draw_sidebar_band(
     ensure_card_menu_scratch(gpu, model, surface_format);
 
     // Each pass stamps one overlay into the shared band texture, in draw order:
-    // band text, seam hairline, toolbar `+`, cards (+ status rails), inter-row
-    // rules, drag float/indicator, then the `…` menu popup above them all.
+    // band text, seam hairline, toolbar `+`, cards, drag float/indicator, then
+    // the `…` menu popup above them all. Spacing separates compact rows.
     draw_sidebar_band_runs(gpu, model, band_size, sidebar_font_px);
     draw_sidebar_divider(gpu, model, band_size, surface_format, sidebar_font_px);
     draw_sidebar_new_button(gpu, model, band_size, surface_format, sidebar_font_px);
     draw_sidebar_cards(gpu, model, band_size, surface_format, sidebar_font_px);
-    draw_sidebar_rules(gpu, model, band_size, surface_format, sidebar_font_px);
     draw_sidebar_drag(gpu, model, band_size, surface_format, sidebar_font_px);
     draw_sidebar_menu(gpu, model, band_size, sidebar_font_px);
 
@@ -662,14 +613,11 @@ fn ensure_card_menu_scratch(
     model: &SidebarDrawModel,
     surface_format: wgpu::TextureFormat,
 ) {
-    if !model.cards.is_empty()
+    if let Some(size) = sidebar_card_scratch_size(model)
         && ensure_scratch(
             &mut gpu.chrome_textures.sidebar_card_tex,
             &gpu.device,
-            PixelSize {
-                w: model.card_w,
-                h: model.card_h,
-            },
+            size,
             surface_format,
             "noa-sidebar-card",
         )
@@ -985,9 +933,9 @@ fn draw_sidebar_new_button(
     );
 }
 
-/// Pass 2 — cards over the seamless band, with a categorical status rail along
-/// the left edge. Resting rows stay transparent; selection, hover and bounded
-/// one-shot cues expose the model's background using the window/palette alpha.
+/// Pass 2 — compact cards over the seamless band. Resting rows stay transparent;
+/// selection, hover and bounded one-shot cues expose the model's background
+/// using the window/palette alpha, without an additional outline or status rail.
 fn draw_sidebar_cards(
     gpu: &mut GpuState,
     model: &SidebarDrawModel,
@@ -1020,36 +968,7 @@ fn draw_sidebar_cards(
         return;
     }
     let panel_bg = active_theme(&gpu.theme, &gpu.preview_theme).default_bg;
-    let card_style = CardStyle {
-        background: chrome().surface_rgba(sidebar_card_bg(panel_bg)),
-        border_color: [0.0; 4],
-        focus_color: rgb_to_rgba(mix_rgb(panel_bg, chrome().accent, 0.45)),
-        corner_radius: 0.0,
-        border_width: 0.0,
-        focus_width: model.scale.max(1.0),
-        focus_glow_width: 0.0,
-    };
-
-    // Every fully-visible card has the same height (`card_h`), so its status
-    // rail uses one reusable solid-color scratch. Geometry varies by category.
-    let rail_w = (2.0 * model.scale).round().max(1.0) as u32;
-    let any_status_rail = model.cards.iter().any(|card| card.status_rail.is_some());
-    if any_status_rail
-        && model.card_h > 0
-        && ensure_scratch(
-            &mut gpu.chrome_textures.sidebar_accent_tex,
-            &gpu.device,
-            PixelSize {
-                w: rail_w,
-                h: model.card_h,
-            },
-            surface_format,
-            "noa-sidebar-accent",
-        )
-    {
-        #[cfg(debug_assertions)]
-        gpu.chrome_textures.record_rebuild();
-    }
+    let card_style = sidebar_card_style(panel_bg);
 
     let theme = active_theme(&gpu.theme, &gpu.preview_theme);
     let (Some(renderer), Some((_, _, band_view)), Some(card_pipe), Some((_, _, card_view))) = (
@@ -1061,11 +980,6 @@ fn draw_sidebar_cards(
         return;
     };
     let pipeline = &card_pipe.pipeline;
-    let accent_view = gpu
-        .chrome_textures
-        .sidebar_accent_tex
-        .as_ref()
-        .map(|t| &t.2);
     let progress_view = gpu
         .chrome_textures
         .sidebar_progress_tex
@@ -1098,12 +1012,6 @@ fn draw_sidebar_cards(
             ),
             &card_draw.runs,
         );
-        // Only selection gets the quiet focus stroke. Attention has its own
-        // indicator/label/status rail, so it cannot look like another selection.
-        let selected = matches!(
-            sidebar_card_frame(card_draw.selected, card_draw.attention),
-            SidebarCardFrame::Selected
-        );
         pipeline.overlay_texture_cards_clipped(
             &gpu.device,
             &gpu.queue,
@@ -1116,66 +1024,11 @@ fn draw_sidebar_cards(
                 y: card_draw.rect.y,
                 w: card_draw.rect.w,
                 h: card_draw.rect.h,
-                selected,
+                selected: card_draw.selected,
             }],
             card_draw.src_uv,
             1.0,
         );
-
-        // Shape and color both encode status, so the rail remains readable
-        // without motion and is less dependent on color perception alone.
-        if let Some(status_rail) = card_draw.status_rail {
-            let rail_h = card_draw.rect.h;
-            if rail_h > 0
-                && let Some(accent_view) = accent_view
-            {
-                rasterize_runs(
-                    renderer,
-                    &gpu.device,
-                    &gpu.queue,
-                    gpu.sidebar_fonts.get_mut(sidebar_font_px),
-                    theme,
-                    accent_view,
-                    PixelSize {
-                        w: rail_w,
-                        h: rail_h,
-                    },
-                    GridSize { cols: 1, rows: 1 },
-                    status_rail.color,
-                    1.0,
-                    &[],
-                );
-                let accent_style = CardStyle {
-                    background: rgb_to_rgba(status_rail.color),
-                    border_color: [0.0; 4],
-                    focus_color: [0.0; 4],
-                    corner_radius: 0.0,
-                    border_width: 0.0,
-                    focus_width: 0.0,
-                    focus_glow_width: 0.0,
-                };
-                let placements: Vec<_> =
-                    status_rail_rects(card_draw.rect, status_rail.kind, rail_w)
-                        .into_iter()
-                        .map(|rect| CardTexturePlacement {
-                            texture_view: accent_view,
-                            x: rect.x,
-                            y: rect.y,
-                            w: rect.w,
-                            h: rect.h,
-                            selected: false,
-                        })
-                        .collect();
-                pipeline.overlay_texture_cards(
-                    &gpu.device,
-                    &gpu.queue,
-                    band_view,
-                    band_size,
-                    &accent_style,
-                    &placements,
-                );
-            }
-        }
 
         if let Some(progress) = card_draw.progress_bar
             && let Some(progress_view) = progress_view
@@ -1200,105 +1053,7 @@ fn draw_sidebar_cards(
     }
 }
 
-/// Pass 2a — thin horizontal rules only at boundaries between adjacent flat rows.
-/// This keeps the one-piece surface while making the cell breaks legible.
-fn draw_sidebar_rules(
-    gpu: &mut GpuState,
-    model: &SidebarDrawModel,
-    band_size: PixelSize,
-    surface_format: wgpu::TextureFormat,
-    sidebar_font_px: f32,
-) {
-    if model.cards.len() <= 1 {
-        return;
-    }
-    let rule_h = (SIDEBAR_CARD_RULE_HEIGHT * model.scale).round().max(1.0) as u32;
-    if ensure_scratch(
-        &mut gpu.chrome_textures.sidebar_rule_tex,
-        &gpu.device,
-        PixelSize {
-            w: model.card_w.max(1),
-            h: rule_h,
-        },
-        surface_format,
-        "noa-sidebar-card-rule",
-    ) {
-        #[cfg(debug_assertions)]
-        gpu.chrome_textures.record_rebuild();
-    }
-    let panel_bg = active_theme(&gpu.theme, &gpu.preview_theme).default_bg;
-    let rule_color = mix_rgb(
-        sidebar_card_bg(panel_bg),
-        chrome().border,
-        SIDEBAR_CARD_RULE_BORDER_MIX,
-    );
-    let theme = active_theme(&gpu.theme, &gpu.preview_theme);
-    let (Some(renderer), Some((_, _, band_view)), Some(card), Some((_, _, rule_view))) = (
-        gpu.chrome_textures.sidebar_renderer.as_mut(),
-        gpu.chrome_textures.sidebar_band.as_ref(),
-        gpu.chrome_textures.sidebar_card.as_ref(),
-        gpu.chrome_textures.sidebar_rule_tex.as_ref(),
-    ) else {
-        return;
-    };
-    rasterize_runs(
-        renderer,
-        &gpu.device,
-        &gpu.queue,
-        gpu.sidebar_fonts.get_mut(sidebar_font_px),
-        theme,
-        rule_view,
-        PixelSize {
-            w: model.card_w.max(1),
-            h: rule_h,
-        },
-        GridSize { cols: 1, rows: 1 },
-        rule_color,
-        1.0,
-        &[],
-    );
-    let rule_style = CardStyle {
-        background: rgb_to_rgba(rule_color),
-        border_color: [0.0; 4],
-        focus_color: [0.0; 4],
-        corner_radius: 0.0,
-        border_width: 0.0,
-        focus_width: 0.0,
-        focus_glow_width: 0.0,
-    };
-    let rule_placements: Vec<_> = model
-        .cards
-        .windows(2)
-        .filter_map(|pair| {
-            let upper = &pair[0];
-            let lower = &pair[1];
-            if upper.rect.bottom() == lower.rect.y && upper.rect.w > 0 && upper.rect.h >= rule_h {
-                Some(CardTexturePlacement {
-                    texture_view: rule_view,
-                    x: upper.rect.x,
-                    y: lower.rect.y.saturating_sub(rule_h),
-                    w: upper.rect.w,
-                    h: rule_h,
-                    selected: false,
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-    if !rule_placements.is_empty() {
-        card.pipeline.overlay_texture_cards(
-            &gpu.device,
-            &gpu.queue,
-            band_view,
-            band_size,
-            &rule_style,
-            &rule_placements,
-        );
-    }
-}
-
-/// Pass 2b — drag-reorder feedback: the accent drop-indicator line at the insertion
+/// Pass 2a — drag-reorder feedback: the accent drop-indicator line at the insertion
 /// gap, then the floating dragged card composited above every static card.
 fn draw_sidebar_drag(
     gpu: &mut GpuState,
@@ -1375,15 +1130,7 @@ fn draw_sidebar_drag(
         return;
     };
     let panel_bg = active_theme(&gpu.theme, &gpu.preview_theme).default_bg;
-    let card_style = CardStyle {
-        background: chrome().surface_rgba(sidebar_card_bg(panel_bg)),
-        border_color: [0.0; 4],
-        focus_color: rgb_to_rgba(mix_rgb(panel_bg, chrome().accent, 0.45)),
-        corner_radius: 0.0,
-        border_width: 0.0,
-        focus_width: model.scale.max(1.0),
-        focus_glow_width: 0.0,
-    };
+    let card_style = sidebar_card_style(panel_bg);
     let theme = active_theme(&gpu.theme, &gpu.preview_theme);
     let progress_view = gpu
         .chrome_textures
@@ -1411,7 +1158,7 @@ fn draw_sidebar_drag(
         },
         drag.grid,
         drag.bg,
-        // The floating card keeps the same focus/fill and glass treatment as
+        // The floating card keeps the same fill and glass treatment as
         // the selected row it was lifted from.
         chrome_raster_alpha(
             model.background_opacity
@@ -1420,7 +1167,9 @@ fn draw_sidebar_drag(
         ),
         &drag.runs,
     );
-    card.pipeline.overlay_texture_cards(
+    // The shared scratch can be taller than this compact card. Preserve its
+    // source slice while dragging, just as the static-card pass does.
+    card.pipeline.overlay_texture_cards_clipped(
         &gpu.device,
         &gpu.queue,
         band_view,
@@ -1432,8 +1181,10 @@ fn draw_sidebar_drag(
             y: drag.rect.y,
             w: drag.rect.w,
             h: drag.rect.h,
-            selected: true,
+            selected: drag.selected,
         }],
+        drag.src_uv,
+        1.0,
     );
     if let Some(progress) = drag.progress_bar
         && let Some(progress_view) = progress_view
@@ -1550,8 +1301,6 @@ mod tests {
                 flash_fill: false,
                 selected: true,
                 hovered: false,
-                attention: false,
-                status_rail: None,
                 progress_bar: None,
                 runs: vec![SidebarTextRun::new(
                     1,
@@ -1585,11 +1334,19 @@ mod tests {
     }
 
     #[test]
-    fn attention_frame_does_not_override_selected_sidebar_card() {
-        assert_eq!(sidebar_card_frame(false, false), SidebarCardFrame::Resting);
-        assert_eq!(sidebar_card_frame(false, true), SidebarCardFrame::Attention);
-        assert_eq!(sidebar_card_frame(true, false), SidebarCardFrame::Selected);
-        assert_eq!(sidebar_card_frame(true, true), SidebarCardFrame::Selected);
+    fn compact_drag_keeps_shared_scratch_when_static_cards_are_empty() {
+        let mut model = cache_model();
+        let scratch = PixelSize { w: 216, h: 120 };
+        assert_eq!(sidebar_card_scratch_size(&model), Some(scratch));
+
+        let mut drag = model.cards.remove(0);
+        drag.rect.h = 60;
+        drag.src_uv = [0.0, 0.0, 1.0, 0.5];
+        model.dragging = Some(drag);
+        assert_eq!(sidebar_card_scratch_size(&model), Some(scratch));
+
+        model.dragging = None;
+        assert_eq!(sidebar_card_scratch_size(&model), None);
     }
 
     #[test]
@@ -1660,36 +1417,50 @@ mod tests {
     }
 
     #[test]
-    fn status_rail_geometry_distinguishes_activity_bell_and_attention() {
-        let card = SidebarRect::new(8, 20, 216, 100);
-        assert_eq!(
-            status_rail_rects(card, StatusRailKind::Activity, 2),
-            vec![
-                SidebarRect::new(8, 20, 2, 32),
-                SidebarRect::new(8, 54, 2, 32),
-                SidebarRect::new(8, 88, 2, 32),
-            ]
-        );
-        assert_eq!(
-            status_rail_rects(card, StatusRailKind::UnreadBell, 2),
-            vec![SidebarRect::new(8, 53, 2, 33)]
-        );
-        assert_eq!(
-            status_rail_rects(card, StatusRailKind::Attention, 2),
-            vec![SidebarRect::new(8, 20, 2, 100)]
-        );
+    fn progress_tracks_follow_compact_and_expanded_card_heights() {
+        for (scale, compact_h, expanded_h, inset, stroke) in
+            [(1.0, 48, 120, 12, 2), (2.0, 96, 240, 24, 4)]
+        {
+            for height in [compact_h, expanded_h] {
+                let card = SidebarRect::new(8, 20, 216, height);
+                let track = progress_track_rect(card, scale);
+                assert_eq!(track.x, card.x + inset);
+                assert_eq!(track.right(), card.right() - inset);
+                assert_eq!(track.h, stroke);
+                assert_eq!(track.bottom(), card.bottom());
+            }
+        }
     }
 
     #[test]
-    fn status_rail_geometry_handles_zero_and_tiny_cards() {
-        assert!(
-            status_rail_rects(SidebarRect::new(0, 0, 0, 10), StatusRailKind::Attention, 2)
-                .is_empty()
-        );
-        assert_eq!(
-            status_rail_rects(SidebarRect::new(0, 0, 5, 3), StatusRailKind::Activity, 2),
-            vec![SidebarRect::new(0, 0, 2, 3)]
-        );
+    fn sidebar_raster_key_misses_when_compact_card_or_drag_crop_changes() {
+        let mut compact = cache_model();
+        compact.cards[0].rect.h = 60;
+        compact.cards[0].src_uv = [0.0, 0.0, 1.0, 0.5];
+        let previous = cache_key(compact.clone());
+
+        let mut expanded = compact.clone();
+        expanded.cards[0].rect.h = 120;
+        expanded.cards[0].src_uv = [0.0, 0.0, 1.0, 1.0];
+        assert!(!sidebar_cache_hit(
+            Some(&previous),
+            cache_key(expanded).inputs()
+        ));
+
+        let mut clipped = compact.clone();
+        clipped.cards[0].src_uv[1] = 0.25;
+        assert!(!sidebar_cache_hit(
+            Some(&previous),
+            cache_key(clipped).inputs()
+        ));
+
+        compact.dragging = compact.cards.pop();
+        let previous = cache_key(compact.clone());
+        compact.dragging.as_mut().unwrap().src_uv[3] = 0.75;
+        assert!(!sidebar_cache_hit(
+            Some(&previous),
+            cache_key(compact).inputs()
+        ));
     }
 
     #[test]
@@ -1715,7 +1486,7 @@ mod tests {
         let card = SidebarRect::new(8, 40, 216, 1);
         assert_eq!(
             progress_track_rect(card, 1.0),
-            SidebarRect::new(13, 40, 206, 1)
+            SidebarRect::new(20, 40, 192, 1)
         );
     }
 

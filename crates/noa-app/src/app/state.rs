@@ -157,15 +157,9 @@ pub(super) struct ChromeTextures {
     /// `CHROME_ACCENT` strip composited at the insertion gap during an active
     /// card drag.
     pub(super) sidebar_drop_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
-    /// Reused scratch texture for the categorical per-card status rail,
-    /// composited along a card's left edge and refilled with each state color.
-    pub(super) sidebar_accent_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// Reused solid-color scratch for the actual `OSC 9;4` progress track and
     /// fill drawn along the bottom of session cards.
     pub(super) sidebar_progress_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
-    /// Reused scratch texture for subtle horizontal rules between flat sidebar
-    /// card rows.
-    pub(super) sidebar_rule_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// The palette block texture, cached with its size so it is reused
     /// frame-to-frame and only reallocated when the block dimensions change.
     pub(super) palette_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
@@ -210,9 +204,7 @@ impl ChromeTextures {
         self.sidebar_button_tex = None;
         self.sidebar_divider_tex = None;
         self.sidebar_drop_tex = None;
-        self.sidebar_accent_tex = None;
         self.sidebar_progress_tex = None;
-        self.sidebar_rule_tex = None;
         self.palette_scratch = None;
         self.tab_bar_scratch = None;
         self.context_menu_scratch = None;
@@ -515,6 +507,8 @@ pub(super) const SIDEBAR_AUTOSORT_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) struct SidebarDrag {
     /// The card being dragged.
     pub(super) card: SessionCardId,
+    /// Preserve this card's height while background reports change its state.
+    pub(super) mode: crate::sidebar::SidebarCardMode,
     /// Pointer y at press (physical px), to measure the drag threshold.
     pub(super) start_y: i64,
     /// Offset (physical px) from the card's top to the grab point, so the
@@ -1711,9 +1705,7 @@ mod chrome_textures_tests {
         assert!(textures.sidebar_button_tex.is_none());
         assert!(textures.sidebar_divider_tex.is_none());
         assert!(textures.sidebar_drop_tex.is_none());
-        assert!(textures.sidebar_accent_tex.is_none());
         assert!(textures.sidebar_progress_tex.is_none());
-        assert!(textures.sidebar_rule_tex.is_none());
         assert!(textures.palette_scratch.is_none());
         assert!(textures.tab_bar_scratch.is_none());
         assert!(textures.context_menu_scratch.is_none());

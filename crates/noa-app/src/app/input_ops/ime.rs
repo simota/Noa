@@ -321,11 +321,12 @@ impl App {
                 let session = self.sidebar_rename.as_ref()?;
                 let inset = self.window_sidebar_inset_px(window_id);
                 let bounds = self.sidebar_layout_bounds(window_id, inset);
-                let windows = self.session_windows_for_window(window_id);
-                let ids = self.session_store.ordered_ids_for_windows(&windows);
-                let layout =
-                    self.sidebar_metrics(window_id)
-                        .layout(bounds, &ids, state.sidebar_scroll);
+                let specs = self.sidebar_card_specs(window_id);
+                let layout = self.sidebar_metrics(window_id).layout_cards(
+                    bounds,
+                    &specs,
+                    state.sidebar_scroll,
+                );
                 let card = layout.cards.iter().find(|card| card.id == session.card)?;
                 let rect = card.name_line;
                 Some((

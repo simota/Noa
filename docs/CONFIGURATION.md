@@ -239,7 +239,24 @@ See [noa-server-protocol.md](api/noa-server-protocol.md) for scope and attach-ch
 | `sidebar-width` | finite decimal `200..=600` | `360` | Sidebar width (points) |
 | `sidebar-font-size` | finite decimal `8..=20` | `11.5` | Session sidebar font size (points) |
 | `sidebar-hotkey` | in-app keybind chord, or `none` / `off` / `false` | unspecified | Rebinds the sidebar toggle's in-app chord (default `cmd+shift+s`). **Not** a system-wide hotkey — it only fires while noa is focused. `none` / an empty value keeps the default chord. A chord already used by another binding (e.g. `cmd+t`) is rejected with a diagnostic |
-| `sidebar-preview-lines` | integer `0..=20` | `5` | Number of trailing lines shown in a card. `0` means no preview |
+| `sidebar-preview-lines` | integer `0..=20` | `5` | Maximum detail/output rows in the selected card. Unselected cards stay compact; a current request with nonempty detail can show one row when this value is greater than `0`. `0` hides all detail, audit, and raw-output rows |
+
+The sidebar normally shows two rows per session: its name with one status,
+then muted agent/process, working-directory tail, and AUTO metadata. Selecting
+a session adds its branch and longer path, followed by up to
+`sidebar-preview-lines` detail/output rows. In a narrow sidebar, the expanded
+context prioritizes the branch; the directory tail remains in the metadata.
+Unselected sessions show no ordinary output, but a current approval/input
+request can add one detail row when previews are enabled. Current detail
+takes priority over past approval audit text; the two do not appear together,
+and audit text is hidden while a current request needs attention.
+
+The default remains `5`, and output extraction is unchanged. The setting now
+bounds the expanded card's preview block rather than reserving that many
+visible rows for every session. This keeps the list easier to scan, at the
+cost of requiring selection to inspect another session's recent output. With
+`0`, names, statuses, metadata, and the selected session's branch/path remain
+available, but no card shows request details, approval audit, or raw output.
 
 See [KEYBINDINGS.md](KEYBINDINGS.md#global-system-hotkeys) for the syntax of global hotkey chords and
 the corresponding keys.

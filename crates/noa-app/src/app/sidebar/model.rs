@@ -66,9 +66,8 @@ impl App {
         let grid = grid_size_for_pane_rect(band, metrics, SIDEBAR_GRID_PADDING);
 
         let bounds = self.sidebar_layout_bounds(window_id, inset);
-        let windows = self.session_windows_for_window(window_id);
-        let ids = self.session_store.ordered_ids_for_windows(&windows);
-        let layout = layout_metrics.layout(bounds, &ids, state.sidebar_scroll);
+        let specs = self.sidebar_card_specs(window_id);
+        let layout = layout_metrics.layout_cards(bounds, &specs, state.sidebar_scroll);
 
         // Pixel → cell conversion, matching where a `Renderer` places cell (0,0):
         // at the padding origin. One closure per grid (band / card / menu).
@@ -96,7 +95,6 @@ impl App {
         let now_instant = Instant::now();
         let home = home_dir();
         let theme = active_theme(&gpu.theme, &gpu.preview_theme);
-        let palette = &theme.palette;
         let panel_bg = theme.default_bg;
         let mut cards: Vec<SidebarCardDraw> = Vec::new();
         // The card texture uses the same width as the laid-out row. The margin
@@ -158,7 +156,8 @@ impl App {
                 .get(&card_rects.id)
                 .filter(|flash| now_instant < flash.until)
                 .map(|flash| flash.kind);
-            let local = layout_metrics.card_local_rects(card_rects.id, card_w);
+            let spec = *specs.iter().find(|spec| spec.id == card_rects.id)?;
+            let local = layout_metrics.card_local_rects_for(spec, card_w);
             let mut card_runs = Vec::new();
             emit_card_text(
                 &mut card_runs,
@@ -166,7 +165,6 @@ impl App {
                 card,
                 &lines,
                 &card_cell,
-                palette,
                 renaming,
                 menu_hint,
             );
@@ -192,11 +190,8 @@ impl App {
                 flash_fill,
                 selected,
                 hovered: hovered_id == Some(card_rects.id),
-                attention: card.attention,
-                status_rail: card_status_rail(card),
-                progress_bar: progress_bar.filter(|_| {
-                    card_rects.clipped_top + card_rects.bounds.h == layout_metrics.card_h
-                }),
+                progress_bar: progress_bar
+                    .filter(|_| card_rects.clipped_top + card_rects.bounds.h == card_rects.full_h),
                 runs: card_runs,
                 src_uv,
             });
@@ -255,7 +250,8 @@ impl App {
                 let mut lines = card_lines(card, now, home, tab_title.as_deref());
                 mark_float_card(&mut lines, is_float);
                 lines.remote_unsupported = self.session_card_is_remote(&drag.card);
-                let local = layout_metrics.card_local_rects(drag.card, card_w);
+                let spec = *specs.iter().find(|spec| spec.id == drag.card)?;
+                let local = layout_metrics.card_local_rects_for(spec, card_w);
                 let mut card_runs = Vec::new();
                 emit_card_text(
                     &mut card_runs,
@@ -263,38 +259,30 @@ impl App {
                     card,
                     &lines,
                     &card_cell,
-                    palette,
                     None,
                     false,
                 );
                 // Floating top follows the cursor, clamped inside the band.
-                let max_top = height.saturating_sub(layout_metrics.card_h) as i64;
+                let max_top = height.saturating_sub(local.full_h) as i64;
                 let top = (drag.current_y - drag.grab_dy).clamp(0, max_top) as u32;
                 let float = SidebarCardDraw {
-                    rect: SidebarRect::new(
-                        layout_metrics.card_margin_x,
-                        top,
-                        card_w,
-                        layout_metrics.card_h,
-                    ),
+                    rect: SidebarRect::new(layout_metrics.card_margin_x, top, card_w, local.full_h),
                     grid: card_grid,
                     bg: sidebar_selected_card_bg(panel_bg),
                     flash_fill: false,
                     selected: true,
                     hovered: false,
-                    attention: false,
-                    status_rail: None,
                     progress_bar: card_progress_bar(card),
                     runs: card_runs,
-                    src_uv: [0.0, 0.0, 1.0, 1.0],
+                    src_uv: card_source_uv(&local, layout_metrics.card_h),
                 };
                 // Drop indicator at the target gap, spanning the card width with a
                 // small horizontal inset so it reads as a rule, not a full band.
                 let vp = layout.viewport;
                 let py = drag.current_y.clamp(0, u32::MAX as i64) as u32;
-                let idx = layout_metrics.drop_index(vp, ids.len(), state.sidebar_scroll, py);
+                let idx = layout_metrics.drop_index_cards(vp, &specs, state.sidebar_scroll, py);
                 let indicator = layout_metrics
-                    .drop_indicator_y(vp, ids.len(), state.sidebar_scroll, idx)
+                    .drop_indicator_y_cards(vp, &specs, state.sidebar_scroll, idx)
                     .map(|y| {
                         let line_h = (SIDEBAR_DROP_INDICATOR_H * scale).round().max(1.0) as u32;
                         let inset_x = (12.0 * scale).round() as u32;
@@ -409,18 +397,6 @@ fn colored_run(
     Some(SidebarTextRun::new(col, row, text, spans.first()?.1))
 }
 
-/// Resolve a preview span's pure `noa_core::Color` to a concrete sidebar RGB:
-/// the theme palette for indexed colors, the raw value for truecolor, and the
-/// sidebar's dim fg for the default (so uncolored output reads as secondary
-/// text on the card).
-fn resolve_preview_color(color: noa_core::Color, palette: &[Rgb; 256]) -> Rgb {
-    match color {
-        noa_core::Color::Default => chrome().dim_fg,
-        noa_core::Color::Palette(index) => palette[index as usize],
-        noa_core::Color::Rgb(rgb) => rgb,
-    }
-}
-
 /// A text run right-aligned within `rect`: the run's column is backed off from
 /// the rect's right edge by the text's display width.
 fn right_aligned_run(
@@ -446,108 +422,118 @@ fn right_aligned_run(
     })
 }
 
-/// Keep actionable state and automatic approval visible before spending the
-/// remaining columns on the process name.
-fn agent_meta(card: &SessionCard, lines: &CardLines, cols: usize) -> Vec<(String, Rgb)> {
-    let (mut badge, badge_fg) = if lines.remote_unsupported {
-        ("PROCESS N/A".to_string(), chrome().dim_fg)
-    } else {
-        process_badge(card.agent.kind, &lines.process, card.is_running())
-    };
-    let (mut status, status_fg) = if let Some(report) = &card.agent_status {
-        use noa_grid::AgentState;
-        let fg = match report.state {
-            AgentState::Running => chrome().dot_blue,
-            AgentState::Finished => chrome().dot_green,
-            _ => chrome().dot_red,
+/// A single status label, shown on the name row. Routine activity stays
+/// neutral; semantic color is reserved for a request that needs attention.
+fn card_state_label(card: &SessionCard) -> Option<(&'static str, Rgb)> {
+    use noa_grid::AgentState;
+    if let Some(report) = &card.agent_status
+        && report.state.needs_attention()
+    {
+        let label = match report.state {
+            AgentState::Permission => "approval",
+            AgentState::Input => "reply",
+            AgentState::Error => "error",
+            _ => report.state.label(),
         };
-        (report.state.label().to_string(), fg)
-    } else if card.attention {
-        (ATTENTION_LABEL.to_string(), chrome().dot_red)
-    } else {
-        (String::new(), chrome().dim_fg)
-    };
-    let (auto, auto_fg) = if lines.remote_unsupported {
-        ("AUTO N/A", chrome().dim_fg)
-    } else if card.auto_approve_enabled {
-        ("AUTO ON", chrome().accent)
-    } else {
-        ("", chrome().dim_fg)
-    };
-    let total = |badge: &str, status: &str, gap: usize| {
-        width(badge)
-            + width(status)
-            + width(auto)
-            + gap * (usize::from(!status.is_empty()) + usize::from(!auto.is_empty()))
-    };
-    if total(&badge, &status, 3) > cols {
-        if let Some(report) = &card.agent_status {
-            use noa_grid::AgentState;
-            status = match report.state {
-                AgentState::Permission => "approval",
-                AgentState::Input => "reply",
-                AgentState::Finished => "ended",
-                _ => report.state.label(),
-            }
-            .to_string();
-        }
-        if !lines.remote_unsupported && card.agent.kind == AgentKind::ClaudeCode {
-            badge = "✳ Claude".to_string();
-        }
+        return Some((label, chrome().dot_red));
     }
-    let gap = if total(&badge, &status, 3) <= cols {
-        " · "
+    if card.attention {
+        return Some((ATTENTION_LABEL, chrome().dot_red));
+    }
+    if card.unread_bell {
+        return Some(("bell", chrome().dim_fg));
+    }
+    if card
+        .agent_status
+        .as_ref()
+        .is_some_and(|report| report.state == AgentState::Finished)
+    {
+        return Some(("done", chrome().dim_fg));
+    }
+    card.is_running().then_some(("running", chrome().dim_fg))
+}
+
+fn working_directory_name(cwd: &str) -> &str {
+    let trimmed = cwd.trim_end_matches(['/', '\\']);
+    trimmed
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(cwd)
+}
+
+/// Compact identification, without repeating the state already on the title.
+/// The directory tail and automation mode remain readable at narrow widths.
+fn agent_meta(card: &SessionCard, lines: &CardLines, cols: usize) -> Vec<(String, Rgb)> {
+    let agent = if lines.remote_unsupported {
+        "PROCESS N/A"
+    } else if card.agent.kind == AgentKind::ClaudeCode {
+        "Claude"
+    } else if card.agent.kind == AgentKind::Generic
+        && matches!(lines.process.as_str(), "idle" | "running")
+    {
+        ""
     } else {
-        " "
+        agent_display_name(card.agent.kind, &lines.process)
     };
-    let mut remaining = cols;
-    let auto = elide_end(auto, remaining);
-    remaining =
-        remaining.saturating_sub(width(&auto) + if auto.is_empty() { 0 } else { width(gap) });
-    let status = elide_end(&status, remaining);
-    remaining =
-        remaining.saturating_sub(width(&status) + if status.is_empty() { 0 } else { width(gap) });
-    let badge = elide_end(&badge, remaining);
+    let cwd = working_directory_name(&lines.cwd);
+    let auto = if lines.remote_unsupported {
+        "AUTO N/A"
+    } else if card.auto_approve_enabled {
+        "AUTO ON"
+    } else {
+        ""
+    };
+    let nonempty = [agent, cwd, auto]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .count();
+    let total = width(agent) + width(cwd) + width(auto) + 3 * nonempty.saturating_sub(1);
+    let gap = if total <= cols { " · " } else { " " };
+    let auto = elide_end(auto, cols);
+    let remaining =
+        cols.saturating_sub(width(&auto) + if auto.is_empty() { 0 } else { width(gap) });
+    let agent_budget = if cwd.is_empty() {
+        remaining
+    } else {
+        remaining.saturating_sub(width(cwd).min(5) + width(gap))
+    };
+    let agent = elide_end(agent, agent_budget);
+    let cwd_budget =
+        remaining.saturating_sub(width(&agent) + if agent.is_empty() { 0 } else { width(gap) });
+    let cwd = elide_start(cwd, cwd_budget);
     let mut spans = Vec::new();
-    for (text, fg) in [(badge, badge_fg), (status, status_fg), (auto, auto_fg)] {
+    for text in [agent, cwd, auto] {
         if text.is_empty() {
             continue;
         }
         if !spans.is_empty() {
             spans.push((gap.to_string(), chrome().dim_fg));
         }
-        spans.push((text, fg));
+        spans.push((text, chrome().dim_fg));
     }
     spans
 }
 
-/// Give branch and working directory their own row, retaining the recognizable
-/// beginning and useful tail of each path when space is limited.
+/// Detailed context belongs to the selected card. The compact metadata already
+/// identifies the directory, so narrow layouts can spend this row on the branch
+/// instead of producing two unrelated fragments.
 fn project_context(lines: &CardLines, cols: usize) -> String {
-    let branch = if lines.branch.is_empty() {
-        String::new()
-    } else {
-        format!("⎇ {}", lines.branch)
-    };
-    if branch.is_empty() {
+    if lines.branch.is_empty() {
         return elide_middle(&lines.cwd, cols);
     }
-    if lines.cwd.is_empty() {
+    let branch = format!("⎇ {}", lines.branch);
+    if lines.cwd.is_empty() || cols < 36 {
         return elide_middle(&branch, cols);
-    }
-    if cols < 7 {
-        return elide_middle(&lines.cwd, cols);
     }
     let available = cols - 3;
     let branch_cols =
         width(&branch).min((available / 2).max(available.saturating_sub(width(&lines.cwd))));
     let cwd_cols = available - branch_cols;
-    let branch = if branch_cols > 2 {
-        format!("⎇ {}", elide_middle(&lines.branch, branch_cols - 2))
-    } else {
-        elide_end(&branch, branch_cols)
-    };
-    format!("{branch} · {}", elide_middle(&lines.cwd, cwd_cols))
+    format!(
+        "{} · {}",
+        elide_middle(&branch, branch_cols),
+        elide_middle(&lines.cwd, cwd_cols)
+    )
 }
 
 /// Emit identity, status, project context, and the configured preview rows.
@@ -555,34 +541,15 @@ fn project_context(lines: &CardLines, cols: usize) -> String {
 /// inline rename is open — it replaces the name run with the buffer + caret in
 /// the accent color. `menu_hint` surfaces the `…` glyph over its (always-live)
 /// hit region — on for the hovered card and while the card's menu is open.
-#[allow(clippy::too_many_arguments)]
 fn emit_card_text(
     out: &mut Vec<SidebarTextRun>,
     rects: &CardRects,
     card: &SessionCard,
     lines: &CardLines,
     to_cell: &impl Fn(u32, u32) -> (u16, u16),
-    palette: &[Rgb; 256],
     renaming: Option<&str>,
     menu_hint: bool,
 ) {
-    // Keep every status shape in the same one-cell Nerd Font slot so changing
-    // state never shifts the project name horizontally.
-    let (status_glyph, status_fg) = status_indicator(status_dot(card));
-    out.extend(window_run(
-        to_cell,
-        rects.dot,
-        status_glyph.to_string(),
-        status_fg,
-        false,
-    ));
-    out.extend(window_run(
-        to_cell,
-        rects.icon,
-        icon_glyph(card.icon).to_string(),
-        icon_color(card.icon),
-        false,
-    ));
     let title = SidebarRect::new(
         rects.name_line.x,
         rects.name_line.y,
@@ -590,13 +557,26 @@ fn emit_card_text(
         rects.menu_button.h,
     );
     let title_cols = text_columns(to_cell, title);
-    let time_cols = width(&lines.updated);
-    // Keep a useful name before reserving a timestamp. Inline rename uses the
-    // whole title area so the insertion point remains visible.
-    let show_time = renaming.is_none()
-        && time_cols > 0
-        && title_cols >= time_cols + 1 + width(&lines.name).min(12);
-    let name_cols = title_cols.saturating_sub(if show_time { time_cols + 1 } else { 0 });
+    let (right, right_fg) = if renaming.is_some() {
+        (String::new(), chrome().dim_fg)
+    } else if let Some((label, color)) = card_state_label(card) {
+        (elide_end(label, title_cols.saturating_sub(5)), color)
+    } else if rects.expanded || menu_hint {
+        // Age is secondary: reveal it while inspecting the card, and only if
+        // there is room to keep an identifying portion of its name.
+        let fits = title_cols >= width(&lines.updated) + 1 + width(&lines.name).min(12);
+        (
+            if fits {
+                lines.updated.clone()
+            } else {
+                String::new()
+            },
+            chrome().dim_fg,
+        )
+    } else {
+        (String::new(), chrome().dim_fg)
+    };
+    let name_cols = title_cols.saturating_sub(width(&right) + usize::from(!right.is_empty()));
     let (name_text, name_fg) = match renaming {
         Some(buffer) => (
             elide_start(&format!("{buffer}▏"), name_cols),
@@ -605,14 +585,7 @@ fn emit_card_text(
         None => (elide_end(&lines.name, name_cols), chrome().fg),
     };
     out.extend(window_run(to_cell, title, name_text, name_fg, true));
-    if show_time {
-        out.extend(right_aligned_run(
-            to_cell,
-            title,
-            lines.updated.clone(),
-            chrome().dim_fg,
-        ));
-    }
+    out.extend(right_aligned_run(to_cell, title, right, right_fg));
     // The `…` menu affordance (its hit region is always live; the glyph shows
     // on hover / while its menu is open).
     if menu_hint {
@@ -636,46 +609,63 @@ fn emit_card_text(
         false,
     ));
 
-    // Pending interaction details take priority over a previous approval. All
-    // summaries share the configured preview budget; the remaining rows retain
-    // the newest output, with its original foreground colors.
-    let audit = card.auto_approve_audit.back().map(|entry| {
-        format!(
-            "AUTO APPROVED {} · {} {}",
-            card.auto_approve_audit.len(),
-            entry.agent,
-            entry.prompt
-        )
-    });
     let detail = card
         .agent_status
         .as_ref()
-        .filter(|report| !report.detail.is_empty())
-        .map(|report| (report.detail.as_str(), report.state.needs_attention()));
-    let mut summaries = Vec::new();
-    if let Some((text, true)) = detail {
-        summaries.push((text, chrome().dot_red));
+        .filter(|report| !report.detail.is_empty());
+    // An unselected request gets one concise line. Routine cards never show
+    // their terminal output until selected, even if the source still collects it.
+    if !rects.expanded {
+        if let Some(report) = detail.filter(|report| report.state.needs_attention())
+            && let Some(rect) = rects.preview.first()
+        {
+            out.extend(window_run(
+                to_cell,
+                *rect,
+                report.detail.clone(),
+                chrome().dim_fg,
+                false,
+            ));
+        }
+        return;
     }
-    if let Some(text) = audit.as_deref() {
-        summaries.push((text, chrome().accent));
-    }
-    if let Some((text, false)) = detail {
-        summaries.push((text, chrome().dim_fg));
-    }
-    let output_rows = rects.preview.len().saturating_sub(summaries.len());
+    // Current work takes precedence over historical approvals. An audit is
+    // useful only when there is no current detail competing with it.
+    let summary = detail.map(|report| report.detail.clone()).or_else(|| {
+        if card.agent_needs_attention() || card.attention {
+            return None;
+        }
+        card.auto_approve_audit
+            .back()
+            .map(|entry| format!("Last approval · {}", entry.prompt))
+    });
+    let output_rows = rects
+        .preview
+        .len()
+        .saturating_sub(usize::from(summary.is_some()));
     let mut preview_index = card.preview.len().saturating_sub(output_rows);
     for (row_index, rect) in rects.preview.iter().enumerate() {
-        if let Some(&(text, fg)) = summaries.get(row_index) {
-            out.extend(window_run(to_cell, *rect, text.to_string(), fg, false));
+        if row_index == 0
+            && let Some(text) = &summary
+        {
+            out.extend(window_run(
+                to_cell,
+                *rect,
+                text.clone(),
+                chrome().dim_fg,
+                false,
+            ));
             continue;
         }
         let Some(line) = card.preview.get(preview_index) else {
             continue;
         };
         preview_index += 1;
+        // The sidebar is a quiet summary. Preserve the original ANSI colors in
+        // the terminal/store while showing preview text with one secondary tone.
         let spans: Vec<_> = line
             .iter()
-            .map(|span| (span.text.as_str(), resolve_preview_color(span.fg, palette)))
+            .map(|span| (span.text.as_str(), chrome().dim_fg))
             .collect();
         out.extend(colored_run(to_cell, *rect, &spans));
     }
@@ -935,21 +925,34 @@ mod tests {
     }
 
     #[test]
-    fn resolve_preview_color_maps_each_color_kind() {
-        let mut palette = [Rgb::new(0, 0, 0); 256];
-        palette[5] = Rgb::new(50, 60, 70);
-        assert_eq!(
-            resolve_preview_color(Color::Default, &palette),
-            chrome().dim_fg
-        );
-        assert_eq!(
-            resolve_preview_color(Color::Palette(5), &palette),
-            Rgb::new(50, 60, 70)
-        );
-        assert_eq!(
-            resolve_preview_color(Color::Rgb(Rgb::new(1, 2, 3)), &palette),
-            Rgb::new(1, 2, 3)
-        );
+    fn output_color_does_not_compete_with_the_state_label() {
+        let mut card = store_card(false, "cargo");
+        let rects = card_rects();
+        let to_cell = cell_at();
+        for color in [
+            Color::Default,
+            Color::Palette(5),
+            Color::Rgb(Rgb::new(255, 0, 0)),
+        ] {
+            card.preview[0][0].fg = color;
+            let lines = card_lines(&card, wall(10, 3), None, None);
+            let mut out = Vec::new();
+            emit_card_text(&mut out, &rects, &card, &lines, &to_cell, None, false);
+            let row = to_cell(rects.preview[0].x, rects.preview[0].y).1;
+            let preview = out
+                .iter()
+                .find(|run| run.row == row)
+                .expect("output preview");
+            let term = rendered_terminal(&preview.text);
+            assert_eq!(
+                term.active().grid[0].cells[0].fg,
+                Color::Rgb(chrome().dim_fg)
+            );
+            assert_eq!(
+                card.preview[0][0].fg, color,
+                "the terminal's source colors are retained"
+            );
+        }
     }
 
     #[test]
@@ -1057,10 +1060,9 @@ mod tests {
     }
 
     #[test]
-    fn real_font_metrics_keep_all_card_runs_inside_distinct_cells() {
+    fn real_font_metrics_keep_all_card_modes_inside_distinct_cells() {
         let card = waiting_card();
         let lines = card_lines(&card, wall(10, 3), Some("/Users/dev"), None);
-        let palette = [Rgb::new(0, 0, 0); 256];
         let rename = "長い日本語の名前 👩🏽‍💻 1\u{20e3} cafe\u{301} 編集中";
         for dpr in [1.0, 1.5, 2.0] {
             for font_size in [8.0, 11.5, 20.0] {
@@ -1076,11 +1078,10 @@ mod tests {
                         .with_cell_height(font_metrics.cell_h);
                     for width in [200, 360, 600] {
                         let card_w = (f64::from(width) * dpr).round() as u32;
-                        let rects = metrics.card_local_rects(card_rects().id, card_w);
                         let grid = grid_size_for_pane_rect(
                             PaneRectApp::new(0, 0, card_w, metrics.card_h),
                             font_metrics,
-                            GridPadding::ZERO,
+                            SIDEBAR_GRID_PADDING,
                         );
                         let to_cell = |x, y| {
                             px_to_cell(
@@ -1093,22 +1094,41 @@ mod tests {
                                 grid,
                             )
                         };
-                        for renaming in [None, Some(rename)] {
-                            let mut out = Vec::new();
-                            emit_card_text(
-                                &mut out, &rects, &card, &lines, &to_cell, &palette, renaming, true,
-                            );
-                            assert_runs_fit_without_overlap(&out, grid);
-                            let title = out.iter().find(|run| run.bold).expect("visible title");
-                            if renaming.is_some() {
-                                assert!(title.text.ends_with('▏'), "{title:?}");
+                        for mode in [
+                            SidebarCardMode::Compact,
+                            SidebarCardMode::Attention,
+                            SidebarCardMode::Expanded,
+                        ] {
+                            let spec = SidebarCardSpec {
+                                id: card_rects().id,
+                                mode,
+                            };
+                            let rects = metrics.card_local_rects_for(spec, card_w);
+                            for renaming in [None, Some(rename)] {
+                                let mut out = Vec::new();
+                                emit_card_text(
+                                    &mut out, &rects, &card, &lines, &to_cell, renaming, true,
+                                );
+                                assert_runs_fit_without_overlap(&out, grid);
+                                for run in &out {
+                                    assert!(
+                                        (f32::from(run.row) + 1.0) * font_metrics.cell_h
+                                            <= rects.full_h as f32 + 1.0
+                                    );
+                                }
+                                let title = out.iter().find(|run| run.bold).expect("visible title");
+                                if renaming.is_some() {
+                                    assert!(title.text.ends_with('▏'), "{title:?}");
+                                }
+                                assert!(out.iter().any(|run| run.text == "⋯"));
+                                let meta_row = to_cell(rects.meta.x, rects.meta.y).1;
+                                assert!(out.iter().any(|run| run.row == meta_row));
+                                if rects.expanded {
+                                    let context_row = to_cell(rects.context.x, rects.context.y).1;
+                                    assert_ne!(meta_row, context_row);
+                                    assert!(out.iter().any(|run| run.row == context_row));
+                                }
                             }
-                            assert!(out.iter().any(|run| run.text == "⋯"));
-                            let meta_row = to_cell(rects.meta.x, rects.meta.y).1;
-                            let context_row = to_cell(rects.context.x, rects.context.y).1;
-                            assert_ne!(meta_row, context_row);
-                            assert!(out.iter().any(|run| run.row == meta_row));
-                            assert!(out.iter().any(|run| run.row == context_row));
                         }
                     }
                 }
@@ -1117,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn actionable_status_and_auto_approval_survive_narrow_metadata_rows() {
+    fn compact_metadata_keeps_project_and_auto_without_repeating_state() {
         let card = waiting_card();
         let lines = card_lines(&card, wall(10, 3), None, None);
         for cols in [25, 34, 48, 80] {
@@ -1128,27 +1148,37 @@ mod tests {
                 .map(|(text, color)| (text.as_str(), *color))
                 .collect();
             let colored = colored_prefix(&spans, cols);
-            assert!(plain.contains("approval"), "{cols}: {plain}");
+            assert!(
+                !plain.contains("approval"),
+                "state is shown once, on the title"
+            );
+            assert!(plain.contains("Noa"), "{cols}: {plain}");
             assert!(plain.contains("AUTO ON"), "{cols}: {plain}");
             assert!(rendered_width(&colored) <= cols, "{cols}: {plain}");
         }
     }
 
     #[test]
-    fn context_preserves_branch_identity_and_the_working_directory_tail() {
+    fn context_uses_the_branch_at_narrow_widths_and_adds_the_path_when_it_fits() {
         let card = waiting_card();
         let lines = card_lines(&card, wall(10, 3), Some("/Users/dev"), None);
         for cols in [25, 34, 48, 80] {
             let context = project_context(&lines, cols);
             assert!(context.starts_with("⎇ "), "{context}");
-            assert!(context.ends_with("/Noa"), "{context}");
+            if cols >= 36 {
+                assert!(context.ends_with("/Noa"), "{context}");
+            } else {
+                assert!(
+                    !context.contains(" · "),
+                    "narrow context prioritizes the branch"
+                );
+            }
             assert!(rendered_width(&context) <= cols, "{cols}: {context}");
         }
     }
 
     #[test]
     fn narrow_titles_reclaim_unused_timestamp_columns() {
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
         for busy in [false, true] {
             let mut card = store_card(busy, "cargo");
@@ -1157,11 +1187,12 @@ mod tests {
             let metrics = SidebarMetrics::new(1.0).with_cell_height(20.0);
             let rects = metrics.card_local_rects(card_rects().id, 200);
             let mut out = Vec::new();
-            emit_card_text(
-                &mut out, &rects, &card, &lines, &to_cell, &palette, None, true,
-            );
+            emit_card_text(&mut out, &rects, &card, &lines, &to_cell, None, true);
             let title = out.iter().find(|run| run.bold).expect("title");
-            assert!(rendered_width(&title.text) > text_columns(&to_cell, rects.name_line));
+            assert!(
+                rendered_width(&title.text) >= 5,
+                "retain an identifying name"
+            );
             assert!(
                 out.iter()
                     .all(|run| lines.updated.is_empty() || run.text != lines.updated)
@@ -1180,37 +1211,54 @@ mod tests {
     fn one_preview_row_prioritizes_pending_details_over_previous_approval() {
         let card = waiting_card();
         let lines = card_lines(&card, wall(10, 3), None, None);
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
         let rects = card_rects();
         let mut out = Vec::new();
-        emit_card_text(
-            &mut out, &rects, &card, &lines, &to_cell, &palette, None, false,
-        );
+        emit_card_text(&mut out, &rects, &card, &lines, &to_cell, None, false);
         let preview_row = to_cell(rects.preview[0].x, rects.preview[0].y).1;
         let detail = out
             .iter()
             .find(|run| run.row == preview_row)
             .expect("pending detail");
         assert!(detail.text.starts_with("Review permission"));
-        assert_eq!(detail.fg, chrome().dot_red);
+        assert_eq!(detail.fg, chrome().dim_fg);
+        assert_eq!(
+            out.iter().filter(|run| run.fg == chrome().dot_red).count(),
+            1
+        );
         assert!(out.iter().all(|run| !run.text.contains("AUTO APPROVED")));
     }
 
     #[test]
-    fn two_preview_rows_keep_pending_details_and_latest_output_colors() {
+    fn a_current_request_without_detail_does_not_surface_a_previous_approval() {
+        let mut card = waiting_card();
+        card.agent_status.as_mut().unwrap().detail.clear();
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        let mut out = Vec::new();
+        emit_card_text(
+            &mut out,
+            &card_rects(),
+            &card,
+            &lines,
+            &cell_at(),
+            None,
+            false,
+        );
+        assert!(out.iter().any(|run| run.text == "approval"));
+        assert!(out.iter().all(|run| !run.text.contains("Last approval")));
+    }
+
+    #[test]
+    fn two_preview_rows_keep_pending_details_and_latest_output_in_a_quiet_tone() {
         let mut card = waiting_card();
         card.auto_approve_audit.clear();
         let lines = card_lines(&card, wall(10, 3), None, None);
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
         let mut rects = card_rects();
         rects.bounds.h = 160;
         rects.preview.push(SidebarRect::new(10, 120, 340, 20));
         let mut out = Vec::new();
-        emit_card_text(
-            &mut out, &rects, &card, &lines, &to_cell, &palette, None, false,
-        );
+        emit_card_text(&mut out, &rects, &card, &lines, &to_cell, None, false);
         let detail_row = to_cell(rects.preview[0].x, rects.preview[0].y).1;
         let output_row = to_cell(rects.preview[1].x, rects.preview[1].y).1;
         let detail = out
@@ -1227,50 +1275,103 @@ mod tests {
         let term = rendered_terminal(&output.text);
         assert_eq!(
             term.active().grid[0].cells[0].fg,
-            Color::Rgb(Rgb::new(40, 120, 210))
+            Color::Rgb(chrome().dim_fg)
         );
         assert_eq!(
             term.active().grid[0].cells[11].fg,
-            Color::Rgb(Rgb::new(90, 180, 110))
+            Color::Rgb(chrome().dim_fg)
         );
         assert_runs_fit_without_overlap(&out, GridSize { cols: 36, rows: 8 });
     }
 
     #[test]
-    fn status_indicator_uses_distinct_shapes_and_colors() {
-        let cases = [
-            (StatusDot::Blue, "\u{f04b}", chrome().dot_blue),
-            (StatusDot::Green, "\u{f10c}", chrome().dot_green),
-            (StatusDot::Yellow, "\u{f0f3}", chrome().dot_yellow),
-            (StatusDot::Red, "\u{f12a}", chrome().dot_red),
-        ];
-        for (status, expected_glyph, expected_color) in cases {
-            let (glyph, color) = status_indicator(status);
-            assert_eq!(glyph, expected_glyph);
-            assert_eq!(color, expected_color);
+    fn status_labels_keep_activity_neutral_and_requests_explicit() {
+        use noa_grid::AgentState;
+        let mut card = waiting_card();
+        for (state, label, color) in [
+            (AgentState::Running, "running", chrome().dim_fg),
+            (AgentState::Permission, "approval", chrome().dot_red),
+            (AgentState::Input, "reply", chrome().dot_red),
+            (AgentState::Error, "error", chrome().dot_red),
+            (AgentState::Finished, "done", chrome().dim_fg),
+        ] {
+            card.agent_status.as_mut().unwrap().state = state;
+            assert_eq!(card_state_label(&card), Some((label, color)));
         }
     }
 
     #[test]
-    fn status_rail_is_categorical_and_follows_attention_precedence() {
+    fn the_single_status_label_prioritizes_attention_over_bell_and_activity() {
         let mut card = store_card(false, "cargo");
-        assert_eq!(card_status_rail(&card), None);
-
+        assert_eq!(card_state_label(&card), None);
         card.busy = true;
-        assert_eq!(
-            card_status_rail(&card).map(|rail| rail.kind),
-            Some(StatusRailKind::Activity)
-        );
+        assert_eq!(card_state_label(&card), Some(("running", chrome().dim_fg)));
         card.unread_bell = true;
-        assert_eq!(
-            card_status_rail(&card).map(|rail| rail.kind),
-            Some(StatusRailKind::UnreadBell)
-        );
+        assert_eq!(card_state_label(&card), Some(("bell", chrome().dim_fg)));
         card.attention = true;
         assert_eq!(
-            card_status_rail(&card).map(|rail| rail.kind),
-            Some(StatusRailKind::Attention)
+            card_state_label(&card),
+            Some((ATTENTION_LABEL, chrome().dot_red))
         );
+    }
+
+    #[test]
+    fn compact_cards_show_only_identity_until_selected() {
+        let card = store_card(true, "codex");
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        let metrics = SidebarMetrics::new(1.0).with_cell_height(20.0);
+        let to_cell = cell_at();
+        let mut counts = Vec::new();
+        for mode in [SidebarCardMode::Compact, SidebarCardMode::Expanded] {
+            let rects = metrics.card_local_rects_for(
+                SidebarCardSpec {
+                    id: card_rects().id,
+                    mode,
+                },
+                360,
+            );
+            let mut out = Vec::new();
+            emit_card_text(&mut out, &rects, &card, &lines, &to_cell, None, false);
+            let rows: HashSet<_> = out.iter().map(|run| run.row).collect();
+            if mode == SidebarCardMode::Compact {
+                assert_eq!(rows.len(), 2);
+                assert!(out.iter().all(|run| !run.text.contains("output")));
+                assert_eq!(out.iter().filter(|run| run.text == "running").count(), 1);
+            } else {
+                assert!(out.iter().any(|run| run.text.contains("output")));
+            }
+            counts.push(rects.full_h);
+        }
+        assert!(counts[0] < counts[1]);
+    }
+
+    #[test]
+    fn compact_attention_keeps_only_the_current_request_and_zero_disables_details() {
+        let card = waiting_card();
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        for preview_lines in [0, 1, 5] {
+            let metrics =
+                SidebarMetrics::new_with_preview_lines(1.0, preview_lines).with_cell_height(20.0);
+            let rects = metrics.card_local_rects_for(
+                SidebarCardSpec {
+                    id: card_rects().id,
+                    mode: SidebarCardMode::Attention,
+                },
+                360,
+            );
+            let mut out = Vec::new();
+            emit_card_text(&mut out, &rects, &card, &lines, &cell_at(), None, false);
+            let rows: HashSet<_> = out.iter().map(|run| run.row).collect();
+            assert_eq!(rows.len(), if preview_lines == 0 { 2 } else { 3 });
+            assert!(
+                out.iter()
+                    .all(|run| !run.text.contains("output") && !run.text.contains("Last approval"))
+            );
+            assert_eq!(
+                out.iter().filter(|run| run.fg == chrome().dot_red).count(),
+                1
+            );
+        }
     }
 
     /// Non-zero sub-rects so every run region emits; one preview row.
@@ -1278,6 +1379,8 @@ mod tests {
         CardRects {
             id: SessionCardId::new(SessionWindowId(1), PaneId::new(0)),
             bounds: SidebarRect::new(0, 0, 360, 140),
+            full_h: 140,
+            expanded: true,
             clipped_top: 0,
             icon: SidebarRect::new(10, 0, 20, 20),
             name_line: SidebarRect::new(30, 0, 220, 20),
@@ -1294,7 +1397,6 @@ mod tests {
     fn emit_card_text_emits_bold_name_run() {
         let card = store_card(false, "cargo");
         let lines = card_lines(&card, wall(10, 3), None, None);
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
         let mut out = Vec::new();
         emit_card_text(
@@ -1303,7 +1405,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            &palette,
             None,
             false,
         );
@@ -1321,7 +1422,6 @@ mod tests {
             !lines.updated.is_empty(),
             "idle card carries a relative time"
         );
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
         let mut out = Vec::new();
         emit_card_text(
@@ -1330,7 +1430,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            &palette,
             None,
             false,
         );
@@ -1345,7 +1444,6 @@ mod tests {
         let card = store_card(true, "cargo");
         let lines = card_lines(&card, wall(10, 3), None, None);
         assert!(lines.updated.is_empty(), "a busy card has no relative time");
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
         let mut out = Vec::new();
         emit_card_text(
@@ -1354,7 +1452,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            &palette,
             None,
             false,
         );
@@ -1370,7 +1467,6 @@ mod tests {
         let mut card = store_card(true, "claude");
         card.attention = true;
         let lines = card_lines(&card, wall(10, 3), None, None);
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
         let mut out = Vec::new();
         emit_card_text(
@@ -1379,7 +1475,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            &palette,
             None,
             false,
         );
@@ -1392,7 +1487,6 @@ mod tests {
     fn emit_card_text_renaming_replaces_name_with_caret_in_accent() {
         let card = store_card(false, "cargo");
         let lines = card_lines(&card, wall(10, 3), None, None);
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
         let mut out = Vec::new();
         emit_card_text(
@@ -1401,7 +1495,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            &palette,
             Some("foo"),
             false,
         );
@@ -1422,7 +1515,6 @@ mod tests {
     fn emit_card_text_menu_hint_emits_ellipsis_glyph() {
         let card = store_card(false, "cargo");
         let lines = card_lines(&card, wall(10, 3), None, None);
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
 
         let mut with_hint = Vec::new();
@@ -1432,7 +1524,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            &palette,
             None,
             true,
         );
@@ -1448,7 +1539,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            &palette,
             None,
             false,
         );
@@ -1463,7 +1553,6 @@ mod tests {
         let card = store_card(false, "idle");
         let mut lines = card_lines(&card, wall(10, 3), None, None);
         lines.remote_unsupported = true;
-        let palette = [Rgb::new(0, 0, 0); 256];
         let to_cell = cell_at();
         let mut out = Vec::new();
         emit_card_text(
@@ -1472,7 +1561,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            &palette,
             None,
             false,
         );

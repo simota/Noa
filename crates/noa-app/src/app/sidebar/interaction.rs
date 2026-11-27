@@ -8,7 +8,7 @@ impl App {
         let windows = self.session_windows_for_window(window_id);
         if let Some(card) = self.session_store.next_notification(&windows) {
             self.hide_tab_overview();
-            self.focus_session_card(card);
+            self.focus_session_card(window_id, card);
         }
     }
 
@@ -64,23 +64,28 @@ impl App {
                 state.sidebar_scroll,
             )
         };
-        let windows = self.session_windows_for_window(window_id);
-        let ids = self.session_store.ordered_ids_for_windows(&windows);
-        match metrics.hit_test(bounds, &ids, scroll, point) {
+        let specs = self.sidebar_card_specs(window_id);
+        match metrics.hit_test_cards(bounds, &specs, scroll, point) {
             Some(crate::sidebar::SidebarHit::Card(card)) => {
+                let Some(spec) = specs.iter().find(|spec| spec.id == card) else {
+                    return true;
+                };
                 // Begin a *pending* drag-reorder rather than focusing now: a
                 // plain click (release without moving past the threshold) still
                 // selects the card in `finish_active_sidebar_drag`, while a drag
                 // reorders it. `grab_dy` anchors the floating card to the cursor.
                 let card_top = metrics
-                    .layout(bounds, &ids, scroll)
+                    .layout_cards(bounds, &specs, scroll)
                     .cards
                     .iter()
                     .find(|c| c.id == card)
-                    .map_or(point.y as i64, |c| c.bounds.y as i64);
+                    .map_or(point.y as i64, |c| {
+                        i64::from(c.bounds.y) - i64::from(c.clipped_top)
+                    });
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.sidebar_drag = Some(SidebarDrag {
                         card,
+                        mode: spec.mode,
                         start_y: point.y as i64,
                         grab_dy: point.y as i64 - card_top,
                         current_y: point.y as i64,
@@ -254,11 +259,10 @@ impl App {
         }
         let state = self.windows.get(&window_id)?;
         let bounds = self.sidebar_layout_bounds(window_id, inset);
-        let windows = self.session_windows_for_window(window_id);
-        let ids = self.session_store.ordered_ids_for_windows(&windows);
-        let layout = self
-            .sidebar_metrics(window_id)
-            .layout(bounds, &ids, state.sidebar_scroll);
+        let specs = self.sidebar_card_specs(window_id);
+        let layout =
+            self.sidebar_metrics(window_id)
+                .layout_cards(bounds, &specs, state.sidebar_scroll);
         layout
             .cards
             .iter()
@@ -268,7 +272,8 @@ impl App {
 
     /// Scroll the sidebar card list when the wheel turns over the band
     /// (FR-15). Returns `true` when consumed (so the terminal never scrolls).
-    /// `lines` is the wheel delta in card-stride units; positive scrolls down.
+    /// `lines` uses a compact card's height so selecting a longer card does not
+    /// change wheel sensitivity.
     pub(in crate::app) fn handle_sidebar_wheel(&mut self, window_id: WindowId, lines: f32) -> bool {
         let inset = self.window_sidebar_inset_px(window_id);
         let point = self
@@ -281,15 +286,15 @@ impl App {
         let bounds = self.sidebar_layout_bounds(window_id, inset);
         let metrics = self.sidebar_metrics(window_id);
         let viewport_h = metrics.bands(bounds).viewport.h;
-        let windows = self.session_windows_for_window(window_id);
-        let content_h =
-            metrics.content_height(self.session_store.ordered_ids_for_windows(&windows).len());
-        let step = metrics.card_stride as f32;
+        let specs = self.sidebar_card_specs(window_id);
+        let content_h = metrics.content_height_cards(&specs);
+        let step = metrics.compact_card_height() as f32;
         let delta = (-lines * step).round() as i64;
         let Some(state) = self.windows.get_mut(&window_id) else {
             return false;
         };
-        let next = (state.sidebar_scroll as i64 + delta).max(0) as u32;
+        let scroll = crate::sidebar::clamp_scroll(state.sidebar_scroll, content_h, viewport_h);
+        let next = (i64::from(scroll) + delta).clamp(0, i64::from(u32::MAX)) as u32;
         state.sidebar_scroll = crate::sidebar::clamp_scroll(next, content_h, viewport_h);
         state.window.request_redraw();
         // The pointer hasn't moved but the cards under it have: recompute the
@@ -301,19 +306,74 @@ impl App {
     /// Switch focus to the window/pane a clicked card belongs to (FR-3,
     /// A-flavor: focus only, never an active-swap). Converts the card's
     /// GUI-agnostic window id back to the winit `WindowId`.
-    fn focus_session_card(&mut self, card: SessionCardId) {
+    fn focus_session_card(&mut self, source_window: WindowId, card: SessionCardId) {
         let window_id = WindowId::from(card.window_id.0);
         if !self.windows.contains_key(&window_id) {
+            if let Some(state) = self.windows.get_mut(&source_window) {
+                state.sidebar_drag = None;
+            }
             return;
+        }
+        // Capture the full card's top before the former selection collapses.
+        // Native-tab switches have separate scroll offsets, so carry the same
+        // visual anchor into the newly focused tab as well.
+        let top_in_viewport = self.windows.get(&source_window).and_then(|state| {
+            let inset = self.window_sidebar_inset_px(source_window);
+            let bounds = self.sidebar_layout_bounds(source_window, inset);
+            let specs = self.sidebar_card_specs(source_window);
+            let layout = self.sidebar_metrics(source_window).layout_cards(
+                bounds,
+                &specs,
+                state.sidebar_scroll,
+            );
+            layout
+                .cards
+                .iter()
+                .find(|rects| rects.id == card)
+                .map(|rects| {
+                    i64::from(rects.bounds.y)
+                        - i64::from(rects.clipped_top)
+                        - i64::from(layout.viewport.y)
+                })
+        });
+        // Read the frozen press geometry before releasing it, then let the
+        // new selection expand when its scroll anchor is resolved below.
+        // The destination may retain a drag whose release happened while a
+        // different tab was focused; it must not override the new selection.
+        for id in [source_window, window_id] {
+            if let Some(state) = self.windows.get_mut(&id) {
+                state.sidebar_drag = None;
+            }
         }
         // floating-panes REQ-016: a float's card brings it into view first.
         if self.session_card_is_float(&card) {
             self.focus_tab(window_id);
             self.reveal_float(window_id, card.pane_id);
-            return;
+        } else {
+            self.focus_pane(window_id, card.pane_id);
+            self.focus_tab(window_id);
         }
-        self.focus_pane(window_id, card.pane_id);
-        self.focus_tab(window_id);
+        let inset = self.window_sidebar_inset_px(window_id);
+        let bounds = self.sidebar_layout_bounds(window_id, inset);
+        let metrics = self.sidebar_metrics(window_id);
+        let specs = self.sidebar_card_specs(window_id);
+        let scroll = metrics.scroll_for_card_anchor(
+            &specs,
+            card,
+            top_in_viewport.unwrap_or(0),
+            metrics.bands(bounds).viewport.h,
+        );
+        if let Some(state) = self.windows.get_mut(&window_id)
+            && let Some(scroll) = scroll
+        {
+            state.sidebar_scroll = scroll;
+            state.window.request_redraw();
+        }
+        let point = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.last_mouse_point);
+        self.update_sidebar_button_hover(window_id, point);
     }
 
     /// Advance an in-flight sidebar card drag on a cursor move. Returns `true`
@@ -355,18 +415,19 @@ impl App {
     /// [`SessionStore::move_card_before`]. Returns `true` when a drag was in
     /// flight (so the caller swallows the release).
     pub(in crate::app) fn finish_active_sidebar_drag(&mut self, window_id: WindowId) -> bool {
-        let Some(drag) = self
-            .windows
-            .get_mut(&window_id)
-            .and_then(|s| s.sidebar_drag.take())
-        else {
+        let Some(drag) = self.windows.get(&window_id).and_then(|s| s.sidebar_drag) else {
             return false;
         };
         if !drag.active {
-            self.focus_session_card(drag.card);
+            self.focus_session_card(window_id, drag.card);
             return true;
         }
         let anchor = self.sidebar_drop_anchor(window_id, drag.current_y);
+        // Resolve the drop against the same frozen row that was drawn for the
+        // drag; releasing first could change the insertion target mid-drop.
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            state.sidebar_drag = None;
+        }
         if self.session_store.move_card_before(drag.card, anchor) {
             self.request_sidebar_redraw();
         } else if let Some(state) = self.windows.get(&window_id) {
@@ -389,11 +450,10 @@ impl App {
         let bounds = self.sidebar_layout_bounds(window_id, inset);
         let metrics = self.sidebar_metrics(window_id);
         let vp = metrics.bands(bounds).viewport;
-        let windows = self.session_windows_for_window(window_id);
-        let ids = self.session_store.ordered_ids_for_windows(&windows);
+        let specs = self.sidebar_card_specs(window_id);
         let py = pointer_y.clamp(0, u32::MAX as i64) as u32;
-        let idx = metrics.drop_index(vp, ids.len(), state.sidebar_scroll, py);
-        ids.get(idx).copied()
+        let idx = metrics.drop_index_cards(vp, &specs, state.sidebar_scroll, py);
+        specs.get(idx).map(|spec| spec.id)
     }
 }
 

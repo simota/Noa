@@ -53,6 +53,7 @@ pub(super) struct Context<'a> {
     /// the verification).
     pub(super) can_attach: bool,
     pub(super) expanded: &'a BTreeSet<String>,
+    pub(super) images: &'a super::images::Cache,
 }
 
 fn history_toggle(
@@ -84,6 +85,7 @@ fn ruling_card(
     session: &Session,
     id: &str,
     ruling: &Ruling,
+    cx: &Context,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let box_ = card(tree, parent, false);
@@ -98,7 +100,7 @@ fn ruling_card(
     }
     if !ruling.evidence.is_empty() {
         caption(tree, box_, "判定の根拠");
-        cited(tree, box_, session, &ruling.evidence, Some(id), actions);
+        cited(tree, box_, session, &ruling.evidence, Some(id), cx, actions);
     }
 }
 
@@ -131,6 +133,7 @@ fn cited(
     session: &Session,
     keys: &[EvidenceKey],
     criterion: Option<&str>,
+    cx: &Context,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let items: Vec<&Evidence> = keys
@@ -161,7 +164,10 @@ fn cited(
         };
         tree.insert(
             Some(line),
-            Label::new(text).font_size(11.5).wrap(true).selectable(true),
+            Label::new(text)
+                .font_size(crate::appearance::font(11.5))
+                .wrap(true)
+                .selectable(true),
         );
         evidence::rerun_details(tree, line, item);
         if matches!(item.body, EvidenceBody::Observation { .. }) {
@@ -180,7 +186,7 @@ fn cited(
     if !media.is_empty() {
         let strip = tree.insert(Some(parent), Container::wrapping_row(6.0, 6.0));
         for item in media {
-            evidence::media_card(tree, strip, item, actions);
+            evidence::media_card(tree, strip, item, cx.images, actions);
         }
     }
 }
@@ -218,7 +224,7 @@ fn criterion(
     tree.insert(
         Some(list),
         Label::new(c.statement.clone())
-            .font_size(13.5)
+            .font_size(crate::appearance::font(13.5))
             .weight(600)
             .wrap(true)
             .selectable(true),
@@ -228,7 +234,7 @@ fn criterion(
     caption(tree, list, "最新の判定");
     match session.rulings.get(id).and_then(|all| all.split_last()) {
         Some((latest, previous)) => {
-            ruling_card(tree, list, session, id, latest, actions);
+            ruling_card(tree, list, session, id, latest, cx, actions);
             if !previous.is_empty()
                 && history_toggle(
                     tree,
@@ -241,7 +247,7 @@ fn criterion(
                 )
             {
                 for ruling in previous.iter().rev() {
-                    ruling_card(tree, list, session, id, ruling, actions);
+                    ruling_card(tree, list, session, id, ruling, cx, actions);
                 }
             }
         }
@@ -267,7 +273,9 @@ fn criterion(
             );
             tree.insert(
                 Some(top),
-                Label::new(part.id.to_string()).font_size(12.0).weight(600),
+                Label::new(part.id.to_string())
+                    .font_size(crate::appearance::font(12.0))
+                    .weight(600),
             );
             caption(tree, top, format!("R{}", r.round));
             tag(
@@ -279,7 +287,7 @@ fn criterion(
             if !r.note.is_empty() {
                 body(tree, box_, r.note.clone());
             }
-            cited(tree, box_, session, &r.evidence, Some(id), actions);
+            cited(tree, box_, session, &r.evidence, Some(id), cx, actions);
         }
     }
     if !any {
@@ -301,7 +309,7 @@ fn criterion(
     } else {
         let strip = tree.insert(Some(list), Container::wrapping_row(6.0, 6.0));
         for item in mine {
-            evidence::media_card(tree, strip, item, actions);
+            evidence::media_card(tree, strip, item, cx.images, actions);
         }
     }
     if cx.can_attach {
@@ -333,7 +341,7 @@ fn criterion(
         tree.insert(
             Some(top),
             Label::new(format!("{} → {}", ch.by, ch.subject))
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(600),
         );
         caption(tree, top, format!("R{}", ch.round));
@@ -346,7 +354,7 @@ fn criterion(
         if !ch.note.is_empty() {
             body(tree, box_, ch.note.clone());
         }
-        cited(tree, box_, session, &ch.evidence, Some(id), actions);
+        cited(tree, box_, session, &ch.evidence, Some(id), cx, actions);
     }
 
     let back = tree.insert(
@@ -384,7 +392,7 @@ fn defect(
     tree.insert(
         Some(list),
         Label::new(d.claim.clone())
-            .font_size(13.5)
+            .font_size(crate::appearance::font(13.5))
             .weight(600)
             .wrap(true),
     );
@@ -431,13 +439,15 @@ fn defect(
         );
         tree.insert(
             Some(top),
-            Label::new(key.to_string()).font_size(12.0).weight(600),
+            Label::new(key.to_string())
+                .font_size(crate::appearance::font(12.0))
+                .weight(600),
         );
         caption(tree, top, format!("R{}", raw.round));
         tag(tree, top, raw.severity.label(), severity_tone(raw.severity));
         body(tree, c, raw.claim.clone());
         caption(tree, c, format!("再現手順: {}", raw.repro));
-        cited(tree, c, session, &raw.evidence, None, actions);
+        cited(tree, c, session, &raw.evidence, None, cx, actions);
     }
     caption(tree, list, "追試");
     let checks: Vec<_> = session
@@ -456,7 +466,9 @@ fn defect(
         );
         tree.insert(
             Some(top),
-            Label::new(ch.by.to_string()).font_size(12.0).weight(600),
+            Label::new(ch.by.to_string())
+                .font_size(crate::appearance::font(12.0))
+                .weight(600),
         );
         caption(tree, top, format!("R{}", ch.round));
         tag(
@@ -468,7 +480,7 @@ fn defect(
         if !ch.note.is_empty() {
             body(tree, c, ch.note.clone());
         }
-        cited(tree, c, session, &ch.evidence, None, actions);
+        cited(tree, c, session, &ch.evidence, None, cx, actions);
     }
     caption(tree, list, "履歴");
     for (round, status, severity) in &d.history {
@@ -500,7 +512,9 @@ fn overview(
             let c = card(tree, list, true);
             let top = tree.insert(
                 Some(c),
-                Container::row().gap(6.0).align_items(AlignItems::CENTER),
+                Container::row()
+                    .gap(crate::appearance::space(6.0))
+                    .align_items(AlignItems::CENTER),
             );
             caption(tree, top, "総合判定");
             tag(tree, top, v.decision.label(), decision_tone(v.decision));
@@ -565,7 +579,7 @@ fn overview(
             tree.insert(
                 Some(c),
                 Label::new(format!("→ {part} に追試: {}", names.join(", ")))
-                    .font_size(11.5)
+                    .font_size(crate::appearance::font(11.5))
                     .color(Role::Muted)
                     .wrap(true),
             );

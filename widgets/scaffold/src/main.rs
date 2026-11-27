@@ -2,7 +2,11 @@
 //! widget-registration gaps found in it (`docs/specs/scaffold-widget.md`).
 //! Flags, window title, the headless snapshot and the app.
 
+#[path = "../../shared/appearance.rs"]
+mod appearance;
 mod demo;
+#[path = "../../tasks/src/sibling.rs"]
+pub mod sibling;
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -190,6 +194,9 @@ fn render_snapshot(path: &Path, screen: &mut dyn Screen, size: (u32, u32)) -> Re
 }
 
 fn main() -> Result<(), String> {
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let args = parse_args(std::env::args().skip(1))?;
     if args.help {
         println!("{USAGE}");

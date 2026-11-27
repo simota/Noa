@@ -8,6 +8,171 @@ fn prepared(kind: &str) -> (WorkflowScreen, TextStore) {
     (screen, text)
 }
 
+#[test]
+fn minimum_zoom_keeps_connection_targets_and_accessible_stage_labels() {
+    let (mut screen, mut text) = prepared("editor");
+    screen.act(Action::Zoom(-1.0), &mut text).unwrap();
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    assert_eq!(screen.zoom, 0.5);
+    let ports: Vec<_> = screen
+        .actions
+        .iter()
+        .filter(|(_, action)| matches!(action, Action::Source(_) | Action::Connect(_)))
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(!ports.is_empty());
+    for id in ports {
+        let rect = screen.bounds(id).unwrap();
+        assert!(rect.width >= 32.0 && rect.height >= 32.0, "{rect:?}");
+    }
+    assert_eq!(
+        screen.canvas.as_ref().unwrap().cards.len(),
+        screen.editor.definition.nodes.len()
+    );
+}
+
+#[test]
+fn inspector_connection_controls_keep_the_same_minimum_target_as_ports() {
+    let (mut screen, mut text) = prepared("editor");
+    screen
+        .act(Action::Source("task".into()), &mut text)
+        .unwrap();
+    screen
+        .act(Action::Select("plan".into()), &mut text)
+        .unwrap();
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    let mut checked = [false; 3];
+    for (id, action) in &screen.actions {
+        let Some(button) = screen.tree.get::<Button>(*id) else {
+            continue;
+        };
+        let index = match action {
+            Action::Source(_) => 0,
+            Action::Connect(_) => 1,
+            Action::Disconnect(_, _) => 2,
+            _ => continue,
+        };
+        checked[index] = true;
+        let rect = screen.bounds(*id).unwrap();
+        assert!(
+            rect.width >= 32.0 && rect.height >= 32.0,
+            "{}: {rect:?}",
+            button.label()
+        );
+    }
+    assert_eq!(checked, [true; 3]);
+}
+
+#[test]
+fn presets_roundtrip_assignments_without_overwriting_graph_edits() {
+    let (mut screen, mut text) = prepared("editor");
+    screen
+        .editor
+        .definition
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "review")
+        .unwrap()
+        .agent = AgentChoice {
+        provider: "claude".into(),
+        model: Some("opus".into()),
+        effort: Some("high".into()),
+    };
+    screen.preset_name = "Review with Claude".into();
+    screen.act(Action::SavePreset, &mut text).unwrap();
+    screen
+        .editor
+        .definition
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "review")
+        .unwrap()
+        .agent = AgentChoice::default();
+    screen.editor.definition.name = "A different title".into();
+    screen.act(Action::ApplyPreset(0), &mut text).unwrap();
+    assert_eq!(
+        screen
+            .editor
+            .definition
+            .node("review")
+            .unwrap()
+            .agent
+            .provider,
+        "claude"
+    );
+    assert_eq!(screen.editor.definition.name, "A different title");
+    assert!(screen.editor.dirty());
+}
+
+#[test]
+fn saved_run_inspection_has_no_execution_channel() {
+    let run = workflow::model::Run::demo();
+    let mut screen = WorkflowScreen::saved(run);
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    assert!(screen.channel.is_none());
+    assert!(!screen.view.can_control);
+    assert!(screen.send(Intent::Resume).is_err());
+}
+
+#[test]
+fn a_task_handoff_keeps_its_form_separate_from_an_older_active_run() {
+    let mut screen = WorkflowScreen::demo("approval");
+    screen.view.deferred = true;
+    let objective = "The newly selected task".to_owned();
+    let origin = workflow::tasks::TaskOrigin {
+        repo: screen.view.repository.clone(),
+        task: "t-new".into(),
+        task_key: "{\"local\":\"t-new\"}".into(),
+        title: "A new task".into(),
+        objective_digest: workflow::model::digest_bytes(objective.as_bytes()),
+    };
+    let mut screen = screen.with_task(origin.clone(), objective.clone());
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    assert!(screen.preparing_run);
+    assert!(!screen.can_start_run());
+    let objective_field = screen
+        .fields
+        .iter()
+        .find(|(_, field)| matches!(field, Field::Objective))
+        .unwrap()
+        .0;
+    assert_eq!(
+        screen.tree.get::<TextArea>(objective_field).unwrap().text(),
+        objective
+    );
+    assert!(
+        screen
+            .actions
+            .iter()
+            .any(|(_, action)| matches!(action, Action::SavedRun))
+    );
+
+    // Asynchronous start failure does not replace this objective with the old run.
+    screen.start_pending = true;
+    let mut refused = screen.view.clone();
+    refused.notice = Some("前の実行に判断待ちの工程があります".into());
+    screen.receive(refused, &mut text);
+    assert!(screen.preparing_run && !screen.start_pending);
+    assert_eq!(screen.origin_task, Some(origin));
+    assert_eq!(screen.objective, objective);
+
+    screen.act(Action::SavedRun, &mut text).unwrap();
+    assert!(!screen.preparing_run);
+    assert!(
+        !screen
+            .fields
+            .iter()
+            .any(|(_, field)| matches!(field, Field::Objective))
+    );
+    screen
+        .act(Action::Select(String::new()), &mut text)
+        .unwrap();
+    assert!(screen.preparing_run);
+    assert_eq!(screen.objective, objective);
+}
+
 fn type_title(screen: &mut WorkflowScreen, text: &mut TextStore, value: &str) -> WidgetId {
     let field = screen
         .fields

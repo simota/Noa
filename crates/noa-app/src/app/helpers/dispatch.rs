@@ -427,6 +427,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenScaffold
         | AppCommand::OpenWorkflow
         | AppCommand::OpenWidgetHost
+        | AppCommand::OpenWidgetSettings
         | AppCommand::OpenAgentUsage
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar
@@ -499,6 +500,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenScaffold
         | AppCommand::OpenWorkflow
         | AppCommand::OpenWidgetHost
+        | AppCommand::OpenWidgetSettings
         | AppCommand::OpenAgentUsage
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar => CommandScope::App,

@@ -924,6 +924,7 @@ fn the_timeline_shows_what_ran_or_was_closed_in_the_last_two_weeks() {
 #[test]
 fn the_calendar_lists_by_day_and_moves_by_month() {
     let (mut screen, _, mut text) = screen_on(demo::view());
+    screen.calendar_mode = views::CalendarMode::Actual;
     screen.set_layout(Layout::Calendar, &mut text);
     let this_month = rows(&screen);
     assert!(this_month.contains(&gh(15)), "{this_month:?}");
@@ -994,6 +995,7 @@ fn j_with_no_rows_shown_does_nothing() {
 #[test]
 fn a_shortcut_never_acts_on_a_task_the_dated_layouts_do_not_show() {
     let (mut screen, log, mut text) = screen_on(demo::view());
+    screen.calendar_mode = views::CalendarMode::Actual;
     // t-1: open, local, never run.
     screen.select_ref(&local("t-1"));
     assert_eq!(screen.selected, Some(local("t-1")));

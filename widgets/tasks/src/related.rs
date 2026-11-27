@@ -67,6 +67,7 @@ pub struct Related {
     pub reviews: Vec<Checked>,
     pub verifications: Vec<Checked>,
     pub prs: Vec<PrLink>,
+    pub workflows: Vec<crate::workflow_links::ResultLink>,
     /// The number of the version the head is on: the last `ChangeSeen`,
     /// or a version a session named first (`None` on the base).
     pub head: Option<u32>,
@@ -117,6 +118,7 @@ impl Related {
             && self.reviews.is_empty()
             && self.verifications.is_empty()
             && self.prs.is_empty()
+            && self.workflows.is_empty()
     }
 
     /// `commit` as a version of the task, pushed as the next one unless it

@@ -3,6 +3,8 @@
 //! (`docs/specs/task-widget.md`). Flags, window title, the headless
 //! snapshot and the app.
 
+#[path = "../../shared/appearance.rs"]
+mod appearance;
 mod demo;
 mod installed;
 mod live;
@@ -71,7 +73,7 @@ fn options() -> AppOptions {
     AppOptions {
         title: window_title().into(),
         size: (DEFAULT_SIZE.0 as f64, DEFAULT_SIZE.1 as f64),
-        min_size: Some((960.0, 600.0)),
+        min_size: Some((720.0, 600.0)),
         ..AppOptions::new("Noa Tasks")
     }
 }
@@ -199,6 +201,9 @@ impl Feed for Unavailable {
 }
 
 fn main() -> Result<(), String> {
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let args = parse_args(std::env::args().skip(1))?;
     if args.help {
         println!("{USAGE}");

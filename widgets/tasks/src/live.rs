@@ -34,6 +34,7 @@ use tasks::related::{self, LinkScan, Related};
 use tasks::sibling::{self, Launcher};
 use tasks::task_links::{self, CHANGE_POLL_MS, LinkEvent, SessionKind, TaskKey};
 use tasks::timeline::{self, Publisher, RunSpec, Share, Status, TimelineApi};
+use tasks::workflow_links;
 use tasks::{code, runs, store, worktree};
 
 use noa_ipc::timeline::Outcome;
@@ -49,6 +50,11 @@ const TICK: Duration = Duration::from_millis(100);
 const MINUTE: Millis = 60_000;
 /// How often the code's markers are read again (`git grep`), besides 再取得.
 const CODE_EVERY: Millis = MINUTE;
+const WORKFLOW_HELPER: sibling::Helper = sibling::Helper {
+    bundled: "Noa Workflow",
+    crate_name: "workflow",
+    title: "Workflow",
+};
 
 /// What the UI thread hands the worker.
 enum Job {
@@ -73,6 +79,17 @@ enum Job {
     OpenSession {
         kind: SessionKind,
         session: String,
+    },
+    CheckVersion {
+        task: TaskRef,
+        kind: SessionKind,
+        run: RunId,
+        commit: String,
+    },
+    OpenWorkflow(Task),
+    OpenWorkflowRun {
+        task: TaskRef,
+        run: String,
     },
     /// A PR's URL, parsed already.
     AddLink {
@@ -285,6 +302,8 @@ impl<C: Connect + Send + 'static> LiveFeed<C> {
                     links,
                     events: Vec::new(),
                     related: BTreeMap::new(),
+                    workflows: BTreeMap::new(),
+                    workflow_at: None,
                     fold_stale: true,
                     change_at: None,
                     here_live: HashSet::new(),
@@ -534,6 +553,25 @@ impl<C: Connect + Send + 'static> Feed for LiveFeed<C> {
             }
             Intent::LoadDetail(number) => self.issues.load_detail(number),
             Intent::OpenSession { kind, session } => self.send(Job::OpenSession { kind, session }),
+            Intent::CheckVersion {
+                task,
+                kind,
+                run,
+                commit,
+            } => {
+                self.send(Job::CheckVersion {
+                    task,
+                    kind,
+                    run,
+                    commit,
+                });
+            }
+            Intent::OpenWorkflow(task) => match self.task(&task) {
+                Some(task) if task.body.is_some() => self.send(Job::OpenWorkflow(task)),
+                Some(_) => self.say("タスク本文の読み込み後にもう一度開いてください"),
+                None => self.say("そのタスクが見つかりません"),
+            },
+            Intent::OpenWorkflowRun { task, run } => self.send(Job::OpenWorkflowRun { task, run }),
             Intent::AddLink { task, input } => {
                 let gh = self.issues.view();
                 match related::parse_pr(&input, gh.repo.as_deref()) {
@@ -574,6 +612,8 @@ struct Worker<C: Connect> {
     /// (`fold_stale`).
     related: BTreeMap<TaskRef, Related>,
     fold_stale: bool,
+    workflows: BTreeMap<String, Vec<workflow_links::ResultLink>>,
+    workflow_at: Option<Millis>,
     /// When the change poll last ran.
     change_at: Option<Millis>,
     /// この作業ツリー runs seen live, and those looked at once more since
@@ -961,6 +1001,94 @@ impl<C: Connect> Worker<C> {
         Ok(format!("{session} を開きました"))
     }
 
+    fn check_version(
+        &mut self,
+        task: &TaskRef,
+        kind: SessionKind,
+        run: &RunId,
+        commit: &str,
+    ) -> Result<String, String> {
+        let (events, related) = self.related_now(task)?;
+        if !related
+            .current()
+            .is_some_and(|version| &version.run == run && version.commit == commit)
+        {
+            return Err("表示後に変更の版が変わりました。最新の関連成果を確認してください".into());
+        }
+        let base = events
+            .iter()
+            .find_map(|event| match event {
+                LinkEvent::ChangeBase {
+                    run: id, commit, ..
+                } if id == run.as_str() => Some(commit.as_str()),
+                _ => None,
+            })
+            .ok_or("着手時点のコミットが不明です。Review / Verify で対象を指定してください")?;
+        for sha in [base, commit] {
+            if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
+                return Err("記録されたコミット ID が不正です".into());
+            }
+            start::git(
+                &self.repo,
+                &["cat-file", "-e", &format!("{sha}^{{commit}}")],
+            )
+            .map_err(|_| {
+                format!("コミット {sha} が見つかりません。リポジトリを確認してください")
+            })?;
+        }
+        let select = task_links::select_arg(&task_key(task)).ok_or("元のタスクを特定できません")?;
+        let mut repo = OsString::from("--repo=");
+        repo.push(&self.repo);
+        let mut origin = OsString::from("--origin-repo=");
+        origin.push(&self.repo);
+        let helper = match kind {
+            SessionKind::Review => sibling::REVIEW,
+            SessionKind::Verify => sibling::VERIFY,
+        };
+        self.launcher.launch(
+            helper,
+            vec![
+                repo,
+                format!("--base={base}").into(),
+                format!("--revision={commit}").into(),
+                origin,
+                format!("--origin-task={select}").into(),
+                format!("--origin-run={run}").into(),
+            ],
+        )?;
+        Ok(format!(
+            "{} の開始フォームを開きました。対象の版を確認して開始してください",
+            helper.title
+        ))
+    }
+
+    fn open_workflow(&mut self, task: &Task) -> Result<String, String> {
+        let request = workflow_links::handoff(&self.root, &self.repo, task, (self.clock)())?;
+        let mut repo = OsString::from("--repo=");
+        repo.push(&self.repo);
+        let mut origin = OsString::from("--task-origin=");
+        origin.push(request);
+        self.launcher.launch(WORKFLOW_HELPER, vec![repo, origin])?;
+        Ok("Workflow の開始フォームを開きました。作業指示を確認して開始してください".into())
+    }
+
+    fn open_workflow_run(&mut self, task: &TaskRef, run: &str) -> Result<String, String> {
+        let results = workflow_links::scan(&self.root, &self.repo);
+        let select = workflow_links::select(task).ok_or("元のタスクを特定できません")?;
+        let expected = serde_json::to_string(task).map_err(|e| e.to_string())?;
+        if !results.get(&select).is_some_and(|runs| {
+            runs.iter()
+                .any(|r| r.run_id == run && r.task_key == expected)
+        }) {
+            return Err("このタスクの Workflow 実行が見つかりません".into());
+        }
+        let mut repo = OsString::from("--repo=");
+        repo.push(&self.repo);
+        self.launcher
+            .launch(WORKFLOW_HELPER, vec![repo, format!("--run={run}").into()])?;
+        Ok(format!("Workflow {run} を開きました"))
+    }
+
     /// The link to Noa, connecting when there is none.
     fn conn(&mut self) -> Result<&mut C::Conn, String> {
         if self.conn.is_none() {
@@ -1171,6 +1299,15 @@ impl<C: Connect> Worker<C> {
 
     /// Sends what is seen when it changed.
     fn publish(&mut self) {
+        let now = (self.clock)();
+        if due(self.workflow_at, now) {
+            self.workflow_at = Some(now);
+            let workflows = workflow_links::scan(&self.root, &self.repo);
+            if workflows != self.workflows {
+                self.workflows = workflows;
+                self.fold_stale = true;
+            }
+        }
         let gone = self.markers_gone();
         let tasks = self
             .tasks
@@ -1181,6 +1318,15 @@ impl<C: Connect> Worker<C> {
             .collect();
         if std::mem::replace(&mut self.fold_stale, false) {
             self.related = related::fold(&self.runs, &self.events);
+            for result in self.workflows.values().flatten() {
+                if let Ok(task) = serde_json::from_str::<TaskRef>(&result.task_key) {
+                    self.related
+                        .entry(task)
+                        .or_default()
+                        .workflows
+                        .push(result.clone());
+                }
+            }
         }
         let seen = (tasks, self.views((self.clock)()), self.related.clone());
         if self.sent.as_ref() == Some(&seen) {
@@ -1200,6 +1346,7 @@ impl<C: Connect> Worker<C> {
         self.scan = Scan::new(self.repo.clone());
         self.panes_at = None;
         self.results_at = None;
+        self.workflow_at = None;
     }
 
     fn handle(&mut self, job: Job) {
@@ -1242,6 +1389,14 @@ impl<C: Connect> Worker<C> {
                 Ok(format!("{url} を開きました"))
             }
             Job::OpenSession { kind, session } => self.open_session(kind, &session),
+            Job::CheckVersion {
+                task,
+                kind,
+                run,
+                commit,
+            } => self.check_version(&task, kind, &run, &commit),
+            Job::OpenWorkflow(task) => self.open_workflow(&task),
+            Job::OpenWorkflowRun { task, run } => self.open_workflow_run(&task, &run),
             Job::AddLink { task, url } => self.add_link(&task, &url),
             Job::RemoveLink { task, id } => self.remove_link(&task, &id),
             Job::Timeline(link) => {
@@ -3302,6 +3457,132 @@ mod tests {
             .filter(|o| **o == workdir)
             .count();
         assert_eq!(after, before, "a removed worktree is not opened");
+    }
+
+    #[test]
+    fn current_version_buttons_pin_base_revision_and_origin_and_refuse_a_stale_version() {
+        let mut rig = rig_with(
+            "version-handoff",
+            |repo, _, _| write_task(repo, "t-1", "one"),
+            true,
+        );
+        let task = local_ref("t-1");
+        let base = start::head_of(&rig.repo).unwrap();
+        let run = run_t1(&mut rig, Isolation::Worktree);
+        // The fixture starts a board tab and the original agent float.
+        // Opening either setup form must preserve that exact spawn record.
+        let started_panes = rig.noa.with(|state| state.spawned.clone());
+        assert!(
+            matches!(
+                started_panes.as_slice(),
+                [
+                    (ipc::Placement::Board, _, _),
+                    (ipc::Placement::Float(_), _, _)
+                ]
+            ),
+            "{started_panes:?}"
+        );
+        let first = commit_in(&run.workdir, "first change");
+        rig.feed.act(Intent::Refresh);
+        rig.until_related(&task, "the recorded revision", |related| {
+            related
+                .current()
+                .is_some_and(|version| version.commit == first)
+        });
+        for kind in [SessionKind::Review, SessionKind::Verify] {
+            rig.feed.act(Intent::CheckVersion {
+                task: task.clone(),
+                kind,
+                run: run.run.clone(),
+                commit: first.clone(),
+            });
+            rig.settle();
+            assert_eq!(
+                rig.noa.with(|state| state.spawned.clone()),
+                started_panes,
+                "opening the {kind:?} setup form must not start another pane"
+            );
+        }
+        let launches = rig.launched.lock().unwrap().clone();
+        assert_eq!(launches.len(), 2);
+        assert_eq!(launches[0].0, sibling::REVIEW);
+        assert_eq!(launches[1].0, sibling::VERIFY);
+        for (_, args) in launches {
+            assert_eq!(
+                args,
+                [
+                    OsString::from(format!("--repo={}", rig.repo.display())),
+                    format!("--base={base}").into(),
+                    format!("--revision={first}").into(),
+                    format!("--origin-repo={}", rig.repo.display()).into(),
+                    "--origin-task=t-1".into(),
+                    format!("--origin-run={}", run.run).into(),
+                ]
+            );
+        }
+        let second = commit_in(&run.workdir, "second change");
+        rig.feed.act(Intent::Refresh);
+        rig.until_related(&task, "the new revision", |related| {
+            related
+                .current()
+                .is_some_and(|version| version.commit == second)
+        });
+        rig.feed.act(Intent::CheckVersion {
+            task,
+            kind: SessionKind::Review,
+            run: run.run,
+            commit: first,
+        });
+        rig.until("stale target refused", |view| {
+            view.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("版が変わりました"))
+        });
+        assert_eq!(rig.launched.lock().unwrap().len(), 2);
+        assert_eq!(
+            rig.noa.with(|state| state.spawned.clone()),
+            started_panes,
+            "refusing a stale version must not start another pane"
+        );
+    }
+
+    #[test]
+    fn workflow_handoff_preserves_task_identity_without_starting_a_run() {
+        let mut rig = rig_with(
+            "workflow-handoff",
+            |repo, _, _| write_task(repo, "t-1", "one"),
+            true,
+        );
+        let task = local_ref("t-1");
+        rig.until("the task", |view| {
+            view.tasks.iter().any(|item| item.r#ref == task)
+        });
+        rig.feed.act(Intent::OpenWorkflow(task.clone()));
+        rig.until("workflow form", |view| {
+            view.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("Workflow の開始フォーム"))
+        });
+        let launches = rig.launched.lock().unwrap().clone();
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].0, WORKFLOW_HELPER);
+        assert_eq!(launches[0].1.len(), 2);
+        let origin = launches[0].1[1]
+            .to_str()
+            .unwrap()
+            .strip_prefix("--task-origin=")
+            .unwrap();
+        let request: serde_json::Value =
+            serde_json::from_slice(&fs::read(origin).unwrap()).unwrap();
+        assert_eq!(request["repo"], rig.repo.to_str().unwrap());
+        assert_eq!(request["task"], "t-1");
+        assert_eq!(
+            serde_json::from_str::<TaskRef>(request["task_key"].as_str().unwrap()).unwrap(),
+            task
+        );
+        assert!(request["objective"].as_str().unwrap().contains("one"));
+        assert!(rig.noa.with(|state| state.spawned.is_empty()));
+        assert!(runs::replay(&rig.log).unwrap().is_empty());
     }
 
     /// AC-6: 関連を追加 writes PrLinked and the PR shows; the same URL on the

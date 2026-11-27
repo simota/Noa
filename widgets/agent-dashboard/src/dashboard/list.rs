@@ -198,7 +198,7 @@ pub(super) fn build(
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(8.0),
-            padding: LayoutRect::length(10.0),
+            padding: LayoutRect::length(crate::appearance::space(10.0)),
             ..fill_remaining()
         })
         .background(Role::Surface)
@@ -207,7 +207,9 @@ pub(super) fn build(
     );
     let toolbar = tree.insert(
         Some(panel),
-        Container::row().align_items(AlignItems::CENTER).gap(10.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(10.0)),
     );
     let counts = counts(fleet, filter);
     let at = Scope::ALL
@@ -226,7 +228,7 @@ pub(super) fn build(
         let note = tree.insert(
             Some(toolbar),
             Label::new(outside_text(outside))
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(700)
                 .color(ORANGE),
         );
@@ -279,7 +281,7 @@ fn column(tree: &mut UiTree, row: WidgetId, width: f32) -> WidgetId {
 /// One line of a row's text, cut at its column's edge.
 fn line(text: impl Into<String>, size: f32) -> Label {
     Label::new(text)
-        .font_size(size)
+        .font_size(crate::appearance::font(size))
         .truncation(Truncation::Tail)
 }
 

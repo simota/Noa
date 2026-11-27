@@ -255,6 +255,112 @@ fn visible(screen: &Tasks) -> BTreeSet<TaskRef> {
 }
 
 #[test]
+fn calendar_modes_keep_deadlines_separate_from_actual_activity() {
+    let mut h = Harness::new(None);
+    let today = dates::day_of(h.screen.view.now);
+    let due = format!("{:04}-{:02}-{:02}", today.year, today.month, today.day);
+    h.screen
+        .planning
+        .workspace
+        .apply(&[local("t-1")], &[Change::Due(due)], h.screen.view.now)
+        .unwrap();
+    h.screen.calendar_mode = views::CalendarMode::Planned;
+    h.screen.set_layout(Layout::Calendar, &mut h.text);
+    assert!(visible(&h.screen).contains(&local("t-1")));
+    let labels: Vec<_> = descendants(&h.screen.tree, h.screen.columns_host)
+        .into_iter()
+        .filter_map(|id| {
+            h.screen
+                .tree
+                .get::<Label>(id)
+                .map(|label| label.text().to_owned())
+        })
+        .collect();
+    assert!(labels.iter().any(|label| label == "期限"));
+    assert!(!labels.iter().any(|label| label.starts_with("▶ ")));
+    h.screen.calendar_mode = views::CalendarMode::Actual;
+    h.screen.rebuild(&mut h.text);
+    assert!(!visible(&h.screen).contains(&local("t-1")));
+    let labels: Vec<_> = descendants(&h.screen.tree, h.screen.columns_host)
+        .into_iter()
+        .filter_map(|id| {
+            h.screen
+                .tree
+                .get::<Label>(id)
+                .map(|label| label.text().to_owned())
+        })
+        .collect();
+    assert!(labels.iter().any(|label| label.starts_with("▶ ")));
+    assert!(!labels.iter().any(|label| label == "期限"));
+    h.screen.calendar_mode = views::CalendarMode::Both;
+    h.screen.rebuild(&mut h.text);
+    assert!(visible(&h.screen).contains(&local("t-1")));
+    h.screen.open_detail(local("t-1"), &mut h.text);
+    assert_eq!(h.screen.detail, Some(local("t-1")));
+}
+
+#[test]
+fn narrow_window_switches_between_navigation_list_and_detail_without_changing_layout() {
+    let mut h = Harness::new(None);
+    h.screen.set_layout(Layout::List, &mut h.text);
+    let size = Size::new(720.0, 600.0);
+    h.screen.prepare(size, &mut h.text);
+    assert!(h.screen.narrow);
+    assert!(h.screen.tree.is_hidden(h.screen.planning.nav_host));
+    assert!(!h.screen.tree.is_hidden(h.screen.columns_host));
+    h.screen.toggle_sidebar();
+    h.screen.prepare(size, &mut h.text);
+    assert!(!h.screen.tree.is_hidden(h.screen.planning.nav_host));
+    assert!(h.screen.tree.is_hidden(h.screen.columns_host));
+    h.screen.open_detail(local("t-1"), &mut h.text);
+    h.screen.prepare(size, &mut h.text);
+    assert!(h.screen.tree.is_hidden(h.screen.planning.nav_host));
+    assert!(h.screen.tree.is_hidden(h.screen.columns_host));
+    assert!(!h.screen.tree.is_hidden(h.screen.side));
+    assert_eq!(h.screen.tree.focused(), Some(h.screen.back_button));
+    assert_eq!(h.screen.layout, Layout::List);
+    h.screen.dispatch(
+        Event::KeyDown {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        },
+        &mut h.text,
+    );
+    h.screen.prepare(size, &mut h.text);
+    assert!(!h.screen.tree.is_hidden(h.screen.columns_host));
+    assert!(h.screen.tree.is_hidden(h.screen.side));
+    assert_eq!(h.screen.layout, Layout::List);
+}
+
+#[test]
+fn a_clock_tick_keeps_rows_and_focus_but_a_content_refresh_restores_the_same_task() {
+    let mut h = Harness::new(None);
+    h.screen.set_layout(Layout::List, &mut h.text);
+    let task = local("t-1");
+    let card = h.screen.cards.iter().find(|(_, r)| r == &task).unwrap().0;
+    h.screen.tree.set_focus(Some(card));
+    let mut view = h.screen.view.clone();
+    view.now += 60_000;
+    h.pending.borrow_mut().push_back(view.clone());
+    h.screen.woken(&mut h.text);
+    assert_eq!(h.screen.tree.focused(), Some(card));
+    assert_eq!(
+        h.screen.cards.iter().find(|(_, r)| r == &task).unwrap().0,
+        card
+    );
+    view.tasks
+        .iter_mut()
+        .find(|t| t.r#ref == task)
+        .unwrap()
+        .title = "updated title".into();
+    h.pending.borrow_mut().push_back(view);
+    h.screen.woken(&mut h.text);
+    let replacement = h.screen.cards.iter().find(|(_, r)| r == &task).unwrap().0;
+    assert_ne!(replacement, card);
+    assert_eq!(h.screen.tree.focused(), Some(replacement));
+}
+
+#[test]
 fn command_palette_works_while_search_has_focus_and_executes_its_choice() {
     let mut h = Harness::new(None);
     h.search("config");

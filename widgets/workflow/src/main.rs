@@ -1,5 +1,8 @@
 //! The native helper accepts the same `--repo=` contract as Noa's other widgets.
 
+#[path = "../../shared/appearance.rs"]
+mod appearance;
+
 mod ui;
 
 use std::path::PathBuf;
@@ -10,7 +13,7 @@ use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 use workflow::runner::Channel;
 
-const USAGE: &str = "Usage: workflow --repo=PATH\n       workflow --demo[=editor|approval|failed] [--snapshot=PNG] [--size=1280x860]\n\nA native visual development workflow editor for Noa.\nSnapshots and demos never start agents or publish changes.";
+const USAGE: &str = "Usage: workflow --repo=PATH [--task-origin=JSON | --run=RUN_ID]\n       workflow --demo[=editor|approval|failed] [--snapshot=PNG] [--size=1280x860]\n\nA native visual development workflow editor for Noa.\nTask handoffs open the start form; --run opens a saved run read-only.\nSnapshots and demos never start agents or publish changes.";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -19,6 +22,8 @@ struct Args {
     snapshot: Option<PathBuf>,
     size: (u32, u32),
     help: bool,
+    task_origin: Option<PathBuf>,
+    run: Option<String>,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
@@ -28,12 +33,21 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         snapshot: None,
         size: (1280, 860),
         help: false,
+        task_origin: None,
+        run: None,
     };
     for arg in args {
         if matches!(arg.as_str(), "--help" | "-h") {
             parsed.help = true;
         } else if let Some(repo) = arg.strip_prefix("--repo=") {
             parsed.repo = Some(PathBuf::from(repo));
+        } else if let Some(path) = arg.strip_prefix("--task-origin=") {
+            parsed.task_origin = Some(PathBuf::from(path));
+        } else if let Some(id) = arg.strip_prefix("--run=") {
+            if !workflow::model::valid_id(id) {
+                return Err("invalid run id".into());
+            }
+            parsed.run = Some(id.into());
         } else if arg == "--demo" {
             parsed.demo = Some("editor".into());
         } else if let Some(demo) = arg.strip_prefix("--demo=") {
@@ -62,6 +76,15 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     if parsed.repo.is_some() == parsed.demo.is_some() {
         return Err("specify exactly one of --repo=PATH or --demo".into());
     }
+    if (parsed.task_origin.is_some() || parsed.run.is_some()) && parsed.repo.is_none()
+        || parsed.task_origin.is_some() && parsed.run.is_some()
+        || parsed
+            .task_origin
+            .as_ref()
+            .is_some_and(|p| !p.is_absolute())
+    {
+        return Err("task handoffs and saved runs require --repo, are mutually exclusive, and handoff paths must be absolute".into());
+    }
     if parsed
         .repo
         .as_ref()
@@ -79,6 +102,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
 }
 
 fn main() -> Result<(), String> {
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let args = parse(std::env::args().skip(1))?;
     if args.help {
         println!("{USAGE}");
@@ -109,14 +135,34 @@ fn main() -> Result<(), String> {
             .map_err(|e| e.to_string());
     }
     let repository = args.repo.ok_or("repository missing")?;
+    if let Some(id) = args.run {
+        let run = workflow::runner::read_run(&repository, &id)?;
+        return App::new(options, move |_| Box::new(ui::WorkflowScreen::saved(run)))
+            .run()
+            .map_err(|e| e.to_string());
+    }
+    let handoff = args
+        .task_origin
+        .as_ref()
+        .map(|path| workflow::tasks::read_handoff(path, &repository))
+        .transpose()?;
     let retained: Arc<Mutex<Option<Channel>>> = Arc::new(Mutex::new(None));
     let holder = retained.clone();
     App::new(options, move |setup| {
         let waker = setup.waker.clone();
-        match Channel::open(repository.clone(), move || waker.wake()) {
+        let channel = if handoff.is_some() {
+            Channel::open_deferred(repository.clone(), move || waker.wake())
+        } else {
+            Channel::open(repository.clone(), move || waker.wake())
+        };
+        match channel {
             Ok(channel) => {
                 *holder.lock().expect("channel holder") = Some(channel.clone());
-                Box::new(ui::WorkflowScreen::live(repository, channel))
+                let screen = ui::WorkflowScreen::live(repository, channel);
+                Box::new(match handoff {
+                    Some((origin, objective)) => screen.with_task(origin, objective),
+                    None => screen,
+                })
             }
             Err(error) => Box::new(ui::WorkflowScreen::unavailable(repository, error)),
         }
@@ -151,5 +197,16 @@ mod tests {
         assert!(args(&["--demo", "--size=999999x1"]).is_err());
         assert!(args(&["--repo="]).is_err());
         assert!(args(&["--help"]).unwrap().help);
+    }
+
+    #[test]
+    fn task_handoffs_and_saved_runs_cannot_be_combined_or_traverse_paths() {
+        assert!(args(&["--repo=.", "--task-origin=/tmp/task.json"]).is_ok());
+        assert!(args(&["--repo=.", "--run=run-123"]).is_ok());
+        assert!(args(&["--repo=.", "--task-origin=task.json"]).is_err());
+        assert!(args(&["--demo", "--task-origin=/tmp/task.json"]).is_err());
+        assert!(args(&["--demo", "--run=run-123"]).is_err());
+        assert!(args(&["--repo=.", "--run=run-123", "--task-origin=/tmp/task.json"]).is_err());
+        assert!(args(&["--repo=.", "--run=../run-123"]).is_err());
     }
 }

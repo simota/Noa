@@ -148,7 +148,7 @@ impl Discussion {
                 self.tree.insert(
                     Some(self.status_leading),
                     Label::new(why.clone())
-                        .font_size(12.0)
+                        .font_size(crate::appearance::font(12.0))
                         .color(Role::Muted)
                         .truncation(noa_gpui_core::widgets::Truncation::Tail),
                 );

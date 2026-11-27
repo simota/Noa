@@ -283,7 +283,7 @@ impl Discussion {
 
     fn build(source: Source, link: Link, session: Option<Arc<Session>>) -> Self {
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::dark());
+        crate::appearance::install(&mut tree, Theme::dark());
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -328,8 +328,8 @@ impl Discussion {
         let tools_host = tree.insert(
             Some(root),
             Container::column()
-                .gap(8.0)
-                .padding(12.0)
+                .gap(crate::appearance::space(8.0))
+                .padding(crate::appearance::space(12.0))
                 .background(Role::Surface),
         );
         let status = StatusBar::insert(&mut tree, root);
@@ -1057,6 +1057,9 @@ impl Discussion {
 }
 
 impl Screen for Discussion {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
     fn tree(&self) -> &UiTree {
         &self.tree
     }
@@ -1264,8 +1267,8 @@ pub(crate) fn full() -> LayoutSize<noa_gpui_core::style::Dimension> {
 
 pub(crate) fn gap(px: f32) -> LayoutSize<LengthPercentage> {
     LayoutSize {
-        width: length(px),
-        height: length(px),
+        width: length(crate::appearance::space(px)),
+        height: length(crate::appearance::space(px)),
     }
 }
 
@@ -1338,7 +1341,7 @@ fn scroller(tree: &mut UiTree, parent: WidgetId, spacing: f32, tail: bool) -> Wi
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(spacing),
-            padding: LayoutRect::length(10.0),
+            padding: LayoutRect::length(crate::appearance::space(10.0)),
             size: LayoutSize {
                 width: percent(1.0),
                 height: auto(),
@@ -1366,14 +1369,21 @@ pub(crate) fn heading(tree: &mut UiTree, parent: WidgetId, title: &str) -> Widge
             ..Default::default()
         }),
     );
-    tree.insert(Some(row), Label::new(title).font_size(14.0).weight(600));
+    tree.insert(
+        Some(row),
+        Label::new(title)
+            .font_size(crate::appearance::font(14.0))
+            .weight(600),
+    );
     row
 }
 
 pub(crate) fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) -> WidgetId {
     tree.insert(
         Some(parent),
-        Label::new(text).font_size(12.0).color(Role::Muted),
+        Label::new(text)
+            .font_size(crate::appearance::font(12.0))
+            .color(Role::Muted),
     )
 }
 
@@ -1383,7 +1393,7 @@ pub(crate) fn note(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>)
     tree.insert(
         Some(parent),
         Label::new(text)
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .color(Role::Muted)
             .wrap(true),
     )

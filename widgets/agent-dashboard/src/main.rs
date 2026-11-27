@@ -1,3 +1,6 @@
+#[path = "../../shared/appearance.rs"]
+mod appearance;
+
 mod dashboard;
 mod fleet;
 mod live;
@@ -268,6 +271,9 @@ fn first_live_snapshot() -> Result<Snapshot, String> {
 }
 
 fn main() -> Result<(), String> {
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let mut snapshot_path = None;
     let mut grouping = None;
     let mut tab = None;

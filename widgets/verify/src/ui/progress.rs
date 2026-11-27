@@ -170,7 +170,9 @@ pub(super) fn insert(
     };
     tree.insert(
         Some(top),
-        Label::new(round_label).font_size(13.0).weight(600),
+        Label::new(round_label)
+            .font_size(crate::appearance::font(13.0))
+            .weight(600),
     );
     if max > 0 {
         let value = done.min(max);
@@ -370,15 +372,17 @@ fn part_chip(
         Some(parent),
         Container::row()
             .align_items(AlignItems::CENTER)
-            .gap(6.0)
-            .padding(6.0)
+            .gap(crate::appearance::space(6.0))
+            .padding(crate::appearance::space(6.0))
             .background(Role::Surface)
             .border(1.0, Role::Separator)
             .radius(6.0),
     );
     tree.insert(
         Some(chip),
-        Label::new(name.to_owned()).font_size(12.0).weight(600),
+        Label::new(name.to_owned())
+            .font_size(crate::appearance::font(12.0))
+            .weight(600),
     );
     let Some(brief) = brief else {
         tag(tree, chip, "判定待ち", Tone::Neutral);

@@ -64,14 +64,16 @@ pub(super) fn insert(
         );
         let head = tree.insert(
             Some(card),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(6.0)),
         );
         let (label, tone) = kind_badge(msg.kind);
         tag(tree, head, format!("R{} · {label}", msg.round), tone);
         tree.insert(
             Some(head),
             Label::new(session.author_name(&msg.author))
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(600),
         );
         if !msg.to.is_empty() {
@@ -80,7 +82,9 @@ pub(super) fn insert(
         }
         tree.insert(
             Some(card),
-            Label::new(msg.body.clone()).font_size(12.0).wrap(true),
+            Label::new(msg.body.clone())
+                .font_size(crate::appearance::font(12.0))
+                .wrap(true),
         );
     }
 

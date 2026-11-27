@@ -353,6 +353,7 @@ pub fn state() -> State {
     let verify_path = PathBuf::from(format!("{DATA}/verifications/{VERIFY_ID}"));
     State {
         repo: PathBuf::from(REPO),
+        git_repository: true,
         commit: Some(COMMIT.into()),
         scanned_at: NOW,
         setup: setup(),

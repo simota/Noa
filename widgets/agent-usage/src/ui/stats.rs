@@ -360,7 +360,7 @@ fn kpi_row(tree: &mut UiTree, parent: WidgetId, report: &StatsReport) {
             tree.insert(
                 Some(c),
                 Label::new(value.clone())
-                    .font_size(20.0)
+                    .font_size(crate::appearance::font(20.0))
                     .weight(700)
                     .wrap(true),
             );
@@ -368,7 +368,7 @@ fn kpi_row(tree: &mut UiTree, parent: WidgetId, report: &StatsReport) {
                 tree.insert(
                     Some(c),
                     Label::new(text.to_owned())
-                        .font_size(11.0)
+                        .font_size(crate::appearance::font(11.0))
                         .color(Role::Muted)
                         .wrap(true),
                 );
@@ -525,14 +525,16 @@ fn share_card(tree: &mut UiTree, parent: WidgetId, report: &StatsReport) {
             row,
             LEGEND_NAME,
             false,
-            Label::new(name).font_size(12.0),
+            Label::new(name).font_size(crate::appearance::font(12.0)),
         );
         cell(
             tree,
             row,
             LEGEND_TOKENS,
             true,
-            Label::new(tokens(t)).font_size(12.0).color(Role::Muted),
+            Label::new(tokens(t))
+                .font_size(crate::appearance::font(12.0))
+                .color(Role::Muted),
         );
         cell(
             tree,
@@ -540,7 +542,7 @@ fn share_card(tree: &mut UiTree, parent: WidgetId, report: &StatsReport) {
             LEGEND_PERCENT,
             true,
             Label::new(format!("{:.1}%", t as f64 * 100.0 / total as f64))
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(600),
         );
     }
@@ -628,7 +630,9 @@ fn table(
             header,
             *w,
             i >= left,
-            Label::new(*title).font_size(11.0).color(Role::Muted),
+            Label::new(*title)
+                .font_size(crate::appearance::font(11.0))
+                .color(Role::Muted),
         );
     }
     for (r, row) in rows.iter().enumerate() {
@@ -657,7 +661,7 @@ fn table(
                 *w,
                 i >= left,
                 Label::new(text.clone())
-                    .font_size(12.0)
+                    .font_size(crate::appearance::font(12.0))
                     .weight(if i == 0 { 600 } else { 400 }),
                 if i < left { cut } else { Truncation::Tail },
             );
@@ -788,7 +792,7 @@ fn tools_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scroll
         tree.insert(
             Some(c),
             Label::new(text)
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .color(Role::Muted)
                 .wrap(true),
         );
@@ -843,7 +847,7 @@ fn skills_table(tree: &mut UiTree, parent: WidgetId, report: &StatsReport, scrol
         tree.insert(
             Some(c),
             Label::new(text)
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .color(Role::Muted)
                 .wrap(true),
         );

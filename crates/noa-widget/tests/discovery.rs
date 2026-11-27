@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use noa_widget::discovery::{discover, load, repo_context};
+use noa_widget::discovery::{discover, discover_with_diagnostics, fixtures, load, repo_context};
 use serde_json::{Value, json};
 
 struct Repository(PathBuf);
@@ -223,5 +223,71 @@ fn packages_with_assets_are_loaded_and_pinned_by_their_bytes() {
             .unwrap_err()
             .to_string()
             .contains("symbolic link")
+    );
+}
+
+#[test]
+fn a_broken_package_does_not_hide_valid_widgets_but_the_registry_boundary_is_strict() {
+    let repo = Repository::new();
+    repo.definition("working");
+    let broken = repo.definition("broken");
+    fs::write(&broken, b"not json").unwrap();
+    let outside = Repository::new();
+    let other = outside.definition("linked");
+    std::os::unix::fs::symlink(other.parent().unwrap(), repo.0.join(".noa-widgets/linked"))
+        .unwrap();
+    let result = discover_with_diagnostics(&repo.0).unwrap();
+    assert_eq!(result.definitions.len(), 1);
+    assert_eq!(result.definitions[0].manifest.id, "working");
+    assert_eq!(result.diagnostics.len(), 2);
+    assert!(result.diagnostics[0].path.ends_with("broken"));
+    assert!(result.diagnostics[1].message.contains("symbolic links"));
+    assert!(discover(&repo.0).is_err(), "the strict API remains strict");
+    fs::rename(repo.0.join(".noa-widgets"), repo.0.join("saved-widgets")).unwrap();
+    std::os::unix::fs::symlink(repo.0.join("saved-widgets"), repo.0.join(".noa-widgets")).unwrap();
+    assert!(discover_with_diagnostics(&repo.0).is_err());
+}
+
+#[test]
+fn fixtures_are_bounded_sorted_validated_and_never_follow_links() {
+    let repo = Repository::new();
+    let path = repo.definition("examples");
+    let definition = load(&repo.0, "examples").unwrap();
+    assert!(fixtures(&repo.0, &definition).unwrap().values.is_empty());
+    let dir = path.parent().unwrap().join("fixtures");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("normal.json"),
+        serde_json::to_vec(&definition.manifest.initial_data).unwrap(),
+    )
+    .unwrap();
+    fs::write(dir.join("invalid.json"), b"{}").unwrap();
+    fs::write(
+        dir.join("oversized.json"),
+        vec![b' '; noa_widget::MAX_DATA_BYTES + 1],
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(dir.join("normal.json"), dir.join("linked.json")).unwrap();
+    let result = fixtures(&repo.0, &definition).unwrap();
+    assert_eq!(result.values.len(), 1);
+    assert_eq!(result.values[0].name, "normal.json");
+    assert_eq!(result.values[0].data, definition.manifest.initial_data);
+    assert_eq!(result.diagnostics.len(), 3);
+    fs::rename(&dir, path.parent().unwrap().join("examples-backup")).unwrap();
+    std::os::unix::fs::symlink(path.parent().unwrap().join("examples-backup"), &dir).unwrap();
+    assert!(fixtures(&repo.0, &definition).is_err());
+}
+
+#[test]
+fn invalid_packages_still_count_against_the_scan_limit() {
+    let repo = Repository::new();
+    for index in 0..=noa_widget::MAX_DEFINITIONS {
+        fs::create_dir_all(repo.0.join(format!(".noa-widgets/w-{index}"))).unwrap();
+    }
+    assert!(
+        discover_with_diagnostics(&repo.0)
+            .unwrap_err()
+            .to_string()
+            .contains("128")
     );
 }

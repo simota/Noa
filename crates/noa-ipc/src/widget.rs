@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::{ErrorCode, Scope, WireId};
 
 pub const CAPABILITY_REPO_WIDGETS_V1: &str = "repoWidgetsV1";
+pub const CAPABILITY_WIDGET_OPERATIONS_V1: &str = "repoWidgetOperationsV1";
 pub const MAX_BRIDGE_LINE_BYTES: usize = 256 * 1024;
 pub const MAX_DATA_BYTES: usize = 128 * 1024;
 pub const MAX_ACTION_BYTES: usize = 16 * 1024;
@@ -82,6 +83,55 @@ pub struct AckParams {
     pub request_id: String,
 }
 
+/// Processing is reported explicitly by the registered consumer. Delivery,
+/// queue acknowledgements and unrelated data updates are not completion.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReportParams {
+    pub instance_id: String,
+    pub consumer_id: String,
+    pub event_id: String,
+    pub expected_version: u64,
+    pub state: OperationState,
+    #[serde(default)]
+    pub message: String,
+    pub request_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OperationState {
+    Accepted,
+    Running,
+    Waiting,
+    Completed,
+    Failed,
+}
+
+impl OperationState {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WidgetOperation {
+    pub event_id: String,
+    pub seq: u64,
+    pub action_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_request_id: Option<String>,
+    pub version: u64,
+    pub state: OperationState,
+    pub message: String,
+    /// Unix milliseconds. Older stored queues have no trustworthy timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloseParams {
@@ -98,6 +148,7 @@ pub enum WidgetCall {
     Set(SetParams),
     Events(EventsParams),
     Ack(AckParams),
+    Report(ReportParams),
     Close(CloseParams),
     Forget(InstanceParams),
 }
@@ -113,6 +164,7 @@ impl WidgetCall {
                 | "noa.widget.set"
                 | "noa.widget.events"
                 | "noa.widget.ack"
+                | "noa.widget.report"
                 | "noa.widget.close"
                 | "noa.widget.forget"
         ) {
@@ -132,6 +184,7 @@ impl WidgetCall {
             "noa.widget.set" => Self::Set(decode(params)?),
             "noa.widget.events" => Self::Events(decode(params)?),
             "noa.widget.ack" => Self::Ack(decode(params)?),
+            "noa.widget.report" => Self::Report(decode(params)?),
             "noa.widget.close" => Self::Close(decode(params)?),
             "noa.widget.forget" => Self::Forget(decode(params)?),
             _ => unreachable!(),
@@ -149,6 +202,7 @@ impl WidgetCall {
             Self::Set(_) => "noa.widget.set",
             Self::Events(_) => "noa.widget.events",
             Self::Ack(_) => "noa.widget.ack",
+            Self::Report(_) => "noa.widget.report",
             Self::Close(_) => "noa.widget.close",
             Self::Forget(_) => "noa.widget.forget",
         }
@@ -163,6 +217,7 @@ impl WidgetCall {
             Self::Set(p) => serde_json::to_value(p),
             Self::Events(p) => serde_json::to_value(p),
             Self::Ack(p) => serde_json::to_value(p),
+            Self::Report(p) => serde_json::to_value(p),
             Self::Close(p) => serde_json::to_value(p),
             Self::Forget(p) => serde_json::to_value(p),
         }
@@ -182,6 +237,7 @@ impl WidgetCall {
             Self::Open(p) => Some(&p.request_id),
             Self::Set(p) => Some(&p.request_id),
             Self::Ack(p) => Some(&p.request_id),
+            Self::Report(p) => Some(&p.request_id),
             Self::Close(p) => Some(&p.request_id),
             _ => None,
         }
@@ -229,6 +285,26 @@ impl WidgetCall {
             Self::Ack(p) => {
                 validate_instance(&p.instance_id)?;
                 validate_token("consumerId", &p.consumer_id)
+            }
+            Self::Report(p) => {
+                validate_instance(&p.instance_id)?;
+                validate_token("consumerId", &p.consumer_id)?;
+                validate_token("eventId", &p.event_id)?;
+                if p.expected_version == 0 || p.state == OperationState::Accepted {
+                    return Err(WidgetError::invalid(
+                        "report requires a positive expectedVersion and running, waiting, completed or failed state",
+                    ));
+                }
+                if p.message.len() > 1024
+                    || p.message
+                        .chars()
+                        .any(|c| c.is_control() && c != '\n' && c != '\t')
+                {
+                    return Err(WidgetError::invalid(
+                        "operation message must be at most 1024 bytes, without control characters",
+                    ));
+                }
+                Ok(())
             }
             Self::Close(p) => validate_instance(&p.instance_id),
         }
@@ -309,6 +385,18 @@ pub enum HostMessage {
         error: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_kind: Option<String>,
+    },
+    /// A bounded recent history, independent of the displayed data revision.
+    /// The producer's explicit reports are the only source of processing state.
+    Status {
+        instance_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_updated_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner_pane_id: Option<WireId>,
+        operations: Vec<WidgetOperation>,
+        total_operations: usize,
+        pending_operations: usize,
     },
     Closed,
 }
@@ -519,6 +607,34 @@ mod tests {
         .unwrap();
         assert_eq!(call.scope(), Scope::Control);
         assert_eq!(call.params()["limit"], 32);
+    }
+
+    #[test]
+    fn processing_reports_are_scoped_bounded_and_separate_from_ack() {
+        let params = json!({"instanceId":"wi_0123456789abcdef0123456789abcdef",
+            "consumerId":"producer", "eventId":"we_0123456789abcdef0123456789abcdef_1",
+            "expectedVersion":1, "state":"running", "message":"Checking", "requestId":"run-1"});
+        let call = WidgetCall::parse("noa.widget.report", params.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(call.scope(), Scope::Control);
+        assert_eq!(call.request_id(), Some("run-1"));
+        assert_eq!(call.method(), "noa.widget.report");
+        for (key, value) in [
+            ("expectedVersion", json!(0)),
+            ("state", json!("accepted")),
+            ("state", json!("success")),
+            ("message", json!("x".repeat(1025))),
+            ("message", json!("control\u{1b}character")),
+            ("command", json!("sh")),
+        ] {
+            let mut invalid = params.clone();
+            invalid[key] = value;
+            assert!(
+                WidgetCall::parse("noa.widget.report", invalid).is_err(),
+                "{key}"
+            );
+        }
     }
 
     #[test]

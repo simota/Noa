@@ -44,8 +44,8 @@ pub fn severity_paint(severity: Severity) -> Paint {
 
 pub fn gap(px: f32) -> LayoutSize<LengthPercentage> {
     LayoutSize {
-        width: length(px),
-        height: length(px),
+        width: length(crate::appearance::space(px)),
+        height: length(crate::appearance::space(px)),
     }
 }
 
@@ -145,7 +145,7 @@ pub fn card(tree: &mut UiTree, parent: WidgetId, style: Style) -> WidgetId {
         Some(parent),
         Container::new(Style {
             flex_direction: FlexDirection::Column,
-            padding: LayoutRect::length(12.0),
+            padding: LayoutRect::length(crate::appearance::space(12.0)),
             gap: gap(6.0),
             ..style
         })
@@ -254,14 +254,18 @@ pub fn cut_cell(
 pub fn heading(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) -> WidgetId {
     tree.insert(
         Some(parent),
-        Label::new(text.into()).font_size(13.0).weight(600),
+        Label::new(text.into())
+            .font_size(crate::appearance::font(13.0))
+            .weight(600),
     )
 }
 
 pub fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) -> WidgetId {
     tree.insert(
         Some(parent),
-        Label::new(text.into()).font_size(11.0).color(Role::Muted),
+        Label::new(text.into())
+            .font_size(crate::appearance::font(11.0))
+            .color(Role::Muted),
     )
 }
 

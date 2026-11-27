@@ -196,7 +196,9 @@ impl Auto {
         let menu = tree.insert(Some(host), planner_menu(&[]));
         let status = tree.insert(
             Some(host),
-            Label::new("").font_size(11.0).color(Role::Muted),
+            Label::new("")
+                .font_size(crate::appearance::font(11.0))
+                .color(Role::Muted),
         );
         let cancel = tree.insert(
             Some(host),

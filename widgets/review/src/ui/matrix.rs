@@ -64,19 +64,22 @@ pub(super) fn insert(
     tree.insert(
         Some(list),
         Label::new("観点 × 重大度（未検証・合意・対立の指摘）")
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(600),
     );
     let grid = tree.insert(
         Some(list),
         Container::column()
-            .gap(2.0)
-            .padding(8.0)
+            .gap(crate::appearance::space(2.0))
+            .padding(crate::appearance::space(8.0))
             .background(Role::Surface)
             .border(1.0, Role::Separator)
             .radius(8.0),
     );
-    let header = tree.insert(Some(grid), Container::row().gap(2.0));
+    let header = tree.insert(
+        Some(grid),
+        Container::row().gap(crate::appearance::space(2.0)),
+    );
     let h = cell_box(tree, header, LENS_COL);
     caption(tree, h, "観点");
     for s in Severity::ALL {
@@ -121,7 +124,9 @@ pub(super) fn insert(
         let held = held(&id);
         let row = tree.insert(
             Some(grid),
-            Container::row().gap(2.0).align_items(AlignItems::CENTER),
+            Container::row()
+                .gap(crate::appearance::space(2.0))
+                .align_items(AlignItems::CENTER),
         );
         let name = cell_box(tree, row, LENS_COL);
         let line = tree.insert(
@@ -140,7 +145,7 @@ pub(super) fn insert(
         tree.insert(
             Some(line),
             Label::new(label)
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .color(if held { Role::Text } else { Role::Muted })
                 .truncation(Truncation::Tail),
         );
@@ -182,8 +187,8 @@ pub(super) fn insert(
         let row = tree.insert(
             Some(list),
             Container::column()
-                .gap(3.0)
-                .padding(8.0)
+                .gap(crate::appearance::space(3.0))
+                .padding(crate::appearance::space(8.0))
                 .background(Role::Surface)
                 .border(1.0, Role::Separator)
                 .radius(6.0),
@@ -194,7 +199,9 @@ pub(super) fn insert(
         );
         tree.insert(
             Some(top),
-            Label::new(file.path.clone()).font_size(12.0).weight(600),
+            Label::new(file.path.clone())
+                .font_size(crate::appearance::font(12.0))
+                .weight(600),
         );
         if !file.status.label().is_empty() {
             tag(tree, top, file.status.label(), Tone::Neutral);
@@ -274,14 +281,14 @@ pub(super) fn insert(
         let row = tree.insert(
             Some(list),
             Container::row()
-                .gap(6.0)
+                .gap(crate::appearance::space(6.0))
                 .align_items(AlignItems::CENTER)
-                .padding(8.0),
+                .padding(crate::appearance::space(8.0)),
         );
         tree.insert(
             Some(row),
             Label::new(o.path.clone())
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .color(Role::Muted),
         );
         tag(tree, row, "スナップショット外", Tone::Neutral);
@@ -301,7 +308,9 @@ fn cell(
     if n == 0 {
         tree.insert(
             Some(host),
-            Label::new("·").font_size(12.0).color(Role::Muted),
+            Label::new("·")
+                .font_size(crate::appearance::font(12.0))
+                .color(Role::Muted),
         );
         return;
     }
@@ -322,7 +331,7 @@ fn cell(
         Some(press),
         Container::row()
             .align_items(AlignItems::CENTER)
-            .padding(4.0)
+            .padding(crate::appearance::space(4.0))
             .grow(1.0),
     );
     tag(tree, inner, n.to_string(), tone);

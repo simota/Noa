@@ -15,8 +15,9 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use noa_ipc::widget::{
     AckParams, CloseParams, EventsParams, HostMessage, HostRequest, MAX_ACTION_BYTES,
-    MAX_BRIDGE_LINE_BYTES, MAX_DATA_BYTES, OpenParams, SetParams, WidgetCall, WidgetError,
-    WidgetErrorKind, WidgetEvent, asset_frames, validate_size, validate_token,
+    MAX_BRIDGE_LINE_BYTES, MAX_DATA_BYTES, OpenParams, OperationState, ReportParams, SetParams,
+    WidgetCall, WidgetError, WidgetErrorKind, WidgetEvent, WidgetOperation, asset_frames,
+    validate_size, validate_token,
 };
 use noa_widget::{Manifest, content_digest, discovery};
 use parking_lot::Mutex;
@@ -167,6 +168,8 @@ struct Instance {
     definition_source: String,
     data: Value,
     data_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_updated_at_ms: Option<u64>,
     owner_pane_id: Option<noa_ipc::WireId>,
     status: String,
     host_ready: bool,
@@ -175,6 +178,8 @@ struct Instance {
     acked_through: u64,
     last_seq: u64,
     events: Vec<WidgetEvent>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    operations: BTreeMap<String, WidgetOperation>,
     requests: BTreeMap<String, Remembered>,
     action_requests: BTreeMap<String, String>,
     open_request_id: String,
@@ -189,6 +194,7 @@ impl Instance {
             || self.events.len() > MAX_EVENTS
             || self.requests.len() > MAX_REQUESTS + MAX_EVENTS + 1
             || self.action_requests.len() > MAX_REQUESTS
+            || self.operations.len() > MAX_REQUESTS
             || self.action_requests.len() as u64 != self.last_seq
             || !matches!(
                 self.status.as_str(),
@@ -215,10 +221,34 @@ impl Instance {
         if seq != self.last_seq {
             return Err(io_error("widget state is missing unacknowledged events"));
         }
+        let mut seen = std::collections::BTreeSet::new();
+        for (id, operation) in &self.operations {
+            if *id != operation.event_id
+                || operation.seq == 0
+                || operation.seq > self.last_seq
+                || operation.version == 0
+                || !seen.insert(operation.seq)
+                || operation.message.len() > 1024
+                || operation.event_id != format!("we_{}_{}", &self.instance_id[3..], operation.seq)
+                || !self
+                    .manifest
+                    .actions
+                    .iter()
+                    .any(|action| action.id == operation.action_id)
+                || operation
+                    .action_request_id
+                    .as_ref()
+                    .is_some_and(|id| !self.action_requests.contains_key(id))
+            {
+                return Err(io_error("invalid widget operation history"));
+            }
+        }
         Ok(())
     }
 
     fn snapshot(&self) -> Value {
+        let mut operations: Vec<_> = self.operations.values().collect();
+        operations.sort_by_key(|operation| operation.seq);
         json!({
             "instanceId": self.instance_id, "serverInstanceId": self.server_instance_id,
             "definitionId": self.manifest.id, "definitionDigest": self.definition_digest,
@@ -227,7 +257,9 @@ impl Instance {
             "dataRevision": self.data_revision, "data": self.data,
             "manifest": self.manifest, "status": self.status, "hostReady": self.host_ready,
             "ownerPaneId": self.owner_pane_id, "consumerId": self.consumer_id,
-            "lastSeq": self.last_seq, "ackedThrough": self.acked_through
+            "lastSeq": self.last_seq, "ackedThrough": self.acked_through,
+            "dataUpdatedAtMs": self.data_updated_at_ms,
+            "operations": operations
         })
     }
 
@@ -238,6 +270,24 @@ impl Instance {
             data_revision: self.data_revision,
             manifest: serde_json::to_value(&self.manifest).expect("validated manifest"),
             data: self.data.clone(),
+        }
+    }
+
+    fn host_status(&self) -> HostMessage {
+        let mut operations: Vec<_> = self.operations.values().cloned().collect();
+        operations.sort_by_key(|operation| std::cmp::Reverse(operation.seq));
+        let pending_operations = operations
+            .iter()
+            .filter(|operation| !operation.state.is_terminal())
+            .count();
+        operations.truncate(32);
+        HostMessage::Status {
+            instance_id: self.instance_id.clone(),
+            data_updated_at_ms: self.data_updated_at_ms,
+            owner_pane_id: self.owner_pane_id,
+            total_operations: self.operations.len(),
+            pending_operations,
+            operations,
         }
     }
 
@@ -394,6 +444,25 @@ impl Store {
             {
                 return Err(io_error("widget definition digest mismatch"));
             }
+            // Older snapshots did not track processing. Pending events can
+            // only be restored as accepted, with unknown timestamps; their
+            // delivery/acknowledgement is never inferred to mean success.
+            for event in &instance.events {
+                instance
+                    .operations
+                    .entry(event.event_id.clone())
+                    .or_insert_with(|| WidgetOperation {
+                        event_id: event.event_id.clone(),
+                        seq: event.seq,
+                        action_id: event.action_id.clone(),
+                        action_request_id: None,
+                        version: 1,
+                        state: OperationState::Accepted,
+                        message: String::new(),
+                        accepted_at_ms: None,
+                        updated_at_ms: None,
+                    });
+            }
             instance.validate_stored()?;
             if instance.status == "open" {
                 instance.status = "restored".into();
@@ -486,9 +555,9 @@ impl Store {
         let result = match call {
             WidgetCall::List(p) => {
                 let context = discovery::repo_context(Path::new(&p.repo)).map_err(domain_error)?;
-                let definitions =
-                    discovery::discover(&context.worktree_root).map_err(domain_error)?;
-                let definitions: Vec<Value> = definitions.into_iter().map(|d| json!({
+                let found = discovery::discover_with_diagnostics(&context.worktree_root)
+                    .map_err(domain_error)?;
+                let definitions: Vec<Value> = found.definitions.into_iter().map(|d| json!({
                     "id": d.manifest.id, "title": d.manifest.title, "description": d.manifest.description.chars().take(240).collect::<String>(),
                     "version": d.manifest.version, "digest": d.digest
                 })).collect();
@@ -498,7 +567,7 @@ impl Store {
                     "definitionDigest": i.definition_digest, "serverInstanceId": i.server_instance_id
                 })).collect();
                 Ok(
-                    json!({"repo":context.worktree_root, "worktreeId":context.worktree_id, "repositoryId":context.repository_id, "definitions":definitions, "instances":instances}),
+                    json!({"repo":context.worktree_root, "worktreeId":context.worktree_id, "repositoryId":context.repository_id, "definitions":definitions, "diagnostics":found.diagnostics, "instances":instances}),
                 )
             }
             WidgetCall::Describe(p) => {
@@ -510,6 +579,7 @@ impl Store {
             WidgetCall::Set(p) => self.set(p, fingerprint),
             WidgetCall::Events(p) => self.events(p),
             WidgetCall::Ack(p) => self.ack(p, fingerprint),
+            WidgetCall::Report(p) => self.report(p, fingerprint),
             WidgetCall::Close(p) => self.close(p, fingerprint),
             WidgetCall::Forget(p) => self.forget(&p.instance_id),
         };
@@ -605,6 +675,7 @@ impl Store {
             manifest,
             data,
             data_revision: 1,
+            data_updated_at_ms: Some(now_ms()),
             owner_pane_id: p.owner_pane_id,
             status: "open".into(),
             host_ready: !self.launch_hosts,
@@ -613,6 +684,7 @@ impl Store {
             acked_through: 0,
             last_seq: 0,
             events: Vec::new(),
+            operations: BTreeMap::new(),
             requests: BTreeMap::new(),
             action_requests: BTreeMap::new(),
             open_request_id: p.request_id,
@@ -637,6 +709,7 @@ impl Store {
         };
         let id = instance.instance_id.clone();
         let snapshot = instance.host_snapshot();
+        let status = instance.host_status();
         let mut result = instance.snapshot();
         result["created"] = json!(true);
         let saved = self.save(instance);
@@ -645,6 +718,7 @@ impl Store {
         {
             self.hosts.insert(id.clone(), host);
             self.send_host(&id, snapshot);
+            self.send_host(&id, status);
         }
         saved?;
         Ok(result)
@@ -656,12 +730,13 @@ impl Store {
             return Ok(replay);
         }
         instance.ensure_open()?;
-        // Keep one slot for an action receipt. Only this service enqueues
+        // Keep two slots for an action receipt and its processing status.
+        // Only this service enqueues
         // messages, so after this check the writer can only free more room.
         if self
             .hosts
             .get(&p.instance_id)
-            .is_some_and(|host| host.input.len() >= 15)
+            .is_some_and(|host| host.input.len() >= 13)
         {
             return Err(error(
                 WidgetErrorKind::Busy,
@@ -679,11 +754,13 @@ impl Store {
             .validate_data(&p.data)
             .map_err(domain_error)?;
         instance.data = p.data;
+        instance.data_updated_at_ms = Some(now_ms());
         instance.data_revision = instance
             .data_revision
             .checked_add(1)
             .ok_or_else(|| error(WidgetErrorKind::LimitReached, "revision limit reached"))?;
         let snapshot = instance.host_snapshot();
+        let status = instance.host_status();
         check_host_message(&snapshot)?;
         let result =
             json!({"instanceId":instance.instance_id,"dataRevision":instance.data_revision});
@@ -691,6 +768,7 @@ impl Store {
         let saved = self.save(instance);
         if committed(&saved) {
             self.send_host(&p.instance_id, snapshot);
+            self.send_host(&p.instance_id, status);
         }
         saved?;
         Ok(result)
@@ -764,6 +842,68 @@ impl Store {
             json!({"instanceId":instance.instance_id,"ackedThrough":instance.acked_through});
         instance.remember(p.request_id, fingerprint, result.clone())?;
         self.save(instance)?;
+        Ok(result)
+    }
+
+    fn report(&mut self, p: ReportParams, fingerprint: String) -> Result<Value, WidgetError> {
+        let mut instance = self.instance(&p.instance_id)?.clone();
+        if let Some(replay) = instance.replay(&p.request_id, &fingerprint)? {
+            return Ok(replay);
+        }
+        if instance.consumer_id.as_deref() != Some(p.consumer_id.as_str()) {
+            return Err(conflict(
+                "only the registered event consumer may report processing",
+            ));
+        }
+        let operation = instance
+            .operations
+            .get_mut(&p.event_id)
+            .ok_or_else(|| error(WidgetErrorKind::NotFound, "widget operation not found"))?;
+        if operation.seq > instance.delivered_through {
+            return Err(conflict(
+                "cannot report an event before it has been delivered",
+            ));
+        }
+        if operation.version != p.expected_version {
+            return Err(conflict(format!(
+                "operation version conflict: current version is {}",
+                operation.version
+            )));
+        }
+        if operation.state.is_terminal() {
+            return Err(conflict(
+                "completed or failed operation is final; retry only its original report requestId",
+            ));
+        }
+        operation.version = operation.version.checked_add(1).ok_or_else(|| {
+            error(
+                WidgetErrorKind::LimitReached,
+                "operation version limit reached",
+            )
+        })?;
+        operation.state = p.state;
+        operation.message = p.message;
+        operation.updated_at_ms = Some(now_ms().max(operation.updated_at_ms.unwrap_or(0)));
+        let result = json!({"instanceId":p.instance_id,"eventId":p.event_id,"version":operation.version,"state":operation.state});
+        instance.remember(p.request_id, fingerprint, result.clone())?;
+        let status = instance.host_status();
+        check_host_message(&status)?;
+        // Reserve two queue slots for an action receipt and its status.
+        if self
+            .hosts
+            .get(&p.instance_id)
+            .is_some_and(|host| host.input.len() >= 14)
+        {
+            return Err(error(
+                WidgetErrorKind::Busy,
+                "widget host has pending updates; retry this report when it catches up",
+            ));
+        }
+        let saved = self.save(instance);
+        if committed(&saved) {
+            self.send_host(&p.instance_id, status);
+        }
+        saved?;
         Ok(result)
     }
 
@@ -843,8 +983,24 @@ impl Store {
                 "event sequence limit reached",
             )
         })?;
+        let event_id = format!("we_{}_{}", &id[3..], seq);
+        let time = now_ms();
+        instance.operations.insert(
+            event_id.clone(),
+            WidgetOperation {
+                event_id: event_id.clone(),
+                seq,
+                action_id: action_id.clone(),
+                action_request_id: Some(request_id.clone()),
+                version: 1,
+                state: OperationState::Accepted,
+                message: String::new(),
+                accepted_at_ms: Some(time),
+                updated_at_ms: Some(time),
+            },
+        );
         instance.events.push(WidgetEvent {
-            event_id: format!("we_{}_{}", &id[3..], seq),
+            event_id,
             seq,
             action_id,
             data_revision: revision,
@@ -881,7 +1037,9 @@ impl Store {
             self.instances.remove(id);
         }
         // Repeating this operation after an ambiguous reply remains safe.
-        // Forget explicitly ends the stored open request's dedup lifetime.
+        // Forget explicitly ends the stored open request's dedup lifetime
+        // and removes processing history, including unconfirmed outcomes.
+        // It must remain possible at the bounded retry ledger's lifetime cap.
         Ok(json!({"instanceId":id,"forgotten":true}))
     }
 
@@ -913,6 +1071,10 @@ impl Store {
                         error_kind,
                     },
                 );
+                if let Some(instance) = self.instances.get(id) {
+                    let status = instance.host_status();
+                    self.send_host(id, status);
+                }
             }
             HostRequest::Closed => self.host_gone(id),
         }
@@ -1123,6 +1285,14 @@ fn random_hex() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 fn fingerprint(method: &str, params: &Value) -> String {
     fn canonical(value: Value) -> Value {
         match value {
@@ -1242,6 +1412,320 @@ mod tests {
             after_seq: 0,
             limit: 32,
         })
+    }
+
+    fn report(
+        id: &str,
+        event: &str,
+        version: u64,
+        state: OperationState,
+        request: &str,
+    ) -> WidgetCall {
+        WidgetCall::Report(ReportParams {
+            instance_id: id.into(),
+            consumer_id: "producer".into(),
+            event_id: event.into(),
+            expected_version: version,
+            state,
+            message: "reported by producer".into(),
+            request_id: request.into(),
+        })
+    }
+
+    #[test]
+    fn processing_reports_survive_queue_acknowledgements_data_updates_and_restart() {
+        let fixture = Fixture::new();
+        let mut store = fixture.store();
+        let id = instance_id(&store.call(fixture.open("open"), &[]).unwrap());
+        store
+            .submit_action(&id, "ui-request".into(), "refresh".into(), 1, json!({}))
+            .unwrap();
+        let event = store.call(events(&id, "producer"), &[]).unwrap()["events"][0]["eventId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            store.instance(&id).unwrap().operations[&event].state,
+            OperationState::Accepted
+        );
+        let started = report(&id, &event, 1, OperationState::Running, "started");
+        assert_eq!(store.call(started.clone(), &[]).unwrap()["version"], 2);
+        assert_eq!(store.call(started, &[]).unwrap()["version"], 2);
+        store
+            .call(
+                WidgetCall::Ack(AckParams {
+                    instance_id: id.clone(),
+                    consumer_id: "producer".into(),
+                    through_seq: 1,
+                    request_id: "ack".into(),
+                }),
+                &[],
+            )
+            .unwrap();
+        store
+            .call(
+                WidgetCall::Set(SetParams {
+                    instance_id: id.clone(),
+                    expected_revision: 1,
+                    data: json!({"summary":"unrelated update"}),
+                    request_id: "data".into(),
+                }),
+                &[],
+            )
+            .unwrap();
+        assert!(store.instance(&id).unwrap().events.is_empty());
+        assert_eq!(
+            store.instance(&id).unwrap().operations[&event].state,
+            OperationState::Running
+        );
+        drop(store);
+        let mut store = fixture.store();
+        assert_eq!(store.instance(&id).unwrap().operations[&event].version, 2);
+        let completed = report(&id, &event, 2, OperationState::Completed, "completed");
+        let result = store.call(completed.clone(), &[]).unwrap();
+        assert_eq!(result["state"], "completed");
+        assert_eq!(store.call(completed, &[]).unwrap(), result);
+        let old = store
+            .call(report(&id, &event, 1, OperationState::Waiting, "old"), &[])
+            .unwrap_err();
+        assert_eq!(old.kind, WidgetErrorKind::Conflict);
+        assert!(
+            store
+                .call(
+                    report(&id, &event, 3, OperationState::Failed, "contradiction"),
+                    &[]
+                )
+                .unwrap_err()
+                .message
+                .contains("final")
+        );
+        let snapshot = store.instance(&id).unwrap().snapshot();
+        assert_eq!(snapshot["operations"][0]["actionRequestId"], "ui-request");
+        assert_eq!(snapshot["operations"][0]["state"], "completed");
+    }
+
+    #[test]
+    fn operation_reports_need_the_registered_consumer_a_delivered_event_and_a_current_version() {
+        let fixture = Fixture::new();
+        let mut store = fixture.store();
+        let id = instance_id(&store.call(fixture.open("open"), &[]).unwrap());
+        for request in ["one", "two"] {
+            store
+                .submit_action(&id, request.into(), "refresh".into(), 1, json!({}))
+                .unwrap();
+        }
+        let first = format!("we_{}_1", &id[3..]);
+        let second = format!("we_{}_2", &id[3..]);
+        assert!(
+            store
+                .call(
+                    report(&id, &first, 1, OperationState::Running, "before-claim"),
+                    &[]
+                )
+                .is_err()
+        );
+        store
+            .call(
+                WidgetCall::Events(EventsParams {
+                    instance_id: id.clone(),
+                    consumer_id: "producer".into(),
+                    after_seq: 0,
+                    limit: 1,
+                }),
+                &[],
+            )
+            .unwrap();
+        assert!(
+            store
+                .call(
+                    report(&id, &second, 1, OperationState::Running, "before-delivery"),
+                    &[]
+                )
+                .unwrap_err()
+                .message
+                .contains("delivered")
+        );
+        let mut other = report(&id, &first, 1, OperationState::Running, "other");
+        if let WidgetCall::Report(params) = &mut other {
+            params.consumer_id = "another".into();
+        }
+        assert!(store.call(other, &[]).is_err());
+        assert_eq!(
+            store
+                .call(
+                    report(&id, "we_missing", 1, OperationState::Completed, "unknown"),
+                    &[]
+                )
+                .unwrap_err()
+                .kind,
+            WidgetErrorKind::NotFound
+        );
+        store
+            .call(report(&id, &first, 1, OperationState::Waiting, "wait"), &[])
+            .unwrap();
+        assert!(
+            store
+                .call(
+                    report(&id, &first, 1, OperationState::Completed, "stale"),
+                    &[]
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.instance(&id).unwrap().operations[&first].state,
+            OperationState::Waiting
+        );
+        assert_eq!(
+            store.instance(&id).unwrap().operations[&second].state,
+            OperationState::Accepted
+        );
+    }
+
+    #[test]
+    fn uncertain_processing_reports_keep_the_published_version_and_retry_identity() {
+        let fixture = Fixture::new();
+        let mut store = fixture.store();
+        let id = instance_id(&store.call(fixture.open("open"), &[]).unwrap());
+        store
+            .submit_action(&id, "ui".into(), "refresh".into(), 1, json!({}))
+            .unwrap();
+        let event = store.call(events(&id, "producer"), &[]).unwrap()["events"][0]["eventId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let completed = report(&id, &event, 1, OperationState::Completed, "report");
+        store.fail_after_publish = true;
+        assert_eq!(
+            store.call(completed.clone(), &[]).unwrap_err().kind,
+            WidgetErrorKind::OutcomeUnknown
+        );
+        assert_eq!(
+            store.instance(&id).unwrap().operations[&event].state,
+            OperationState::Completed
+        );
+        store.fail_after_publish = false;
+        assert_eq!(store.call(completed, &[]).unwrap()["version"], 2);
+        let mut mismatch = report(&id, &event, 1, OperationState::Completed, "report");
+        if let WidgetCall::Report(params) = &mut mismatch {
+            params.message = "different".into();
+        }
+        assert_eq!(
+            store.call(mismatch, &[]).unwrap_err().kind,
+            WidgetErrorKind::Conflict
+        );
+    }
+
+    #[test]
+    fn legacy_queues_restore_without_fabricated_processing_or_timestamps() {
+        let fixture = Fixture::new();
+        let mut store = fixture.store();
+        let id = instance_id(&store.call(fixture.open("open"), &[]).unwrap());
+        store
+            .submit_action(&id, "ui".into(), "refresh".into(), 1, json!({}))
+            .unwrap();
+        let mut value = serde_json::to_value(store.instance(&id).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("operations");
+        value.as_object_mut().unwrap().remove("dataUpdatedAtMs");
+        drop(store);
+        fs::write(
+            fixture.state.join(format!("{id}.json")),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let store = fixture.store();
+        let operation = store
+            .instance(&id)
+            .unwrap()
+            .operations
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(operation.state, OperationState::Accepted);
+        assert_eq!(operation.updated_at_ms, None);
+        assert_eq!(operation.action_request_id, None);
+        assert_eq!(store.instance(&id).unwrap().data_updated_at_ms, None);
+    }
+
+    #[test]
+    fn operation_history_is_ordered_by_sequence_and_forget_explicitly_removes_it() {
+        let fixture = Fixture::new();
+        let mut store = fixture.store();
+        let id = instance_id(&store.call(fixture.open("open"), &[]).unwrap());
+        for seq in 1..=12 {
+            store
+                .submit_action(&id, format!("ui-{seq}"), "refresh".into(), 1, json!({}))
+                .unwrap();
+        }
+        let snapshot = store.instance(&id).unwrap().snapshot();
+        let seqs: Vec<_> = snapshot["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|operation| operation["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, (1..=12).collect::<Vec<_>>());
+        store.call(events(&id, "producer"), &[]).unwrap();
+        let event = format!("we_{}_12", &id[3..]);
+        store
+            .call(
+                report(&id, &event, 1, OperationState::Running, "running"),
+                &[],
+            )
+            .unwrap();
+        store
+            .call(
+                WidgetCall::Close(CloseParams {
+                    instance_id: id.clone(),
+                    request_id: "close".into(),
+                }),
+                &[],
+            )
+            .unwrap();
+        assert!(
+            store.forget(&id).is_err(),
+            "unacknowledged events remain protected"
+        );
+        store
+            .call(
+                WidgetCall::Ack(AckParams {
+                    instance_id: id.clone(),
+                    consumer_id: "producer".into(),
+                    through_seq: 12,
+                    request_id: "ack".into(),
+                }),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store.instance(&id).unwrap().operations[&event].state,
+            OperationState::Running
+        );
+        assert_eq!(store.forget(&id).unwrap()["forgotten"], true);
+        assert!(!store.instances.contains_key(&id));
+        assert_eq!(store.forget(&id).unwrap()["forgotten"], true);
+    }
+
+    #[test]
+    fn list_keeps_valid_packages_and_exposes_each_invalid_package() {
+        let fixture = Fixture::new();
+        let mut store = fixture.store();
+        fs::create_dir_all(fixture.repo.join(".noa-widgets/broken")).unwrap();
+        fs::write(
+            fixture.repo.join(".noa-widgets/broken/widget.json"),
+            b"not json",
+        )
+        .unwrap();
+        let result = store
+            .call(
+                WidgetCall::List(ListParams {
+                    repo: fixture.repo.display().to_string(),
+                }),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(result["definitions"].as_array().unwrap().len(), 1);
+        assert_eq!(result["definitions"][0]["id"], "status");
+        assert_eq!(result["diagnostics"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -1842,16 +2326,22 @@ mod tests {
         assert_eq!(opened["definitionDigest"], pinned);
         assert_ne!(pinned, manifest.digest());
 
-        // The host's input: every asset frame, then the pinning snapshot.
+        // The host's input: every asset frame, the pinning snapshot, then
+        // independent processing/data-freshness metadata.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let lines = loop {
             let text = fs::read_to_string(&received).unwrap_or_default();
-            if text.contains("\"type\":\"snapshot\"") || std::time::Instant::now() > deadline {
+            if text.contains("\"type\":\"status\"") || std::time::Instant::now() > deadline {
                 break text.lines().map(str::to_owned).collect::<Vec<_>>();
             }
             thread::sleep(Duration::from_millis(20));
         };
-        let (snapshot, frames) = lines.split_last().expect("host input");
+        let at = lines
+            .iter()
+            .position(|line| line.contains("\"type\":\"snapshot\""))
+            .expect("host snapshot");
+        let (frames, after) = lines.split_at(at);
+        let snapshot = &after[0];
         let HostMessage::Snapshot {
             definition_digest, ..
         } = serde_json::from_str(snapshot).unwrap()
@@ -1859,6 +2349,9 @@ mod tests {
             panic!("the snapshot follows the asset frames");
         };
         assert_eq!(definition_digest, pinned);
+        assert!(
+            matches!(serde_json::from_str::<HostMessage>(&after[1]).unwrap(), HostMessage::Status { operations, .. } if operations.is_empty())
+        );
         let mut bytes = Vec::new();
         for line in frames {
             let HostMessage::Asset {

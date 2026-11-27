@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::assets::{self, Asset};
 use crate::{
@@ -40,6 +41,35 @@ pub struct Definition {
     pub assets: Vec<Asset>,
 }
 
+/// A registry can contain a valid package beside a broken draft. Per-package
+/// failures are visible diagnostics, while an unreadable or unsafe registry
+/// still fails the entire scan. No rejected path is followed.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Discovery {
+    pub definitions: Vec<Definition>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostic {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Fixture {
+    pub name: String,
+    pub data: Value,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Fixtures {
+    pub values: Vec<Fixture>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
 pub fn repo_context(path: &Path) -> Result<RepoContext, WidgetError> {
     let worktree_root = git_path(path, "--show-toplevel")?;
     let git_common_dir = git_path(path, "--git-common-dir")?;
@@ -52,40 +82,131 @@ pub fn repo_context(path: &Path) -> Result<RepoContext, WidgetError> {
 }
 
 pub fn discover(repo: &Path) -> Result<Vec<Definition>, WidgetError> {
+    let found = discover_with_diagnostics(repo)?;
+    if let Some(diagnostic) = found.diagnostics.first() {
+        return Err(at(&diagnostic.path, &diagnostic.message));
+    }
+    Ok(found.definitions)
+}
+
+pub fn discover_with_diagnostics(repo: &Path) -> Result<Discovery, WidgetError> {
     let context = repo_context(repo)?;
     let registry_path = context.worktree_root.join(DEFINITIONS_DIR);
     let worktree = open_root(&context.worktree_root)?;
     let registry = match open_directory(&worktree, OsStr::new(DEFINITIONS_DIR)) {
         Ok(registry) => registry,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Discovery::default()),
         Err(error) => return Err(at(&registry_path, error)),
     };
     let mut names = directory_names(&registry).map_err(|e| at(&registry_path, e))?;
     names.sort();
-    let mut definitions = Vec::new();
+    let mut found = Discovery::default();
+    let mut candidates = 0;
     for name in names {
-        let mode = entry_mode(&registry, &name).map_err(|e| at(&registry_path.join(&name), e))?;
-        if mode & libc::S_IFMT == libc::S_IFLNK {
-            return Err(WidgetError::new(format!(
-                "{}: symbolic links are not allowed",
-                registry_path.join(&name).display()
-            )));
-        }
-        if mode & libc::S_IFMT != libc::S_IFDIR {
+        let path = registry_path.join(&name);
+        let mode = entry_mode(&registry, &name);
+        if mode.as_ref().is_ok_and(|mode| {
+            mode & libc::S_IFMT != libc::S_IFDIR && mode & libc::S_IFMT != libc::S_IFLNK
+        }) {
             continue;
         }
-        let id = name
-            .to_str()
-            .ok_or_else(|| WidgetError::new("widget directory name must be UTF-8"))?;
-        check_id(id)?;
-        if definitions.len() >= MAX_DEFINITIONS {
+        candidates += 1;
+        if candidates > MAX_DEFINITIONS {
             return Err(WidgetError::new(
                 "at most 128 repository widgets are supported",
             ));
         }
-        definitions.push(read_definition(&registry, &registry_path, id)?);
+        let definition = (|| {
+            let mode = mode.map_err(|error| at(&path, error))?;
+            if mode & libc::S_IFMT == libc::S_IFLNK {
+                return Err(WidgetError::new("symbolic links are not allowed"));
+            }
+            let id = name
+                .to_str()
+                .ok_or_else(|| WidgetError::new("widget directory name must be UTF-8"))?;
+            check_id(id)?;
+            read_definition(&registry, &registry_path, id)
+        })();
+        match definition {
+            Ok(definition) => found.definitions.push(definition),
+            Err(error) => found.diagnostics.push(Diagnostic {
+                path,
+                message: error.to_string(),
+            }),
+        }
     }
-    Ok(definitions)
+    Ok(found)
+}
+
+/// Read optional, bounded JSON examples through the same descriptor-relative
+/// path boundary as the package. A malformed example never hides other ones.
+pub fn fixtures(repo: &Path, definition: &Definition) -> Result<Fixtures, WidgetError> {
+    let context = repo_context(repo)?;
+    let worktree = open_root(&context.worktree_root)?;
+    let registry = open_directory(&worktree, OsStr::new(DEFINITIONS_DIR))
+        .map_err(|error| at(&context.worktree_root.join(DEFINITIONS_DIR), error))?;
+    check_id(&definition.manifest.id)?;
+    let package = open_directory(&registry, OsStr::new(&definition.manifest.id))
+        .map_err(|error| at(&definition.path, error))?;
+    let path = definition
+        .path
+        .parent()
+        .expect("manifest has a package")
+        .join("fixtures");
+    let directory = match open_directory(&package, OsStr::new("fixtures")) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Fixtures::default()),
+        Err(error) => return Err(at(&path, error)),
+    };
+    let mut names = directory_names(&directory).map_err(|error| at(&path, error))?;
+    names.sort();
+    let names: Vec<_> = names
+        .into_iter()
+        .filter(|name| {
+            Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    if names.len() > 32 {
+        return Err(WidgetError::new("at most 32 fixture files are supported"));
+    }
+    let mut fixtures = Fixtures::default();
+    for name in names {
+        let file_path = path.join(&name);
+        let data = (|| {
+            let file = open_file(&directory, &name).map_err(|error| at(&file_path, error))?;
+            if !file
+                .metadata()
+                .map_err(|error| at(&file_path, error))?
+                .is_file()
+            {
+                return Err(WidgetError::new("fixture must be a regular file"));
+            }
+            let mut bytes = Vec::new();
+            file.take(crate::MAX_DATA_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| at(&file_path, error))?;
+            if bytes.len() > crate::MAX_DATA_BYTES {
+                return Err(WidgetError::new("fixture exceeds 128 KiB"));
+            }
+            let data: Value =
+                serde_json::from_slice(&bytes).map_err(|error| at(&file_path, error))?;
+            definition.manifest.validate_data(&data)?;
+            Ok(data)
+        })();
+        match data {
+            Ok(data) => fixtures.values.push(Fixture {
+                name: name.to_string_lossy().into_owned(),
+                data,
+            }),
+            Err(error) => fixtures.diagnostics.push(Diagnostic {
+                path: file_path,
+                message: error.to_string(),
+            }),
+        }
+    }
+    Ok(fixtures)
 }
 
 pub fn load(repo: &Path, id: &str) -> Result<Definition, WidgetError> {

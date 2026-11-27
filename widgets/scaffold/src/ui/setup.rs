@@ -29,7 +29,7 @@ impl Scaffold {
         self.tree.insert(
             Some(card),
             Label::new("開発を始める準備を確認")
-                .font_size(20.0)
+                .font_size(crate::appearance::font(20.0))
                 .weight(700)
                 .wrap(true),
         );
@@ -47,7 +47,7 @@ impl Scaffold {
         self.tree.insert(
             Some(stack_host),
             Label::new(stacks)
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .color(Role::Muted)
                 .max_lines(1),
         );
@@ -94,7 +94,8 @@ impl Scaffold {
             self.note(
                 card,
                 format!(
-                    "セットアップのタスク {id} を作成済みです。View → Tasks で作業を続けられます。"
+                    "セットアップのタスク {id} を作成済みです。{}",
+                    self.state.task_destination(),
                 ),
             );
         } else if self.state.setup.attention_count() == 0 && !self.state.setup.checks.is_empty() {
@@ -104,6 +105,9 @@ impl Scaffold {
             );
         }
         let actions = self.tree.insert(Some(card), Container::new(row(8.0)));
+        if let Some((id, _)) = self.state.setup_task() {
+            self.button(actions, "作成したタスクを開く", Press::OpenTask(id));
+        }
         if invalid_registry {
             self.button(actions, "情報源を確認", Press::GoTab(Tab::Sources));
         } else if !pending.is_empty() {
@@ -152,7 +156,7 @@ impl Scaffold {
             self.tree.insert(
                 Some(host),
                 Label::new(&check.title)
-                    .font_size(14.0)
+                    .font_size(crate::appearance::font(14.0))
                     .weight(600)
                     .max_lines(1),
             );
@@ -163,7 +167,7 @@ impl Scaffold {
             self.tree.insert(
                 Some(r),
                 Label::new(check.description)
-                    .font_size(12.0)
+                    .font_size(crate::appearance::font(12.0))
                     .max_lines(2)
                     .color(Role::Muted),
             );
@@ -212,7 +216,9 @@ impl Scaffold {
             Preview::Register(assets) => {
                 self.tree.insert(
                     Some(card),
-                    Label::new("登録する内容を確認").font_size(18.0).weight(700),
+                    Label::new("登録する内容を確認")
+                        .font_size(crate::appearance::font(18.0))
+                        .weight(700),
                 );
                 self.note(card, format!("書込先: {REGISTRY}"));
                 self.note(card, format!("次の {} 件を「候補」として資産台帳へ追加します。各資産の検証状態は「未実施」から始まります。", assets.len()));
@@ -223,7 +229,7 @@ impl Scaffold {
                     self.tree.insert(
                         Some(entry),
                         Label::new(&asset.title)
-                            .font_size(13.0)
+                            .font_size(crate::appearance::font(13.0))
                             .weight(600)
                             .wrap(true),
                     );
@@ -235,7 +241,7 @@ impl Scaffold {
                             asset.path,
                             asset.id
                         ))
-                        .font_size(12.0)
+                        .font_size(crate::appearance::font(12.0))
                         .color(Role::Muted)
                         .wrap(true)
                         .selectable(true),
@@ -253,18 +259,30 @@ impl Scaffold {
                 self.tree.insert(
                     Some(card),
                     Label::new("セットアップの作業指示")
-                        .font_size(18.0)
+                        .font_size(crate::appearance::font(18.0))
                         .weight(700),
                 );
-                self.note(card, "以下の内容を .noa/tasks/ に保存します。作成したタスクは View → Tasks で確認できます。");
+                self.note(
+                    card,
+                    format!(
+                        "以下の内容を .noa/tasks/ に保存します。{}",
+                        self.state.task_destination(),
+                    ),
+                );
                 self.tree.insert(
                     Some(card),
-                    Label::new(text).font_size(12.0).wrap(true).selectable(true),
+                    Label::new(text)
+                        .font_size(crate::appearance::font(12.0))
+                        .wrap(true)
+                        .selectable(true),
                 );
                 if self.state.setup_task().is_some() {
                     self.note(
                         card,
-                        "この内容のタスクは作成済みです。View → Tasks で確認できます。",
+                        format!(
+                            "この内容のタスクは作成済みです。{}",
+                            self.state.task_destination(),
+                        ),
                     );
                 } else if key != self.state.setup.task_key() {
                     self.note(card, "準備状況が変わりました。確認を閉じて、最新の作業指示をもう一度確認してください。");

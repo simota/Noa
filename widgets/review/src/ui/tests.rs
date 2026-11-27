@@ -1394,9 +1394,13 @@ fn first_rows(screen: &mut Review, size: (f32, f32)) -> (f32, usize) {
 }
 
 #[test]
-fn the_smallest_window_shows_as_much_of_the_findings_as_before() {
+fn the_original_split_window_shows_as_much_of_the_findings_as_before() {
     // Laid out by 601c4c3b (before the filters scrolled with the list): the
-    // first row's top and the rows shown whole at the smallest window.
+    // first row's top and the rows shown whole at the original split-window
+    // minimum. Keep this historical comparison at the same geometry; compact
+    // navigation at 720px is covered by the narrow-window tests separately.
+    let original_size = (LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH
+        + 2.0 * noa_gpui_core::widgets::DIVIDER, 600.0);
     let root = std::env::temp_dir().join(format!("noa-review-rows-{}", std::process::id()));
     let stored = Review::stored(&stored_demo(&root)).unwrap();
     // The stored review opens its snapshot from the target card (L1-5).
@@ -1406,7 +1410,7 @@ fn the_smallest_window_shows_as_much_of_the_findings_as_before() {
         (Review::demo_held(), 423.2, 0),
         (stored, 300.2, 3),
     ] {
-        let (top, whole) = first_rows(&mut screen, SMALLEST);
+        let (top, whole) = first_rows(&mut screen, original_size);
         assert!(top <= top_before, "{top} > {top_before}");
         assert!(whole >= whole_before, "{whole} < {whole_before}");
     }
@@ -3437,4 +3441,56 @@ fn session_tools_open_on_demand_without_hiding_the_next_action() {
     assert!(screen.tree.is_hidden(screen.tools_host));
     assert!(widget_for(&screen, &Action::Continue).is_some());
     assert!(widget_for(&screen, &Action::CopyReport).is_none());
+}
+
+
+#[test]
+fn compact_layout_reuses_panes_and_preserves_the_search_draft() {
+    let mut screen = Review::demo();
+    let panes = screen.pane_roots;
+    let search = screen.search;
+    screen.tree.update::<TextField, _>(search, |field, cx| field.set_text(cx, "長い日本語の検索下書き"));
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(noa_gpui_scene::Size::new(720.0, 700.0), &mut text);
+    assert!(screen.compact);
+    assert!(!screen.tree.is_hidden(screen.navigation));
+    for pane in 0..3 {
+        screen.handle_action(Action::CompactPane(pane), &mut text);
+        screen.prepare(noa_gpui_scene::Size::new(720.0, 700.0), &mut text);
+        assert_eq!(screen.pane_roots, panes);
+        assert!(!screen.tree.is_hidden(panes[pane]));
+        assert_eq!(screen.tree.get::<TextField>(search).unwrap().text(), "長い日本語の検索下書き");
+    }
+    screen.prepare(noa_gpui_scene::Size::new(1440.0, 900.0), &mut text);
+    assert!(!screen.compact);
+    for root in panes { assert!(!screen.tree.is_hidden(root)); }
+}
+
+#[test]
+fn find_from_a_compact_detail_reveals_and_focuses_the_existing_search() {
+    let mut screen = Review::demo();
+    let mut text = TextStore::new(Default::default());
+    let size = noa_gpui_scene::Size::new(720.0, 700.0);
+    screen.prepare(size, &mut text);
+    // Layout and subsequent mutations share shaped text, as in the native app.
+    screen.handle_action(Action::CompactPane(2), &mut text);
+    screen.prepare(size, &mut text);
+    screen.handle_action(Action::ToggleSearch, &mut text);
+    screen.prepare(size, &mut text);
+    assert_eq!(screen.compact_pane, 1);
+    assert!(screen.search_open);
+    assert_eq!(screen.tree.focused(), Some(screen.search));
+}
+
+
+#[test]
+fn refilling_a_past_session_clears_an_unrelated_task_handoff() {
+    let mut screen = Review::demo();
+    screen.start_origin = Some(task_links::OriginHint {
+        base: "b".repeat(40),
+        repo: PathBuf::from("/unrelated"), task: "t-other".into(),
+        run: "run-other".into(), commit: "a".repeat(40),
+    });
+    act(&mut screen, Action::ReviewAgain(None));
+    assert!(screen.start_origin.is_none());
 }

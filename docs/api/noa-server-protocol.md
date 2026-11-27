@@ -217,6 +217,7 @@ wire ID string representation.
 | `noa.widget.set` | control | `instanceId`, `data`, `expectedRevision`, `requestId` |
 | `noa.widget.events` | control | `instanceId`, `consumerId`; optional `afterSeq` (0), `limit` (32, at most 64) |
 | `noa.widget.ack` | control | `instanceId`, `consumerId`, `throughSeq`, `requestId` |
+| `noa.widget.report` | control | `instanceId`, `consumerId`, `eventId`, `expectedVersion`, `state`, `requestId`; optional `message` (requires `repoWidgetOperationsV1`) |
 | `noa.widget.close` | control | `instanceId`, `requestId` |
 | `noa.widget.forget` | control | `instanceId` |
 
@@ -228,6 +229,45 @@ complete data after schema validation and a revision comparison. `events`
 claims one consumer and retains events until cumulative acknowledgment.
 `forget` is idempotent by instance ID and removes only stopped instances with
 no pending events, including their retry history.
+
+`list` returns valid `definitions` alongside per-package `diagnostics`
+(`path`, `message`). A malformed package does not hide valid siblings; an
+unsafe or unreadable registry root still fails the call.
+
+#### Processing reports (capability `repoWidgetOperationsV1`)
+
+This additional capability is advertised when the service accepts `report`.
+It separates durable event receipt from the consumer's reported processing
+outcome. Neither `ack` nor `set` marks an operation complete.
+
+A queued action starts at `state: "accepted"`, `version: 1`. After receiving
+it through `events`, its registered consumer can report `running`, `waiting`,
+`completed` or `failed`. `expectedVersion` must match the operation's current
+version; every accepted report increments it. Terminal `completed` and
+`failed` records cannot change. Identical retries with the original
+`requestId` and params return the original result before checking version or
+terminal state. A different consumer, an undelivered event or a stale version
+is rejected. `message` defaults to an empty string and is limited to 1,024
+UTF-8 bytes; control characters other than newline and tab are rejected.
+
+```json
+{"jsonrpc":"2.0","id":17,"method":"noa.widget.report","params":{"instanceId":"wi_0123456789abcdef0123456789abcdef","consumerId":"test-run-42","eventId":"we_0123456789abcdef0123456789abcdef_1","expectedVersion":1,"state":"running","message":"Running the failed tests","requestId":"test-run-42-started"}}
+```
+
+The result contains `instanceId`, `eventId`, `version` and `state`. `get`
+returns all retained `operations` in ascending `seq` order, with `eventId`,
+`seq`, `actionId`, optional original UI `actionRequestId`, `version`, `state`,
+`message`, `acceptedAtMs` and `updatedAtMs`. The instance also exposes
+`dataUpdatedAtMs`. Timestamps use Unix milliseconds; old stored events may
+have unknown timestamps and no original request ID. Already-acknowledged
+events from older stores are not reconstructed.
+
+Reports remain durable after acknowledgment and restart. The registered
+consumer can report a final outcome for a stopped instance without reopening
+its window. Processing history shares the existing bounded instance storage
+and retry ledgers. Explicit `forget` deletes that history, including any
+operation without a final outcome; it never implies completion. Existing
+producers may continue without reports, and their actions remain unconfirmed.
 
 The native host uses a separate inherited pipe tied to one instance; it never
 authenticates with the public control token. The public methods keep the

@@ -760,6 +760,13 @@ fn t_does_not_hand_off_a_handed_off_candidate_again() {
     // The completed hand-off offers its destination, not another create action.
     assert!(!detail_labels(&s).contains(&"タスクにする (T)".into()));
     assert!(has(&detail_labels(&s), "View → Tasks"));
+    click(&mut s, &mut text, "作成したタスクを開く");
+    assert_eq!(
+        sent(&log),
+        [Action::OpenTask {
+            id: "task-1".into()
+        }]
+    );
 }
 
 // ------------------------------------------- repo root from a subdir
@@ -934,6 +941,13 @@ fn setup_tasks_are_previewed_and_an_existing_task_is_not_recreated() {
     assert!(!list_labels(&s).contains(&"不足を整える作業指示を確認".into()));
     s.do_press(Press::SetupTask, &mut text);
     assert!(sent(&log).is_empty());
+    click(&mut s, &mut text, "作成したタスクを開く");
+    assert_eq!(
+        sent(&log),
+        [Action::OpenTask {
+            id: "task-1".into()
+        }]
+    );
 }
 
 #[test]

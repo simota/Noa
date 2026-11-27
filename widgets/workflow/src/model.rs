@@ -15,6 +15,137 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Explicit launch settings. `auto` is resolved once when a run is created;
+/// retries read the frozen run definition rather than detecting another agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentChoice {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl Default for AgentChoice {
+    fn default() -> Self {
+        Self {
+            provider: "auto".into(),
+            model: None,
+            effort: None,
+        }
+    }
+}
+
+impl AgentChoice {
+    pub const PROVIDERS: [&'static str; 4] = ["auto", "codex", "claude", "agy"];
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn efforts(provider: &str) -> &'static [&'static str] {
+        match provider {
+            "codex" => &["low", "medium", "high", "xhigh", "max", "ultra"],
+            "claude" | "agy" => &["low", "medium", "high", "xhigh", "max"],
+            _ => &[],
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !Self::PROVIDERS.contains(&self.provider.as_str()) {
+            return Err("エージェントは auto / codex / claude / agy から選んでください".into());
+        }
+        if self.provider == "auto" && (self.model.is_some() || self.effort.is_some()) {
+            return Err("モデルやeffortを指定する場合はエージェントを選んでください".into());
+        }
+        if let Some(model) = &self.model {
+            if model.is_empty()
+                || model.len() > 200
+                || model.starts_with(['-', '='])
+                || !model
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._:/@+=-".contains(&c))
+            {
+                return Err("モデル名には英数字と . _ : / @ + = - を使用してください（先頭の - と = は不可）".into());
+            }
+        }
+        if let Some(effort) = &self.effort {
+            if !Self::efforts(&self.provider).contains(&effort.as_str()) {
+                return Err(format!(
+                    "{} は effort {effort:?} に対応していません",
+                    self.provider
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn label(&self) -> String {
+        let mut parts = vec![self.provider.as_str()];
+        parts.extend(self.model.as_deref());
+        parts.extend(self.effort.as_deref());
+        parts.join(" · ")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPreset {
+    pub name: String,
+    pub assignments: BTreeMap<String, AgentChoice>,
+}
+
+impl AgentPreset {
+    pub fn from_definition(name: String, definition: &WorkflowDefinition) -> Self {
+        Self {
+            name,
+            assignments: definition
+                .nodes
+                .iter()
+                .filter(|n| n.kind.uses_agent())
+                .map(|n| (n.id.clone(), n.agent.clone()))
+                .collect(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty()
+            || self.name.len() > 240
+            || self.name.chars().any(char::is_control)
+        {
+            return Err("担当構成の名前を1〜240バイトで入力してください".into());
+        }
+        if self.assignments.is_empty()
+            || self.assignments.len() > MAX_NODES
+            || self.assignments.keys().any(|id| !valid_id(id))
+        {
+            return Err("担当構成は計画・実装・レビュー・検証の設定です".into());
+        }
+        for choice in self.assignments.values() {
+            choice.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn apply(&self, definition: &mut WorkflowDefinition) -> Result<(), String> {
+        self.validate()?;
+        if self.assignments.keys().any(|id| {
+            definition
+                .node(id)
+                .is_none_or(|node| !node.kind.uses_agent())
+        }) {
+            return Err("担当構成の工程IDが現在のフローと一致しません".into());
+        }
+        for node in &mut definition.nodes {
+            if let Some(choice) = self.assignments.get(&node.id) {
+                node.agent = choice.clone();
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -52,6 +183,12 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
+    pub fn uses_agent(self) -> bool {
+        matches!(
+            self,
+            Self::Plan | Self::Implement | Self::Review | Self::Verify
+        )
+    }
     pub const ALL: [Self; 7] = [
         Self::Trigger,
         Self::Plan,
@@ -128,6 +265,9 @@ pub struct Node {
     pub instruction: String,
     pub timeout_ms: Millis,
     pub max_retries: u8,
+    /// Defaults are omitted so pre-assignment definitions retain their digest.
+    #[serde(default, skip_serializing_if = "AgentChoice::is_default")]
+    pub agent: AgentChoice,
 }
 
 impl Node {
@@ -140,6 +280,7 @@ impl Node {
             instruction: String::new(),
             timeout_ms: 30 * 60_000,
             max_retries: 2,
+            agent: AgentChoice::default(),
         }
     }
 }
@@ -307,6 +448,16 @@ impl WorkflowDefinition {
         }
         let mut by_id = BTreeMap::new();
         for node in &self.nodes {
+            if let Err(message) = node.agent.validate() {
+                errors.push(issue(Some(&node.id), "agent", message));
+            }
+            if !node.kind.uses_agent() && !node.agent.is_default() {
+                errors.push(issue(
+                    Some(&node.id),
+                    "agent",
+                    "この工程はエージェントを使用しません",
+                ));
+            }
             if !valid_id(&node.id) || by_id.insert(node.id.as_str(), node).is_some() {
                 errors.push(issue(
                     Some(&node.id),
@@ -614,6 +765,8 @@ pub struct Run {
     pub definition_digest: String,
     pub repository: PathBuf,
     pub objective: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_task: Option<crate::tasks::TaskOrigin>,
     pub target: TargetSnapshot,
     pub state: RunState,
     pub nodes: BTreeMap<String, NodeRun>,
@@ -642,6 +795,57 @@ impl Run {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_assignments_preserve_old_serialization_and_run_digests() {
+        let definition = WorkflowDefinition::standard();
+        let encoded = serde_json::to_string(&definition).unwrap();
+        assert!(!encoded.contains("\"agent\""));
+        let restored: WorkflowDefinition = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.digest(), definition.digest());
+        assert!(restored.nodes.iter().all(|n| n.agent.is_default()));
+        let run = Run::demo();
+        let encoded = serde_json::to_string(&run).unwrap();
+        assert!(!encoded.contains("origin_task"));
+        crate::engine::Engine::restore(serde_json::from_str(&encoded).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_preset_preserves_distinct_assignments_for_repeated_stage_kinds() {
+        let mut source = WorkflowDefinition::standard();
+        let mut extra = Node::new("second-review", NodeKind::Review, 30.0, 30.0);
+        extra.agent.provider = "claude".into();
+        source.nodes.push(extra);
+        source
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "review")
+            .unwrap()
+            .agent
+            .provider = "codex".into();
+        let preset = AgentPreset::from_definition("Independent review".into(), &source);
+        let restored: AgentPreset =
+            serde_json::from_slice(&serde_json::to_vec(&preset).unwrap()).unwrap();
+        let mut target = source.clone();
+        for node in &mut target.nodes {
+            node.agent = AgentChoice::default();
+        }
+        let positions: Vec<_> = target.nodes.iter().map(|n| n.position).collect();
+        restored.apply(&mut target).unwrap();
+        assert_eq!(target.node("review").unwrap().agent.provider, "codex");
+        assert_eq!(
+            target.node("second-review").unwrap().agent.provider,
+            "claude"
+        );
+        assert_eq!(
+            positions,
+            target.nodes.iter().map(|n| n.position).collect::<Vec<_>>()
+        );
+        let mut other = WorkflowDefinition::standard();
+        let unchanged = other.clone();
+        assert!(restored.apply(&mut other).is_err());
+        assert_eq!(other, unchanged);
+    }
 
     #[test]
     fn standard_graph_requires_both_independent_verdicts() {

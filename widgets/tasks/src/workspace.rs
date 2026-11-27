@@ -221,6 +221,7 @@ pub struct Preferences {
     pub sort: Sort,
     pub source: Option<String>,
     pub label: Option<String>,
+    pub calendar_mode: String,
 }
 
 impl Default for Preferences {
@@ -232,6 +233,7 @@ impl Default for Preferences {
             sort: Sort::Activity,
             source: None,
             label: None,
+            calendar_mode: "both".into(),
         }
     }
 }

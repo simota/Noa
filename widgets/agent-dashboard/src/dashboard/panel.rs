@@ -46,7 +46,7 @@ pub(super) fn group_header(tree: &mut UiTree, parent: WidgetId, name: &str, n: u
     tree.insert(
         Some(parent),
         Label::new(format!("{} · {n}", one_line(name)))
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .weight(700)
             .color(Role::Muted),
     )

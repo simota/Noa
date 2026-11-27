@@ -46,20 +46,24 @@ fn rows(mode: Mode) -> Vec<Row> {
 pub(super) fn build(tree: &mut UiTree, root: WidgetId) -> WidgetId {
     tree.insert(
         Some(root),
-        Label::new("キーボード操作").font_size(14.0).weight(700),
+        Label::new("キーボード操作")
+            .font_size(crate::appearance::font(14.0))
+            .weight(700),
     );
     for (mode, heading) in SECTIONS {
         tree.insert(
             Some(root),
             Label::new(heading)
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .weight(700)
                 .color(Role::Muted),
         );
         for row in rows(mode) {
             let line = tree.insert(
                 Some(root),
-                Container::row().align_items(AlignItems::CENTER).gap(8.0),
+                Container::row()
+                    .align_items(AlignItems::CENTER)
+                    .gap(crate::appearance::space(8.0)),
             );
             let keys = tree.insert(
                 Some(line),
@@ -79,23 +83,32 @@ pub(super) fn build(tree: &mut UiTree, root: WidgetId) -> WidgetId {
             }
             // Wrapped, so a long description (`/`'s) stays inside the
             // help instead of running past its right edge.
-            tree.insert(Some(line), Label::new(row.title).font_size(12.0).wrap(true));
+            tree.insert(
+                Some(line),
+                Label::new(row.title)
+                    .font_size(crate::appearance::font(12.0))
+                    .wrap(true),
+            );
         }
     }
     // What a row is: a pane, which can be given more tasks.
     tree.insert(
         Some(root),
-        Label::new(ROW_NOTE).font_size(11.0).color(Role::Muted),
+        Label::new(ROW_NOTE)
+            .font_size(crate::appearance::font(11.0))
+            .color(Role::Muted),
     );
     // The footer: the note on the mouse, and 閉じる at the row's end.
     let footer = tree.insert(
         Some(root),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     tree.insert(
         Some(footer),
         Label::new("マウス: 行のボタン・表示の切替・分析はクリックでも操作できます")
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .color(Role::Muted),
     );
     spacer(tree, footer);

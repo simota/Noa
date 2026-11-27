@@ -1,9 +1,9 @@
 //! Calendar days in the local time zone, and what happened on them: the
 //! facts the timeline and the calendar place (a run's start and end, a
-//! task's close). Tasks have no due dates (spec, Scope), so nothing here is
-//! planned, only done.
+//! task's close), with calendar dates used by personal task deadlines.
 
 use tasks::model::types::{Liveness, Millis, ResultFact, RunView, State, Task, TaskRef};
+use tasks::workspace::{self, TaskMeta};
 
 /// A local calendar day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -114,17 +114,58 @@ pub(super) fn closed_at(task: &Task) -> Option<Millis> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Happened {
     /// A run started on the task, by this agent.
-    RunStarted { task: TaskRef, agent: String },
+    RunStarted {
+        task: TaskRef,
+        agent: String,
+    },
     /// The task was closed.
-    Closed { task: TaskRef },
+    Closed {
+        task: TaskRef,
+    },
+    Due {
+        task: TaskRef,
+        overdue: bool,
+    },
 }
 
 impl Happened {
     pub(super) fn task(&self) -> &TaskRef {
         match self {
-            Happened::RunStarted { task, .. } | Happened::Closed { task } => task,
+            Happened::RunStarted { task, .. }
+            | Happened::Closed { task }
+            | Happened::Due { task, .. } => task,
         }
     }
+}
+
+/// Deadlines are dates in the current local calendar, not UTC timestamps.
+pub(super) fn due_date(value: &str) -> Option<Millis> {
+    if value.is_empty() || !workspace::valid_date(value) {
+        return None;
+    }
+    let mut parts = value.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next()?.parse().ok()?;
+    let day = parts.next()?.parse().ok()?;
+    Some(midnight(year, month, day))
+}
+
+pub(super) fn deadline(
+    task: &Task,
+    last: Option<&RunView>,
+    meta: &TaskMeta,
+    now: Millis,
+) -> Option<(Millis, Happened)> {
+    let at = due_date(&meta.due)?;
+    let overdue =
+        next_midnight(at) <= now && !workspace::effective_workflow(task, last, meta).is_finished();
+    Some((
+        at,
+        Happened::Due {
+            task: task.r#ref.clone(),
+            overdue,
+        },
+    ))
 }
 
 /// What happened to `tasks` from `from` (inclusive) to `to` (exclusive),
@@ -291,5 +332,36 @@ mod tests {
                 (None, _, _) => assert_eq!(end, Some(view.now)),
             }
         }
+    }
+
+    #[test]
+    fn a_deadline_is_overdue_after_its_local_day_unless_the_task_is_finished() {
+        let view = demo::view();
+        let task = view
+            .tasks
+            .iter()
+            .find(|task| task.r#ref == TaskRef::Local("t-1".into()))
+            .unwrap();
+        let mut meta = TaskMeta {
+            due: "2028-02-29".into(),
+            ..Default::default()
+        };
+        let start = midnight(2028, 2, 29);
+        let end = midnight(2028, 3, 1);
+        assert_eq!(due_date("2028-02-29"), Some(start));
+        assert_eq!(due_date("2027-02-29"), None);
+        assert_eq!(due_date(""), None);
+        let overdue = |meta: &TaskMeta, now| {
+            matches!(
+                deadline(task, None, meta, now),
+                Some((_, Happened::Due { overdue: true, .. }))
+            )
+        };
+        assert!(!overdue(&meta, end - 1));
+        assert!(overdue(&meta, end));
+        meta.workflow = Some(workspace::Workflow::Done);
+        assert!(!overdue(&meta, end));
+        meta.workflow = Some(workspace::Workflow::Canceled);
+        assert!(!overdue(&meta, end));
     }
 }

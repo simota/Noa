@@ -17,6 +17,7 @@ pub mod sibling;
 pub mod store;
 pub mod task_links;
 pub mod timeline;
+pub mod workflow_links;
 pub mod workspace;
 pub mod worktree;
 

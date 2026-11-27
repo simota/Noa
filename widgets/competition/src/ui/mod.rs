@@ -288,7 +288,7 @@ impl Competition {
         artifact_root: Option<PathBuf>,
     ) -> Self {
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::dark());
+        crate::appearance::install(&mut tree, Theme::dark());
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -746,7 +746,9 @@ impl Competition {
                             PublishState::Published { post_id, .. } => {
                                 let published = self.tree.insert(
                                     Some(self.status_leading),
-                                    Label::new(label.clone()).font_size(12.0).color(Role::Muted),
+                                    Label::new(label.clone())
+                                        .font_size(crate::appearance::font(12.0))
+                                        .color(Role::Muted),
                                 );
                                 self.tree.set_accessible_label(
                                     published,
@@ -1334,6 +1336,9 @@ mod timeline_header_tests {
 }
 
 impl Screen for Competition {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
     fn tree(&self) -> &UiTree {
         &self.tree
     }
@@ -1473,8 +1478,8 @@ pub(super) fn fill() -> Style {
 
 pub(super) fn gap(px: f32) -> LayoutSize<LengthPercentage> {
     LayoutSize {
-        width: length(px),
-        height: length(px),
+        width: length(crate::appearance::space(px)),
+        height: length(crate::appearance::space(px)),
     }
 }
 
@@ -1515,14 +1520,21 @@ pub(super) fn heading(tree: &mut UiTree, parent: WidgetId, text: &str) -> Widget
             ..Default::default()
         }),
     );
-    tree.insert(Some(bar), Label::new(text).font_size(14.0).weight(600));
+    tree.insert(
+        Some(bar),
+        Label::new(text)
+            .font_size(crate::appearance::font(14.0))
+            .weight(600),
+    );
     bar
 }
 
 pub(super) fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) {
     tree.insert(
         Some(parent),
-        Label::new(text.into()).font_size(12.0).color(Role::Muted),
+        Label::new(text.into())
+            .font_size(crate::appearance::font(12.0))
+            .color(Role::Muted),
     );
 }
 
@@ -1530,7 +1542,7 @@ pub(super) fn note(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>)
     tree.insert(
         Some(parent),
         Label::new(text.into())
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .color(Role::Muted)
             .wrap(true),
     );
@@ -1566,7 +1578,7 @@ pub(super) fn scroll_column(tree: &mut UiTree, parent: WidgetId, spacing: f32) -
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(spacing),
-            padding: LayoutRect::length(12.0),
+            padding: LayoutRect::length(crate::appearance::space(12.0)),
             size: LayoutSize {
                 width: percent(1.0),
                 height: auto(),

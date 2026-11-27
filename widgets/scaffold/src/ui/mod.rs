@@ -90,6 +90,7 @@ enum Press {
     RegisterAssets,
     SetupTaskPreview,
     SetupTask,
+    OpenTask(String),
     ClosePreview,
     GoTab(Tab),
     ClearFilters,
@@ -151,7 +152,7 @@ impl Scaffold {
         let mut theme = Theme::for_appearance(Appearance::Dark);
         // Keep secondary text and status colors readable on the selected row.
         theme.selection = noa_gpui_core::theme::mix(theme.surface, theme.accent, 0.12);
-        tree.set_theme(theme);
+        crate::appearance::install(&mut tree, theme);
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -172,13 +173,15 @@ impl Scaffold {
         let identity = tree.insert(Some(header), Container::new(row(12.0)));
         tree.insert(
             Some(identity),
-            Label::new("足場").font_size(20.0).weight(700),
+            Label::new("足場")
+                .font_size(crate::appearance::font(20.0))
+                .weight(700),
         );
         let repo_host = tree.insert(Some(identity), Container::new(grow()));
         let repo = tree.insert(
             Some(repo_host),
             Label::new("")
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .max_lines(1)
                 .color(Role::Muted),
         );
@@ -188,7 +191,9 @@ impl Scaffold {
         let commit = tree.insert(Some(status), Tag::new(""));
         let scanned = tree.insert(
             Some(status),
-            Label::new("").font_size(11.0).color(Role::Muted),
+            Label::new("")
+                .font_size(crate::appearance::font(11.0))
+                .color(Role::Muted),
         );
         let navigation = tree.insert(Some(header), Container::new(row(12.0)));
         let tabs = tree.insert(
@@ -210,7 +215,7 @@ impl Scaffold {
         let count = tree.insert(
             Some(count_host),
             Label::new("")
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .color(Role::Muted)
                 .max_lines(1),
         );
@@ -226,7 +231,12 @@ impl Scaffold {
                 ..style::column(0.0)
             }),
         );
-        let notice = tree.insert(Some(notice_host), Label::new("").font_size(12.0).wrap(true));
+        let notice = tree.insert(
+            Some(notice_host),
+            Label::new("")
+                .font_size(crate::appearance::font(12.0))
+                .wrap(true),
+        );
         let body = tree.insert(
             Some(root),
             Container::new(Style {
@@ -275,7 +285,7 @@ impl Scaffold {
         );
         tree.insert(Some(footer), Label::new(
             "0 セットアップ · 1 資産 · 2 改善候補 · 3 情報源    ↑↓ 選択 · Enter 詳細 · / 検索 · Esc 戻る · R 再スキャン"
-        ).font_size(10.0).color(Role::Muted).max_lines(1));
+        ).font_size(crate::appearance::font(10.0)).color(Role::Muted).max_lines(1));
 
         let mut backend = backend;
         let state = backend.scan();
@@ -602,6 +612,17 @@ impl Scaffold {
     /// `text` must be the store the tree was laid out with: removed widgets
     /// release their text layouts in it.
     fn rebuild(&mut self, text: &mut TextStore) {
+        let focused = self.tree.focused();
+        let focused_item = self
+            .rows
+            .iter()
+            .find(|(id, _)| Some(*id) == focused)
+            .map(|(_, item)| item.clone());
+        let focused_press = self
+            .presses
+            .iter()
+            .find(|(id, _)| Some(*id) == focused)
+            .map(|(_, press)| press.clone());
         self.update_header();
         clear(&mut self.tree, self.ids.list, text);
         clear(&mut self.tree, self.ids.info, text);
@@ -624,6 +645,21 @@ impl Scaffold {
         }
         if !show_detail && self.form.is_some() {
             self.close_form(text);
+        }
+        if let Some(item) = focused_item {
+            let next = self
+                .rows
+                .iter()
+                .find(|(_, row)| row == &item)
+                .map(|(id, _)| *id);
+            self.tree.set_focus(next);
+        } else if let Some(press) = focused_press {
+            let next = self
+                .presses
+                .iter()
+                .find(|(_, action)| action == &press)
+                .map(|(id, _)| *id);
+            self.tree.set_focus(next);
         }
     }
 
@@ -778,7 +814,7 @@ impl Scaffold {
         self.tree.insert(
             Some(parent),
             Label::new(text)
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .color(Role::Muted)
                 .wrap(true),
         );
@@ -795,7 +831,10 @@ impl Scaffold {
         );
         self.tree.insert(
             Some(card),
-            Label::new(title).font_size(15.0).weight(600).wrap(true),
+            Label::new(title)
+                .font_size(crate::appearance::font(15.0))
+                .weight(600)
+                .wrap(true),
         );
         self.note(card, description);
     }
@@ -850,7 +889,7 @@ impl Scaffold {
             self.tree.insert(
                 Some(host),
                 Label::new(&a.title)
-                    .font_size(14.0)
+                    .font_size(crate::appearance::font(14.0))
                     .weight(600)
                     .max_lines(1),
             );
@@ -863,7 +902,7 @@ impl Scaffold {
             self.tree.insert(
                 Some(host),
                 Label::new(format!("{} · {}", a.kind.label(), a.path))
-                    .font_size(11.0)
+                    .font_size(crate::appearance::font(11.0))
                     .max_lines(1)
                     .color(Role::Muted),
             );
@@ -922,7 +961,7 @@ impl Scaffold {
             self.tree.insert(
                 Some(host),
                 Label::new(format!("{}/{}", imp.widget, imp.target))
-                    .font_size(14.0)
+                    .font_size(crate::appearance::font(14.0))
                     .weight(600)
                     .max_lines(1),
             );
@@ -938,7 +977,7 @@ impl Scaffold {
             self.tree.insert(
                 Some(r),
                 Label::new(format!("{}{evidence}", rule_label(&imp.rule)))
-                    .font_size(11.0)
+                    .font_size(crate::appearance::font(11.0))
                     .max_lines(1)
                     .color(Role::Muted),
             );
@@ -976,7 +1015,7 @@ impl Scaffold {
             self.tree.insert(
                 Some(host),
                 Label::new(&source.path)
-                    .font_size(13.0)
+                    .font_size(crate::appearance::font(13.0))
                     .weight(600)
                     .max_lines(1),
             );
@@ -996,7 +1035,7 @@ impl Scaffold {
                         .error
                         .unwrap_or_else(|| "スキャンの根拠として読み込みました".into()),
                 )
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .max_lines(2)
                 .color(if ok {
                     Paint::Role(Role::Muted)
@@ -1010,7 +1049,10 @@ impl Scaffold {
     fn heading(&mut self, text: impl Into<String>) {
         self.tree.insert(
             Some(self.ids.info),
-            Label::new(text).font_size(14.0).weight(700).wrap(true),
+            Label::new(text)
+                .font_size(crate::appearance::font(14.0))
+                .weight(700)
+                .wrap(true),
         );
     }
 
@@ -1018,7 +1060,7 @@ impl Scaffold {
         self.tree.insert(
             Some(self.ids.info),
             Label::new(text)
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .weight(600)
                 .color(Role::Muted),
         );
@@ -1027,7 +1069,10 @@ impl Scaffold {
     fn line(&mut self, text: impl Into<String>) {
         self.tree.insert(
             Some(self.ids.info),
-            Label::new(text).font_size(12.0).wrap(true).selectable(true),
+            Label::new(text)
+                .font_size(crate::appearance::font(12.0))
+                .wrap(true)
+                .selectable(true),
         );
     }
 
@@ -1036,6 +1081,9 @@ impl Scaffold {
             Some(parent),
             Button::new(label).control_size(ControlSize::Small),
         );
+        if matches!(&press, Press::OpenTask(_)) {
+            self.tree.set_enabled(id, self.state.git_repository);
+        }
         self.presses.push((id, press));
     }
 
@@ -1053,7 +1101,7 @@ impl Scaffold {
             self.tree.insert(
                 Some(host),
                 Label::new(format!("{} {id} · {}", kind.label(), path.display()))
-                    .font_size(12.0)
+                    .font_size(crate::appearance::font(12.0))
                     .wrap(true),
             );
             self.button(r, "外す", Press::Unlink(kind, id));
@@ -1203,8 +1251,14 @@ impl Scaffold {
             ImprovementStatus::Open => self.button(actions, "タスクにする (T)", Press::HandOff),
             ImprovementStatus::HandedOff(task) => {
                 self.line(format!(
-                    "タスク {task} に引き渡し済みです。View → Tasks で作業を続けられます。"
+                    "タスク {task} に引き渡し済みです。{}",
+                    self.state.task_destination(),
                 ));
+                self.button(
+                    actions,
+                    "作成したタスクを開く",
+                    Press::OpenTask(task.clone()),
+                );
             }
             ImprovementStatus::Resolved => {
                 self.line("この候補は解消しています。関連する作業と検証の記録を確認できます。");
@@ -1228,7 +1282,7 @@ impl Scaffold {
             self.tree.insert(
                 Some(self.ids.info),
                 Label::new(brief)
-                    .font_size(11.0)
+                    .font_size(crate::appearance::font(11.0))
                     .wrap(true)
                     .selectable(true),
             );
@@ -1377,6 +1431,15 @@ impl Scaffold {
             return;
         }
         match &press {
+            Press::OpenTask(id) => {
+                if !self.state.git_repository {
+                    self.set_notice(Err(backend::TASKS_REQUIRE_GIT.into()));
+                    self.rebuild(text);
+                    return;
+                }
+                self.act(Action::OpenTask { id: id.clone() }, text);
+                return;
+            }
             Press::GoTab(tab) => {
                 self.clear_filters(text);
                 self.set_tab(*tab, text);
@@ -1403,6 +1466,7 @@ impl Scaffold {
             | Press::RegisterAssets
             | Press::SetupTaskPreview
             | Press::SetupTask
+            | Press::OpenTask(_)
             | Press::ClosePreview
             | Press::GoTab(_)
             | Press::ClearFilters
@@ -1591,6 +1655,10 @@ fn shortcut_modifiers(key: &Key, m: &Modifiers) -> bool {
 }
 
 impl Screen for Scaffold {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
+
     fn tree(&self) -> &UiTree {
         &self.tree
     }

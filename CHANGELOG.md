@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The board timeline follows its live orchestrator when it is rebound to a
+  different board, instead of staying on the old history. Explicit board IDs
+  and the history of closed orchestrators remain readable. Visit counts and
+  post details are kept separate when the board changes.
+- Timeline worker and agent filters remain selected when a search returns
+  no posts. Failed reads show the cause, and `r` retries the current search
+  or open post. Empty timelines explain how results are published.
+- The orchestration skill's two-step spawn/send examples now register new
+  tasks with `--new-run` and explain publishing a worker summary; ordinary
+  state reports and result files do not create timeline posts.
+
 ## [0.9.20] - 2026-11-27
 
 Repository-defined widgets that agents open and update from a JSON

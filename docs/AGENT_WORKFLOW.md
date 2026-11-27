@@ -283,7 +283,10 @@ noa close PANE
 `--task` waits for the agent to be ready, types the task and waits for the turn
 to end. When the agent's input box is not on screen in time (a trust or login
 prompt), it types nothing and prints `"sent":false` with the `screen`; answer
-the prompt and `send` the task yourself. Every worker gets its own report file
+the prompt and use `send PANE --new-run --enter --wait …` for the task.
+`--new-run` is also for the first task after a plain `spawn`, and for a later
+new task. Follow-up instructions, approval responses and question answers
+stay in the same run without it. Every worker gets its own report file
 in `NOA_RESULT` (`<cwd>/.noa/result-LABEL.md`, with a random suffix when that
 name is taken; `.noa/` ignores itself, so git
 never sees it), which `result` prints.
@@ -291,7 +294,7 @@ never sees it), which `result` prints.
 | Command | What it does |
 |---|---|
 | `spawn [--cwd D \| --worktree] [--tier T] [--env K=V] [--label L] [--input T] [--no-wait-after] [--focus] [--no-board] [--max-children N] [--ready S] [--task T \| --task-file F [wait options]] [-- CMD...]` | Starts a worker in a floating pane stowed on this pane's board, opening the board first when none is open; the board's row shows the worker's state, and the board's `g` opens it over the lower part of the board. With `--no-board`, or when the board cannot open, the worker floats over this pane instead, collapsed to its title strip. `--focus` opens it and moves focus to it; otherwise focus stays where it was. The command runs without a shell, found on the orchestrator's own `PATH`, and the worker gets the orchestrator's locale (`LANG`, `LC_*`), which a Noa started from the Dock lacks; the cwd defaults to the orchestrator's (a relative `--cwd` is taken from it). A `--cwd` that is not a directory, or a command not found on the worker's `PATH`, is refused before anything starts. Finished workers stay open (with their exit code in `Panel.exit`) until closed, unless `--no-wait-after`. A board holds at most 20 stowed workers (its list scrolls), a pane at most 8 other floats, and one orchestrator 20 workers unless `--max-children` sets fewer; exited workers count until closed; Noa counts them too, one spawn at a time, so parallel spawns stay under the limit (an older Noa leaves only the count `+ctl` makes before each spawn). `--split` and `--tab` are refused, and so are a `--label` starting with `board:` and `--input` for an agent (it is typed as raw keys, each newline an Enter). `--worktree` (needs `--label L`, refuses `--cwd`) first runs `git worktree add -b orch/L <main>-wt/L HEAD`, next to the repository's main worktree, and starts the worker there; it prints `worktree` and `branch` too, and warns apart about tracked changes and untracked files the worktree lacks. `--ready S` waits up to S seconds for the worker to report or show a screen that stays still, and prints `ready` and the `screen`; `--task` (claude, codex or agy) then types the task and waits as `send --enter --wait` does. A spawn whose answer Noa did not confirm looks for its worker for about 3 s and prints `recovered:true` when it finds it. `--tier light\|standard\|deep` adds the model and effort flags of that tier to a `claude`, `codex` or `agy` command (refused when the command already picks a model or effort) |
-| `send PANE [--enter] [--raw] [--replace] [--wait ...] [--answer] [--queue] TEXT\|-` | Pastes `TEXT` (or stdin) and, with `--enter`, submits it. Refused while the pane's agent waits for an approval or asks a question (`blocked:"question"`: Enter would pick its first choice), checked before typing and again before Enter, unless `--answer` (`--answer --enter ""` presses Enter alone); refused while the agent is working unless `--queue` (raw keys such as Esc still go); refused for a text over 250 KiB. A paste into an agent waits up to 15 s for it to enable bracketed paste, so a program still starting does not take each newline as Enter. Prints `{"paneId","seq"}`: pass `seq` to `wait --after`, which covers state reports but not `attention` (a notification-only worker that finishes before the wait starts is missed). `--wait` waits right away, with no chance to miss the reply, and says on stderr how to resume if it is killed. `--replace` first clears what the input line holds (Ctrl-E, then Ctrl-U in short writes, enough for 32 lines; checked on Claude Code, Codex and Antigravity CLI) |
+| `send PANE [--enter] [--raw] [--replace] [--wait ...] [--answer] [--queue] [--new-run] TEXT\|-` | Pastes `TEXT` (or stdin) and, with `--enter`, submits it. `--new-run` registers a new timeline run before delivering a new task; it cannot be combined with `--answer`, `--raw`, `--queue` or `--replace`. Refused while the pane's agent waits for an approval or asks a question (`blocked:"question"`: Enter would pick its first choice), checked before typing and again before Enter, unless `--answer` (`--answer --enter ""` presses Enter alone); refused while the agent is working unless `--queue` (raw keys such as Esc still go); refused for a text over 250 KiB. A paste into an agent waits up to 15 s for it to enable bracketed paste, so a program still starting does not take each newline as Enter. Prints `{"paneId","seq"}`: pass `seq` to `wait --after`, which covers state reports but not `attention` (a notification-only worker that finishes before the wait starts is missed). `--wait` waits right away, with no chance to miss the reply, and says on stderr how to resume if it is killed. `--replace` first clears what the input line holds (Ctrl-E, then Ctrl-U in short writes, enough for 32 lines; checked on Claude Code, Codex and Antigravity CLI) |
 | `wait PANE...\|--children [--after SEQ \| --after PANE=SEQ ...] [--for LIST] [--all] [--timeout S] [--tail N] [--stall S] [--settle S]` | Returns when one of the panes (all of them with `--all`) stops: `finished`, `permission`, `input`, `error`, `exit` (printed whatever `--for` lists when a pane is gone or has exited and stays open, since neither will report again; without `--all`, a pane that had already exited when the wait began is skipped while other panes are left), or `attention`. Prints one line per pane that stopped; exits 2 on timeout, printing each pending pane's report count as `baseline`, which a later wait takes as `--after PANE=SEQ` to carry on without missing a report in between. A named pane that is not listed is an error. `--tail N` adds each open pane's last N output lines as `tail`. `--stall S` also ends the wait, with `stalled` and `quietSecs`, for a pane whose screen has not changed for S seconds: a worker that stopped without reporting (Claude Code's working spinner keeps its screen changing; Codex and Antigravity CLI are not checked, so read a stalled pane before treating it as stopped). `--settle S` holds a `finished` until the work on screen has stayed still for S seconds. Lines carry the pane's `label`, the dialog as `prompt` for `permission` and `input`, `blocked`, `result` once the worker wrote its report file, and `agentLeft` when the agent quit to its shell. SIGTERM, SIGINT or SIGHUP prints the timeout line with `interrupted:true` |
 | `read PANE [--scrollback] [--max-bytes N]` | Prints the screen, or the retained output tail; a cut says so on stderr, and so does a pane on the alternate screen, which keeps no history |
 | `result PANE [--max-bytes N \| --path]` | Prints the worker's report file (`NOA_RESULT`); a cut keeps the start. `--path` prints only the file's path and a newline (exit 0 even if the file is empty or missing, without opening it; it does not go with `--max-bytes`, an argument error), e.g. to `tail -f` a command worker's log |
@@ -431,6 +434,12 @@ opens the selected post and `Esc` returns to the timeline. Use `/` to search
 the title, summary and body, and `f` to filter by worker, agent, post kind or
 outcome. `F` clears both search and filters in one step.
 
+`r` reloads the timeline with the current search and filters, and retries a
+failed post-body read. A body that could not be fetched shows a failure
+message instead of staying on a loading message. A failed refresh keeps the
+posts already shown, marked as stale, so you can continue reading them and
+retry after the connection recovers.
+
 Press `c` in the post list to switch between detailed cards and a compact,
 one-post-per-line list. The compact list prioritizes the outcome mark, post
 kind and title; wider panes also show the post number, outcome word, author
@@ -444,6 +453,24 @@ header. `G` merges them and selects the newest post. `g` opens a post's live
 worker pane and `w` shows that worker's detail when it still belongs to this
 board. `v` switches to the workflow. Archived posts remain readable after
 their worker closes. `?` shows the full key reference in any view.
+
+If the timeline is empty, distinguish registration from publication:
+
+- No board is registered yet: `spawn --task` / `--task-file`, `send --new-run`
+  and `retry` register a run when they deliver a task on a timeline-capable
+  Noa. A plain `spawn` followed by plain `send` does not. From the
+  orchestrator's pane, `noa timeline context --pane PANE` reads the worker's
+  board and runs. A `not_found` error says whether the pane is closed or has
+  no registered board.
+- A board is registered but has no posts: an agent-state report or writing
+  `$NOA_RESULT` is not a timeline post. The worker publishes its summary with
+  `noa timeline post --run RUN_ID --file summary.json`; Tasks posts a result
+  when you use 共有. The [worker summary example](../skills/noa-orchestration/reference.md#publishing-a-worker-summary)
+  shows the JSON fields and how to retry safely.
+- Posts may be hidden by a search or filter: `F` clears them. To check the
+  stored feed directly, use `noa timeline list --board BOARD_ID` from a shell
+  where `noa() { "$NOA_BIN" +ctl "$@"; }` is defined. Use `G` for posts that
+  arrived while you were reading older ones.
 
 ### A skill for the orchestrating agent
 

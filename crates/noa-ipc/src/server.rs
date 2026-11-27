@@ -2534,16 +2534,22 @@ mod tests {
 
     #[test]
     fn deadline_stream_mark_connected_applies_the_steady_state_timeouts() {
-        let (_client, server) = tcp_pair();
+        let (client, server) = tcp_pair();
+        // The kernel quantizes socket timeouts (for example, 50 ms can read
+        // back as 52 ms). Calibrate on the independent peer, then require the
+        // exact same settings on the stream after its state transition.
+        client
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        client.set_write_timeout(Some(WRITE_TIMEOUT)).unwrap();
+        let expected_read = client.read_timeout().unwrap();
+        let expected_write = client.write_timeout().unwrap();
         let mut stream = DeadlineStream::new_handshake(server, Duration::from_secs(5));
         stream
             .mark_connected(Instant::now() + Duration::from_secs(10))
             .unwrap();
-        assert_eq!(
-            stream.inner.read_timeout().unwrap(),
-            Some(Duration::from_millis(50))
-        );
-        assert_eq!(stream.inner.write_timeout().unwrap(), Some(WRITE_TIMEOUT));
+        assert_eq!(stream.inner.read_timeout().unwrap(), expected_read);
+        assert_eq!(stream.inner.write_timeout().unwrap(), expected_write);
     }
 
     #[test]

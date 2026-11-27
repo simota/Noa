@@ -60,6 +60,12 @@
         "linux",
         "macos"
       ]
+    },
+    "workflow": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
     }
   },
   "assets": [

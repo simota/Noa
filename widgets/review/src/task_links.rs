@@ -285,6 +285,88 @@ pub struct Target {
     pub head_sha: Option<String>,
 }
 
+/// Explicit launch context supplied by Tasks. A commit alone cannot identify
+/// a task: several runs may have produced or inspected the same revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OriginHint {
+    pub repo: PathBuf,
+    pub base: String,
+    pub task: String,
+    pub run: String,
+    pub commit: String,
+}
+
+/// Resolve only the requested task/run, in the requested repository, and only
+/// if its recorded revision matches the captured target. Never fall back to a
+/// newer run when an explicit handoff is stale or incorrect.
+pub fn match_explicit(root: &Path, hint: &OriginHint, target: &Target) -> Result<Matched, String> {
+    let repository = repository_of(&hint.repo).ok_or("元タスクのリポジトリを確認できません")?;
+    if repository_of(&target.toplevel).as_ref() != Some(&repository)
+        || target.head_sha.as_deref() != Some(hint.commit.as_str())
+    {
+        return Err(
+            "元タスクと対象のリポジトリ・変更版が一致しません。Tasksから開き直してください".into(),
+        );
+    }
+    for dir in key_dirs(root) {
+        if key_repository(&dir).as_ref() != Some(&repository) {
+            continue;
+        }
+        let events = read(&links_log(&dir)).map_err(|e| e.to_string())?;
+        let origin_repo = events.iter().rev().find_map(|event| match event {
+            LinkEvent::Repo { path, .. } => Some(path),
+            _ => None,
+        });
+        // A different Tasks workspace can reuse both a local task ID and a
+        // millisecond run ID, even within the same Git common directory.
+        if !origin_repo.is_some_and(|path| same_path(path, &hint.repo)) {
+            continue;
+        }
+        if !events.iter().any(|event| {
+            matches!(event,
+            LinkEvent::ChangeBase { run, commit, .. } if run == &hint.run && commit == &hint.base)
+        }) {
+            continue;
+        }
+        if !events.iter().any(|e| {
+            matches!(e, LinkEvent::ChangeSeen { run, commit, .. }
+            if run == &hint.run && commit == &hint.commit)
+        }) {
+            continue;
+        }
+        if let Some(run) = read_runs(&dir).into_iter().find(|r| {
+            r.run == hint.run && select_arg(&r.task).as_deref() == Some(hint.task.as_str())
+        }) {
+            return Ok(Matched {
+                run,
+                by: MatchedBy::Commit,
+            });
+        }
+    }
+    Err("指定したタスク・実行・変更版が見つかりません。Tasksから開き直してください".into())
+}
+
+pub fn link_explicit(
+    root: &Path,
+    hint: &OriginHint,
+    target: &Target,
+    kind: SessionKind,
+    session: &str,
+    now: Millis,
+) -> Result<Option<Origin>, String> {
+    let matched = match_explicit(root, hint, target)?;
+    link_session(
+        &matched,
+        kind,
+        session,
+        target.head_sha.as_deref(),
+        false,
+        now,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(find_origin(root, kind, session))
+}
+
 /// The run a target belongs to, and the rule that said so.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Matched {
@@ -1040,6 +1122,144 @@ mod tests {
     /// A worktree run's own work tree on another ref (`HEAD~1`) is not the
     /// run's head, so the worktree rule does not take it; a ref or a commit
     /// of another clone with the same branch name or SHA matches nothing.
+    #[test]
+    fn explicit_origin_selects_the_tasks_worktree_when_local_ids_collide() {
+        let (root, one, two) = fixture("explicit-worktree");
+        let repo = root.join("repo");
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let other = root.join("another-worktree");
+        git(
+            &repo,
+            &["worktree", "add", "-qb", "another", other.to_str().unwrap()],
+        );
+        append(
+            &links_log(&two),
+            &LinkEvent::Repo {
+                path: other.clone(),
+                at: 20,
+            },
+        )
+        .unwrap();
+        let chosen = read_runs(&one)
+            .into_iter()
+            .find(|r| r.run == "run-5")
+            .unwrap();
+        run_started(&two, "run-5", &chosen.task.0.to_string(), &other, None, 21);
+        for dir in [&one, &two] {
+            append(
+                &links_log(dir),
+                &LinkEvent::ChangeBase {
+                    run: "run-5".into(),
+                    commit: SHA_B.into(),
+                    at: 21,
+                },
+            )
+            .unwrap();
+            append(
+                &links_log(dir),
+                &LinkEvent::ChangeSeen {
+                    run: "run-5".into(),
+                    commit: SHA_A.into(),
+                    at: 22,
+                },
+            )
+            .unwrap();
+        }
+        let hint = OriginHint {
+            base: SHA_B.into(),
+            repo: other,
+            task: select_arg(&chosen.task).unwrap(),
+            run: "run-5".into(),
+            commit: SHA_A.into(),
+        };
+        let target = Target {
+            toplevel: repo,
+            head_ref: None,
+            head_sha: Some(SHA_A.into()),
+        };
+        assert_eq!(
+            match_explicit(&root, &hint, &target).unwrap().run.key_dir,
+            two
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_handoff_does_not_switch_to_a_newer_run_of_the_same_commit() {
+        let (root, one, _) = fixture("explicit");
+        let repo = root.join("repo");
+        for run in ["run-5", "run-7"] {
+            append(
+                &links_log(&one),
+                &LinkEvent::ChangeBase {
+                    run: run.into(),
+                    commit: SHA_B.into(),
+                    at: 9,
+                },
+            )
+            .unwrap();
+            append(
+                &links_log(&one),
+                &LinkEvent::ChangeSeen {
+                    run: run.into(),
+                    commit: SHA_A.into(),
+                    at: 10,
+                },
+            )
+            .unwrap();
+        }
+        let chosen = read_runs(&one)
+            .into_iter()
+            .find(|r| r.run == "run-5")
+            .unwrap();
+        let hint = OriginHint {
+            base: SHA_B.into(),
+            repo: repo.clone(),
+            task: select_arg(&chosen.task).unwrap(),
+            run: chosen.run,
+            commit: SHA_A.into(),
+        };
+        let target = Target {
+            toplevel: repo,
+            head_ref: None,
+            head_sha: Some(SHA_A.into()),
+        };
+        assert_eq!(
+            match_explicit(&root, &hint, &target).unwrap().run.run,
+            "run-5"
+        );
+        let origin = link_explicit(
+            &root,
+            &hint,
+            &target,
+            SessionKind::Review,
+            "rev-explicit",
+            12,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(origin.run, "run-5");
+        let mut wrong = hint.clone();
+        wrong.base = SHA_A.into();
+        assert!(match_explicit(&root, &wrong, &target).is_err());
+        let mut wrong = hint.clone();
+        wrong.task = "t-unrelated".into();
+        assert!(match_explicit(&root, &wrong, &target).is_err());
+        let mut wrong = hint.clone();
+        wrong.run = "missing".into();
+        assert!(match_explicit(&root, &wrong, &target).is_err());
+        let mut wrong = target.clone();
+        wrong.head_sha = Some(SHA_B.into());
+        assert!(match_explicit(&root, &hint, &wrong).is_err());
+        let other = root.join("other-clone");
+        fs::create_dir_all(&other).unwrap();
+        git(&other, &["init", "-q"]);
+        let mut wrong = target.clone();
+        wrong.toplevel = other;
+        assert!(match_explicit(&root, &hint, &wrong).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn links_ac3_match_run_keeps_to_the_runs_head_and_repository() {
         let root = scratch("scope");

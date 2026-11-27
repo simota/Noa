@@ -2,6 +2,9 @@
 //! local-log statistics (`docs/specs/agent-usage.md`). Flags, window title,
 //! the headless snapshot and the app.
 
+#[path = "../../shared/appearance.rs"]
+mod appearance;
+
 mod demo;
 mod ui;
 
@@ -149,6 +152,9 @@ fn render_snapshot(
 }
 
 fn main() -> Result<(), String> {
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let args = parse_args(std::env::args().skip(1))?;
     if args.help {
         println!("{USAGE}");

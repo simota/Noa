@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use noa_ipc::widget::{
     AckParams, CloseParams, DescribeParams, EventsParams, InstanceParams, ListParams,
-    MAX_EVENT_PAGE, OpenParams, SetParams, WidgetCall,
+    MAX_EVENT_PAGE, OpenParams, OperationState, ReportParams, SetParams, WidgetCall,
 };
 use noa_ipc::{Client, ClientError, WireId};
 use noa_widget::{Asset, MAX_DATA_BYTES, MAX_MANIFEST_BYTES, Manifest, assets, definition_digest};
@@ -30,6 +30,8 @@ const HELP: &str = "Repository widgets (JSON output):
   widget set INSTANCE --data-file FILE --expected-revision N --request-id ID
   widget events INSTANCE [--consumer ID] [--after N] [--limit N] [--wait SECONDS]
   widget ack INSTANCE --through N [--consumer ID] --request-id ID
+  widget report INSTANCE --event ID --expected-version N --state STATE
+                [--consumer ID] [--message TEXT] --request-id ID
   widget close INSTANCE --request-id ID
   widget forget INSTANCE
 
@@ -39,6 +41,8 @@ order. Mutations require a stable request id: reuse it only for identical retrie
 Forget removes a stopped, fully acknowledged instance and its retry history;
 it is idempotent by instance id and does not need a separate request id.
 Validation and preview work with the control server disabled.
+Report states: running, waiting, completed, failed. Only the registered event
+consumer may report a delivered event. A queue ack is never processing completion.
 ";
 
 const INLINE_ASSETS: &str = "a definition with assets cannot be opened with --definition-file: \
@@ -94,6 +98,15 @@ pub(crate) enum WidgetCommand {
         through: u64,
         request_id: String,
     },
+    Report {
+        instance: String,
+        consumer: Option<String>,
+        event: String,
+        version: u64,
+        state: OperationState,
+        message: String,
+        request_id: String,
+    },
     Close {
         instance: String,
         request_id: String,
@@ -110,6 +123,7 @@ impl WidgetCommand {
             Self::Open { .. }
                 | Self::Events { consumer: None, .. }
                 | Self::Ack { consumer: None, .. }
+                | Self::Report { consumer: None, .. }
         )
     }
 
@@ -266,6 +280,35 @@ pub(crate) fn parse(args: &[String]) -> Result<WidgetCommand, String> {
                 instance: one(&mut args, "instance id")?,
                 consumer,
                 through,
+                request_id,
+            }
+        }
+        "report" => {
+            let consumer = args.value("--consumer")?;
+            let event = required(&mut args, "--event")?;
+            let version = parse_u64(
+                "--expected-version",
+                &required(&mut args, "--expected-version")?,
+            )?;
+            if version == 0 {
+                return Err("--expected-version must be positive".into());
+            }
+            let state = match required(&mut args, "--state")?.as_str() {
+                "running" => OperationState::Running,
+                "waiting" => OperationState::Waiting,
+                "completed" => OperationState::Completed,
+                "failed" => OperationState::Failed,
+                _ => return Err("--state needs running, waiting, completed or failed".into()),
+            };
+            let message = args.value("--message")?.unwrap_or_default();
+            let request_id = required(&mut args, "--request-id")?;
+            WidgetCommand::Report {
+                instance: one(&mut args, "instance id")?,
+                consumer,
+                event,
+                version,
+                state,
+                message,
                 request_id,
             }
         }
@@ -579,6 +622,30 @@ pub(crate) fn execute(
             through_seq: through,
             request_id,
         }),
+        WidgetCommand::Report {
+            instance,
+            consumer,
+            event,
+            version,
+            state,
+            message,
+            request_id,
+        } => {
+            if !client.has_capability(noa_ipc::widget::CAPABILITY_WIDGET_OPERATIONS_V1) {
+                return Err(Failure::unavailable(
+                    "this Noa server does not support widget operation reports",
+                ));
+            }
+            WidgetCall::Report(ReportParams {
+                instance_id: instance,
+                consumer_id: consumer_id(consumer, own)?,
+                event_id: event,
+                expected_version: version,
+                state,
+                message,
+                request_id,
+            })
+        }
         WidgetCommand::Close {
             instance,
             request_id,
@@ -800,5 +867,37 @@ mod tests {
             .join("../../.noa-widgets/test-summary/widget.json");
         let plain = read_definition(&summary).unwrap();
         assert!(package_assets(Path::new("-"), &plain).unwrap().is_empty());
+    }
+
+    #[test]
+    fn processing_report_requires_event_version_state_and_a_retry_key() {
+        let args = [
+            "report",
+            "wi_x",
+            "--event",
+            "we_1",
+            "--expected-version",
+            "1",
+            "--state",
+            "running",
+            "--request-id",
+            "report-1",
+        ];
+        assert!(parse_list(&args).unwrap().needs_own_pane());
+        let mut explicit = args.to_vec();
+        explicit.extend(["--consumer", "producer", "--message", "Checking files"]);
+        assert!(!parse_list(&explicit).unwrap().needs_own_pane());
+        for missing in ["--event", "--expected-version", "--state", "--request-id"] {
+            let mut incomplete = args.to_vec();
+            let at = incomplete.iter().position(|arg| *arg == missing).unwrap();
+            incomplete.drain(at..at + 2);
+            assert!(parse_list(&incomplete).is_err(), "{missing}");
+        }
+        let mut invalid = args.to_vec();
+        invalid[7] = "accepted";
+        assert!(parse_list(&invalid).is_err());
+        invalid[7] = "running";
+        invalid[5] = "0";
+        assert!(parse_list(&invalid).is_err());
     }
 }

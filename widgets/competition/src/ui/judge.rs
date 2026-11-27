@@ -42,7 +42,7 @@ pub(super) fn insert(
                 flex_direction: FlexDirection::Column,
                 flex_shrink: 0.0,
                 gap: gap(6.0),
-                padding: LayoutRect::length(12.0),
+                padding: LayoutRect::length(crate::appearance::space(12.0)),
                 size: LayoutSize {
                     width: percent(1.0),
                     height: auto(),
@@ -79,7 +79,7 @@ pub(super) fn insert(
             Container::new(Style {
                 flex_direction: FlexDirection::Column,
                 gap: gap(6.0),
-                padding: LayoutRect::length(10.0),
+                padding: LayoutRect::length(crate::appearance::space(10.0)),
                 size: LayoutSize {
                     width: percent(1.0),
                     height: auto(),
@@ -115,7 +115,9 @@ pub(super) fn insert(
     if let Some(verdict) = session.final_verdict() {
         tree.insert(
             Some(list),
-            Label::new(verdict.to_owned()).font_size(14.0).wrap(true),
+            Label::new(verdict.to_owned())
+                .font_size(crate::appearance::font(14.0))
+                .wrap(true),
         );
     }
 
@@ -157,7 +159,7 @@ pub(super) fn insert(
         tree.insert(
             Some(card),
             Label::new(outcome.overview.clone())
-                .font_size(14.0)
+                .font_size(crate::appearance::font(14.0))
                 .wrap(true),
         );
         let panel = !round.scorecards.is_empty();
@@ -248,7 +250,7 @@ fn cell(tree: &mut UiTree, row: WidgetId, text: impl Into<String>, width: f32, s
             ..Default::default()
         }),
     );
-    let label = Label::new(text.into()).font_size(12.0);
+    let label = Label::new(text.into()).font_size(crate::appearance::font(12.0));
     let label = if strong {
         label.weight(600)
     } else {
@@ -266,7 +268,10 @@ fn panel_details(tree: &mut UiTree, card: WidgetId, session: &Session, round: &R
         return;
     };
     caption(tree, card, "審判別スコア");
-    let table = tree.insert(Some(card), Container::column().gap(2.0));
+    let table = tree.insert(
+        Some(card),
+        Container::column().gap(crate::appearance::space(2.0)),
+    );
     let head = tree.insert(
         Some(table),
         Container::row().align_items(AlignItems::CENTER),
@@ -307,7 +312,7 @@ fn panel_details(tree: &mut UiTree, card: WidgetId, session: &Session, round: &R
         tree.insert(
             Some(card),
             Label::new(card_out.overview.clone())
-                .font_size(14.0)
+                .font_size(crate::appearance::font(14.0))
                 .wrap(true),
         );
     }

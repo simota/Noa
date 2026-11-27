@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::sibling::{self, Launcher};
 use scaffold::gitread;
 use scaffold::handoff::{self, Related};
 use scaffold::model::{
@@ -21,6 +22,8 @@ use scaffold::verify_log;
 #[derive(Debug, Clone)]
 pub struct State {
     pub repo: PathBuf,
+    /// A Git work tree, including one with no first commit yet.
+    pub git_repository: bool,
     pub commit: Option<String>,
     pub scanned_at: Millis,
     pub setup: Setup,
@@ -37,6 +40,14 @@ pub struct State {
 }
 
 impl State {
+    pub fn task_destination(&self) -> &'static str {
+        if self.git_repository {
+            "View → Tasks で作業を続けられます。"
+        } else {
+            TASKS_REQUIRE_GIT
+        }
+    }
+
     /// 未登録リポジトリ: no `dev/scaffold/registry.json`.
     pub fn unregistered(&self) -> bool {
         matches!(self.registry, Err(LoadError::Absent))
@@ -104,11 +115,17 @@ impl State {
     }
 }
 
+pub const TASKS_REQUIRE_GIT: &str =
+    "Tasks は Git リポジトリで利用します。Git を初期化して再スキャンしてください。";
+
 /// One thing the person asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     RegisterAssets,
     SetupTask,
+    OpenTask {
+        id: String,
+    },
     HandOff {
         improvement: String,
     },
@@ -296,6 +313,7 @@ impl Backend for Live {
             .collect();
         State {
             repo: self.repo.clone(),
+            git_repository: gitread::git_dir(&self.repo).is_some(),
             commit,
             scanned_at: now,
             setup,
@@ -346,6 +364,31 @@ impl Backend for Live {
                     "{count} 件を資産に登録しました。候補として記録し、検証結果や採用判断を残せます"
                 ))
             }
+            Action::OpenTask { id } => {
+                if gitread::git_dir(&self.repo).is_none() {
+                    return Err(TASKS_REQUIRE_GIT.into());
+                }
+                let path = state
+                    .observations
+                    .iter()
+                    .find_map(|observation| match observation {
+                        Observation::Task {
+                            id: known, path, ..
+                        } if known == &id => Some(path),
+                        _ => None,
+                    })
+                    .ok_or("そのタスクはこのプロジェクトに関連付いていません")?;
+                let expected = self.repo.join(".noa/tasks").join(format!("{id}.md"));
+                if path != &expected || !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+                {
+                    return Err(format!(
+                        "タスク {id} のファイルが見つかりません。再スキャンしてください"
+                    ));
+                }
+                let args = task_args(&self.repo, &id)?;
+                sibling::System.launch(sibling::TASKS, args)?;
+                Ok(format!("タスク {id} を Tasks で開きました"))
+            }
             Action::SetupTask => {
                 if state.setup.attention_count() == 0 {
                     return Err("不足しているセットアップ項目はありません".into());
@@ -375,11 +418,13 @@ impl Backend for Live {
                 }
                 if created {
                     Ok(format!(
-                        "タスク {id} を作成しました。View → Tasks で作業指示を確認し、エージェントに渡せます"
+                        "タスク {id} を作成しました。{}",
+                        state.task_destination(),
                     ))
                 } else {
                     Ok(format!(
-                        "タスク {id} は作成済みです。View → Tasks で続けてください"
+                        "タスク {id} は作成済みです。{}",
+                        state.task_destination(),
                     ))
                 }
             }
@@ -397,12 +442,14 @@ impl Backend for Live {
                     task_for(&store.observations(), &Subject::Improvement(improvement))
                 {
                     return Ok(format!(
-                        "タスク {id} は作成済みです。View → Tasks で続けてください"
+                        "タスク {id} は作成済みです。{}",
+                        state.task_destination(),
                     ));
                 }
                 let id = handoff::hand_off(store, &self.repo, imp, &related(state, &imp.id), now)?;
                 Ok(format!(
-                    "タスク {id} を作りました。View → Tasks で続けてください"
+                    "タスク {id} を作りました。{}",
+                    state.task_destination(),
                 ))
             }
             Action::Link { subject, kind, id } => {
@@ -453,9 +500,34 @@ impl Backend for Live {
     }
 }
 
+/// One argument per value; repository paths and task ids never enter a shell.
+fn task_args(repo: &Path, id: &str) -> Result<Vec<std::ffi::OsString>, String> {
+    if !id.starts_with("t-") || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+        return Err("タスク ID が不正です".into());
+    }
+    let mut repo_arg = std::ffi::OsString::from("--repo=");
+    repo_arg.push(repo);
+    Ok(vec![repo_arg, format!("--select={id}").into()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_arguments_keep_paths_whole_and_refuse_path_like_ids() {
+        let args = task_args(Path::new("/tmp/project with spaces"), "t-123-2").unwrap();
+        assert_eq!(
+            args,
+            [
+                std::ffi::OsString::from("--repo=/tmp/project with spaces"),
+                "--select=t-123-2".into()
+            ]
+        );
+        for id in ["../t-1", "t-1/other", "t-1;echo", "t-1\n", "--help"] {
+            assert!(task_args(Path::new("/tmp/project"), id).is_err(), "{id}");
+        }
+    }
 
     fn put(repo: &Path, path: &str, text: &str) {
         let file = repo.join(path);

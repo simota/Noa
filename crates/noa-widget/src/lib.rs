@@ -57,7 +57,7 @@ impl From<serde_json::Error> for WidgetError {
     }
 }
 
-pub(crate) fn check_id(id: &str) -> Result<(), WidgetError> {
+pub fn check_id(id: &str) -> Result<(), WidgetError> {
     if id.is_empty()
         || id.len() > 64
         || !id.as_bytes()[0].is_ascii_lowercase()

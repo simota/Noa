@@ -8,3 +8,6 @@ pub mod images;
 pub mod render;
 pub mod screen;
 mod style;
+
+#[path = "../../shared/appearance.rs"]
+pub mod appearance;

@@ -138,7 +138,9 @@ pub(super) fn insert(
     };
     tree.insert(
         Some(top),
-        Label::new(round_label).font_size(14.0).weight(600),
+        Label::new(round_label)
+            .font_size(crate::appearance::font(14.0))
+            .weight(600),
     );
     if let Some(round) = current.filter(|_| !session.closed) {
         let phase = match round.phase {
@@ -204,7 +206,12 @@ pub(super) fn insert(
                     .map(|why| format!("↻ {}: 修正依頼中 — {why}", brief.to))
             };
             if let Some(notice) = notice {
-                tree.insert(Some(strip), Label::new(notice).font_size(13.0).wrap(true));
+                tree.insert(
+                    Some(strip),
+                    Label::new(notice)
+                        .font_size(crate::appearance::font(13.0))
+                        .wrap(true),
+                );
             }
         }
     }
@@ -311,15 +318,17 @@ fn part_chip(tree: &mut UiTree, parent: WidgetId, name: &str, brief: Option<&Bri
         Some(parent),
         Container::row()
             .align_items(AlignItems::CENTER)
-            .gap(6.0)
-            .padding(6.0)
+            .gap(crate::appearance::space(6.0))
+            .padding(crate::appearance::space(6.0))
             .background(Role::Surface)
             .border(1.0, Role::Separator)
             .radius(6.0),
     );
     tree.insert(
         Some(chip),
-        Label::new(name.to_owned()).font_size(12.0).weight(600),
+        Label::new(name.to_owned())
+            .font_size(crate::appearance::font(12.0))
+            .weight(600),
     );
     let Some(brief) = brief else {
         tag(tree, chip, "提出待ち", Tone::Neutral);

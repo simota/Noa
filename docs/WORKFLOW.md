@@ -25,7 +25,7 @@ The workflow can focus an underlying agent pane when direct inspection is useful
 
 ### Editing and inspection
 
-Select a stage to edit its title, instructions, timeout, and automatic retry count. Stages can be added, moved, or deleted, and connections can be removed independently. Connect an output to an input by dragging between ports or by selecting the two ports in order. The editor rejects incompatible types, self-connections, duplicates, and cycles at connection time. The definition validation view explains any remaining missing inputs or graph requirements before a run can start.
+Select a stage to edit its title, instructions, timeout, and automatic retry count. Plan, Implement, Review, and Verify also offer an agent selector, an optional model name, and a provider-specific effort selector. Stages can be added, moved, or deleted, and connections can be removed independently. Connect an output to an input by dragging between ports or by selecting the two ports in order. The editor rejects incompatible types, self-connections, duplicates, and cycles at connection time. The definition validation view explains any remaining missing inputs or graph requirements before a run can start.
 
 The editor provides undo, redo, automatic arrangement, zoom, and a fit-to-graph view. Keyboard actions use the platform command modifier: Command on macOS and Control on Linux.
 
@@ -37,7 +37,33 @@ The editor provides undo, redo, automatic arrangement, zoom, and a fit-to-graph 
 | Delete the focused stage | Delete or Backspace |
 | Abandon a drag or pending connection | Escape |
 
-Graph shortcuts do not replace text editing while a text field is focused. The execution view uses the run's frozen graph and exposes stage messages and artifact details. The history view displays the latest 500 run events; the persisted run retains its full bounded event history. Narrow windows switch between graph and details instead of compressing the inspector into an unusable column.
+Graph shortcuts do not replace text editing while a text field is focused. The execution view uses the run's frozen graph and exposes stage messages and artifact details. The history view displays the latest 500 run events; the persisted run retains its full bounded event history. Narrow windows switch between graph and details instead of compressing the inspector into an unusable column. Below 80% zoom, cards show a readable overview with the stage title and state; selecting a card opens its full details. Port click targets stay at least 32 logical points wide and high at every zoom level, and overview captions stay at least 11 points before the shared text-size preference is applied.
+
+### Agent assignments and presets
+
+Each agent stage saves `agent.provider`, `agent.model`, and `agent.effort` in the workflow definition. Providers are `auto`, `codex`, `claude`, and `agy`. Leave model or effort blank to use that CLI's configured default; this records the default selection, not an independently verified model identity. Custom model names must be bounded plain words. Codex receives `-m` and `-c model_reasoning_effort=…`; Claude and agy receive `--model` and `--effort`. Effort choices follow the same provider capability table used by Noa's Review widget. Invalid names or unsupported effort levels are refused before a shell command is constructed. Agent permission options are not changed.
+
+At run creation, `auto` is detected once and resolved to an explicit provider in the immutable run definition. Explicit assignments are preserved. Later retries, repair attempts, and reopening use this saved definition, even if the editor's draft changes. An explicitly selected provider must be installed and authenticated; selection is not a successful launch check.
+
+Open the workflow settings inspector to save a named **担当構成** (assignment preset), then use **読み込む** to apply it to the draft. Presets retain each agent stage's ID and settings, including distinct assignments for multiple Review stages. They do not replace graph positions, instructions, or execution limits. A preset naming a missing or non-agent stage is refused. Saving the same name updates it; up to 32 presets are stored per repository in `agent-presets.json`. Save the edited workflow before starting a run with a loaded preset.
+
+### Starting from Tasks and following results
+
+Tasks can open Workflow with the selected task's title, body, repository, and stable task reference already filled in. This opens the new-run form; it does not start an agent or recover, retry, or advance a previous saved run. The handoff remains deferred even when it acquires ownership from another window. Closing it, refreshing, editing the graph, or a rejected start does not release that gate. Review the objective and assignments, save any graph edits, then choose **このフローで開始**. The run freezes the originating task identity and the exact objective used at start. **Tasksで元タスクを開く** returns to the same task.
+
+If an unfinished run already exists, the new task's form stays visible and its start action is disabled. **以前の実行を表示** opens that saved run separately; **以前の実行を再開** explicitly enables its recovery and scheduling. Its controls do not operate on the new task. The ordinary Workflow entry point keeps its existing automatic recovery behavior. A run already owned by another window can continue there; opening a handoff does not pause or start that other window.
+
+The handoff command is `workflow --repo=PATH --task-origin=ABSOLUTE_JSON_PATH`. The version-1 handoff contains `schema_version`, `repo`, `task` (the Tasks `--select` value), `task_key` (the serialized stable Tasks reference), `title`, and `objective`. The reader refuses symlinks, a repository mismatch, an invalid task-reference shape or mismatched return selector, unsupported versions, files larger than 128 KiB, and objectives larger than 64 KiB. Opening the handoff never executes its contents as a command.
+
+After committing run state, Workflow writes a derived reference under `<Noa data directory>/tasks/<Tasks repository key>/workflow-results/<run-id>.json`. The reference includes the source task, run ID, state, exact target digest, definition digest, progress summary, last-update time, and a PR URL only when a publication result has been accepted. Its `source` is `workflow_agent_reports`. Tasks displays these as Workflow results, separate from Review or Verify widget sessions. This link does not imply those existing sessions ran, nor does it promote a result for an older target to evidence for a new change.
+
+`workflow --repo=PATH --run=RUN_ID` opens the saved run read-only without starting the runner or connecting to agents. It is the destination of the result link in Tasks. The run snapshot remains available after a later run starts. If a derived reference cannot be written, the committed run remains authoritative and the UI reports the projection failure.
+
+### Shared display preferences
+
+Use **ウィジェットの表示設定** from Noa's command palette, or run any native widget with `--widget-settings`, to choose system/light/dark appearance, 100/115/130/150% body and input text size, and standard/compact whitespace. Labels, buttons and editable text use the selected scale; auxiliary menus, segmented controls and tags retain GPUI's default size. The preview shows the chosen text size and appearance. Save and reopen the widgets to apply the preference. Density changes whitespace independently from text size and the Workflow port-target minimum.
+
+The shared file is `<Noa data directory>/widget-appearance.json`. Offline demo/snapshot invocations and tests use defaults unless `NOA_WIDGET_APPEARANCE_FILE` explicitly selects a settings file, allowing repeatable screenshots of different display preferences.
 
 ### Reading changes and evidence
 
@@ -142,7 +168,8 @@ The principal files are:
 | `workflow.json` | A checksummed envelope containing the current definition, store version, and current run with its events and attempt history. |
 | `workflow.lock` | File lock used while reading or atomically replacing the snapshot. |
 | `runner.lock` | Lifetime lease allowing one controlling runner for this repository's state directory. Other open windows observe the saved state. |
-| `runs/<run-id>/run.json` | Previous run snapshot archived before starting a later run. |
+| `runs/<run-id>/run.json` | Read-only projection of each committed run state, retained after later runs start. |
+| `agent-presets.json` | Up to 32 named stage-assignment presets, separate from the graph. |
 | `runs/<run-id>/jobs/<node-id>-<attempt>/receipt.json` | Adapter identity, dispatch phase, worktree, pane reference, and accepted outcome for that attempt. |
 | `runs/<run-id>/jobs/<implement-id>-<attempt>/changes.patch` | Runner-captured committed diff from the starting base SHA to the implementation target HEAD SHA. |
 | `runs/<run-id>/implementation/` | The implementation worktree, reused for bounded repairs. |
@@ -225,7 +252,7 @@ server-scopes = read,control,input
 
 The existing defaults use loopback port `61771`. Workflow reads the normal Noa configuration and either its explicitly configured server token or the existing auto-provisioned token file. It does not require `attach`. See [Configuration](CONFIGURATION.md) and the [server runbook](runbooks/noa-server.md) for the server's configuration and token behavior.
 
-Install and authenticate a supported agent and make it available in the login shell used by Noa. The adapter currently probes `codex`, `claude`, and `agy` in that order and uses the first available command; there is no per-stage agent selector. Install and authenticate GitHub CLI before using publication and configure a supported `origin` remote. These setup tools are not part of the daily GUI workflow. There is no separate Workflow service, database, or account to configure.
+Install and authenticate a supported agent and make it available in the login shell used by Noa. For stages set to `auto`, the runner probes `codex`, `claude`, and `agy` in that order once at run creation and freezes the first available provider. Explicit per-stage choices override automatic detection. Install and authenticate GitHub CLI before using publication and configure a supported `origin` remote. These setup tools are not part of the daily GUI workflow. There is no separate Workflow service, database, or account to configure.
 
 The launcher supplies `--repo=DIR` to the native helper. Developers may invoke the helper with that argument for diagnosis; users can open it from Noa. Run limits and node instructions belong to the saved definition, rather than a separate global Workflow configuration file.
 

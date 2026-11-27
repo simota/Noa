@@ -5,6 +5,8 @@ use noa_gpui_core::{Appearance, Style, Theme};
 use noa_gpui_scene::Color;
 use workflow::model::NodeState;
 
+pub(super) const MIN_CONNECTION_TARGET: f32 = 32.0;
+
 pub(super) fn fill() -> Style {
     Style {
         flex_grow: 1.0,
@@ -21,8 +23,8 @@ pub(super) fn column() -> Style {
     Style {
         flex_direction: FlexDirection::Column,
         gap: LayoutSize {
-            width: length(8.0),
-            height: length(8.0),
+            width: length(crate::appearance::space(8.0)),
+            height: length(crate::appearance::space(8.0)),
         },
         ..fill()
     }

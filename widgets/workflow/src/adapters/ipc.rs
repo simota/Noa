@@ -45,7 +45,7 @@ pub struct Ipc {
 
 #[derive(Clone, Debug)]
 pub struct AgentSpec {
-    pub agent: String,
+    pub choice: crate::model::AgentChoice,
     pub directory: PathBuf,
     pub label: String,
     pub prompt: String,
@@ -53,11 +53,40 @@ pub struct AgentSpec {
 }
 
 pub fn agent_argv(agent: &str) -> Result<Vec<String>, String> {
-    let suffix = match agent {
-        "codex" | "claude" => "",
-        "agy" => " -i",
-        _ => return Err("利用できるエージェントは codex / claude / agy です".into()),
-    };
+    configured_agent_argv(&crate::model::AgentChoice {
+        provider: agent.into(),
+        model: None,
+        effort: None,
+    })
+}
+
+pub fn configured_agent_argv(choice: &crate::model::AgentChoice) -> Result<Vec<String>, String> {
+    choice.validate()?;
+    if choice.provider == "auto" {
+        return Err("実行前にエージェントを確定してください".into());
+    }
+    let mut words = vec![choice.provider.clone()];
+    if choice.provider == "agy" {
+        words.push("-i".into());
+    }
+    if let Some(model) = &choice.model {
+        words.push(
+            if choice.provider == "codex" {
+                "-m"
+            } else {
+                "--model"
+            }
+            .into(),
+        );
+        words.push(model.clone());
+    }
+    if let Some(effort) = &choice.effort {
+        if choice.provider == "codex" {
+            words.extend(["-c".into(), format!("model_reasoning_effort={effort}")]);
+        } else {
+            words.extend(["--effort".into(), effort.clone()]);
+        }
+    }
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|s| Path::new(s).is_absolute())
@@ -73,8 +102,28 @@ pub fn agent_argv(agent: &str) -> Result<Vec<String>, String> {
         "-l".into(),
         "-i".into(),
         "-c".into(),
-        format!("exec {agent}{suffix} \"$NOA_WORKFLOW_PROMPT\""),
+        // Validation above restricts every inserted word to shell-inert bytes.
+        // The potentially arbitrary prompt remains a quoted environment value.
+        format!("exec {} \"$NOA_WORKFLOW_PROMPT\"", words.join(" ")),
     ])
+}
+
+pub fn freeze_assignments(
+    mut definition: crate::model::WorkflowDefinition,
+    mut detect: impl FnMut() -> Result<String, String>,
+) -> Result<crate::model::WorkflowDefinition, String> {
+    let mut detected = None;
+    for node in &mut definition.nodes {
+        node.agent.validate()?;
+        if node.kind.uses_agent() && node.agent.provider == "auto" {
+            if detected.is_none() {
+                detected = Some(detect()?);
+            }
+            node.agent.provider = detected.clone().expect("detected above");
+            configured_agent_argv(&node.agent)?;
+        }
+    }
+    Ok(definition)
 }
 
 pub fn detect_agent() -> Result<String, String> {
@@ -177,7 +226,7 @@ impl Ipc {
     }
 
     pub fn spawn(&mut self, board: u64, spec: &AgentSpec) -> Result<u64, Error> {
-        let argv = agent_argv(&spec.agent).map_err(Error::Refused)?;
+        let argv = configured_agent_argv(&spec.choice).map_err(Error::Refused)?;
         let mut env = BTreeMap::new();
         env.insert("NOA_WORKFLOW_PROMPT".into(), spec.prompt.clone());
         env.insert("NOA_RESULT".into(), spec.result.display().to_string());
@@ -334,6 +383,76 @@ mod tests {
         ] {
             assert!(matches!(error(failure), Error::Uncertain(_)));
         }
+    }
+
+    #[test]
+    fn selected_models_and_efforts_are_validated_before_shell_construction() {
+        let mut choice = crate::model::AgentChoice {
+            provider: "codex".into(),
+            model: Some("gpt-6.2-sol".into()),
+            effort: Some("high".into()),
+        };
+        assert_eq!(
+            configured_agent_argv(&choice).unwrap()[4],
+            "exec codex -m gpt-6.2-sol -c model_reasoning_effort=high \"$NOA_WORKFLOW_PROMPT\""
+        );
+        choice.provider = "claude".into();
+        choice.model = Some("sonnet".into());
+        assert_eq!(
+            configured_agent_argv(&choice).unwrap()[4],
+            "exec claude --model sonnet --effort high \"$NOA_WORKFLOW_PROMPT\""
+        );
+        choice.provider = "agy".into();
+        assert!(
+            configured_agent_argv(&choice).unwrap()[4]
+                .starts_with("exec agy -i --model sonnet --effort high")
+        );
+        choice.effort = Some("ultra".into());
+        assert!(configured_agent_argv(&choice).is_err());
+        choice.effort = None;
+        for value in [
+            "$(touch /tmp/x)",
+            "m;echo",
+            "--help",
+            "a b",
+            "x\nexec y",
+            "'model'",
+        ] {
+            choice.model = Some(value.into());
+            assert!(configured_agent_argv(&choice).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn auto_is_detected_once_and_explicit_assignments_are_not_overridden() {
+        let mut definition = crate::model::WorkflowDefinition::standard();
+        definition
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "review")
+            .unwrap()
+            .agent = crate::model::AgentChoice {
+            provider: "claude".into(),
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        };
+        let mut calls = 0;
+        let frozen = freeze_assignments(definition.clone(), || {
+            calls += 1;
+            Ok("codex".into())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(
+            frozen.node("review").unwrap().agent,
+            definition.node("review").unwrap().agent
+        );
+        for id in ["plan", "implement", "verify"] {
+            assert_eq!(frozen.node(id).unwrap().agent.provider, "codex");
+        }
+        assert!(definition.node("plan").unwrap().agent.is_default());
+        assert!(frozen.node("task").unwrap().agent.is_default());
+        assert!(frozen.validate().is_empty());
     }
 
     #[test]

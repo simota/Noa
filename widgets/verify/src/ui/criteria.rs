@@ -385,7 +385,9 @@ pub(super) fn insert(
     keep_scroll(tree, list, session, "criteria");
     tree.insert(
         Some(list),
-        Label::new("受け入れ基準の確認").font_size(13.0).weight(600),
+        Label::new("受け入れ基準の確認")
+            .font_size(crate::appearance::font(13.0))
+            .weight(600),
     );
     note(
         tree,
@@ -393,8 +395,14 @@ pub(super) fn insert(
         "判定役の基準を確かめ、必要なら直してから検証を始めます。未保存の変更と追加欄の基準も、開始時にまとめて保存します。変更はレポートの「基準の変更」に記録され、検証が始まると基準は固定されます。",
     );
     if editable {
-        editor.pending_label =
-            Some(tree.insert(Some(list), Label::new("").font_size(12.0).wrap(true)));
+        editor.pending_label = Some(
+            tree.insert(
+                Some(list),
+                Label::new("")
+                    .font_size(crate::appearance::font(12.0))
+                    .wrap(true),
+            ),
+        );
     }
     if !session.criteria_summary.is_empty() {
         let c = card(tree, list, true);
@@ -419,7 +427,9 @@ pub(super) fn insert(
         );
         tree.insert(
             Some(top),
-            Label::new(c.id.clone()).font_size(12.5).weight(700),
+            Label::new(c.id.clone())
+                .font_size(crate::appearance::font(12.5))
+                .weight(700),
         );
         tag(
             tree,
@@ -485,7 +495,10 @@ pub(super) fn insert(
         );
         tree.update::<TextArea, _>(how, |a, cx| a.set_text(cx, how_text));
         tree.set_accessible_label(how, format!("{} の確かめ方", c.id));
-        let foot = tree.insert(Some(box_), Container::row().gap(6.0));
+        let foot = tree.insert(
+            Some(box_),
+            Container::row().gap(crate::appearance::space(6.0)),
+        );
         let save = tree.insert(Some(foot), small("変更を保存"));
         tree.set_accessible_label(save, format!("{} の変更を保存", c.id));
         actions.push((save, Action::SaveCriterion(c.id.clone())));
@@ -525,7 +538,9 @@ pub(super) fn insert(
     tree.set_accessible_label(how, "追加する基準の確かめ方");
     let foot = tree.insert(
         Some(add),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     let priority = priority_menu(tree, foot, draft_priority);
     tree.set_accessible_label(priority, "追加する基準の優先度");

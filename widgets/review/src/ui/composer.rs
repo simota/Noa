@@ -62,11 +62,15 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     );
     let row = tree.insert(
         Some(root),
-        Container::row().align_items(AlignItems::END).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::END)
+            .gap(crate::appearance::space(8.0)),
     );
     let recipients_host = tree.insert(
         Some(row),
-        Container::column().gap(4.0).align_items(AlignItems::START),
+        Container::column()
+            .gap(crate::appearance::space(4.0))
+            .align_items(AlignItems::START),
     );
     caption(tree, recipients_host, "宛先");
     let recipients = tree.insert(

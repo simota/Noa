@@ -152,7 +152,7 @@ fn filter_row(tree: &mut UiTree, parent: WidgetId, title: &str) -> WidgetId {
     tree.insert(
         Some(row),
         Label::new(title.to_owned())
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .color(Role::Muted),
     );
     row
@@ -273,8 +273,8 @@ pub(super) fn insert(
     let bar = tree.insert(
         Some(list),
         Container::column()
-            .gap(4.0)
-            .padding(8.0)
+            .gap(crate::appearance::space(4.0))
+            .padding(crate::appearance::space(8.0))
             .background(Role::SurfaceAlt)
             .radius(8.0),
     );
@@ -413,8 +413,8 @@ pub(super) fn insert(
         let c = tree.insert(
             Some(row),
             Container::column()
-                .gap(4.0)
-                .padding(10.0)
+                .gap(crate::appearance::space(4.0))
+                .padding(crate::appearance::space(10.0))
                 .background(if is_selected {
                     Role::SurfaceAlt
                 } else {
@@ -442,7 +442,7 @@ pub(super) fn insert(
         tree.insert(
             Some(c),
             Label::new(f.claim.clone())
-                .font_size(14.0)
+                .font_size(crate::appearance::font(14.0))
                 .weight(500)
                 .wrap(true)
                 .max_lines(2)
@@ -458,7 +458,7 @@ pub(super) fn insert(
                 let label = tree.insert(
                     Some(bottom),
                     Label::new(short_path(&location))
-                        .font_size(12.0)
+                        .font_size(crate::appearance::font(12.0))
                         .color(Role::Muted),
                 );
                 tree.set_accessible_label(label, location);
@@ -511,8 +511,8 @@ fn unplaced(tree: &mut UiTree, list: WidgetId, session: &Session) {
         let row = tree.insert(
             Some(list),
             Container::column()
-                .gap(4.0)
-                .padding(10.0)
+                .gap(crate::appearance::space(4.0))
+                .padding(crate::appearance::space(10.0))
                 .background(Role::Surface)
                 .border(1.0, Role::Separator)
                 .radius(8.0),
@@ -527,7 +527,7 @@ fn unplaced(tree: &mut UiTree, list: WidgetId, session: &Session) {
         tree.insert(
             Some(row),
             Label::new(raw.claim.clone())
-                .font_size(12.5)
+                .font_size(crate::appearance::font(12.5))
                 .wrap(true)
                 .max_lines(2)
                 .truncation(Truncation::Tail),

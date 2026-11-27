@@ -5,6 +5,7 @@
 - [Commands](#commands)
 - [State and retry contract](#state-and-retry-contract)
 - [Event processing](#event-processing)
+- [Report processing](#report-processing)
 - [Lifecycle and cleanup](#lifecycle-and-cleanup)
 - [Limits and authority](#limits-and-authority)
 
@@ -19,7 +20,7 @@ Noa executable followed by `+ctl` outside one.
 | `widget validate FILE [--data-file FILE]` | Validate definition, initial data, and optional supplied data offline |
 | `widget preview FILE [--data-file FILE]` | Open a local preview without a control server |
 | `widget preview FILE --data-file FILE --snapshot FILE.png --size 960x720` | Render a software PNG preview offline |
-| `widget list [--repo DIR]` | List current-worktree definitions and local instances |
+| `widget list [--repo DIR]` | List valid current-worktree definitions, package diagnostics and local instances |
 | `widget describe ID [--repo DIR]` | Read one shared manifest and its digest |
 | `widget open ID [--repo DIR] [--data-file FILE] --request-id ID` | Open a shared definition as a new instance |
 | `widget open --definition-file FILE [--repo DIR] [--data-file FILE] --request-id ID` | Open an inline definition without writing a shared package |
@@ -27,6 +28,7 @@ Noa executable followed by `+ctl` outside one.
 | `widget set INSTANCE --data-file FILE --expected-revision N --request-id ID` | Replace complete data with compare-and-swap |
 | `widget events INSTANCE [--consumer ID] [--after N] [--limit N] [--wait 30s]` | Claim/read the single event stream |
 | `widget ack INSTANCE --through N [--consumer ID] --request-id ID` | Acknowledge a contiguous handled prefix |
+| `widget report INSTANCE --event ID --expected-version N --state STATE [--consumer ID] [--message TEXT] --request-id ID` | Report processing for a delivered event; requires `repoWidgetOperationsV1` |
 | `widget close INSTANCE --request-id ID` | Stop the host while retaining state and events |
 | `widget forget INSTANCE` | Delete a stopped instance with no pending events |
 
@@ -53,7 +55,8 @@ Restore them instead of rerunning ID generation after reconnecting.
 `open` and `get` snapshots include `instanceId`, `definitionId`,
 `definitionDigest`, `definitionSource`, `repo`, `repositoryId`, `worktreeId`,
 `dataRevision`, `data`, `manifest`, `status`, `hostReady`, `ownerPaneId`,
-`consumerId`, `lastSeq`, and `ackedThrough`. `open` also reports `created`.
+`consumerId`, `lastSeq`, `ackedThrough`, `dataUpdatedAtMs` and `operations`.
+`open` also reports `created`.
 The returned `instanceId` has a generated `wi_…` value; never substitute the
 manifest ID for it.
 
@@ -86,12 +89,16 @@ consumer lease, reset, or takeover command in v1.
 Use this processing order:
 
 ```text
-read events
+read events and the current reported operations
 for each event in seq order:
     look up eventId in the durable operation journal
     if completed: reuse the recorded result
-    otherwise: perform the authorized operation and durably record its result
+    otherwise:
+        if reports are supported: report running with the current version and a saved request ID
+        perform the authorized operation and durably record its result
     if the instance is open: publish updated data if needed, using a saved request ID and CAS revision
+    if reports are supported and no final report exists:
+        report the recorded final outcome with the current version and a saved request ID
 ack the highest contiguous handled seq
 ```
 
@@ -110,6 +117,64 @@ an unfinished earlier event.
 instance, or timeout. It does not schedule work or resume an agent later.
 Use a wait shorter than the enclosing tool's timeout.
 
+## Report processing
+
+Check that the server advertises `repoWidgetOperationsV1` before using
+`report`; the CLI reports a clear unsupported-capability error on older
+servers. Older producers still work, but the host cannot confirm their
+processing outcomes from queue acknowledgments or data changes.
+
+Each accepted UI action has an operation at version 1. Match it by `eventId`
+in `widget get`'s `operations`, which are ordered by `seq`. Save the report
+request ID, exact params and resulting version with the event's task records.
+Use the same explicit consumer that received the event. Never guess a new
+identity to bypass a consumer conflict.
+
+| State | Use |
+| --- | --- |
+| `accepted` | The server queued the event; the producer has not reported processing. Producers cannot assign this state. |
+| `running` | Processing has started. |
+| `waiting` | Processing awaits a response or prerequisite; explain it in `message`. |
+| `completed` | The operation finished and its outcome was recorded. |
+| `failed` | The operation ended unsuccessfully or was intentionally declined; record the reason. |
+
+For a newly delivered event, before any report has been accepted:
+
+```sh
+noaw report "$instance" --consumer "$consumer_id" \
+  --event "$event_id" --expected-version 1 --state running \
+  --message 'Running the requested check' \
+  --request-id "$operation_id-$event_seq-started"
+# Save the returned version (2). After recording the actual result:
+noaw report "$instance" --consumer "$consumer_id" \
+  --event "$event_id" --expected-version 2 --state completed \
+  --message 'Check finished; results are recorded' \
+  --request-id "$operation_id-$event_seq-completed"
+```
+
+These versions describe the example's first two reports. On recovery, read
+the actual operation version and reuse any in-flight report's exact saved
+request. Each accepted report increments the version. A stale version changes
+nothing; read and reconcile it before issuing a new request. An uncertain
+outcome requires an identical retry. `completed` and `failed` are final:
+retrying the same report returns its original result, while a different
+report cannot overwrite it. If a recovered operation is already final,
+reconcile it with the durable task journal and do not repeat its side effects.
+
+Messages are limited to 1,024 UTF-8 bytes. Keep them factual and avoid secrets.
+The host displays the 32 latest operations and counts all operations lacking
+a final outcome. `get` retains the complete bounded history, original UI
+`actionRequestId` when known, and recorded Unix-millisecond timestamps.
+Legacy queued events have unknown timestamps; older acknowledged events are
+not reconstructed. A report records the consumer's claim, not independent
+verification of the underlying effect.
+
+Report final outcomes before acknowledgment in the normal processing loop.
+Reports also work after acknowledgment or on a stopped instance, so they can
+finish recovery without reopening a host. `ack`, `set`, timeout and window
+closure never mark work complete. Report history and report request IDs share
+the instance's existing lifetime storage and retry limits.
+
 ## Lifecycle and cleanup
 
 | Status | Handling |
@@ -121,15 +186,16 @@ Use a wait shorter than the enclosing tool's timeout.
 | `restored` | Application restarted; old open state is retained without relaunching anything |
 
 An instance opened outside a recognized pane has no owner-pane lifetime.
-Close it explicitly when done. Stopped instances accept event reads and
-acknowledgments but cannot be updated or accept new actions. To continue,
+Close it explicitly when done. Stopped instances accept event reads,
+acknowledgments and processing reports but cannot be updated or accept new actions. To continue,
 open a new instance, optionally supplying the old data.
 
 Close before the final drain so no further clicks can arrive. `forget` rejects
 open instances and instances with pending events. Repeating `forget` for the
 same generated ID is safe even if an earlier response was lost. Forgetting
-deletes data, definition snapshot, events and deduplication history; export
-anything still needed first.
+deletes data, definition snapshot, events, processing reports and deduplication
+history, including operations without a final outcome. Export anything still
+needed first; forgetting is explicit cleanup and never proves completion.
 
 ## Limits and authority
 
@@ -146,7 +212,7 @@ displayed text. Reduce data or the view when validation rejects a limit;
 do not silently truncate evidence while reporting a complete result.
 
 Public widget RPC uses Noa's existing trusted-controller model. `list`,
-`describe`, and `get` need `read`; `open`, `set`, `events`, `ack`, `close`, and
+`describe`, and `get` need `read`; `open`, `set`, `events`, `ack`, `report`, `close`, and
 `forget` need `control`. Repository, pane and consumer IDs coordinate state;
 they are not per-repository authorization boundaries. Restrict agent behavior
 to its own task and instances even though the controller API has wider reach.

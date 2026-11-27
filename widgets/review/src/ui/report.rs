@@ -97,28 +97,34 @@ pub(super) fn insert(tree: &mut UiTree, host: WidgetId, session: &Session) {
     let md = export::report_markdown(session);
     for line in md.lines() {
         let label = if let Some(rest) = line.strip_prefix("# ") {
-            Label::new(plain(rest)).font_size(17.0).weight(700)
+            Label::new(plain(rest))
+                .font_size(crate::appearance::font(17.0))
+                .weight(700)
         } else if let Some(rest) = line.strip_prefix("## ") {
             // A little air above each section.
             tree.insert(
                 Some(list),
-                noa_gpui_core::widgets::Container::column().padding(4.0),
+                noa_gpui_core::widgets::Container::column().padding(crate::appearance::space(4.0)),
             );
-            Label::new(plain(rest)).font_size(15.0).weight(600)
+            Label::new(plain(rest))
+                .font_size(crate::appearance::font(15.0))
+                .weight(600)
         } else if let Some(rest) = line.strip_prefix("### ") {
             Label::new(plain(rest))
-                .font_size(13.0)
+                .font_size(crate::appearance::font(13.0))
                 .weight(600)
                 .wrap(true)
         } else if line.trim().is_empty() {
             continue;
         } else if line.starts_with("  ") {
             Label::new(plain(line.trim_start()))
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .color(Role::Muted)
                 .wrap(true)
         } else {
-            Label::new(plain(line)).font_size(12.5).wrap(true)
+            Label::new(plain(line))
+                .font_size(crate::appearance::font(12.5))
+                .wrap(true)
         };
         tree.insert(Some(list), label.selectable(true));
     }

@@ -496,7 +496,12 @@ impl Adapters {
             // Change. Any remaining writer blocks another attempt.
             self.no_previous_writer(&job)?;
         }
-        job.agent = ipc::detect_agent()?;
+        job.agent = if job.node.agent.provider == "auto" {
+            // Compatibility for a run saved before explicit assignments existed.
+            ipc::detect_agent()?
+        } else {
+            job.node.agent.provider.clone()
+        };
         self.save(&job)?;
         let request_dir = job.report.parent().ok_or("結果ディレクトリがありません")?;
         private_results(&job.worktree)?;
@@ -532,7 +537,10 @@ impl Adapters {
         job.phase = Phase::SpawnIntent;
         self.save(&job)?;
         let spec = ipc::AgentSpec {
-            agent: job.agent.clone(),
+            choice: crate::model::AgentChoice {
+                provider: job.agent.clone(),
+                ..job.node.agent.clone()
+            },
             directory: job.worktree.clone(),
             label: job.label.clone(),
             prompt: format!(

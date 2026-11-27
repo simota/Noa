@@ -226,7 +226,7 @@ pub(super) fn insert(
             Some(d) => format!("⚔ 討論 {}", d.id),
             None => "⚔ 討論の準備".to_owned(),
         })
-        .font_size(13.0)
+        .font_size(crate::appearance::font(13.0))
         .weight(600),
     );
     if let Some(issue) = issue {
@@ -234,7 +234,7 @@ pub(super) fn insert(
         tree.insert(
             Some(head),
             Label::new(issue.title.clone())
-                .font_size(12.5)
+                .font_size(crate::appearance::font(12.5))
                 .truncation(Truncation::Tail),
         );
     }
@@ -288,7 +288,7 @@ pub(super) fn insert(
                 align_items: AlignItems::START,
                 flex_shrink: 0.0,
                 gap: gap(8.0),
-                padding: LayoutRect::length(10.0),
+                padding: LayoutRect::length(crate::appearance::space(10.0)),
                 ..Default::default()
             })
             .background(Role::Surface),
@@ -300,7 +300,7 @@ pub(super) fn insert(
         tree.insert(
             Some(text),
             Label::new(verdict.rationale.clone())
-                .font_size(12.5)
+                .font_size(crate::appearance::font(12.5))
                 .wrap(true),
         );
     }
@@ -359,7 +359,12 @@ pub(super) fn insert(
                 ..Default::default()
             }),
         );
-        tree.insert(Some(top), Label::new(title).font_size(12.0).weight(600));
+        tree.insert(
+            Some(top),
+            Label::new(title)
+                .font_size(crate::appearance::font(12.0))
+                .weight(600),
+        );
         if parts.is_empty() {
             caption(tree, top, "（不在）");
         }
@@ -367,7 +372,7 @@ pub(super) fn insert(
             tree.insert(
                 Some(top),
                 Label::new(part_name(part))
-                    .font_size(12.0)
+                    .font_size(crate::appearance::font(12.0))
                     .color(author_color(session, &Author::Part(part.clone()))),
             );
         }

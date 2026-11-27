@@ -1,6 +1,9 @@
 //! The discussion widget's binary: the noa-gpui window over the library's
 //! model, engine and store (`lib.rs`), fed by the live layer (`live.rs`).
 
+#[path = "../../shared/appearance.rs"]
+mod appearance;
+
 mod demo;
 mod installed;
 mod live;
@@ -131,6 +134,9 @@ fn render_snapshot(
 }
 
 fn main() -> Result<(), String> {
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let mut snapshot_path = None;
     let mut demo = false;
     let mut demo_start = false;

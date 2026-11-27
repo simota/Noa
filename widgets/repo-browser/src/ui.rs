@@ -260,7 +260,7 @@ impl RepoBrowser {
         raw_data: RepoData,
     ) -> Self {
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::dark());
+        crate::appearance::install(&mut tree, Theme::dark());
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -422,7 +422,7 @@ impl RepoBrowser {
                     width: length(0.0),
                     height: length(4.0),
                 },
-                padding: LayoutRect::length(6.0),
+                padding: LayoutRect::length(crate::appearance::space(6.0)),
                 ..Default::default()
             })
             .background(Role::Background),
@@ -452,7 +452,7 @@ impl RepoBrowser {
         let diff_log = tree.insert(
             Some(diff_col),
             LogView::new()
-                .font_size(12.5)
+                .font_size(crate::appearance::font(12.5))
                 .follows_tail(false)
                 .fill_height(),
         );
@@ -474,7 +474,7 @@ impl RepoBrowser {
                     width: percent(1.0),
                     height: percent(1.0),
                 },
-                padding: LayoutRect::length(6.0),
+                padding: LayoutRect::length(crate::appearance::space(6.0)),
                 ..Default::default()
             })
             .background(Role::SurfaceAlt),
@@ -502,7 +502,12 @@ impl RepoBrowser {
                 ..Default::default()
             }),
         );
-        let terminal = tree.insert(Some(term_page), Terminal::new().font_size(12.0).rows(36));
+        let terminal = tree.insert(
+            Some(term_page),
+            Terminal::new()
+                .font_size(crate::appearance::font(12.0))
+                .rows(36),
+        );
 
         // Tab 1: Review Composer
         let composer_page = tree.insert(
@@ -514,7 +519,7 @@ impl RepoBrowser {
                     width: length(0.0),
                     height: length(8.0),
                 },
-                padding: LayoutRect::length(6.0),
+                padding: LayoutRect::length(crate::appearance::space(6.0)),
                 size: LayoutSize {
                     width: percent(1.0),
                     height: percent(1.0),
@@ -527,7 +532,7 @@ impl RepoBrowser {
             Label::new(
                 "ファイル・行範囲を何度でも引用して指示を組み立て、選んだペインへ送ります (⌘L で引用)。",
             )
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .color(Role::Muted)
             .wrap(true),
         );
@@ -619,7 +624,7 @@ impl RepoBrowser {
                     width: length(0.0),
                     height: length(6.0),
                 },
-                padding: LayoutRect::length(6.0),
+                padding: LayoutRect::length(crate::appearance::space(6.0)),
                 size: LayoutSize {
                     width: percent(1.0),
                     height: percent(1.0),
@@ -1178,13 +1183,15 @@ impl RepoBrowser {
         );
         self.tree.insert(
             Some(row),
-            Label::new("送信先:").font_size(12.0).color(Role::Muted),
+            Label::new("送信先:")
+                .font_size(crate::appearance::font(12.0))
+                .color(Role::Muted),
         );
         let Some(pane) = panes.iter().find(|p| Some(p.pane_id) == chosen) else {
             self.tree.insert(
                 Some(row),
                 Label::new("(ペインなし)")
-                    .font_size(12.0)
+                    .font_size(crate::appearance::font(12.0))
                     .color(Role::Muted),
             );
             return;
@@ -1197,7 +1204,7 @@ impl RepoBrowser {
         self.tree.insert(
             Some(row),
             Label::new(format!("#{} {}{process}", pane.pane_id, pane.name))
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(600)
                 .truncation(Truncation::Tail),
         );
@@ -1534,7 +1541,7 @@ impl RepoBrowser {
         self.tree.insert(
             Some(self.diff_header),
             Label::new(header_text)
-                .font_size(12.5)
+                .font_size(crate::appearance::font(12.5))
                 .weight(600)
                 .truncation(Truncation::Tail),
         );
@@ -1613,7 +1620,7 @@ impl RepoBrowser {
         self.tree.insert(
             Some(self.commit_head),
             Label::new(summary)
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .color(Role::Muted)
                 .wrap(true),
         );
@@ -1716,7 +1723,7 @@ impl RepoBrowser {
         self.tree.insert(
             Some(self.status_leading),
             Label::new(format!("{repos} repos · {wts} worktrees · {files} files"))
-                .font_size(11.5)
+                .font_size(crate::appearance::font(11.5))
                 .color(Role::Muted),
         );
         if conflicts > 0 {
@@ -1745,7 +1752,9 @@ impl RepoBrowser {
                 .insert(Some(self.status_trailing), Kbd::shortcut(sc));
             self.tree.insert(
                 Some(self.status_trailing),
-                Label::new(text).font_size(11.0).color(Role::Muted),
+                Label::new(text)
+                    .font_size(crate::appearance::font(11.0))
+                    .color(Role::Muted),
             );
         }
     }
@@ -2868,6 +2877,9 @@ impl RepoBrowser {
 }
 
 impl Screen for RepoBrowser {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
     fn tree(&self) -> &UiTree {
         &self.tree
     }

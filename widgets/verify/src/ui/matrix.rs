@@ -293,7 +293,7 @@ pub(super) fn insert(
     tree.insert(
         Some(list),
         Label::new("受け入れ基準 × 検証者（各検証者の最新の結果）")
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(600),
     );
     let filters = tree.insert(Some(list), Container::wrapping_row(6.0, 4.0));
@@ -324,15 +324,17 @@ pub(super) fn insert(
     let grid = tree.insert(
         Some(list),
         Container::column()
-            .gap(2.0)
-            .padding(8.0)
+            .gap(crate::appearance::space(2.0))
+            .padding(crate::appearance::space(8.0))
             .background(Role::Surface)
             .border(1.0, Role::Separator)
             .radius(8.0),
     );
     let header = tree.insert(
         Some(grid),
-        Container::row().gap(2.0).align_items(AlignItems::CENTER),
+        Container::row()
+            .gap(crate::appearance::space(2.0))
+            .align_items(AlignItems::CENTER),
     );
     let h = name_box(tree, header);
     caption(tree, h, "基準");
@@ -341,7 +343,7 @@ pub(super) fn insert(
         tree.insert(
             Some(c),
             Label::new(part.id.to_string())
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .color(Role::Muted)
                 .truncation(Truncation::Tail),
         );
@@ -378,7 +380,7 @@ pub(super) fn insert(
         let row = tree.insert(
             Some(press),
             Container::row()
-                .gap(2.0)
+                .gap(crate::appearance::space(2.0))
                 .align_items(AlignItems::CENTER)
                 .background(if is_selected {
                     Role::SurfaceAlt
@@ -409,11 +411,15 @@ pub(super) fn insert(
         ));
         let line = tree.insert(
             Some(name),
-            Container::row().gap(4.0).align_items(AlignItems::CENTER),
+            Container::row()
+                .gap(crate::appearance::space(4.0))
+                .align_items(AlignItems::CENTER),
         );
         tree.insert(
             Some(line),
-            Label::new(criterion.id.clone()).font_size(12.0).weight(700),
+            Label::new(criterion.id.clone())
+                .font_size(crate::appearance::font(12.0))
+                .weight(700),
         );
         tag(
             tree,
@@ -427,14 +433,19 @@ pub(super) fn insert(
         tree.insert(
             Some(name),
             Label::new(criterion.statement.clone())
-                .font_size(11.5)
+                .font_size(crate::appearance::font(11.5))
                 .truncation(Truncation::Tail),
         );
         for part in &session.verifiers {
             let at = cell_box(tree, row, CELL, CELL_MIN);
             let cell = cell(session, &part.id, &criterion.id);
             if cell.outcome.is_none() {
-                tree.insert(Some(at), Label::new("·").font_size(12.0).color(Role::Muted));
+                tree.insert(
+                    Some(at),
+                    Label::new("·")
+                        .font_size(crate::appearance::font(12.0))
+                        .color(Role::Muted),
+                );
             } else {
                 let press = tree.insert(
                     Some(at),

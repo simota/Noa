@@ -17,6 +17,7 @@ mod criteria;
 mod defects;
 mod evidence;
 mod fix;
+mod images;
 mod layout;
 mod matrix;
 mod preview;
@@ -125,6 +126,8 @@ pub enum Action {
     /// 開く: the stored copy (a log in the window's text view, anything
     /// else in the system viewer).
     OpenEvidence(EvidenceKey),
+    /// Inspect the verified original image in a separate native window.
+    PreviewImage(EvidenceKey),
     /// Compare the currently scoped stored images in a local HTML page.
     PreviewImages,
     /// Finder で表示 on the stored copy.
@@ -273,6 +276,7 @@ pub struct Verify {
     evidence_focus: Option<evidence::Focus>,
     evidence_return: Option<(CenterTab, Option<FocusAnchor>, usize)>,
     preview_job: Option<preview::Job>,
+    thumbnails: images::Cache,
     expanded_history: BTreeSet<String>,
     actions_expanded: bool,
     progress_expanded: bool,
@@ -318,6 +322,7 @@ pub struct Verify {
     /// (`docs/specs/task-links.md` L1-7): from its runner, or found in the
     /// link log for a stored one.
     origin: Option<Origin>,
+    start_origin: Option<task_links::OriginHint>,
     /// Where the verification's Board Timeline posts stand.
     timeline: Status,
     /// Where the link logs are (`task_links::default_root`).
@@ -476,6 +481,25 @@ impl Verify {
     /// Puts `dir` in the start view's repository field (`--repo`: the
     /// focused pane's directory, so verifying where the person works needs
     /// no path typed).
+    /// Prefill a task's immutable diff; opening the form starts no agents.
+    pub fn with_handoff(
+        mut self,
+        base: Option<&str>,
+        revision: Option<&str>,
+        origin: Option<task_links::OriginHint>,
+    ) -> Self {
+        if let (Some(base), Some(revision)) = (base, revision) {
+            let mut form = start::read(&self.tree, &self.start);
+            form.base = base.into();
+            form.head = revision.into();
+            let mut text = TextStore::new(Default::default());
+            start::fill(&mut self.tree, &mut self.start, &form, &mut text);
+            self.start_origin = origin;
+            self.rebuild(&mut text);
+        }
+        self
+    }
+
     pub fn with_place(mut self, dir: &Path) -> Self {
         let mut text = TextStore::new(Default::default());
         let form = start::Form {
@@ -502,7 +526,7 @@ impl Verify {
 
     fn build(source: Source, link: Link, session: Option<Arc<Session>>) -> Self {
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::dark());
+        crate::appearance::install(&mut tree, Theme::dark());
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -521,7 +545,10 @@ impl Verify {
                 ..fill()
             }),
         );
-        let navigation = tree.insert(Some(board), Container::wrapping_row(6.0, 4.0).padding(8.0));
+        let navigation = tree.insert(
+            Some(board),
+            Container::wrapping_row(6.0, 4.0).padding(crate::appearance::space(8.0)),
+        );
         let navigation_buttons = ["対象・パネル", "基準・結果", "選択の詳細"].map(|label| {
             tree.insert(
                 Some(navigation),
@@ -571,6 +598,7 @@ impl Verify {
             evidence_focus: None,
             evidence_return: None,
             preview_job: None,
+            thumbnails: images::Cache::default(),
             expanded_history: BTreeSet::new(),
             actions_expanded: false,
             progress_expanded: false,
@@ -597,6 +625,7 @@ impl Verify {
             panes_alert: None,
             stored_panes: None,
             origin: None,
+            start_origin: None,
             timeline: Status::Idle,
             tasks_root: task_links::default_root(),
             built: None,
@@ -653,6 +682,8 @@ impl Verify {
     }
 
     fn rebuild(&mut self, text: &mut TextStore) {
+        self.sync_thumbnails();
+        self.thumbnails.begin_build();
         // Rebuilding replaces the widgets, and focus would go with them: it
         // goes back to the widget that takes the focused one's place.
         let focused = self.focused_action();
@@ -722,6 +753,21 @@ impl Verify {
     }
 
     fn rebuild_widgets(&mut self, text: &mut TextStore) {
+        self.tree
+            .set_hidden(self.start.handoff, self.start_origin.is_none());
+        if let Some(origin) = &self.start_origin {
+            let short = |value: &str| value.chars().take(12).collect::<String>();
+            let label = format!(
+                "元タスク {} · {}\n比較元 {} → この版 {}",
+                origin.task,
+                origin.run,
+                short(&origin.base),
+                short(&origin.commit)
+            );
+            self.tree
+                .update::<Label, _>(self.start.handoff, |view, cx| view.set_text(cx, label));
+        }
+
         self.built = Some(self.built_key());
         self.actions.clear();
         let started = self.session.is_some();
@@ -1063,6 +1109,7 @@ impl Verify {
                     self.tab == CenterTab::Gallery,
                     can_attach,
                     &preview_offer,
+                    &self.thumbnails,
                     &mut self.actions,
                 );
             }
@@ -1099,6 +1146,7 @@ impl Verify {
             offer: offer.as_ref(),
             can_attach: self.can_attach(),
             expanded: &self.expanded_history,
+            images: &self.thumbnails,
         };
         thread::insert(
             &mut self.tree,
@@ -1476,6 +1524,9 @@ impl Verify {
 
     fn rebuild_if_changed(&mut self, text: &mut TextStore) {
         self.poll_preview();
+        if self.thumbnails.poll() {
+            self.built = None;
+        }
         let next = self.built_key();
         if let Some(prev) = &self.built {
             if prev == &next {
@@ -1940,6 +1991,20 @@ impl Verify {
                 self.rebuild(text);
             }
             Action::OpenEvidence(key) => self.open_evidence(&key, text),
+            Action::PreviewImage(key) => {
+                if matches!(self.source, Source::Demo) || !self.thumbnails.ready(&key) {
+                    self.toast("画像の読込が完了してから拡大プレビューを開いてください");
+                    return;
+                }
+                if let Some(dir) = &self.session_dir {
+                    match crate::native_preview::launch(dir, &key) {
+                        Ok(()) => self.toast("画像の拡大プレビューを開きました"),
+                        Err(why) => self.toast(why),
+                    }
+                } else {
+                    self.toast("保存された検証を開くと拡大プレビューを使えます");
+                }
+            }
             Action::PreviewImages => self.preview_images(text),
             Action::RevealEvidence(key) => self.reveal_evidence(&key),
             Action::CloseLog => {
@@ -2091,6 +2156,7 @@ impl Verify {
                 }
             }
             Action::NewVerification => {
+                self.start_origin = None;
                 self.leave();
                 self.refusal = None;
                 self.auto.reset();
@@ -2266,6 +2332,7 @@ impl Verify {
             text,
         );
         self.send_cmd(Command::Start {
+            origin: self.start_origin.clone(),
             request: form.request.clone(),
             target: Box::new(target),
             isolation: form.isolation,
@@ -2306,6 +2373,7 @@ impl Verify {
                 Err(why) => return self.toast(why),
             },
         };
+        self.start_origin = None;
         let form = start::Form::from_session(&session);
         if self.session.is_some() {
             self.leave();
@@ -2341,6 +2409,9 @@ fn rerun_log(rerun: &Rerun) -> Option<&Stored> {
 }
 
 impl Screen for Verify {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
     fn prepare(&mut self, viewport: noa_gpui_scene::Size, text: &mut TextStore) -> bool {
         self.adapt_layout(viewport.width);
         let changed = self.tree.prepare(viewport, text).is_some();
@@ -2680,13 +2751,20 @@ pub(super) fn heading(tree: &mut UiTree, parent: WidgetId, text: &str) {
             ..Default::default()
         }),
     );
-    tree.insert(Some(bar), Label::new(text).font_size(14.0).weight(600));
+    tree.insert(
+        Some(bar),
+        Label::new(text)
+            .font_size(crate::appearance::font(14.0))
+            .weight(600),
+    );
 }
 
 pub(super) fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) {
     tree.insert(
         Some(parent),
-        Label::new(text.into()).font_size(11.0).color(Role::Muted),
+        Label::new(text.into())
+            .font_size(crate::appearance::font(11.0))
+            .color(Role::Muted),
     );
 }
 
@@ -2694,7 +2772,7 @@ pub(super) fn note(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>)
     tree.insert(
         Some(parent),
         Label::new(text.into())
-            .font_size(11.5)
+            .font_size(crate::appearance::font(11.5))
             .color(Role::Muted)
             .wrap(true),
     );
@@ -2704,7 +2782,7 @@ pub(super) fn body(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>)
     tree.insert(
         Some(parent),
         Label::new(text.into())
-            .font_size(12.5)
+            .font_size(crate::appearance::font(12.5))
             .wrap(true)
             .selectable(true),
     );
@@ -2768,8 +2846,8 @@ pub(super) fn card(tree: &mut UiTree, parent: WidgetId, accent: bool) -> WidgetI
     tree.insert(
         Some(parent),
         Container::column()
-            .gap(6.0)
-            .padding(10.0)
+            .gap(crate::appearance::space(6.0))
+            .padding(crate::appearance::space(10.0))
             .background(Role::Background)
             .border(
                 1.0,

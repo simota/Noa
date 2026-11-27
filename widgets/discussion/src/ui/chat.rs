@@ -109,7 +109,7 @@ fn brief_bar(
     tree.insert(
         Some(row),
         Label::new(format!("▍ブリーフ R{}", round.no))
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(600),
     );
     if let RoundKind::Debate(id) = &round.kind {
@@ -176,7 +176,7 @@ fn debate_banner(
     tree.insert(
         Some(row),
         Label::new(text)
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .truncation(Truncation::Tail),
     );
     spacer(tree, row);
@@ -203,7 +203,7 @@ fn filter_bar(
         tree.insert(
             Some(row),
             Label::new(found.title.clone())
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .truncation(Truncation::Tail),
         );
     }
@@ -264,7 +264,7 @@ pub(super) fn message_card(
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
     let author = Label::new(author_name(&message.author))
-        .font_size(13.0)
+        .font_size(crate::appearance::font(13.0))
         .weight(600)
         .color(author_color(session, &message.author));
     let link = match &message.author {
@@ -305,7 +305,7 @@ pub(super) fn message_card(
     tree.insert(
         Some(card),
         Label::new(message.body.clone())
-            .font_size(if question { 13.0 } else { 14.0 })
+            .font_size(crate::appearance::font(if question { 13.0 } else { 14.0 }))
             .color(if question { Role::Muted } else { Role::Text })
             .wrap(true)
             .selectable(true),

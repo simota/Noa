@@ -1288,9 +1288,11 @@ fn draws_a_picture(tree: &UiTree, root: WidgetId) -> bool {
 }
 
 #[test]
-fn ac32_media_show_as_placeholder_cards_without_a_picture_or_a_thumbnail() {
+fn ac32_invalid_media_keep_labeled_fallbacks_without_writing_sidecars() {
     let workdir = temp("cards");
     let (session, reply) = demo_with_files(&workdir);
+    // This fixture stores plain text in the media files. Invalid image data
+    // keeps its metadata and external-open action while previewing fails.
     let before = files_with_times(&workdir);
     let (mut screen, _link) = live_with_dirs(session, &reply);
     let opened = record_opens(&mut screen);
@@ -4323,4 +4325,18 @@ fn auto_resuming_a_past_verification_while_deciding_stops_the_planner() {
     );
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn refilling_a_past_session_clears_an_unrelated_task_handoff() {
+    let mut screen = Verify::demo();
+    screen.start_origin = Some(task_links::OriginHint {
+        base: "b".repeat(40),
+        repo: PathBuf::from("/unrelated"),
+        task: "t-other".into(),
+        run: "run-other".into(),
+        commit: "a".repeat(40),
+    });
+    act(&mut screen, Action::VerifyAgain(None));
+    assert!(screen.start_origin.is_none());
 }

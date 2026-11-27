@@ -575,6 +575,7 @@ impl IpcBackend for AppIpcBackend {
             .is_some_and(|service| service.opened())
         {
             capabilities.push(noa_ipc::CAPABILITY_REPO_WIDGETS_V1);
+            capabilities.push(noa_ipc::widget::CAPABILITY_WIDGET_OPERATIONS_V1);
         }
         capabilities
     }

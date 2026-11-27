@@ -32,7 +32,7 @@ pub(super) fn insert(
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(4.0),
-            padding: LayoutRect::length(10.0),
+            padding: LayoutRect::length(crate::appearance::space(10.0)),
             size: LayoutSize {
                 width: percent(1.0),
                 height: auto(),
@@ -47,7 +47,7 @@ pub(super) fn insert(
     tree.insert(
         Some(req),
         Label::new(session.request.clone())
-            .font_size(14.0)
+            .font_size(crate::appearance::font(14.0))
             .wrap(true),
     );
 
@@ -71,7 +71,7 @@ pub(super) fn insert(
     tree.insert(
         Some(rhead),
         Label::new(format!("Round {}", round.no))
-            .font_size(15.0)
+            .font_size(crate::appearance::font(15.0))
             .weight(600),
     );
     tag(tree, rhead, kind_label, kind_tone);
@@ -82,7 +82,7 @@ pub(super) fn insert(
             Container::new(Style {
                 flex_direction: FlexDirection::Column,
                 gap: gap(4.0),
-                padding: LayoutRect::length(10.0),
+                padding: LayoutRect::length(crate::appearance::space(10.0)),
                 size: LayoutSize {
                     width: percent(1.0),
                     height: auto(),
@@ -96,7 +96,7 @@ pub(super) fn insert(
         tree.insert(
             Some(ov),
             Label::new(outcome.overview.clone())
-                .font_size(14.0)
+                .font_size(crate::appearance::font(14.0))
                 .wrap(true),
         );
     }
@@ -138,7 +138,7 @@ pub(super) fn insert(
                     height: auto(),
                 },
                 gap: gap(8.0),
-                padding: LayoutRect::length(12.0),
+                padding: LayoutRect::length(crate::appearance::space(12.0)),
                 ..Default::default()
             })
             .background(Role::Surface)
@@ -164,7 +164,12 @@ pub(super) fn insert(
         } else {
             part.to_string()
         };
-        tree.insert(Some(head), Label::new(title).font_size(14.0).weight(600));
+        tree.insert(
+            Some(head),
+            Label::new(title)
+                .font_size(crate::appearance::font(14.0))
+                .weight(600),
+        );
         spacer(tree, head);
         if let Some(score) = session.score_label(round.no, part) {
             tag(tree, head, format!("{score}/100"), Tone::Neutral);
@@ -183,7 +188,7 @@ pub(super) fn insert(
             tree.insert(
                 Some(col),
                 Label::new(sub.summary.clone())
-                    .font_size(14.0)
+                    .font_size(crate::appearance::font(14.0))
                     .weight(600)
                     .wrap(true),
             );
@@ -217,7 +222,9 @@ pub(super) fn insert(
                         continue;
                     }
                     caption(tree, col, title);
-                    let label = Label::new(text).font_size(14.0).wrap(true);
+                    let label = Label::new(text)
+                        .font_size(crate::appearance::font(14.0))
+                        .wrap(true);
                     tree.insert(
                         Some(col),
                         if muted {
@@ -244,7 +251,9 @@ pub(super) fn insert(
                 caption(tree, col, "提出レポート");
                 tree.insert(
                     Some(col),
-                    Label::new(sub.body.clone()).font_size(14.0).wrap(true),
+                    Label::new(sub.body.clone())
+                        .font_size(crate::appearance::font(14.0))
+                        .wrap(true),
                 );
             }
         } else {

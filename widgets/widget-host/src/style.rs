@@ -1,3 +1,4 @@
+use crate::appearance::space;
 use noa_gpui_core::Style;
 use noa_gpui_core::style::{
     AlignItems, Dimension, FlexDirection, LengthPercentage, Size, auto, length, percent,
@@ -5,8 +6,8 @@ use noa_gpui_core::style::{
 
 pub fn gap(px: f32) -> Size<LengthPercentage> {
     Size {
-        width: length(px),
-        height: length(px),
+        width: length(space(px)),
+        height: length(space(px)),
     }
 }
 

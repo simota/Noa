@@ -58,7 +58,7 @@ pub(super) fn insert(
             Container::new(Style {
                 flex_direction: FlexDirection::Column,
                 gap: gap(4.0),
-                padding: LayoutRect::length(10.0),
+                padding: LayoutRect::length(crate::appearance::space(10.0)),
                 size: LayoutSize {
                     width: percent(1.0),
                     height: auto(),
@@ -83,7 +83,9 @@ pub(super) fn insert(
 
         let top = tree.insert(
             Some(card),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(6.0)),
         );
         let rank_label = if is_winner {
             format!("🏆 #{} {part}", idx + 1)
@@ -92,7 +94,9 @@ pub(super) fn insert(
         };
         tree.insert(
             Some(top),
-            Label::new(rank_label).font_size(14.0).weight(600),
+            Label::new(rank_label)
+                .font_size(crate::appearance::font(14.0))
+                .weight(600),
         );
         spacer(tree, top);
         let score_hist = session.score_history(part);
@@ -174,7 +178,7 @@ pub(super) fn insert(
         Container::new(Style {
             padding: LayoutRect {
                 top: length(8.0),
-                ..LayoutRect::length(0.0)
+                ..LayoutRect::length(crate::appearance::space(0.0))
             },
             ..Default::default()
         }),
@@ -304,7 +308,7 @@ fn judge_card(
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(4.0),
-            padding: LayoutRect::length(10.0),
+            padding: LayoutRect::length(crate::appearance::space(10.0)),
             size: LayoutSize {
                 width: percent(1.0),
                 height: auto(),
@@ -321,7 +325,10 @@ fn judge_card(
     };
     tree.insert(
         Some(card),
-        Label::new(label).font_size(13.0).weight(600).wrap(true),
+        Label::new(label)
+            .font_size(crate::appearance::font(13.0))
+            .weight(600)
+            .wrap(true),
     );
     let row = tree.insert(
         Some(card),

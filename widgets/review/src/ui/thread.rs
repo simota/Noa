@@ -57,7 +57,7 @@ pub(super) fn insert(
     tree.insert(
         Some(list),
         Label::new(f.claim.clone())
-            .font_size(13.5)
+            .font_size(crate::appearance::font(13.5))
             .weight(600)
             .wrap(true),
     );
@@ -69,7 +69,9 @@ pub(super) fn insert(
     );
     let loc_row = tree.insert(
         Some(list),
-        Container::row().gap(6.0).align_items(AlignItems::CENTER),
+        Container::row()
+            .gap(crate::appearance::space(6.0))
+            .align_items(AlignItems::CENTER),
     );
     match &f.location {
         Some(loc) => {
@@ -121,7 +123,9 @@ pub(super) fn insert(
         );
         tree.insert(
             Some(top),
-            Label::new(key.to_string()).font_size(12.0).weight(600),
+            Label::new(key.to_string())
+                .font_size(crate::appearance::font(12.0))
+                .weight(600),
         );
         caption(tree, top, format!("R{}", raw.round));
         tag(tree, top, raw.severity.label(), severity_tone(raw.severity));
@@ -152,7 +156,9 @@ pub(super) fn insert(
             );
             tree.insert(
                 Some(top),
-                Label::new(part.to_string()).font_size(12.0).weight(600),
+                Label::new(part.to_string())
+                    .font_size(crate::appearance::font(12.0))
+                    .weight(600),
             );
             caption(tree, top, format!("R{}", s.round));
             tag(tree, top, s.kind.label(), stance_tone(s.kind));
@@ -199,7 +205,9 @@ fn overview(
             let c = card(tree, list, true);
             let top = tree.insert(
                 Some(c),
-                Container::row().gap(6.0).align_items(AlignItems::CENTER),
+                Container::row()
+                    .gap(crate::appearance::space(6.0))
+                    .align_items(AlignItems::CENTER),
             );
             caption(tree, top, "総合判定");
             tag(tree, top, v.decision.label(), decision_tone(v.decision));
@@ -232,7 +240,7 @@ fn overview(
                 tree.insert(
                     Some(c),
                     Label::new(format!("→ {part}: {q}"))
-                        .font_size(11.5)
+                        .font_size(crate::appearance::font(11.5))
                         .color(Role::Muted)
                         .wrap(true),
                 );

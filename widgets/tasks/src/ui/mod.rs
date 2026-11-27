@@ -38,7 +38,7 @@ use noa_gpui_core::{
     Appearance, Event, Key, Message, Modifiers, Role, Style, Theme, UiTree, WidgetId,
 };
 use noa_gpui_platform::Screen;
-use noa_gpui_scene::Color;
+use noa_gpui_scene::{Color, Size};
 use noa_gpui_text::TextStore;
 
 use tasks::auto_assign::AutoRecord;
@@ -111,6 +111,18 @@ pub enum Intent {
         kind: SessionKind,
         session: String,
     },
+    /// Open a start form on the exact version displayed, never start agents.
+    CheckVersion {
+        task: TaskRef,
+        kind: SessionKind,
+        run: RunId,
+        commit: String,
+    },
+    OpenWorkflow(TaskRef),
+    OpenWorkflowRun {
+        task: TaskRef,
+        run: String,
+    },
     /// 関連を追加: what the person typed (a PR's URL or number).
     AddLink {
         task: TaskRef,
@@ -174,6 +186,12 @@ const ALL_LABELS: &str = "すべてのラベル";
 const FAILURE: Color = Color::hex(0xff9f0a);
 const DAY_MS: Millis = 86_400_000;
 
+enum SemanticFocus {
+    Task(TaskRef),
+    Detail(Intent),
+    Control(organizer::ControlFocus),
+}
+
 pub struct Tasks {
     tree: UiTree,
     feed: Box<dyn Feed>,
@@ -224,6 +242,10 @@ pub struct Tasks {
     month: i32,
     /// The calendar's 前の月 / 今月 / 次の月.
     month_buttons: Option<[WidgetId; 3]>,
+    calendar_mode: views::CalendarMode,
+    calendar_control: Option<WidgetId>,
+    calendar_day: Option<Millis>,
+    calendar_days: Vec<(WidgetId, Millis)>,
     /// The list's, timeline's or calendar's scroll view and which it is
     /// (the calendar's month with it): its position is kept across a
     /// rebuild of the same one.
@@ -231,6 +253,13 @@ pub struct Tasks {
     /// How 実行's 「自動で割り当て」 starts a planner, and its clock.
     auto_hooks: auto::Hooks,
     planning: planning::Planning,
+    narrow: bool,
+    narrow_sidebar_open: bool,
+    sidebar_button: WidgetId,
+    back_button: WidgetId,
+    last_related: Option<BTreeMap<TaskRef, Related>>,
+    last_timeline: Option<BTreeMap<RunId, Status>>,
+    deferred_rebuild: bool,
 }
 
 impl Tasks {
@@ -240,7 +269,7 @@ impl Tasks {
             auto_hooks.plan = plan;
         }
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::for_appearance(Appearance::Dark));
+        crate::appearance::install(&mut tree, Theme::for_appearance(Appearance::Dark));
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -252,19 +281,47 @@ impl Tasks {
         );
 
         let header = style::bar(&mut tree, root, 14.0);
+        let sidebar_button = tree.insert(
+            Some(header),
+            Button::new("ビュー").control_size(ControlSize::Small),
+        );
         tree.insert(
             Some(header),
-            Label::new("タスク").font_size(15.0).weight(700),
+            Label::new("タスク")
+                .font_size(crate::appearance::font(15.0))
+                .weight(700),
+        );
+        let repo_host = tree.insert(
+            Some(header),
+            Container::new(Style {
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                flex_basis: length(160.0),
+                min_size: noa_gpui_core::style::Size {
+                    width: length(0.0),
+                    height: noa_gpui_core::style::auto(),
+                },
+                ..Default::default()
+            }),
         );
         let repo_label = tree.insert(
-            Some(header),
-            Label::new("").font_size(12.0).color(Role::Muted),
+            Some(repo_host),
+            Label::new("")
+                .font_size(crate::appearance::font(12.0))
+                .color(Role::Muted)
+                .max_lines(1),
         );
         style::spacer(&mut tree, header);
-        let notice = tree.insert(Some(header), Label::new("").font_size(12.0));
         let new_button = tree.insert(Some(header), Button::new("新規 (C)"));
         let palette_button = tree.insert(Some(header), Button::new("コマンド ⌘K"));
         let refresh_button = tree.insert(Some(header), Button::new("再取得 (R)"));
+        let notice_host = style::bar(&mut tree, root, 8.0);
+        let notice = tree.insert(
+            Some(notice_host),
+            Label::new("")
+                .font_size(crate::appearance::font(12.0))
+                .wrap(true),
+        );
         style::hairline(&mut tree, root);
 
         let filters = style::bar(&mut tree, root, 10.0);
@@ -276,7 +333,9 @@ impl Tasks {
         );
         tree.insert(
             Some(filters),
-            Label::new("取得元").font_size(12.0).color(Role::Muted),
+            Label::new("取得元")
+                .font_size(crate::appearance::font(12.0))
+                .color(Role::Muted),
         );
         let source = tree.insert(
             Some(filters),
@@ -299,13 +358,22 @@ impl Tasks {
         let github = style::bar(&mut tree, root, 10.0);
         tree.insert(
             Some(github),
-            Label::new("GitHub").font_size(12.0).weight(700),
+            Label::new("GitHub")
+                .font_size(crate::appearance::font(12.0))
+                .weight(700),
         );
         let gh_status = tree.insert(
             Some(github),
-            Label::new("").font_size(12.0).color(Role::Muted),
+            Label::new("")
+                .font_size(crate::appearance::font(12.0))
+                .color(Role::Muted),
         );
-        let gh_failure = tree.insert(Some(github), Label::new("").font_size(12.0).color(FAILURE));
+        let gh_failure = tree.insert(
+            Some(github),
+            Label::new("")
+                .font_size(crate::appearance::font(12.0))
+                .color(FAILURE),
+        );
         style::hairline(&mut tree, root);
 
         let body = tree.insert(
@@ -347,13 +415,17 @@ impl Tasks {
                     width: length(DETAIL_WIDTH),
                     height: noa_gpui_core::style::percent(1.0),
                 },
-                padding: LayoutRect::length(12.0),
+                padding: LayoutRect::length(crate::appearance::space(12.0)),
                 ..Default::default()
             })
             .background(Role::Surface)
             .border(1.0, Role::Separator)
             .radius(10.0)
             .clip(true),
+        );
+        let back_button = tree.insert(
+            Some(side),
+            Button::new("一覧へ戻る (Esc)").control_size(ControlSize::Small),
         );
         let properties_host = tree.insert(
             Some(side),
@@ -418,9 +490,20 @@ impl Tasks {
             layout_control,
             month: 0,
             month_buttons: None,
+            calendar_mode: views::CalendarMode::Both,
+            calendar_control: None,
+            calendar_day: None,
+            calendar_days: Vec::new(),
             layout_scroll: None,
             auto_hooks,
             planning,
+            narrow: false,
+            narrow_sidebar_open: false,
+            sidebar_button,
+            back_button,
+            last_related: None,
+            last_timeline: None,
+            deferred_rebuild: false,
         };
         // Nothing is laid out yet: any store serves the first build.
         let mut text = TextStore::new(Default::default());
@@ -496,6 +579,9 @@ impl Tasks {
     /// `text` must be the store the tree was laid out with: removed widgets
     /// release their text layouts in it.
     fn rebuild(&mut self, text: &mut TextStore) {
+        let focused = self.remember_focus();
+        self.last_related = self.feed.related().cloned();
+        self.last_timeline = self.feed.timeline().cloned();
         self.keep_selection();
         self.show_notice();
         let repo = self.view.repo.display().to_string();
@@ -514,9 +600,12 @@ impl Tasks {
             self.rebuild_layout(text);
             self.rebuild_planning(text);
             self.rebuild_detail(text);
+            self.restore_focus(focused);
             return;
         }
         self.month_buttons = None;
+        self.calendar_control = None;
+        self.calendar_days.clear();
         self.planning.row_controls = organizer::Controls::default();
         // A rebuild (a new View each minute, a key) keeps where the reader
         // was in each column.
@@ -557,6 +646,7 @@ impl Tasks {
         self.column_scrolls = Some(built.scrolls);
         self.rebuild_planning(text);
         self.rebuild_detail(text);
+        self.restore_focus(focused);
     }
 
     /// The list, timeline or calendar in place of the columns.
@@ -620,6 +710,8 @@ impl Tasks {
                     scroll: built.scroll,
                     rows: built.rows,
                     months: None,
+                    calendar_mode: None,
+                    days: Vec::new(),
                 }
             }
             Layout::Timeline => views::timeline(
@@ -639,6 +731,9 @@ impl Tasks {
                     &self.view.runs,
                     self.month,
                     now,
+                    &self.planning.workspace,
+                    self.calendar_mode,
+                    self.calendar_day,
                 )
             }
         };
@@ -647,6 +742,8 @@ impl Tasks {
         }
         self.layout_scroll = Some((which, built.scroll));
         self.month_buttons = built.months;
+        self.calendar_control = built.calendar_mode;
+        self.calendar_days = built.days;
         self.columns = [pane; 4];
         self.column_scrolls = None;
         self.cards = built.rows;
@@ -759,6 +856,7 @@ impl Tasks {
             self.side,
             !shown && self.form.is_none() && !self.planning.form_open(),
         );
+        self.apply_responsive();
     }
 
     /// Keeps the selection on a card that is shown: the same task when it
@@ -807,6 +905,7 @@ impl Tasks {
     /// Loads an issue's detail unless it is loaded: a failed load is tried
     /// again.
     fn open_detail(&mut self, r: TaskRef, text: &mut TextStore) {
+        self.narrow_sidebar_open = false;
         if let TaskRef::GitHub { number, .. } = &r
             && !matches!(self.view.github.details.get(number), Some(Ok(_)))
         {
@@ -814,9 +913,13 @@ impl Tasks {
         }
         self.detail = Some(r);
         self.rebuild(text);
+        if self.narrow {
+            self.tree.set_focus(Some(self.back_button));
+        }
     }
 
     fn open_form(&mut self, mut form: Form, text: &mut TextStore) {
+        self.narrow_sidebar_open = false;
         if self.planning.form_open() {
             self.close_planning_form(text);
         }
@@ -1153,6 +1256,10 @@ fn clear(tree: &mut UiTree, parent: WidgetId, text: &mut TextStore) {
 }
 
 impl Screen for Tasks {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
+
     fn tree(&self) -> &UiTree {
         &self.tree
     }
@@ -1161,9 +1268,24 @@ impl Screen for Tasks {
         &mut self.tree
     }
 
+    fn prepare(&mut self, viewport: Size, text: &mut TextStore) -> bool {
+        let narrow = viewport.width < 1120.0;
+        if narrow != self.narrow {
+            self.narrow = narrow;
+            self.narrow_sidebar_open = false;
+            self.apply_responsive();
+        }
+        if self.deferred_rebuild && !self.in_overlay() {
+            self.deferred_rebuild = false;
+            self.rebuild(text);
+        }
+        self.tree.prepare(viewport, text).is_some()
+    }
+
     fn woken(&mut self, text: &mut TextStore) {
         self.persist_preferences();
         match self.planning.workspace.reload() {
+            Ok(true) if self.in_overlay() => self.deferred_rebuild = true,
             Ok(true) => self.rebuild(text),
             Ok(false) => {}
             Err(error) => {
@@ -1175,13 +1297,35 @@ impl Screen for Tasks {
             form.poll_auto(&mut self.tree, (self.auto_hooks.clock)());
         }
         if let Some(view) = self.feed.poll() {
+            let only_clock = View {
+                now: self.view.now,
+                ..view.clone()
+            } == self.view
+                && dates::same_day(view.now, self.view.now)
+                && self.last_related.as_ref() == self.feed.related()
+                && self.last_timeline.as_ref() == self.feed.timeline();
             // A new notice from the feed is newer than the screen's own.
             if view.notice.is_some() && view.notice != self.view.notice {
                 self.own_notice = None;
             }
             self.view = view;
             self.sync_source_changes();
-            self.rebuild(text);
+            let same_members = self.layout != Layout::Board || {
+                let expected: BTreeSet<_> = self.column_refs().into_iter().flatten().collect();
+                let shown: BTreeSet<_> = self.cards.iter().map(|(_, r)| r.clone()).collect();
+                expected == shown
+            };
+            if only_clock && same_members && self.layout != Layout::Timeline {
+                let (status, _) = github_header(&self.view.github, self.view.now);
+                self.tree
+                    .update::<Label, _>(self.gh_status, |label, cx| label.set_text(cx, status));
+                style::refresh_ages(&mut self.tree, self.columns_host, self.view.now);
+                style::refresh_ages(&mut self.tree, self.detail_host, self.view.now);
+            } else if self.in_overlay() {
+                self.deferred_rebuild = true;
+            } else {
+                self.rebuild(text);
+            }
             if let Some(id) = self.select_later.take()
                 && !self.select(&id, text)
             {
@@ -1282,7 +1426,13 @@ impl Screen for Tasks {
         }
         let source = message.source;
         if let Some(SelectionChanged(i)) = message.downcast_ref::<SelectionChanged>() {
-            if source == self.layout_control {
+            if Some(source) == self.calendar_control {
+                if let Some(mode) = views::CalendarMode::ALL.get(*i) {
+                    self.calendar_mode = *mode;
+                    self.mark_preferences_dirty();
+                    self.rebuild(text);
+                }
+            } else if source == self.layout_control {
                 if let Some(layout) = Layout::ALL.get(*i) {
                     self.set_layout(*layout, text);
                 }
@@ -1309,10 +1459,28 @@ impl Screen for Tasks {
                 self.tree.set_focus(None);
             }
         } else if message.downcast_ref::<ButtonClicked>().is_some() {
-            if source == self.new_button {
+            if source == self.sidebar_button {
+                self.toggle_sidebar();
+            } else if source == self.back_button {
+                self.form = None;
+                self.close_planning_form(text);
+                self.detail = None;
+                clear(&mut self.tree, self.form_host, text);
+                self.rebuild_detail(text);
+            } else if source == self.new_button {
                 self.open_form(Form::new_task(), text);
             } else if source == self.refresh_button {
                 self.act(Intent::Refresh);
+            } else if let Some((_, day)) = self.calendar_days.iter().find(|(id, _)| *id == source) {
+                self.calendar_day = (self.calendar_day != Some(*day)).then_some(*day);
+                self.rebuild(text);
+                if let Some((_, scroll)) = self.layout_scroll {
+                    set_scroll_position(
+                        &mut self.tree,
+                        scroll,
+                        noa_gpui_scene::Point::new(0.0, 0.0),
+                    );
+                }
             } else if let Some(at) = self
                 .month_buttons
                 .and_then(|ids| ids.iter().position(|id| *id == source))
@@ -1339,6 +1507,125 @@ impl Screen for Tasks {
 }
 
 impl Tasks {
+    fn toggle_sidebar(&mut self) {
+        if self.narrow {
+            self.narrow_sidebar_open = !self.narrow_sidebar_open;
+        } else {
+            self.planning.sidebar_hidden = !self.planning.sidebar_hidden;
+        }
+        self.apply_responsive();
+    }
+
+    fn apply_responsive(&mut self) {
+        let detail = self.detail.as_ref().is_some_and(|r| self.task(r).is_some())
+            || self.form.is_some()
+            || self.planning.form_open();
+        let sidebar = if self.narrow {
+            self.narrow_sidebar_open
+        } else {
+            !self.planning.sidebar_hidden
+        };
+        self.tree.set_hidden(self.planning.nav_host, !sidebar);
+        self.tree
+            .set_hidden(self.columns_host, self.narrow && (detail || sidebar));
+        self.tree
+            .set_hidden(self.side, !detail || (self.narrow && sidebar));
+        self.tree.set_hidden(self.back_button, !self.narrow);
+        let narrow = self.narrow;
+        self.tree.update::<Container, _>(self.side, |c, cx| {
+            c.set_style(
+                cx,
+                Style {
+                    flex_direction: FlexDirection::Column,
+                    flex_shrink: 0.0,
+                    flex_grow: if narrow { 1.0 } else { 0.0 },
+                    flex_basis: if narrow {
+                        length(0.0)
+                    } else {
+                        noa_gpui_core::style::auto()
+                    },
+                    min_size: noa_gpui_core::style::Size {
+                        width: length(0.0),
+                        height: length(0.0),
+                    },
+                    size: noa_gpui_core::style::Size {
+                        width: if narrow {
+                            noa_gpui_core::style::percent(1.0)
+                        } else {
+                            length(DETAIL_WIDTH)
+                        },
+                        height: noa_gpui_core::style::percent(1.0),
+                    },
+                    padding: LayoutRect::length(crate::appearance::space(12.0)),
+                    ..Default::default()
+                },
+            )
+        });
+        self.tree
+            .update::<Container, _>(self.planning.nav_host, |c, cx| {
+                c.set_style(
+                    cx,
+                    Style {
+                        flex_shrink: 0.0,
+                        flex_grow: if narrow { 1.0 } else { 0.0 },
+                        size: noa_gpui_core::style::Size {
+                            width: if narrow {
+                                noa_gpui_core::style::percent(1.0)
+                            } else {
+                                length(180.0)
+                            },
+                            height: noa_gpui_core::style::percent(1.0),
+                        },
+                        ..Default::default()
+                    },
+                )
+            });
+    }
+
+    fn remember_focus(&self) -> Option<SemanticFocus> {
+        let id = self.tree.focused()?;
+        if let Some((_, task)) = self.cards.iter().find(|(w, _)| *w == id) {
+            return Some(SemanticFocus::Task(task.clone()));
+        }
+        if let Some((_, action)) = self.detail_actions.iter().find(|(w, _)| *w == id) {
+            return Some(SemanticFocus::Detail(action.clone()));
+        }
+        [
+            &self.planning.nav_controls,
+            &self.planning.row_controls,
+            &self.planning.properties_controls,
+        ]
+        .into_iter()
+        .find_map(|c| c.remember_focus(id))
+        .map(SemanticFocus::Control)
+    }
+
+    fn restore_focus(&mut self, focus: Option<SemanticFocus>) {
+        let Some(focus) = focus else {
+            return;
+        };
+        let id = match focus {
+            SemanticFocus::Task(task) => self
+                .cards
+                .iter()
+                .find(|(_, t)| t == &task)
+                .map(|(id, _)| *id),
+            SemanticFocus::Detail(action) => self
+                .detail_actions
+                .iter()
+                .find(|(_, a)| a == &action)
+                .map(|(id, _)| *id),
+            SemanticFocus::Control(control) => [
+                &self.planning.nav_controls,
+                &self.planning.row_controls,
+                &self.planning.properties_controls,
+            ]
+            .into_iter()
+            .find_map(|c| c.restore_focus(&control)),
+        };
+        self.tree.set_focus(id);
+    }
+
     /// A detail button: 編集, 実行 and 関連を追加 open their form, the rest
     /// are sent.
     fn detail_action(&mut self, intent: Intent, text: &mut TextStore) {

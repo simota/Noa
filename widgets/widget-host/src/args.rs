@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: widget-host --manifest=FILE [--data=FILE] [--snapshot=FILE.png [--size=WxH]]\n       widget-host --repo=DIR\n       widget-host --bridge-stdio";
+pub const USAGE: &str = "usage: widget-host --manifest=FILE [--data=FILE] [--snapshot=FILE.png [--size=WxH]]\n       widget-host --repo=DIR [--preview-id=ID [--snapshot=FILE.png [--size=WxH]]]\n       widget-host --bridge-stdio";
 pub const DEFAULT_SIZE: (u32, u32) = (960, 720);
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -13,6 +13,7 @@ pub struct Args {
     pub snapshot: Option<PathBuf>,
     pub size: Option<(u32, u32)>,
     pub repo: Option<PathBuf>,
+    pub preview_id: Option<String>,
     pub bridge: bool,
     pub help: bool,
 }
@@ -55,6 +56,12 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             path_arg(&mut parsed.snapshot, "--snapshot", value)?;
         } else if let Some(value) = arg.strip_prefix("--repo=") {
             path_arg(&mut parsed.repo, "--repo", value)?;
+        } else if let Some(value) = arg.strip_prefix("--preview-id=") {
+            if parsed.preview_id.is_some() {
+                return Err("--preview-id may be specified once".into());
+            }
+            noa_widget::check_id(value).map_err(|error| error.to_string())?;
+            parsed.preview_id = Some(value.to_owned());
         } else if let Some(value) = arg.strip_prefix("--size=") {
             if parsed.size.is_some() {
                 return Err("--size may be specified once".into());
@@ -75,11 +82,20 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "choose exactly one of --manifest, --repo, --bridge-stdio\n{USAGE}"
         ));
     }
-    if (parsed.data.is_some() || parsed.snapshot.is_some()) && parsed.manifest.is_none() {
-        return Err("--data and --snapshot require --manifest".into());
+    if parsed.data.is_some() && parsed.manifest.is_none() {
+        return Err("--data requires --manifest".into());
+    }
+    if parsed.snapshot.is_some()
+        && parsed.manifest.is_none()
+        && !(parsed.repo.is_some() && parsed.preview_id.is_some())
+    {
+        return Err("--snapshot requires --manifest or --repo with --preview-id".into());
     }
     if parsed.size.is_some() && parsed.snapshot.is_none() {
         return Err("--size requires --snapshot".into());
+    }
+    if parsed.preview_id.is_some() && parsed.repo.is_none() {
+        return Err("--preview-id requires --repo".into());
     }
     Ok(parsed)
 }
@@ -99,6 +115,7 @@ mod tests {
             "--manifest=x",
             "--data=x",
             "--repo=x",
+            "--preview-id=example",
             "--snapshot=x",
             "--size=800x600",
         ] {
@@ -121,5 +138,23 @@ mod tests {
         assert!(args(&["--manifest=x", "--snapshot=x", "--size=0x700"]).is_err());
         assert!(args(&["--manifest="]).is_err());
         assert!(args(&["--manifest=x", "--manifest=y"]).is_err());
+    }
+
+    #[test]
+    fn catalogue_preview_is_scoped_to_a_repository_and_a_valid_id() {
+        let parsed = args(&["--repo=/project", "--preview-id=example"]).unwrap();
+        assert_eq!(parsed.preview_id.as_deref(), Some("example"));
+        for input in [
+            vec!["--manifest=x", "--preview-id=example"],
+            vec!["--repo=/project", "--preview-id=../outside"],
+            vec!["--repo=/project", "--preview-id=example", "--data=outside"],
+            vec![
+                "--repo=/project",
+                "--preview-id=example",
+                "--preview-id=second",
+            ],
+        ] {
+            assert!(args(&input).is_err(), "{input:?}");
+        }
     }
 }

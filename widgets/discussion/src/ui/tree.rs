@@ -40,7 +40,7 @@ pub(super) fn insert(
     tree.insert(
         Some(list),
         Label::new(session.topic.clone())
-            .font_size(14.0)
+            .font_size(crate::appearance::font(14.0))
             .weight(600)
             .wrap(true),
     );
@@ -129,7 +129,7 @@ fn issue_node(
                 height: auto(),
             },
             gap: gap(7.0),
-            padding: LayoutRect::length(8.0),
+            padding: LayoutRect::length(crate::appearance::space(8.0)),
             ..Default::default()
         })
         .label(format!("{} {}", issue.id, issue.title))
@@ -144,7 +144,7 @@ fn issue_node(
     tree.insert(
         Some(title),
         Label::new(issue.id.to_string())
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .color(Role::Muted),
     );
     // New: added by the summary that opened this round, or in it.
@@ -154,7 +154,7 @@ fn issue_node(
     tree.insert(
         Some(node),
         Label::new(issue.title.clone())
-            .font_size(14.0)
+            .font_size(crate::appearance::font(14.0))
             .weight(600)
             .wrap(true),
     );

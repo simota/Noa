@@ -12,6 +12,7 @@ use noa_gpui_text::TextStore;
 use noa_widget::Manifest;
 use serde_json::Value;
 
+use widget_host::appearance;
 use widget_host::args::{self, DEFAULT_SIZE, USAGE};
 use widget_host::bridge::{self, Bridge};
 use widget_host::catalog::Catalog;
@@ -73,6 +74,9 @@ fn upload(screen: &mut WidgetScreen, setup: &mut Setup<'_>) {
 }
 
 fn main() -> Result<(), String> {
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let args = args::parse(std::env::args().skip(1))?;
     if args.help {
         println!("{USAGE}");
@@ -93,6 +97,38 @@ fn main() -> Result<(), String> {
         .map_err(|error| error.to_string());
     }
     if let Some(repo) = args.repo {
+        if let Some(id) = args.preview_id {
+            let definition =
+                noa_widget::discovery::load(&repo, &id).map_err(|error| error.to_string())?;
+            let fixtures =
+                noa_widget::discovery::fixtures(&repo, &definition).unwrap_or_else(|error| {
+                    noa_widget::discovery::Fixtures {
+                        values: Vec::new(),
+                        diagnostics: vec![noa_widget::discovery::Diagnostic {
+                            path: definition.path.clone(),
+                            message: error.to_string(),
+                        }],
+                    }
+                });
+            let mut screen = WidgetScreen::preview_package(
+                definition.manifest.clone(),
+                definition.manifest.initial_data.clone(),
+                &definition.assets,
+            )?
+            .with_fixtures(fixtures);
+            let title = format!("Noa · {} · Preview", screen.title());
+            if let Some(path) = args.snapshot {
+                snapshot(&mut screen, &path, args.size.unwrap_or(DEFAULT_SIZE))?;
+                println!("wrote {}", path.display());
+                return Ok(());
+            }
+            return App::new(options(title), move |setup| {
+                upload(&mut screen, setup);
+                Box::new(screen)
+            })
+            .run()
+            .map_err(|error| error.to_string());
+        }
         let screen = Catalog::open(&repo)?;
         return App::new(options("Noa · Repository Widgets".into()), move |_| {
             Box::new(screen)

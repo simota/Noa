@@ -446,7 +446,7 @@ fn notice_line(tree: &mut UiTree, root: WidgetId, feed: &Feed) -> WidgetId {
     tree.insert(
         Some(slot),
         Label::new(health::initial_notice(feed))
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .truncation(Truncation::Tail),
     )
 }
@@ -653,7 +653,7 @@ impl Dashboard {
 
     fn start(view: View, feed: Feed) -> Self {
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::for_appearance(Appearance::Dark));
+        crate::appearance::install(&mut tree, Theme::for_appearance(Appearance::Dark));
         let mut dashboard = Self::build(
             tree,
             view,
@@ -1453,7 +1453,7 @@ impl Dashboard {
             Container::new(Style {
                 flex_direction: FlexDirection::Column,
                 gap: gap(10.0),
-                padding: LayoutRect::length(14.0),
+                padding: LayoutRect::length(crate::appearance::space(14.0)),
                 size: LayoutSize {
                     width: length(DRAWER_WIDTH),
                     height: percent(1.0),
@@ -1598,7 +1598,7 @@ impl Dashboard {
                 // 5, not more: every row then fits the smallest window
                 // (1100 x 700) with the ⇧X row too.
                 gap: gap(5.0),
-                padding: LayoutRect::length(16.0),
+                padding: LayoutRect::length(crate::appearance::space(16.0)),
                 size: LayoutSize {
                     width: length(HELP_WIDTH),
                     height: noa_gpui_core::style::auto(),
@@ -2333,6 +2333,9 @@ impl Dashboard {
 }
 
 impl Screen for Dashboard {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
     fn tree(&self) -> &UiTree {
         &self.tree
     }

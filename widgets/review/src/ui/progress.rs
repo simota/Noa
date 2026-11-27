@@ -127,7 +127,9 @@ pub(super) fn insert(
     };
     tree.insert(
         Some(top),
-        Label::new(round_label).font_size(13.0).weight(600),
+        Label::new(round_label)
+            .font_size(crate::appearance::font(13.0))
+            .weight(600),
     );
     if let Some(round) = current.filter(|_| !session.closed) {
         let (phase, tone) = if session.waits_to_continue() {
@@ -204,7 +206,10 @@ pub(super) fn insert(
         return toggle;
     }
 
-    let detail = tree.insert(Some(strip), Container::column().gap(8.0));
+    let detail = tree.insert(
+        Some(strip),
+        Container::column().gap(crate::appearance::space(8.0)),
+    );
     let rounds = tree.insert(
         Some(detail),
         Container::wrapping_row(8.0, 6.0).align_items(AlignItems::CENTER),
@@ -260,7 +265,12 @@ fn attention(tree: &mut UiTree, parent: WidgetId, label: &str, message: &str, to
         Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
     );
     tag(tree, row, label, tone);
-    tree.insert(Some(row), Label::new(message).font_size(12.5).wrap(true));
+    tree.insert(
+        Some(row),
+        Label::new(message)
+            .font_size(crate::appearance::font(12.5))
+            .wrap(true),
+    );
 }
 
 fn steps(tree: &mut UiTree, parent: WidgetId, round: &Round, closed: bool) {
@@ -297,15 +307,17 @@ fn part_chip(
         Some(parent),
         Container::row()
             .align_items(AlignItems::CENTER)
-            .gap(6.0)
-            .padding(6.0)
+            .gap(crate::appearance::space(6.0))
+            .padding(crate::appearance::space(6.0))
             .background(Role::Surface)
             .border(1.0, Role::Separator)
             .radius(6.0),
     );
     tree.insert(
         Some(chip),
-        Label::new(name.to_owned()).font_size(12.0).weight(600),
+        Label::new(name.to_owned())
+            .font_size(crate::appearance::font(12.0))
+            .weight(600),
     );
     let Some(brief) = brief else {
         tag(tree, chip, "取りまとめ待ち", Tone::Neutral);

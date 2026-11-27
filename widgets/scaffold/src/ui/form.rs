@@ -98,7 +98,9 @@ impl Form {
         );
         tree.insert(
             Some(column),
-            Label::new(self.heading()).font_size(13.0).weight(700),
+            Label::new(self.heading())
+                .font_size(crate::appearance::font(13.0))
+                .weight(700),
         );
         let mut ids = Ids::default();
         match &self.kind {
@@ -124,7 +126,9 @@ impl Form {
             Kind::Decide { choices, links, .. } => {
                 tree.insert(
                     Some(column),
-                    Label::new("移す先").font_size(11.0).color(Role::Muted),
+                    Label::new("移す先")
+                        .font_size(crate::appearance::font(11.0))
+                        .color(Role::Muted),
                 );
                 ids.choice = Some(
                     tree.insert(
@@ -141,7 +145,7 @@ impl Form {
                 tree.insert(
                     Some(column),
                     Label::new("根拠（関連付けから選ぶ・パスを書く）")
-                        .font_size(11.0)
+                        .font_size(crate::appearance::font(11.0))
                         .color(Role::Muted),
                 );
                 for (kind, id) in links {

@@ -4,12 +4,14 @@
 
 use std::collections::BTreeSet;
 
-use noa_gpui_core::style::{Size as LayoutSize, auto, length};
+use noa_gpui_core::style::{FlexWrap, Size as LayoutSize, auto, length};
+use noa_gpui_core::styling::{Length, StylePatch};
 use noa_gpui_core::widgets::{Button, Container, Label, Tag, TextArea, TextField, Tone};
-use noa_gpui_core::{Paint, PaintCx, Role, Style, UiTree, Widget, WidgetId};
+use noa_gpui_core::{Appearance, Paint, PaintCx, Role, Style, UiTree, Widget, WidgetId};
 use noa_gpui_scene::{Border, Color, Rect};
 use serde_json::{Value, json};
 
+use crate::appearance::{font, space};
 use crate::images::{self, Picture};
 use crate::style;
 
@@ -56,6 +58,7 @@ pub enum Node {
     },
     List(Vec<String>),
     Button {
+        id: String,
         label: String,
         action: Action,
     },
@@ -93,6 +96,9 @@ pub enum Node {
 pub struct Inputs {
     pub fields: Vec<InputField>,
     pub buttons: Vec<FormButton>,
+    /// Stable manifest node identities for all keyboard-focusable controls.
+    pub focus_nodes: Vec<(String, WidgetId)>,
+    pub tones: Vec<(WidgetId, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +367,7 @@ pub fn resolve(view: &Value, data: &Value) -> Result<Node, String> {
         "button" if view.get("inputs").is_some() => form_button(view, data),
         "text-input" => text_input(view, data),
         "button" => Ok(Node::Button {
+            id: string(view, "id")?,
             label: display(&bound(view, "label", data)?)?,
             action: Action {
                 id: string(view, "action")?,
@@ -445,13 +452,23 @@ fn tone(name: &str) -> Tone {
     }
 }
 
-fn text_color(tone: &str) -> Paint {
-    match tone {
-        "muted" => Role::Muted.into(),
-        "success" => Color::hex(0x30d158).into(),
-        "warning" => Color::hex(0xffb840).into(),
-        "error" => Color::hex(0xff453a).into(),
+fn text_color(tone: &str, appearance: Appearance) -> Paint {
+    match (tone, appearance) {
+        ("success", Appearance::Light) => Color::hex(0x146c2e).into(),
+        ("warning", Appearance::Light) => Color::hex(0x9c4a00).into(),
+        ("error", Appearance::Light) => Color::hex(0xb42318).into(),
+        ("muted", _) => Role::Muted.into(),
+        ("success", _) => Color::hex(0x30d158).into(),
+        ("warning", _) => Color::hex(0xffb840).into(),
+        ("error", _) => Color::hex(0xff453a).into(),
         _ => Role::Text.into(),
+    }
+}
+
+pub fn refresh_tones(tree: &mut UiTree, inputs: &Inputs) {
+    for (id, tone) in &inputs.tones {
+        let color = text_color(tone, tree.theme().appearance);
+        tree.update::<Label, _>(*id, |label, cx| label.set_color(cx, color));
     }
 }
 
@@ -468,14 +485,31 @@ pub fn insert(
             let container = tree.insert(
                 Some(parent),
                 Container::new(style::wide(if row {
-                    style::row(*gap)
+                    Style {
+                        flex_wrap: FlexWrap::Wrap,
+                        ..style::row(*gap)
+                    }
                 } else {
                     style::column(*gap)
                 })),
             );
             for child in children {
                 if row {
-                    let slot = tree.insert(Some(container), Container::new(style::grow()));
+                    // A readable minimum basis makes a narrow row wrap into
+                    // full-width slots. Inputs then size to the slot, never
+                    // to a hard-coded 360 px field width.
+                    let basis = match child {
+                        Node::TextInput { .. } | Node::Section { .. } => 260.0,
+                        Node::Button { .. } | Node::FormButton { .. } => 160.0,
+                        _ => 180.0,
+                    };
+                    let slot = tree.insert(
+                        Some(container),
+                        Container::new(Style {
+                            flex_basis: length(basis),
+                            ..style::grow()
+                        }),
+                    );
                     insert(tree, slot, child, actions, inputs);
                 } else {
                     insert(tree, container, child, actions, inputs);
@@ -493,24 +527,26 @@ pub fn insert(
                     .background(Role::Surface)
                     .border(1.0, Role::Separator)
                     .radius(8.0)
-                    .padding(16.0),
+                    .padding(space(16.0)),
             );
             tree.insert(
                 Some(container),
-                Label::new(title).font_size(15.0).weight(700),
+                Label::new(title).font_size(font(15.0)).weight(700),
             );
             for child in children {
                 insert(tree, container, child, actions, inputs);
             }
         }
         Node::Text { text, tone } => {
-            tree.insert(
+            let color = text_color(tone, tree.theme().appearance);
+            let id = tree.insert(
                 Some(parent),
                 Label::new(text)
-                    .font_size(14.0)
+                    .font_size(font(14.0))
                     .max_lines(24)
-                    .color(text_color(tone)),
+                    .color(color),
             );
+            inputs.tones.push((id, tone.clone()));
         }
         Node::Metric { label, value } => {
             let container = tree.insert(
@@ -519,15 +555,15 @@ pub fn insert(
                     .background(Role::Surface)
                     .border(1.0, Role::Separator)
                     .radius(8.0)
-                    .padding(16.0),
+                    .padding(space(16.0)),
             );
             tree.insert(
                 Some(container),
-                Label::new(label).font_size(12.0).color(Role::Muted),
+                Label::new(label).font_size(font(12.0)).color(Role::Muted),
             );
             tree.insert(
                 Some(container),
-                Label::new(value).font_size(30.0).weight(700),
+                Label::new(value).font_size(font(30.0)).weight(700),
             );
         }
         Node::Badge { text, tone: name } => {
@@ -539,13 +575,13 @@ pub fn insert(
                 Container::new(style::wide(style::column(6.0))),
             );
             if let Some(label) = label {
-                tree.insert(Some(container), Label::new(label).font_size(12.0));
+                tree.insert(Some(container), Label::new(label).font_size(font(12.0)));
             }
             tree.insert(Some(container), Progress(*fraction));
             tree.insert(
                 Some(container),
                 Label::new(format!("{:.0}%", fraction * 100.0))
-                    .font_size(11.0)
+                    .font_size(font(11.0))
                     .color(Role::Muted),
             );
         }
@@ -561,7 +597,7 @@ pub fn insert(
                 tree.insert(
                     Some(table),
                     Label::new("項目はありません")
-                        .font_size(13.0)
+                        .font_size(font(13.0))
                         .color(Role::Muted),
                 );
             }
@@ -583,13 +619,16 @@ pub fn insert(
             for item in items {
                 tree.insert(
                     Some(list),
-                    Label::new(format!("• {item}")).font_size(14.0).max_lines(8),
+                    Label::new(format!("• {item}"))
+                        .font_size(font(14.0))
+                        .max_lines(8),
                 );
             }
         }
-        Node::Button { label, action } => {
+        Node::Button { id, label, action } => {
             let button = tree.insert(Some(parent), Button::new(label));
             actions.push((button, action.clone()));
+            inputs.focus_nodes.push((id.clone(), button));
         }
         Node::FormButton {
             id,
@@ -600,6 +639,7 @@ pub fn insert(
         } => {
             let button = tree.insert(Some(parent), Button::new(label));
             actions.push((button, action.clone()));
+            inputs.focus_nodes.push((id.clone(), button));
             inputs.buttons.push(FormButton {
                 id: id.clone(),
                 widget: button,
@@ -622,14 +662,21 @@ pub fn insert(
             if let Some(label) = label {
                 tree.insert(
                     Some(container),
-                    Label::new(label).font_size(12.0).color(Role::Muted),
+                    Label::new(label).font_size(font(12.0)).color(Role::Muted),
                 );
             }
             let widget = if *multiline {
                 tree.insert(Some(container), TextArea::new(placeholder).min_lines(4))
             } else {
-                tree.insert(Some(container), TextField::new(placeholder, 360.0))
+                tree.insert(Some(container), TextField::new(placeholder, 0.0))
             };
+            let mut sizing = StylePatch::default();
+            sizing.width = Some(Length::Percent(1.0));
+            sizing.min_width = Some(Length::Px(0.0));
+            sizing.max_width = Some(Length::Percent(1.0));
+            tree.set_inline_style(widget, sizing);
+            tree.set_accessible_label(widget, label.as_deref().unwrap_or(placeholder));
+            inputs.focus_nodes.push((id.clone(), widget));
             inputs.fields.push(InputField {
                 id: id.clone(),
                 widget,
@@ -662,7 +709,7 @@ fn table_row(tree: &mut UiTree, parent: WidgetId, cells: &[String], header: bool
     let row = tree.insert(
         Some(parent),
         Container::new(style::wide(style::row(12.0)))
-            .padding(10.0)
+            .padding(space(10.0))
             .background(if header {
                 Role::SurfaceAlt
             } else {
@@ -674,7 +721,7 @@ fn table_row(tree: &mut UiTree, parent: WidgetId, cells: &[String], header: bool
         tree.insert(
             Some(cell),
             Label::new(value)
-                .font_size(13.0)
+                .font_size(font(13.0))
                 .weight(if header { 700 } else { 400 })
                 .max_lines(8),
         );
@@ -757,6 +804,7 @@ mod tests {
         assert_eq!(
             resolve(&view, &data).unwrap(),
             Node::Button {
+                id: "button".into(),
                 label: "Retry".into(),
                 action: Action {
                     id: "retry".into(),

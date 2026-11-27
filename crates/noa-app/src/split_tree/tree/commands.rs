@@ -74,6 +74,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::OpenScaffold
         | AppCommand::OpenWorkflow
         | AppCommand::OpenWidgetHost
+        | AppCommand::OpenWidgetSettings
         | AppCommand::OpenAgentUsage
         | AppCommand::Spawn(_)
         | AppCommand::ToggleSidebar

@@ -57,7 +57,45 @@ pub(super) struct Controls {
     priorities: Vec<(WidgetId, TaskRef)>,
 }
 
+#[derive(Clone)]
+pub(super) enum ControlFocus {
+    Action(Action),
+    Workflow(TaskRef),
+    Priority(TaskRef),
+}
+
 impl Controls {
+    pub fn remember_focus(&self, id: WidgetId) -> Option<ControlFocus> {
+        if let Some((_, action)) = self.buttons.iter().find(|(w, _)| *w == id) {
+            return Some(ControlFocus::Action(action.clone()));
+        }
+        if let Some((_, task)) = self.workflows.iter().find(|(w, _)| *w == id) {
+            return Some(ControlFocus::Workflow(task.clone()));
+        }
+        self.priorities
+            .iter()
+            .find(|(w, _)| *w == id)
+            .map(|(_, task)| ControlFocus::Priority(task.clone()))
+    }
+    pub fn restore_focus(&self, focus: &ControlFocus) -> Option<WidgetId> {
+        match focus {
+            ControlFocus::Action(action) => self
+                .buttons
+                .iter()
+                .find(|(_, a)| a == action)
+                .map(|(id, _)| *id),
+            ControlFocus::Workflow(task) => self
+                .workflows
+                .iter()
+                .find(|(_, t)| t == task)
+                .map(|(id, _)| *id),
+            ControlFocus::Priority(task) => self
+                .priorities
+                .iter()
+                .find(|(_, t)| t == task)
+                .map(|(id, _)| *id),
+        }
+    }
     pub fn action(&self, _tree: &UiTree, message: &Message) -> Option<Action> {
         if message.downcast_ref::<ButtonClicked>().is_some() {
             return self
@@ -93,7 +131,7 @@ fn heading(tree: &mut UiTree, host: WidgetId, text: &str) {
     tree.insert(
         Some(host),
         Label::new(text)
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .weight(700)
             .color(Role::Muted),
     );
@@ -103,7 +141,7 @@ fn muted(tree: &mut UiTree, host: WidgetId, text: impl Into<String>) {
     tree.insert(
         Some(host),
         Label::new(text.into())
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .color(Role::Muted)
             .wrap(true),
     );
@@ -122,7 +160,7 @@ pub(super) fn sidebar(
         Some(host),
         ScrollView::new(Style {
             flex_direction: FlexDirection::Column,
-            padding: LayoutRect::length(10.0),
+            padding: LayoutRect::length(crate::appearance::space(10.0)),
             gap: gap(6.0),
             ..style::fill()
         }),
@@ -130,7 +168,7 @@ pub(super) fn sidebar(
     tree.insert(
         Some(scroll),
         Label::new(repo_title)
-            .font_size(14.0)
+            .font_size(crate::appearance::font(14.0))
             .weight(700)
             .max_lines(2)
             .wrap(true),
@@ -164,7 +202,7 @@ pub(super) fn sidebar(
         let row = tree.insert(
             Some(scroll),
             Pressable::new(Style {
-                padding: LayoutRect::length(7.0),
+                padding: LayoutRect::length(crate::appearance::space(7.0)),
                 size: LayoutSize {
                     width: percent(1.0),
                     height: auto(),
@@ -178,7 +216,7 @@ pub(super) fn sidebar(
         tree.insert(
             Some(row),
             Label::new(&entry.label)
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(if chosen { 700 } else { 400 })
                 .max_lines(1),
         );
@@ -186,7 +224,7 @@ pub(super) fn sidebar(
         tree.insert(
             Some(row),
             Label::new(entry.count.to_string())
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .color(Role::Muted),
         );
         controls
@@ -323,7 +361,7 @@ pub(super) fn list(
         let empty = tree.insert(
             Some(scroll),
             Container::new(Style {
-                padding: LayoutRect::length(28.0),
+                padding: LayoutRect::length(crate::appearance::space(28.0)),
                 gap: gap(8.0),
                 ..style::card_style()
             }),
@@ -331,7 +369,7 @@ pub(super) fn list(
         tree.insert(
             Some(empty),
             Label::new("このビューにタスクはありません")
-                .font_size(15.0)
+                .font_size(crate::appearance::font(15.0))
                 .weight(700),
         );
         muted(
@@ -407,7 +445,7 @@ pub(super) fn list(
         tree.insert(
             Some(open),
             Label::new(task_id(task))
-                .font_size(10.0)
+                .font_size(crate::appearance::font(10.0))
                 .color(Role::Muted)
                 .max_lines(1),
         );
@@ -427,7 +465,7 @@ pub(super) fn list(
         tree.insert(
             Some(title_host),
             Label::new(&task.title)
-                .font_size(13.0)
+                .font_size(crate::appearance::font(13.0))
                 .weight(if is_selected { 600 } else { 400 })
                 .max_lines(1),
         );
@@ -515,7 +553,13 @@ pub(super) fn list(
         if let Some(problem) = &task.problem {
             tree.insert(Some(props), Tag::new(problem.clone()).tone(Tone::Warning));
         }
-        muted(tree, props, age(now, task.updated));
+        let updated = tree.insert(
+            Some(props),
+            Label::new(age(now, task.updated))
+                .font_size(crate::appearance::font(11.0))
+                .color(Role::Muted),
+        );
+        style::remember_age(tree, updated, task.updated, "", "");
         let edit = tree.insert(
             Some(props),
             Button::new("詳細設定").control_size(ControlSize::Small),
@@ -638,7 +682,7 @@ impl PropertyForm {
         tree.insert(
             Some(column),
             Label::new(&self.title)
-                .font_size(15.0)
+                .font_size(crate::appearance::font(15.0))
                 .weight(700)
                 .wrap(true),
         );
@@ -724,7 +768,7 @@ impl PropertyForm {
         let error = tree.insert(
             Some(column),
             Label::new("")
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .wrap(true)
                 .color(super::FAILURE),
         );
@@ -931,7 +975,9 @@ pub(super) fn activity(tree: &mut UiTree, host: WidgetId, meta: &TaskMeta) {
             muted(tree, host, date(comment.at));
             tree.insert(
                 Some(host),
-                Label::new(&comment.body).font_size(12.0).wrap(true),
+                Label::new(&comment.body)
+                    .font_size(crate::appearance::font(12.0))
+                    .wrap(true),
             );
         }
     }

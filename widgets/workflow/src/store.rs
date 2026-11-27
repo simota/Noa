@@ -109,7 +109,9 @@ fn open_at(
     directory: &File,
     name: &std::ffi::OsStr,
     flags: libc::c_int,
-    mode: libc::mode_t,
+    // openat is variadic: mode_t is u16 on macOS, but the mode argument
+    // must use a C integer type after default argument promotion.
+    mode: libc::c_uint,
 ) -> io::Result<File> {
     let name = c_name(name)?;
     // SAFETY: the directory and C string live through openat; the returned

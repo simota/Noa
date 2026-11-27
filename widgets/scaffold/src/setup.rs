@@ -4,10 +4,10 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::Read as _;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::Path;
 
 use crate::hash;
@@ -200,6 +200,11 @@ impl Read {
     }
 }
 
+/// Case variants are aliases only when they name the same safely opened
+/// object. Different inodes keep distinct case-sensitive files; different
+/// folded paths keep hard-linked files with separate roles (README/AGENTS).
+type ReadAliases = BTreeMap<(String, u64, u64), Read>;
+
 /// An open root and descriptor-relative reads keep intermediate symlinks from
 /// redirecting the inventory outside the chosen repository, including when a
 /// directory is replaced while the scan is running.
@@ -265,7 +270,7 @@ impl Reader {
         Ok(Some(parent))
     }
 
-    fn read(&self, path: &str, remaining: &mut usize) -> Read {
+    fn read(&self, path: &str, remaining: &mut usize, aliases: &mut ReadAliases) -> Read {
         let failed = |error: String| Read::Unknown {
             path: path.into(),
             error,
@@ -278,6 +283,22 @@ impl Reader {
         let meta = match file.metadata() {
             Ok(meta) => meta,
             Err(e) => return failed(format!("読み取れません: {e}")),
+        };
+        let key = (path.to_ascii_lowercase(), meta.dev(), meta.ino());
+        if let Some(cached) = aliases.get(&key) {
+            return cached.clone();
+        }
+        // Retain the first known spelling for sources, evidence and assets,
+        // including failures. Aliases spend no additional byte budget.
+        let result = Self::read_open_file(path, file, &meta, remaining);
+        aliases.insert(key, result.clone());
+        result
+    }
+
+    fn read_open_file(path: &str, file: File, meta: &Metadata, remaining: &mut usize) -> Read {
+        let failed = |error: String| Read::Unknown {
+            path: path.into(),
+            error,
         };
         if !meta.is_file() {
             return failed("通常のファイルではありません".into());
@@ -381,6 +402,7 @@ struct Inventory {
     reader: Reader,
     remaining: usize,
     cache: BTreeMap<String, Read>,
+    aliases: ReadAliases,
     sources: BTreeMap<String, SourceReport>,
     assets: BTreeMap<String, Asset>,
 }
@@ -410,7 +432,9 @@ impl Inventory {
         if let Some(cached) = self.cache.get(path) {
             return cached.clone();
         }
-        let result = self.reader.read(path, &mut self.remaining);
+        let result = self
+            .reader
+            .read(path, &mut self.remaining, &mut self.aliases);
         self.record(&result);
         self.cache.insert(path.into(), result.clone());
         result
@@ -543,6 +567,7 @@ pub fn scan(repo: &Path) -> Setup {
         reader,
         remaining: MAX_TOTAL_BYTES,
         cache: BTreeMap::new(),
+        aliases: BTreeMap::new(),
         sources: BTreeMap::new(),
         assets: BTreeMap::new(),
     };
@@ -848,6 +873,176 @@ mod tests {
 
     fn check<'a>(setup: &'a Setup, id: &str) -> &'a Check {
         setup.checks.iter().find(|c| c.id == id).unwrap()
+    }
+
+    fn identity(path: &Path) -> (u64, u64) {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        (
+            std::os::unix::fs::MetadataExt::dev(&meta),
+            std::os::unix::fs::MetadataExt::ino(&meta),
+        )
+    }
+
+    /// Case-only hardlinks reproduce a case-insensitive lookup on Linux. On
+    /// a case-insensitive volume the second spelling already names the file.
+    fn case_alias(repo: &Path, original: &str, alias: &str) {
+        if let Err(error) = std::fs::hard_link(repo.join(original), repo.join(alias)) {
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        }
+        assert_eq!(identity(&repo.join(original)), identity(&repo.join(alias)));
+    }
+
+    #[test]
+    fn case_aliases_share_sources_evidence_assets_and_unknown_results() {
+        for contents in [
+            b"# Start\n".to_vec(),
+            vec![b'x'; MAX_BYTES as usize + 1],
+            vec![0xff, 0xfe],
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            put(repo.path(), "README.md", contents);
+            put(repo.path(), "Makefile", "\ntest:\n\techo test\n");
+            let before = scan(repo.path());
+            case_alias(repo.path(), "README.md", "readme.md");
+            case_alias(repo.path(), "Makefile", "makefile");
+            let after = scan(repo.path());
+            assert_eq!(after, before);
+            assert_eq!(after.sources.len(), 2);
+            assert_eq!(
+                check(&after, "getting-started").evidence,
+                [Evidence::new("README.md", 1)]
+            );
+            assert_eq!(
+                check(&after, "verification").evidence,
+                [Evidence::new("Makefile", 2)]
+            );
+            assert!(
+                after
+                    .assets
+                    .iter()
+                    .all(|a| matches!(a.path.as_str(), "README.md" | "Makefile"))
+            );
+            assert_eq!(after.task_key(), before.task_key());
+        }
+    }
+
+    #[test]
+    fn case_aliases_do_not_spend_the_read_budget_twice() {
+        for (path, alias, contents) in [
+            ("README.md", "readme.md", b"# Start\n".to_vec()),
+            ("README.md", "readme.md", vec![0xff, 0xfe]),
+            ("README.md", "readme.md", vec![b'x'; MAX_BYTES as usize + 1]),
+            ("package.json", "PACKAGE.JSON", b"{broken".to_vec()),
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            put(repo.path(), path, &contents);
+            case_alias(repo.path(), path, alias);
+            let reader = Reader::new(repo.path()).unwrap();
+            let mut aliases = ReadAliases::new();
+            let mut remaining = contents.len();
+            let first = reader.read(path, &mut remaining, &mut aliases);
+            let after_first = remaining;
+            let repeated = reader.read(alias, &mut remaining, &mut aliases);
+            assert_eq!(remaining, after_first);
+            assert_eq!(aliases.len(), 1);
+            match (first, repeated) {
+                (Read::Found { path: a, text: x }, Read::Found { path: b, text: y }) => {
+                    assert_eq!((a.as_str(), x), (b.as_str(), y));
+                    assert_eq!(a, path);
+                }
+                (Read::Unknown { path: a, error: x }, Read::Unknown { path: b, error: y }) => {
+                    assert_eq!((a.as_str(), x), (b.as_str(), y));
+                    assert_eq!(a, path);
+                }
+                other => panic!("case alias changed the read result: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_case_files_and_hardlinked_roles_are_preserved() {
+        use std::io::Write as _;
+
+        let repo = tempfile::tempdir().unwrap();
+        put(repo.path(), "Makefile", "test:\n\techo first\n");
+        let distinct_case_file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(repo.path().join("makefile"))
+        {
+            Ok(mut file) => {
+                file.write_all(b"\n\ncheck:\n\techo second\n").unwrap();
+                assert_ne!(
+                    identity(&repo.path().join("Makefile")),
+                    identity(&repo.path().join("makefile"))
+                );
+                true
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+                assert_eq!(
+                    identity(&repo.path().join("Makefile")),
+                    identity(&repo.path().join("makefile"))
+                );
+                false
+            }
+        };
+        put(repo.path(), "README.md", "# Shared project instructions\n");
+        std::fs::hard_link(repo.path().join("README.md"), repo.path().join("AGENTS.md")).unwrap();
+        let setup = scan(repo.path());
+        let mut expected = vec![Evidence::new("Makefile", 1)];
+        if distinct_case_file {
+            expected.push(Evidence::new("makefile", 3));
+        }
+        assert_eq!(check(&setup, "verification").evidence, expected);
+        assert_eq!(
+            check(&setup, "getting-started").evidence,
+            [Evidence::new("README.md", 1)]
+        );
+        assert_eq!(
+            check(&setup, "working-agreements").evidence,
+            [Evidence::new("AGENTS.md", 1)]
+        );
+        let mut expected_paths = vec!["AGENTS.md", "Makefile", "README.md"];
+        if distinct_case_file {
+            expected_paths.push("makefile");
+        }
+        assert_eq!(
+            setup
+                .sources
+                .iter()
+                .map(|s| s.path.as_str())
+                .collect::<Vec<_>>(),
+            expected_paths
+        );
+        let mut asset_paths: Vec<_> = setup.assets.iter().map(|a| a.path.as_str()).collect();
+        asset_paths.sort();
+        assert_eq!(asset_paths, expected_paths);
+    }
+
+    #[test]
+    fn alias_cache_does_not_bypass_a_replaced_paths_symlink_check() {
+        let repo = tempfile::tempdir().unwrap();
+        put(repo.path(), "README.md", "# Start\n");
+        let reader = Reader::new(repo.path()).unwrap();
+        let mut aliases = ReadAliases::new();
+        let mut remaining = MAX_TOTAL_BYTES;
+        assert!(matches!(
+            reader.read("README.md", &mut remaining, &mut aliases),
+            Read::Found { .. }
+        ));
+        std::fs::rename(
+            repo.path().join("README.md"),
+            repo.path().join("original.md"),
+        )
+        .unwrap();
+        symlink("original.md", repo.path().join("readme.md")).unwrap();
+        let after_first = remaining;
+        assert!(matches!(
+            reader.read("readme.md", &mut remaining, &mut aliases),
+            Read::Unknown { .. }
+        ));
+        assert_eq!(remaining, after_first);
     }
 
     #[test]

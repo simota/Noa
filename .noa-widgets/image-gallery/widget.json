@@ -1,0 +1,55 @@
+{
+  "apiVersion": "noa.widget/v1",
+  "id": "image-gallery",
+  "version": "1.0.0",
+  "title": "Image gallery",
+  "description": "Shows images packaged with the widget: fixed sizes, explicit boxes, circle crops and an image chosen by the agent's data.",
+  "assets": {
+    "logo": {"path": "assets/logo.png"},
+    "landscape": {"path": "assets/landscape.jpg"},
+    "pattern": {"path": "assets/pattern.webp"}
+  },
+  "dataSchema": {
+    "type": "object",
+    "properties": {
+      "featured": {"type": "string", "enum": ["logo", "landscape", "pattern"]},
+      "caption": {"type": "string", "minLength": 1, "maxLength": 200}
+    },
+    "required": ["featured", "caption"],
+    "additionalProperties": false
+  },
+  "initialData": {"featured": "landscape", "caption": "A packaged JPEG landscape"},
+  "view": {
+    "type": "column",
+    "id": "root",
+    "children": [
+      {
+        "type": "section",
+        "id": "sizes",
+        "title": "Sizes and shapes",
+        "children": [
+          {
+            "type": "row",
+            "id": "size-row",
+            "gap": "lg",
+            "children": [
+              {"type": "image", "id": "logo-sm", "src": "logo", "alt": "Noa ring logo, small", "size": "sm"},
+              {"type": "image", "id": "logo-md", "src": "logo", "alt": "Noa ring logo, medium"},
+              {"type": "image", "id": "pattern-circle", "src": "pattern", "alt": "Striped pattern in a circle", "shape": "circle"},
+              {"type": "image", "id": "landscape-box", "src": "landscape", "alt": "Landscape fitted into a wide box", "width": 200, "height": 96}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "id": "featured",
+        "title": "Chosen by data",
+        "children": [
+          {"type": "image", "id": "featured-image", "src": {"source": "data", "pointer": "/featured"}, "alt": {"source": "data", "pointer": "/caption"}, "size": "lg"},
+          {"type": "text", "id": "featured-caption", "text": {"source": "data", "pointer": "/caption"}, "tone": "muted"}
+        ]
+      }
+    ]
+  }
+}

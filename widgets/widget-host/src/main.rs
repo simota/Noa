@@ -6,7 +6,7 @@ use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use noa_gpui_platform::{App, AppOptions, Headless, Screen};
+use noa_gpui_platform::{App, AppOptions, Headless, Screen, Setup};
 use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 use noa_widget::Manifest;
@@ -49,10 +49,11 @@ fn options(title: String) -> AppOptions {
     }
 }
 
-fn snapshot(screen: &mut dyn Screen, path: &Path, size: (u32, u32)) -> Result<(), String> {
+fn snapshot(screen: &mut WidgetScreen, path: &Path, size: (u32, u32)) -> Result<(), String> {
     // The software renderer makes previews available without a window,
     // display server or GPU adapter and is deterministic for a given font set.
     let mut renderer = Headless::software();
+    screen.upload_images(&mut |width, height, rgba| renderer.create_image(width, height, rgba));
     let mut text = TextStore::new(Default::default());
     screen.prepare(Size::new(size.0 as f32, size.1 as f32), &mut text);
     renderer
@@ -62,6 +63,15 @@ fn snapshot(screen: &mut dyn Screen, path: &Path, size: (u32, u32)) -> Result<()
         .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
+/// Images can only be uploaded while the window's GPU is set up.
+fn upload(screen: &mut WidgetScreen, setup: &mut Setup<'_>) {
+    screen.upload_images(&mut |width, height, rgba| {
+        setup
+            .renderer
+            .create_image(setup.device, setup.queue, width, height, rgba)
+    });
+}
+
 fn main() -> Result<(), String> {
     let args = args::parse(std::env::args().skip(1))?;
     if args.help {
@@ -69,10 +79,12 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     if args.bridge {
-        let (snapshot, reader) = bridge::bootstrap()?;
-        let mut screen = WidgetScreen::from_snapshot(snapshot)?;
+        let (snapshot, assets, reader) = bridge::bootstrap()?;
+        let mut screen = WidgetScreen::from_bridge(snapshot, &assets)?;
+        drop(assets);
         let title = format!("Noa · {}", screen.title());
         return App::new(options(title), move |setup| {
+            upload(&mut screen, setup);
             let waker = setup.waker.clone();
             screen.attach_bridge(Bridge::start(reader, move || waker.wake()));
             Box::new(screen)
@@ -96,14 +108,21 @@ fn main() -> Result<(), String> {
             .map_err(|error| error.to_string())?,
         None => manifest.initial_data.clone(),
     };
+    // Offline previews read the package directly: the manifest's directory.
+    let package = path.parent().ok_or("--manifest has no package directory")?;
+    let assets = noa_widget::assets::load(package, &manifest).map_err(|error| error.to_string())?;
     let title = format!("Noa · {} · Preview", manifest.title);
-    let mut screen = WidgetScreen::preview(manifest, data)?;
+    let mut screen = WidgetScreen::preview_package(manifest, data, &assets)?;
+    drop(assets);
     if let Some(path) = args.snapshot {
         snapshot(&mut screen, &path, args.size.unwrap_or(DEFAULT_SIZE))?;
         println!("wrote {}", path.display());
         return Ok(());
     }
-    App::new(options(title), move |_| Box::new(screen))
-        .run()
-        .map_err(|error| error.to_string())
+    App::new(options(title), move |setup| {
+        upload(&mut screen, setup);
+        Box::new(screen)
+    })
+    .run()
+    .map_err(|error| error.to_string())
 }

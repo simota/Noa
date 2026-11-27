@@ -1,10 +1,13 @@
-//! Repository widget definitions. This crate only reads and validates data;
-//! it has no renderer, scripting engine, command execution or IPC authority.
+//! Repository widget definitions. This crate only reads and validates data
+//! (including packaged image assets); it has no renderer, image decoder,
+//! scripting engine, command execution or IPC authority.
 
+pub mod assets;
 pub mod discovery;
 pub mod manifest;
 
-pub use manifest::{Action, Manifest, content_digest, resolve, schema_document};
+pub use assets::{Asset, ImageFormat, definition_digest};
+pub use manifest::{Action, AssetRef, Manifest, content_digest, resolve, schema_document};
 
 use std::fmt;
 

@@ -16,6 +16,11 @@ noa-widget = { path = "../../crates/noa-widget" }
 noa-ipc = { path = "../../crates/noa-ipc" }
 serde_json = "1"
 libc = "0.2"
+# Packaged widget images. Decoders only: no encoders, no format sniffing
+# beyond the magic bytes noa-widget already verified.
+png = "0.18"
+zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }
+image-webp = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

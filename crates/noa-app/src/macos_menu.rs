@@ -417,6 +417,7 @@ impl MacosMenu {
                 &MenuItem::with_id(AppCommand::OpenVerify.menu_id(), "Verify", true, None),
                 &MenuItem::with_id(AppCommand::OpenTasks.menu_id(), "Tasks", true, None),
                 &MenuItem::with_id(AppCommand::OpenScaffold.menu_id(), "Scaffold", true, None),
+                &MenuItem::with_id(AppCommand::OpenWorkflow.menu_id(), "Workflow", true, None),
                 &MenuItem::with_id(
                     AppCommand::OpenWidgetHost.menu_id(),
                     "Repository Widgets…",

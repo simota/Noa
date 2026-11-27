@@ -3,11 +3,11 @@
 //! browser (`repo-browser.open`), the discussion (`discussion.open`), the
 //! competition (`competition.open`), the review (`review.open`), the verify
 //! (`verify.open`), the tasks (`tasks.open`), the scaffold
-//! (`scaffold.open`) and the agent usage (`agent-usage.open`). Each runs as a
-//! process of its own. All but the scaffold and the agent usage read Noa's
-//! panes through the control server; those two need neither the server nor
-//! `server-enable`. Only the review, the verify, the tasks and the scaffold
-//! get an argument: the focused pane's directory.
+//! (`scaffold.open`), the workflow editor (`workflow.open`) and the agent
+//! usage (`agent-usage.open`). Each runs as a process of its own. Helpers that
+//! inspect live panes use Noa's control server; local views can open without
+//! it. Repository-oriented helpers receive the focused pane's
+//! directory, including the workflow editor and the declarative widget host.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -76,6 +76,12 @@ pub(crate) const SCAFFOLD: HelperProgram = HelperProgram {
     crate_name: "scaffold",
 };
 
+pub(crate) const WORKFLOW: HelperProgram = HelperProgram {
+    title: "Workflow",
+    bundled: "Noa Workflow",
+    crate_name: "workflow",
+};
+
 pub(crate) const WIDGET_HOST: HelperProgram = HelperProgram {
     title: "Repository Widgets",
     bundled: "Noa Widget Host",
@@ -90,8 +96,8 @@ pub(crate) const AGENT_USAGE: HelperProgram = HelperProgram {
 
 /// What `helper` is started with, given the working directory of the
 /// focused pane (local, an existing directory, as `App::focused_pane_cwd`
-/// gives it): the review, the verify, the tasks and the scaffold take it as `--repo=`, the
-/// place their start views offer first; every other program starts with no argument.
+/// gives it): repository-oriented helpers take it as `--repo=`, the place
+/// their start views offer first; every other program starts with no argument.
 pub(crate) fn launch_args(helper: HelperProgram, focused_cwd: Option<&str>) -> Vec<String> {
     match focused_cwd {
         Some(cwd)
@@ -99,6 +105,7 @@ pub(crate) fn launch_args(helper: HelperProgram, focused_cwd: Option<&str>) -> V
                 || helper.crate_name == VERIFY.crate_name
                 || helper.crate_name == TASKS.crate_name
                 || helper.crate_name == SCAFFOLD.crate_name
+                || helper.crate_name == WORKFLOW.crate_name
                 || helper.crate_name == WIDGET_HOST.crate_name)
                 && Path::new(cwd).is_absolute() =>
         {
@@ -324,6 +331,7 @@ mod tests {
             AGENT_USAGE,
             TASKS,
             SCAFFOLD,
+            WORKFLOW,
             WIDGET_HOST,
         ] {
             let dirs = dev_build_dirs(helper);
@@ -373,6 +381,29 @@ mod tests {
         assert_eq!(
             locate(SCAFFOLD, Some(&exe_dir), std::slice::from_ref(&dev)),
             Some(exe_dir.join("Noa Scaffold"))
+        );
+        for dir in [exe_dir, dev] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn workflow_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("workflow-exe");
+        let dev = scratch_dir("workflow-dev");
+        assert_eq!(
+            locate(WORKFLOW, Some(&exe_dir), std::slice::from_ref(&dev)),
+            None
+        );
+        std::fs::write(dev.join("workflow"), "").unwrap();
+        assert_eq!(
+            locate(WORKFLOW, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(dev.join("workflow"))
+        );
+        std::fs::write(exe_dir.join("Noa Workflow"), "").unwrap();
+        assert_eq!(
+            locate(WORKFLOW, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(exe_dir.join("Noa Workflow"))
         );
         for dir in [exe_dir, dev] {
             let _ = std::fs::remove_dir_all(dir);
@@ -539,8 +570,8 @@ mod tests {
     }
 
     #[test]
-    fn ac28_only_the_review_the_verify_and_the_tasks_are_given_the_focused_panes_directory() {
-        for helper in [REVIEW, VERIFY, TASKS, SCAFFOLD, WIDGET_HOST] {
+    fn repository_helpers_are_given_the_focused_panes_directory() {
+        for helper in [REVIEW, VERIFY, TASKS, SCAFFOLD, WORKFLOW, WIDGET_HOST] {
             assert_eq!(
                 launch_args(helper, Some("/Users/me/src/noa")),
                 ["--repo=/Users/me/src/noa"],

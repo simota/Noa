@@ -135,6 +135,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::OpenVerify => "Open Verify",
         AppCommand::OpenTasks => "Open Tasks",
         AppCommand::OpenScaffold => "Open Scaffold",
+        AppCommand::OpenWorkflow => "Open Workflow",
         AppCommand::OpenWidgetHost => "Repository Widgets…",
         AppCommand::OpenAgentUsage => "Open Agent Usage",
         // Deviation: the locked spec's literal label is Japanese
@@ -293,6 +294,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::OpenScaffold => {
             "Show the repository's development assets (checkers, runbooks, rules) and the registration gaps found in it, and hand a gap to an agent as a task, in a window of its own."
         }
+        AppCommand::OpenWorkflow => {
+            "Workflow editor: build and inspect a development cycle as connected steps, with execution states, verification and approval, in a window of its own."
+        }
         AppCommand::OpenAgentUsage => {
             "Show Claude Code, Codex and Antigravity usage limits and statistics in a window of its own."
         }
@@ -404,6 +408,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::OpenVerify,
         AppCommand::OpenTasks,
         AppCommand::OpenScaffold,
+        AppCommand::OpenWorkflow,
         AppCommand::OpenWidgetHost,
         AppCommand::OpenAgentUsage,
         AppCommand::SetTabTitle,
@@ -711,6 +716,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::OpenVerify
         | AppCommand::OpenTasks
         | AppCommand::OpenScaffold
+        | AppCommand::OpenWorkflow
         | AppCommand::OpenWidgetHost
         | AppCommand::OpenAgentUsage => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
@@ -1084,6 +1090,7 @@ mod tests {
             AppCommand::OpenVerify,
             AppCommand::OpenTasks,
             AppCommand::OpenScaffold,
+            AppCommand::OpenWorkflow,
             AppCommand::OpenWidgetHost,
             AppCommand::OpenAgentUsage,
         ];
@@ -1099,6 +1106,17 @@ mod tests {
                 .map(|m| m.command)
                 .collect();
             assert!(found.contains(&AppCommand::OpenAgentUsage), "{query}");
+        }
+    }
+
+    #[test]
+    fn workflow_editor_is_found_by_its_title_and_description() {
+        for query in ["Open Workflow", "Workflow editor"] {
+            let found: Vec<AppCommand> = command_palette_matches(&default_palette_entries(), query)
+                .iter()
+                .map(|m| m.command)
+                .collect();
+            assert!(found.contains(&AppCommand::OpenWorkflow), "{query}");
         }
     }
 

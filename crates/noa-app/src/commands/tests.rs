@@ -1287,6 +1287,23 @@ fn scaffold_is_addressable_by_action_and_menu_id() {
 }
 
 #[test]
+fn workflow_is_addressable_by_action_and_menu_id() {
+    let command = AppCommand::OpenWorkflow;
+    assert_eq!(command.action_name(), "workflow.open");
+    assert_eq!(AppCommand::from_action_name("workflow.open"), Some(command));
+    assert_eq!(command.menu_id(), "noa.view.open-workflow");
+    assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+    assert_eq!(
+        crate::command_palette::command_palette_title(command),
+        "Open Workflow"
+    );
+    assert_eq!(
+        crate::command_palette::command_category(command),
+        crate::command_palette::CommandCategory::View
+    );
+}
+
+#[test]
 fn widget_host_is_addressable_by_action_and_menu_id() {
     let command = AppCommand::OpenWidgetHost;
     assert_eq!(command.action_name(), "widget-host.open");

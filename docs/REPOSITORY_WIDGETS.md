@@ -175,9 +175,12 @@ accepted. On a click the host resolves `payload` as before, then inserts each
 input's current text, as a string, under its property. `widget validate`
 requires every target to be a text-input, the action's `payloadSchema` to
 declare each property with type `string`, the property to be absent from the
-button's payload (a literal object, or the schema of a bound one), and an
-input's `maxLength` not to exceed that property's `maxLength`. Input
-properties may be listed in the action's `required`: the host supplies them.
+button's payload, and an input's `maxLength` not to exceed that property's
+`maxLength`. A bound payload's schema must set `additionalProperties` to
+`false` and not declare an input property, so data can never carry a value
+that typed text would silently overwrite. Input properties may be listed in
+the action's `required`, and a whole-payload `enum` applies to the final
+payload: the host supplies the inputs first.
 
 Enter in a single-line input presses its `submit` button. In a multi-line
 input Enter inserts a line break and Cmd+Enter (Ctrl+Enter off macOS) submits.

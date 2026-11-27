@@ -306,3 +306,51 @@ fn live_inputs_are_sent_and_cleared_only_after_the_service_accepts() {
     assert_eq!(text_of(&screen, "subject"), "");
     assert_eq!(text_of(&screen, "details"), "追記");
 }
+
+fn live() -> (Manifest, WidgetScreen) {
+    let manifest = manifest();
+    let screen =
+        WidgetScreen::from_snapshot(snapshot(&manifest, 1, manifest.initial_data.clone())).unwrap();
+    (manifest, screen)
+}
+
+fn update_status(screen: &mut WidgetScreen, manifest: &Manifest, text: &mut TextStore) {
+    let data = json!({"status":"処理中です。","task":"別のタスク"});
+    screen
+        .apply_snapshot(snapshot(manifest, 2, data), text)
+        .unwrap();
+}
+
+#[test]
+fn a_live_data_snapshot_keeps_the_caret_where_the_person_is_editing() {
+    let (manifest, mut screen) = live();
+    let mut text = TextStore::new(Default::default());
+    type_into(&mut screen, "subject", "あいう", &mut text);
+    let widget = field(&screen, "subject").widget;
+    screen
+        .tree
+        .update::<TextField, _>(widget, |field, cx| field.select(cx, 0..0));
+    update_status(&mut screen, &manifest, &mut text);
+    screen.dispatch(Event::Text("X".into()), &mut text);
+    assert_eq!(text_of(&screen, "subject"), "Xあいう");
+}
+
+#[test]
+fn a_live_data_snapshot_during_an_ime_composition_keeps_it_and_enter_does_not_submit() {
+    let (manifest, mut screen) = live();
+    let mut text = TextStore::new(Default::default());
+    type_into(&mut screen, "subject", "書き", &mut text);
+    compose(&mut screen, "かけ", &mut text);
+    update_status(&mut screen, &manifest, &mut text);
+    let widget = field(&screen, "subject").widget;
+    assert_eq!(
+        screen.tree.get::<TextField>(widget).unwrap().composition(),
+        "かけ"
+    );
+    assert_eq!(screen.tree.focused(), Some(widget));
+    enter(&mut screen, &mut text);
+    assert!(
+        screen.instance.as_ref().unwrap().pending.is_none(),
+        "Enter during a conversion must not send"
+    );
+}

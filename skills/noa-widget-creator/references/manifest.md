@@ -152,7 +152,8 @@ To let a person type the request, add `text-input` nodes and list them in
 the button's `inputs` (payload property → text-input node ID). The host puts
 each input's current text into the payload as a string. Declare each such
 property in `payloadSchema` with `"type":"string"` and a `maxLength`, keep it
-out of the button's own `payload`, and keep the input's `maxLength` at most
+out of the button's own `payload` (a bound payload's schema needs
+`"additionalProperties": false`), and keep the input's `maxLength` at most
 the schema's. Set the input's `submit` to that button so Enter (Cmd+Enter in
 a `multiline` input) sends it; Enter during an IME conversion never sends.
 `clearInputs: true` clears the inputs after the event is accepted. Typed text

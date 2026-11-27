@@ -153,6 +153,11 @@ impl Manifest {
         if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
             required.retain(|key| key.as_str().is_none_or(|key| !inputs.contains_key(key)));
         }
+        // An enum of whole payloads names complete payloads, input text
+        // included; only the final payload can be compared with it.
+        if let Some(schema) = schema.as_object_mut() {
+            schema.remove("enum");
+        }
         check_json(payload, MAX_ACTION_BYTES, "action payload")?;
         validate_value(&schema, payload, "action payload", 0)
     }
@@ -875,9 +880,17 @@ fn validate_text_inputs(
                 let payload_properties = match node.get("payload") {
                     None => None,
                     Some(payload) => match binding_pointer(payload)? {
-                        Some(pointer) => schema_pointer(data_schema, pointer)?
-                            .get("properties")
-                            .and_then(Value::as_object),
+                        Some(pointer) => {
+                            // Data must not be able to carry an input property
+                            // that the typed text would silently overwrite.
+                            let bound = schema_pointer(data_schema, pointer)?;
+                            if bound["additionalProperties"] != false {
+                                return fail(format!(
+                                    "button {id} payload binding {pointer:?} must set additionalProperties to false when the button has inputs"
+                                ));
+                            }
+                            bound.get("properties").and_then(Value::as_object)
+                        }
                         None => payload.as_object(),
                     },
                 };

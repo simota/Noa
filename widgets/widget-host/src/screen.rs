@@ -298,13 +298,9 @@ impl WidgetScreen {
         let mut view = render::resolve(&self.manifest.view, &data)?;
         self.images.attach(&mut view);
         if data != self.data {
-            // Typed text is not instance data: carry it over by node id.
-            let typed: Vec<_> = self
-                .inputs
-                .fields
-                .iter()
-                .map(|field| (field.id.clone(), field.text(&self.tree)))
-                .collect();
+            // Typed text is not instance data. Move each input widget itself
+            // into the rebuilt view by node id, so its caret, selection and
+            // any IME composition in progress survive with the text.
             let focused = self.tree.focused().and_then(|focus| {
                 self.inputs
                     .fields
@@ -312,6 +308,16 @@ impl WidgetScreen {
                     .find(|field| field.widget == focus)
                     .map(|field| field.id.clone())
             });
+            let mut kept: Vec<_> = self
+                .inputs
+                .fields
+                .iter()
+                .filter_map(|field| {
+                    self.tree
+                        .take_subtree(field.widget)
+                        .map(|subtree| (field.id.clone(), subtree))
+                })
+                .collect();
             for child in self.tree.children(self.body).to_vec() {
                 self.tree.remove(child, text);
             }
@@ -324,13 +330,32 @@ impl WidgetScreen {
                 &mut self.actions,
                 &mut self.inputs,
             );
-            for field in self.inputs.fields.clone() {
-                if let Some((_, typed)) = typed.iter().find(|(id, _)| *id == field.id) {
-                    field.set_text(&mut self.tree, typed.clone());
-                }
-                if focused.as_ref() == Some(&field.id) {
-                    self.tree.set_focus(Some(field.widget));
-                }
+            for field in &mut self.inputs.fields {
+                let Some(at) = kept.iter().position(|(id, _)| *id == field.id) else {
+                    continue;
+                };
+                let (_, subtree) = kept.swap_remove(at);
+                let parent = self
+                    .tree
+                    .parent(field.widget)
+                    .expect("an input widget has a container");
+                let index = self
+                    .tree
+                    .children(parent)
+                    .iter()
+                    .position(|&child| child == field.widget)
+                    .expect("a child of its parent");
+                self.tree.remove(field.widget, text);
+                field.widget = self.tree.insert_subtree(Some(parent), subtree);
+                self.tree.move_child(field.widget, index);
+            }
+            if let Some(field) = self
+                .inputs
+                .fields
+                .iter()
+                .find(|field| focused.as_ref() == Some(&field.id))
+            {
+                self.tree.set_focus(Some(field.widget));
             }
         }
         self.data = data;

@@ -270,3 +270,54 @@ fn editor_schema_describes_the_new_component_and_button_fields() {
         "#/$defs/id"
     );
 }
+
+#[test]
+fn a_whole_payload_enum_is_checked_on_the_final_payload_not_the_partial_one() {
+    let mut value = document();
+    value["actions"][0]["payloadSchema"]["enum"] =
+        json!([{"kind":"request","subject":"ok","details":""}]);
+    let manifest = parse(&value).unwrap();
+    manifest
+        .validate_action(
+            "request",
+            &json!({"kind":"request","subject":"ok","details":""}),
+        )
+        .unwrap();
+    assert!(
+        manifest
+            .validate_action(
+                "request",
+                &json!({"kind":"request","subject":"other","details":""}),
+            )
+            .is_err()
+    );
+}
+
+/// A bound payload whose schema allows more properties could carry an input
+/// property in data that the typed text would silently overwrite.
+#[test]
+fn a_bound_payload_must_close_its_properties_so_inputs_cannot_overwrite_data() {
+    for request in [
+        json!({"type":"object","properties":{"kind":{"type":"string"}}}),
+        json!({"type":"object","properties":{"kind":{"type":"string"}},"additionalProperties":true}),
+        json!({"type":"object"}),
+    ] {
+        let mut value = document();
+        value["dataSchema"]["properties"]["request"] = request.clone();
+        value["initialData"]["request"] = json!({"kind":"request"});
+        node(&mut value, "send")["payload"] = json!({"source":"data","pointer":"/request"});
+        let message = error(&value);
+        assert!(
+            message.contains("additionalProperties"),
+            "{request}: {message}"
+        );
+    }
+    let mut value = document();
+    value["dataSchema"]["properties"]["request"] = json!({
+        "type":"object","required":["kind"],"additionalProperties":false,
+        "properties":{"kind":{"type":"string","enum":["request"]}}
+    });
+    value["initialData"]["request"] = json!({"kind":"request"});
+    node(&mut value, "send")["payload"] = json!({"source":"data","pointer":"/request"});
+    parse(&value).unwrap();
+}

@@ -5,6 +5,9 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+mod setup;
+pub use setup::{find_setup_task, hand_off_setup};
+
 use crate::model::{Improvement, Subject, rule_label};
 use crate::store::{Event, LinkKind, Store, temp_sibling};
 use crate::time::Millis;
@@ -97,7 +100,10 @@ fn real_dir(path: &Path) -> std::io::Result<()> {
             "{} がフォルダではありません（リンクには書きません）",
             path.display()
         ))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match std::fs::create_dir(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => real_dir(path),
+            result => result,
+        },
         Err(e) => Err(e),
     }
 }
@@ -106,15 +112,26 @@ fn real_dir(path: &Path) -> std::io::Result<()> {
 /// `.noa/tasks` and `.noa/.gitignore` (`*`) when missing, refuses a `.noa`
 /// or `.noa/tasks` that is a link, and never replaces a task. Gives the id
 /// and the path.
-pub fn create_task(repo: &Path, text: &str, now: Millis) -> std::io::Result<(String, PathBuf)> {
+fn tasks_dir(repo: &Path) -> std::io::Result<PathBuf> {
     let noa = repo.join(".noa");
     real_dir(&noa)?;
     let ignore = noa.join(".gitignore");
-    if std::fs::symlink_metadata(&ignore).is_err() {
-        std::fs::write(&ignore, "*\n")?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&ignore)
+    {
+        Ok(mut file) => file.write_all(b"*\n")?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
     }
     let dir = noa.join("tasks");
     real_dir(&dir)?;
+    Ok(dir)
+}
+
+pub fn create_task(repo: &Path, text: &str, now: Millis) -> std::io::Result<(String, PathBuf)> {
+    let dir = tasks_dir(repo)?;
     let base = format!("t-{now}");
     let tmp = temp_sibling(&dir.join(format!("{base}.md")));
     let mut f = std::fs::OpenOptions::new()

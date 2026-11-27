@@ -33,13 +33,18 @@ impl Backend for Recorder {
         if let Some(why) = &self.refuse {
             return Err(why.clone());
         }
-        if let Action::HandOff { improvement } = action {
+        let task_subject = match action {
+            Action::HandOff { improvement } => Some(Subject::Improvement(improvement)),
+            Action::SetupTask => Some(Subject::Improvement(self.state.borrow().setup.task_key())),
+            _ => None,
+        };
+        if let Some(subject) = task_subject {
             let id = format!("task-{}", self.sent.borrow().len());
             self.state
                 .borrow_mut()
                 .observations
                 .push(Observation::Task {
-                    subject: Subject::Improvement(improvement),
+                    subject,
                     path: format!("/r/.noa/tasks/{id}.md").into(),
                     id,
                     at: demo::NOW,
@@ -77,6 +82,7 @@ fn screen_shared(
     };
     let mut screen = Scaffold::new(Box::new(backend));
     let mut text = TextStore::new(Default::default());
+    screen.set_tab(Tab::Assets, &mut text);
     screen.prepare(window(), &mut text);
     (screen, sent, text, shared)
 }
@@ -260,18 +266,16 @@ fn the_assets_tab_lists_each_asset_with_its_states() {
         ]
     );
     let labels = list_labels(&s);
-    let first: Vec<&str> = labels.iter().take(6).map(String::as_str).collect();
     assert_eq!(
-        first,
-        [
-            "チェッカー",
-            "check-widget-registration",
-            "ウィジェット登録の整合チェック · scripts/check-widget-registration.py",
-            "dev/scaffold/registry.json:31",
-            "評価中",
-            "確認済み",
-        ]
+        labels[0], "ウィジェット登録の整合チェック",
+        "the human title leads the row"
     );
+    assert!(has(
+        &labels,
+        "チェッカー · scripts/check-widget-registration.py"
+    ));
+    assert!(has(&labels, "評価中"));
+    assert!(has(&labels, "確認済み"));
     assert!(has(&labels, "試作"));
     assert!(has(&labels, "省略"));
     assert!(!has(&labels, "記録に矛盾"));
@@ -345,7 +349,7 @@ fn moving_the_selection_keeps_its_row_in_view() {
     let (mut s, _, mut text) = demo_screen();
     s.prepare(smallest(), &mut text);
     let mut overflowed = false;
-    for (tab, digit) in Tab::ALL.into_iter().zip(['1', '2', '3']) {
+    for (tab, digit) in Tab::ALL.into_iter().zip(['0', '1', '2', '3']) {
         key_small(&mut s, &mut text, Key::Char(digit));
         assert_eq!(s.tab, tab);
         let n = s.items(tab).len();
@@ -428,10 +432,8 @@ fn j_k_move_enter_opens_escape_closes() {
     special(&mut s, &mut text, Key::Enter);
     assert!(!s.tree.is_hidden(s.ids.detail));
     let detail = detail_labels(&s);
-    assert!(has(
-        &detail,
-        "check-widget-registration — ウィジェット登録の整合チェック"
-    ));
+    assert!(has(&detail, "ウィジェット登録の整合チェック"));
+    assert!(has(&detail, "id: check-widget-registration"));
     assert!(has(&detail, "根拠: dev/scaffold/registry.json:31"));
     assert!(has(&detail, "検証状態: 確認済み"));
     assert!(has(
@@ -716,7 +718,7 @@ fn the_30s_tick_keeps_the_selection_too() {
     s.rescan(&mut text);
     assert_eq!(s.items(Tab::Assets)[0], Item::Asset("aaa-new".into()));
     assert_eq!(s.selection(), Some(Item::Asset(a.clone())));
-    assert!(has(&detail_labels(&s), &format!("{a} — ")));
+    assert!(has(&detail_labels(&s), &format!("id: {a}")));
 }
 
 #[test]
@@ -755,10 +757,9 @@ fn t_does_not_hand_off_a_handed_off_candidate_again() {
     }
     assert_eq!(sent(&log), [], "no second task");
     assert!(has(&header_notice(&s), "task-1"), "{:?}", header_notice(&s));
-    // The detail's button does not either.
-    click(&mut s, &mut text, "タスクにする (T)");
-    assert_eq!(sent(&log), []);
-    assert!(has(&header_notice(&s), "task-1"));
+    // The completed hand-off offers its destination, not another create action.
+    assert!(!detail_labels(&s).contains(&"タスクにする (T)".into()));
+    assert!(has(&detail_labels(&s), "View → Tasks"));
 }
 
 // ------------------------------------------- repo root from a subdir
@@ -794,4 +795,333 @@ fn outside_any_repository_the_given_directory_is_used() {
     let state = Live::new(plain.clone(), None).scan();
     assert_eq!(state.repo, plain);
     assert!(state.unregistered());
+}
+
+// ----------------------------------------------- setup and discovery
+
+fn generic_setup_state() -> State {
+    use scaffold::scan::Evidence;
+    use scaffold::setup::{Check, CheckState, Setup};
+    let mut state = demo::state();
+    let mut assets = state.registry.as_ref().unwrap().registry.assets.clone();
+    for asset in &mut assets {
+        asset.decisions.clear();
+    }
+    state.setup = Setup {
+        stacks: vec!["Rust".into()],
+        checks: vec![
+            Check {
+                id: "getting-started".into(),
+                title: "開発手順".into(),
+                description: "初回の開発手順を確認します".into(),
+                state: CheckState::Found,
+                evidence: vec![Evidence::new("README.md", 1)],
+                next_step: "README.md に沿って開発環境を確認してください".into(),
+            },
+            Check {
+                id: "verification".into(),
+                title: "検証の入口".into(),
+                description: "テストの実行手順を整えます".into(),
+                state: CheckState::Missing,
+                evidence: vec![],
+                next_step: "テスト手順を README.md に追加してください".into(),
+            },
+            Check {
+                id: "automation".into(),
+                title: "継続的な検証".into(),
+                description: "CI の設定を読み込めませんでした".into(),
+                state: CheckState::Unknown,
+                evidence: vec![Evidence::new(".github/workflows/ci.yml", 1)],
+                next_step: "CI の設定を確認してください".into(),
+            },
+        ],
+        assets,
+        sources: vec![],
+        registration_applicable: false,
+    };
+    state.registry = Err(LoadError::Absent);
+    state.improvements.clear();
+    state.observations.clear();
+    state
+}
+
+fn search_for(s: &mut Scaffold, text: &mut TextStore, query: &str) {
+    let id = s.ids.search;
+    s.tree
+        .update::<TextField, _>(id, |field, cx| field.set_text(cx, ""));
+    s.tree.set_focus(Some(id));
+    s.dispatch(Event::Text(query.into()), text);
+    s.prepare(window(), text);
+}
+
+#[test]
+fn a_new_window_starts_with_setup_and_explains_the_next_action() {
+    let shared = Rc::new(RefCell::new(generic_setup_state()));
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let mut s = Scaffold::new(Box::new(Recorder {
+        state: shared,
+        sent: actions.clone(),
+        refuse: None,
+    }));
+    let mut text = TextStore::new(Default::default());
+    s.prepare(window(), &mut text);
+    assert_eq!(s.tab, Tab::Setup);
+    assert!(has(&list_labels(&s), "開発を始める準備を確認"));
+    assert!(has(&list_labels(&s), "登録内容を確認"));
+    assert!(has(&list_labels(&s), "不足を整える作業指示を確認"));
+    assert!(has(&header(&s), "構成を検出 1/3"));
+    assert!(!has(&header(&s), "整合 0/0"));
+    assert!(
+        sent(&actions).is_empty(),
+        "opening the window writes nothing"
+    );
+}
+
+#[test]
+fn setup_details_explain_the_evidence_and_the_next_step() {
+    let (mut s, _, mut text) = screen_on(generic_setup_state(), None);
+    key(&mut s, &mut text, '0');
+    special(&mut s, &mut text, Key::Enter);
+    let detail = detail_labels(&s);
+    assert!(has(&detail, "確認の根拠"));
+    assert!(has(&detail, "README.md:1"));
+    assert!(has(&detail, "次の手順"));
+    assert!(has(&detail, "README.md に沿って"));
+}
+
+#[test]
+fn registering_assets_requires_review_and_an_explicit_confirmation() {
+    let (mut s, log, mut text) = screen_on(generic_setup_state(), None);
+    key(&mut s, &mut text, '0');
+    click(&mut s, &mut text, "登録内容を確認");
+    assert!(sent(&log).is_empty());
+    let labels = list_labels(&s);
+    assert!(has(&labels, "書込先: dev/scaffold/registry.json"));
+    assert!(has(&labels, "「候補」"));
+    assert!(has(&labels, "未実施"));
+    assert!(has(&labels, "scripts/check-widget-registration.py"));
+    click(&mut s, &mut text, "この内容で登録");
+    assert_eq!(sent(&log), [Action::RegisterAssets]);
+    assert!(s.setup_preview.is_none());
+}
+
+#[test]
+fn a_background_scan_cannot_change_the_registration_being_approved() {
+    let (mut s, log, mut text, shared) = screen_shared(generic_setup_state(), None);
+    key(&mut s, &mut text, '0');
+    click(&mut s, &mut text, "登録内容を確認");
+    shared.borrow_mut().setup.assets.pop();
+    s.rescan(&mut text);
+    assert!(has(&list_labels(&s), "検出内容が変わりました"));
+    assert!(!list_labels(&s).contains(&"この内容で登録".into()));
+    s.do_press(Press::RegisterAssets, &mut text);
+    assert!(
+        sent(&log).is_empty(),
+        "a stale button message cannot approve new content"
+    );
+}
+
+#[test]
+fn setup_tasks_are_previewed_and_an_existing_task_is_not_recreated() {
+    let (mut s, log, mut text) = screen_on(generic_setup_state(), None);
+    key(&mut s, &mut text, '0');
+    click(&mut s, &mut text, "不足を整える作業指示を確認");
+    assert!(sent(&log).is_empty());
+    assert!(has(&list_labels(&s), "scaffold-setup:"));
+    click(&mut s, &mut text, "この内容でタスクを作成");
+    assert_eq!(sent(&log), [Action::SetupTask]);
+    assert!(has(&list_labels(&s), "task-1"));
+    assert!(!list_labels(&s).contains(&"不足を整える作業指示を確認".into()));
+    s.do_press(Press::SetupTask, &mut text);
+    assert!(sent(&log).is_empty());
+}
+
+#[test]
+fn a_changed_setup_plan_requires_a_new_preview() {
+    let (mut s, log, mut text, shared) = screen_shared(generic_setup_state(), None);
+    key(&mut s, &mut text, '0');
+    click(&mut s, &mut text, "不足を整える作業指示を確認");
+    shared.borrow_mut().setup.checks[1].state = scaffold::setup::CheckState::Found;
+    s.rescan(&mut text);
+    assert!(has(&list_labels(&s), "準備状況が変わりました"));
+    assert!(!list_labels(&s).contains(&"この内容でタスクを作成".into()));
+    s.do_press(Press::SetupTask, &mut text);
+    assert!(sent(&log).is_empty());
+}
+
+#[test]
+fn setup_does_not_offer_a_task_when_every_check_is_found() {
+    let mut state = generic_setup_state();
+    for check in &mut state.setup.checks {
+        check.state = scaffold::setup::CheckState::Found;
+    }
+    let (mut s, _, mut text) = screen_on(state, None);
+    key(&mut s, &mut text, '0');
+    assert!(has(&list_labels(&s), "検出項目は揃っています"));
+    assert!(!list_labels(&s).contains(&"不足を整える作業指示を確認".into()));
+}
+
+#[test]
+fn a_broken_registry_offers_recovery_instead_of_registration() {
+    let mut state = generic_setup_state();
+    state.registry = Err(LoadError::Invalid("invalid JSON".into()));
+    let (mut s, log, mut text) = screen_on(state, None);
+    assert!(has(&list_labels(&s), "資産台帳を読み込めません"));
+    assert!(!has(&list_labels(&s), "未登録リポジトリ"));
+    key(&mut s, &mut text, '0');
+    assert!(has(&list_labels(&s), "資産台帳を読み込めません"));
+    assert!(!list_labels(&s).contains(&"登録内容を確認".into()));
+    click(&mut s, &mut text, "情報源を確認");
+    assert_eq!(s.tab, Tab::Sources);
+    assert!(sent(&log).is_empty());
+}
+
+#[test]
+fn searching_matches_titles_paths_and_multiple_case_insensitive_words() {
+    let (mut s, _, mut text) = screen_on(generic_setup_state(), None);
+    key(&mut s, &mut text, '0');
+    search_for(&mut s, &mut text, "開発 readme.MD");
+    assert_eq!(s.items(Tab::Setup), [Item::Setup("getting-started".into())]);
+    special(&mut s, &mut text, Key::Escape);
+    assert_eq!(s.items(Tab::Setup).len(), 3);
+    assert_eq!(s.tree.focused(), Some(s.ids.search));
+    special(&mut s, &mut text, Key::Escape);
+    assert_eq!(s.tree.focused(), None);
+}
+
+#[test]
+fn typing_shortcut_letters_in_search_never_changes_tabs_or_creates_work() {
+    let (mut s, log, mut text) = demo_screen();
+    key(&mut s, &mut text, '2');
+    key(&mut s, &mut text, '/');
+    for c in ['t', 'r', '0', '1', 'j', 'l'] {
+        key(&mut s, &mut text, c);
+    }
+    assert_eq!(s.tab, Tab::Candidates);
+    assert_eq!(s.query, "tr01jl");
+    assert_eq!(
+        s.tree.get::<TextField>(s.ids.search).unwrap().text(),
+        "tr01jl"
+    );
+    assert!(sent(&log).is_empty());
+    assert!(s.form.is_none());
+    assert!(has(&list_labels(&s), "一致する項目がありません"));
+    click(&mut s, &mut text, "検索・絞り込みを解除");
+    assert_eq!(s.items(Tab::Candidates).len(), 3);
+    assert!(s.query.is_empty());
+}
+
+#[test]
+fn the_attention_filter_keeps_actionable_checks_candidates_and_sources() {
+    let (mut s, _, mut text) = screen_on(generic_setup_state(), None);
+    key(&mut s, &mut text, '0');
+    s.attention_only = true;
+    s.filters_changed(&mut text);
+    assert_eq!(
+        s.items(Tab::Setup),
+        [
+            Item::Setup("verification".into()),
+            Item::Setup("automation".into())
+        ]
+    );
+
+    let (mut s, _, mut text) = demo_screen();
+    key(&mut s, &mut text, '2');
+    s.attention_only = true;
+    s.filters_changed(&mut text);
+    assert_eq!(s.items(Tab::Candidates).len(), 1);
+    assert_eq!(
+        s.items(Tab::Candidates)[0],
+        Item::Candidate(open_candidate(&s))
+    );
+    s.state.report.sources[0].state = SourceState::Unknown;
+    s.set_tab(Tab::Sources, &mut text);
+    assert_eq!(s.items(Tab::Sources).len(), 1);
+}
+
+#[test]
+fn hiding_a_selected_item_closes_its_detail_and_rescans_keep_filtered_selection() {
+    let (mut s, _, mut text, shared) = screen_shared(demo::state(), None);
+    special(&mut s, &mut text, Key::Enter);
+    let selected = s.selection();
+    assert!(!s.tree.is_hidden(s.ids.detail));
+    search_for(&mut s, &mut text, "add-widget");
+    assert!(s.tree.is_hidden(s.ids.detail));
+    assert_ne!(s.selection(), selected);
+    let filtered = s.selection();
+    shared
+        .borrow_mut()
+        .registry
+        .as_mut()
+        .unwrap()
+        .registry
+        .assets
+        .reverse();
+    s.rescan(&mut text);
+    assert_eq!(s.selection(), filtered);
+    assert_eq!(s.query, "add-widget");
+}
+
+#[test]
+fn a_resolved_candidate_has_no_create_action_even_for_the_keyboard_shortcut() {
+    let (mut s, log, mut text) = demo_screen();
+    key(&mut s, &mut text, '2');
+    let item = s.items(Tab::Candidates).last().cloned().unwrap();
+    s.select(item, &mut text);
+    special(&mut s, &mut text, Key::Enter);
+    assert!(!detail_labels(&s).contains(&"タスクにする (T)".into()));
+    key(&mut s, &mut text, 't');
+    assert!(sent(&log).is_empty());
+    assert!(has(&header_notice(&s), "解消済み"));
+}
+
+#[test]
+fn the_toolbar_and_detail_fit_the_minimum_window() {
+    let (mut s, _, mut text) = screen_on(generic_setup_state(), None);
+    key_small(&mut s, &mut text, Key::Char('0'));
+    for id in [
+        s.ids.repo,
+        s.ids.commit,
+        s.ids.score,
+        s.ids.scanned,
+        s.ids.rescan,
+        s.ids.tabs,
+        s.ids.search,
+        s.ids.filter,
+        s.ids.count,
+    ] {
+        let rect = s.tree.window_rect(id).unwrap();
+        assert!(
+            rect.x >= 0.0 && rect.x + rect.width <= 960.5,
+            "toolbar overflows: {rect:?}"
+        );
+        assert!(
+            rect.y >= 0.0 && rect.y + rect.height <= 600.5,
+            "toolbar overflows: {rect:?}"
+        );
+    }
+    key_small(&mut s, &mut text, Key::Enter);
+    let detail = s.tree.window_rect(s.ids.detail).unwrap();
+    assert!(
+        detail.x >= 0.0 && detail.x + detail.width <= 960.5,
+        "detail overflows: {detail:?}"
+    );
+    let list = s.tree.window_rect(s.ids.list).unwrap();
+    assert!(list.width >= 350.0, "the list is too narrow: {list:?}");
+    assert!(selected_row_shown(&s));
+}
+
+#[test]
+fn list_rows_announce_their_human_title_and_state() {
+    let (mut s, _, mut text) = screen_on(generic_setup_state(), None);
+    key(&mut s, &mut text, '0');
+    let label = s.tree.get::<Pressable>(s.rows[0].0).unwrap().label_text();
+    assert!(label.contains("開発手順"));
+    assert!(label.contains("見つかりました"));
+    click(&mut s, &mut text, "登録内容を確認");
+    special(&mut s, &mut text, Key::Enter);
+    assert!(
+        s.tree.is_hidden(s.ids.detail),
+        "a preview does not open an invisible checklist row"
+    );
 }

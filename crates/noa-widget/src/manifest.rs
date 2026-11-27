@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -14,6 +14,8 @@ use crate::{
 const MAX_JSON_NODES: usize = 20_000;
 const MAX_STRING_BYTES: usize = 64 * 1024;
 const MAX_COLUMNS: usize = 32;
+/// A button sends at most this many text inputs with its event.
+const MAX_BUTTON_INPUTS: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -28,6 +30,16 @@ pub struct Manifest {
     pub view: Value,
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// Images packaged beside the manifest. Absent (not empty) for packages
+    /// without images, so their canonical form and digest are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<BTreeMap<String, AssetRef>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRef {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +98,7 @@ impl Manifest {
                 ));
             }
         }
+        crate::assets::validate_declarations(self.assets.as_ref())?;
         validate_node(
             &self.view,
             &self.data_schema,
@@ -94,6 +107,8 @@ impl Manifest {
             &mut 0,
             0,
         )?;
+        validate_text_inputs(&self.view, &self.data_schema, &self.actions)?;
+        validate_image_sources(&self.view, &self.data_schema, &self.asset_ids())?;
         self.validate_data(&self.initial_data)
     }
 
@@ -120,8 +135,45 @@ impl Manifest {
         validate_value(&action.payload_schema, payload, "action payload", 0)
     }
 
+    /// The literal or bound part of a payload whose text-input properties the
+    /// host fills in at click time: those properties may be absent here, and
+    /// the complete payload is validated again when the event is submitted.
+    fn validate_partial_action(
+        &self,
+        action_id: &str,
+        payload: &Value,
+        inputs: &Map<String, Value>,
+    ) -> Result<(), WidgetError> {
+        let action = self
+            .actions
+            .iter()
+            .find(|a| a.id == action_id)
+            .ok_or_else(|| WidgetError::new(format!("unknown action {action_id:?}")))?;
+        let mut schema = action.payload_schema.clone();
+        if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+            required.retain(|key| key.as_str().is_none_or(|key| !inputs.contains_key(key)));
+        }
+        // An enum of whole payloads names complete payloads, input text
+        // included; only the final payload can be compared with it.
+        if let Some(schema) = schema.as_object_mut() {
+            schema.remove("enum");
+        }
+        check_json(payload, MAX_ACTION_BYTES, "action payload")?;
+        validate_value(&schema, payload, "action payload", 0)
+    }
+
+    /// Declared asset ids, empty when the manifest has no `assets`.
+    pub fn asset_ids(&self) -> BTreeSet<&str> {
+        self.assets
+            .iter()
+            .flat_map(|assets| assets.keys().map(String::as_str))
+            .collect()
+    }
+
     /// Canonical object key ordering makes whitespace and key ordering
     /// irrelevant. This digest identifies content, never grants authority.
+    /// It covers the manifest only: a package with `assets` is identified by
+    /// [`crate::assets::definition_digest`], which also covers image bytes.
     pub fn digest(&self) -> String {
         let value = serde_json::to_value(self).expect("a manifest is JSON serializable");
         let bytes = serde_json::to_vec(&canonical(value)).expect("a manifest is JSON serializable");
@@ -451,16 +503,15 @@ fn validate_value(
         Value::String(text) => {
             length_bounds(schema, text.chars().count(), "minLength", "maxLength", at)?
         }
-        Value::Number(_) => {
+        Value::Number(_)
             if schema
                 .get("minimum")
                 .is_some_and(|n| number_cmp(value, n).is_lt())
                 || schema
                     .get("maximum")
-                    .is_some_and(|n| number_cmp(value, n).is_gt())
-            {
-                return fail(format!("{at} is outside its numeric bounds"));
-            }
+                    .is_some_and(|n| number_cmp(value, n).is_gt()) =>
+        {
+            return fail(format!("{at} is outside its numeric bounds"));
         }
         _ => {}
     }
@@ -606,7 +657,9 @@ fn validate_node(
         "progress" => &["value", "max", "label"],
         "table" => &["rows", "rowKey", "columns"],
         "list" => &["items", "itemKey", "textPointer"],
-        "button" => &["label", "action", "payload"],
+        "button" => &["label", "action", "payload", "inputs", "clearInputs"],
+        "text-input" => &["label", "placeholder", "multiline", "maxLength", "submit"],
+        "image" => &["src", "alt", "size", "width", "height", "shape"],
         _ => return fail(format!("unsupported component {kind:?}")),
     };
     let allowed: Vec<_> = ["type", "id"]
@@ -721,8 +774,190 @@ fn validate_node(
             if let Some(payload) = node.get("payload") {
                 expression(payload, schema, &["object"], "button payload")?;
             }
+            validate_button_inputs(node, id)?;
         }
+        "text-input" => validate_text_input_fields(node, schema, id)?,
+        "image" => validate_image(node, schema)?,
         _ => unreachable!(),
+    }
+    Ok(())
+}
+
+/// Field shapes of a `text-input` node. References to other nodes are checked
+/// by [`validate_text_inputs`] once every node ID is known.
+fn validate_text_input_fields(
+    node: &Map<String, Value>,
+    schema: &Value,
+    id: &str,
+) -> Result<(), WidgetError> {
+    if let Some(label) = node.get("label") {
+        expression(label, schema, &["string"], "text-input label")?;
+    }
+    if let Some(placeholder) = node.get("placeholder") {
+        bounded_text(
+            string(placeholder, &format!("text-input {id} placeholder"))?,
+            200,
+            &format!("text-input {id} placeholder"),
+            true,
+        )?;
+    }
+    if node.get("multiline").is_some_and(|v| !v.is_boolean()) {
+        return fail(format!("text-input {id} multiline must be a boolean"));
+    }
+    if let Some(max) = node.get("maxLength")
+        && !max
+            .as_u64()
+            .is_some_and(|n| (1..=MAX_ACTION_BYTES as u64).contains(&n))
+    {
+        return fail(format!(
+            "text-input {id} maxLength must be an integer in 1..={MAX_ACTION_BYTES}"
+        ));
+    }
+    if let Some(submit) = node.get("submit") {
+        check_id(string(submit, "text-input submit")?)?;
+    }
+    Ok(())
+}
+
+fn validate_button_inputs(node: &Map<String, Value>, id: &str) -> Result<(), WidgetError> {
+    if node.get("clearInputs").is_some_and(|v| !v.is_boolean()) {
+        return fail(format!("button {id} clearInputs must be a boolean"));
+    }
+    let Some(inputs) = node.get("inputs") else {
+        return Ok(());
+    };
+    let inputs = object(inputs, &format!("button {id} inputs"))?;
+    if inputs.is_empty() || inputs.len() > MAX_BUTTON_INPUTS {
+        return fail(format!(
+            "button {id} inputs must map 1..={MAX_BUTTON_INPUTS} payload properties"
+        ));
+    }
+    for (property, input) in inputs {
+        if property.is_empty() {
+            return fail(format!("button {id} inputs has an empty property name"));
+        }
+        check_id(string(input, &format!("button {id} inputs.{property}"))?)?;
+    }
+    Ok(())
+}
+
+fn collect_nodes<'a>(node: &'a Value, nodes: &mut Vec<(&'a str, &'a Value)>) {
+    if let Some(id) = node["id"].as_str() {
+        nodes.push((id, node));
+    }
+    for child in node["children"].as_array().into_iter().flatten() {
+        collect_nodes(child, nodes);
+    }
+}
+
+/// Cross-node rules for text inputs: a button's `inputs` name text-input
+/// nodes and string properties its action declares, and a `submit` names a
+/// button that sends the input. Input text is only ever a payload string.
+fn validate_text_inputs(
+    view: &Value,
+    data_schema: &Value,
+    actions: &[Action],
+) -> Result<(), WidgetError> {
+    let mut nodes = Vec::new();
+    collect_nodes(view, &mut nodes);
+    let find = |id: &str| nodes.iter().find(|(node, _)| *node == id).map(|(_, n)| *n);
+    // Buttons first: a wrong `inputs` entry is reported before the
+    // `submit` that it consequently fails to satisfy.
+    let buttons = nodes.iter().filter(|(_, node)| node["type"] == "button");
+    let others = nodes.iter().filter(|(_, node)| node["type"] != "button");
+    for (id, node) in buttons.chain(others) {
+        match node["type"].as_str() {
+            Some("button") => {
+                let Some(inputs) = node.get("inputs").and_then(Value::as_object) else {
+                    continue;
+                };
+                let action_id = node["action"].as_str().unwrap_or_default();
+                let action = actions
+                    .iter()
+                    .find(|a| a.id == action_id)
+                    .ok_or_else(|| WidgetError::new(format!("unknown action {action_id:?}")))?;
+                // A bound payload's schema shows which properties it may carry.
+                let payload_properties = match node.get("payload") {
+                    None => None,
+                    Some(payload) => match binding_pointer(payload)? {
+                        Some(pointer) => {
+                            // Data must not be able to carry an input property
+                            // that the typed text would silently overwrite.
+                            let bound = schema_pointer(data_schema, pointer)?;
+                            if bound["additionalProperties"] != false {
+                                return fail(format!(
+                                    "button {id} payload binding {pointer:?} must set additionalProperties to false when the button has inputs"
+                                ));
+                            }
+                            bound.get("properties").and_then(Value::as_object)
+                        }
+                        None => payload.as_object(),
+                    },
+                };
+                for (property, input_id) in inputs {
+                    let input_id = input_id.as_str().unwrap_or_default();
+                    let input = find(input_id).ok_or_else(|| {
+                        WidgetError::new(format!(
+                            "button {id} inputs.{property} refers to unknown node {input_id:?}"
+                        ))
+                    })?;
+                    if input["type"] != "text-input" {
+                        return fail(format!(
+                            "button {id} inputs.{property} refers to {input_id:?}, which is not a text-input"
+                        ));
+                    }
+                    let target = action
+                        .payload_schema
+                        .get("properties")
+                        .and_then(|p| p.get(property))
+                        .filter(|p| p["type"] == "string")
+                        .ok_or_else(|| {
+                            WidgetError::new(format!(
+                                "button {id} inputs.{property}: action {action_id} payloadSchema must declare {property:?} with type string"
+                            ))
+                        })?;
+                    if payload_properties.is_some_and(|p| p.contains_key(property)) {
+                        return fail(format!(
+                            "button {id} inputs.{property} is also set by the button payload"
+                        ));
+                    }
+                    if let (Some(own), Some(limit)) = (
+                        input.get("maxLength").and_then(Value::as_u64),
+                        target.get("maxLength").and_then(Value::as_u64),
+                    ) && own > limit
+                    {
+                        return fail(format!(
+                            "text-input {input_id} maxLength {own} exceeds action {action_id} {property:?} maxLength {limit}"
+                        ));
+                    }
+                }
+            }
+            Some("text-input") => {
+                let Some(submit) = node.get("submit").and_then(Value::as_str) else {
+                    continue;
+                };
+                let button = find(submit).ok_or_else(|| {
+                    WidgetError::new(format!(
+                        "text-input {id} submit refers to unknown node {submit:?}"
+                    ))
+                })?;
+                if button["type"] != "button" {
+                    return fail(format!(
+                        "text-input {id} submit refers to {submit:?}, which is not a button"
+                    ));
+                }
+                let sends = button
+                    .get("inputs")
+                    .and_then(Value::as_object)
+                    .is_some_and(|inputs| inputs.values().any(|v| v == id));
+                if !sends {
+                    return fail(format!(
+                        "text-input {id} submit button {submit:?} does not list {id:?} in its inputs"
+                    ));
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -876,8 +1111,21 @@ fn validate_rendered(
         "button" => {
             resolved(&node["label"], data, &["string"], "button label")?;
             let payload = resolve(node.get("payload").unwrap_or(&json!({})), data)?;
-            manifest.validate_action(string(&node["action"], "button action")?, &payload)?;
+            let action = string(&node["action"], "button action")?;
+            match node.get("inputs").and_then(Value::as_object) {
+                Some(inputs) => manifest.validate_partial_action(action, &payload, inputs)?,
+                None => manifest.validate_action(action, &payload)?,
+            }
         }
+        "text-input" => {
+            if let Some(label) = node.get("label") {
+                resolved(label, data, &["string"], "text-input label")?;
+            }
+            if let Some(placeholder) = node.get("placeholder") {
+                remaining.value(placeholder)?;
+            }
+        }
+        "image" => validate_rendered_image(node, data, manifest, remaining)?,
         _ => return fail(format!("unsupported component {kind:?}")),
     }
     Ok(())
@@ -929,6 +1177,115 @@ fn render_budget(remaining: &mut RenderBudget, count: usize) -> Result<(), Widge
         .checked_sub(count)
         .ok_or_else(|| WidgetError::new("expanded view exceeds 8192 nodes, rows and cells"))?;
     Ok(())
+}
+
+/// Square box sizes for `image.size`, in logical pixels.
+pub const IMAGE_SIZES: [(&str, u32); 3] = [("sm", 48), ("md", 96), ("lg", 192)];
+/// Largest explicit `image.width` / `image.height`, in logical pixels.
+pub const MAX_IMAGE_BOX: u64 = 1024;
+
+/// Image field checks that do not depend on the declared assets; the asset
+/// references themselves are checked by `validate_image_sources`.
+fn validate_image(node: &Map<String, Value>, schema: &Value) -> Result<(), WidgetError> {
+    let id = string(field(node, "id")?, "node id")?;
+    if let Some(target) = expression(field(node, "src")?, schema, &["string"], "image src")?
+        && target.get("enum").is_none()
+    {
+        return fail(format!(
+            "image {id:?} src binding must point to a string schema whose enum lists asset ids"
+        ));
+    }
+    let alt = field(node, "alt")?;
+    expression(alt, schema, &["string"], "image alt")?;
+    if let Some(alt) = alt.as_str() {
+        bounded_text(alt, 500, "image alt", false)?;
+    }
+    if let Some(size) = node.get("size") {
+        let size = string(size, "image size")?;
+        if !IMAGE_SIZES.iter().any(|(name, _)| *name == size) {
+            return fail(format!("image {id:?} size must be sm, md or lg"));
+        }
+        if node.contains_key("width") || node.contains_key("height") {
+            return fail(format!(
+                "image {id:?} takes either size or width/height, not both"
+            ));
+        }
+    }
+    match (node.get("width"), node.get("height")) {
+        (None, None) => {}
+        (Some(width), Some(height)) => {
+            for value in [width, height] {
+                if !value
+                    .as_u64()
+                    .is_some_and(|n| (1..=MAX_IMAGE_BOX).contains(&n))
+                {
+                    return fail(format!(
+                        "image {id:?} width and height must be integers 1..={MAX_IMAGE_BOX}"
+                    ));
+                }
+            }
+        }
+        _ => {
+            return fail(format!(
+                "image {id:?} width and height must be given together"
+            ));
+        }
+    }
+    if let Some(shape) = node.get("shape")
+        && !matches!(string(shape, "image shape")?, "square" | "circle")
+    {
+        return fail(format!("image {id:?} shape must be square or circle"));
+    }
+    Ok(())
+}
+
+/// Every image source must name a declared asset: a literal directly, a data
+/// binding through its schema enum. Runs after `validate_node` accepted the
+/// tree's shape.
+fn validate_image_sources(
+    node: &Value,
+    schema: &Value,
+    assets: &BTreeSet<&str>,
+) -> Result<(), WidgetError> {
+    if node["type"] == "image" {
+        let id = node["id"].as_str().unwrap_or_default();
+        let src = &node["src"];
+        let ids: Vec<&Value> = match binding_pointer(src)? {
+            None => vec![src],
+            Some(pointer) => schema_pointer(schema, pointer)?["enum"]
+                .as_array()
+                .map(|values| values.iter().collect())
+                .unwrap_or_default(),
+        };
+        for value in ids {
+            let asset = string(value, "image src")?;
+            if !assets.contains(asset) {
+                return fail(format!(
+                    "image {id:?} refers to undeclared asset {asset:?}; declare it in assets"
+                ));
+            }
+        }
+    }
+    if let Some(children) = node.get("children").and_then(Value::as_array) {
+        for child in children {
+            validate_image_sources(child, schema, assets)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_rendered_image(
+    node: &Value,
+    data: &Value,
+    manifest: &Manifest,
+    remaining: &mut RenderBudget,
+) -> Result<(), WidgetError> {
+    let src = resolved(&node["src"], data, &["string"], "image src")?;
+    let src = src.as_str().expect("checked string");
+    if !manifest.asset_ids().contains(src) {
+        return fail(format!("image src {src:?} is not a declared asset"));
+    }
+    remaining.value(&resolved(&node["alt"], data, &["string"], "image alt")?)
 }
 
 struct StrictValue(Value);
@@ -1012,7 +1369,7 @@ pub fn schema_document() -> Value {
     let tone = json!({"enum":["default","muted","success","warning","error"]});
     let children =
         json!({"type":"array","maxItems":MAX_VIEW_NODES,"items":{"$ref":"#/$defs/node"}});
-    let nodes = vec![
+    let mut nodes = vec![
         node(
             json!({"children":children,"gap":gap}),
             &["children"],
@@ -1049,11 +1406,26 @@ pub fn schema_document() -> Value {
             &["list"],
         ),
         node(
-            json!({"label":text,"action":{"$ref":"#/$defs/id"},"payload":{"type":"object"}}),
+            json!({"label":text,"action":{"$ref":"#/$defs/id"},"payload":{"type":"object"},
+                "inputs":{"type":"object","minProperties":1,"maxProperties":MAX_BUTTON_INPUTS,"propertyNames":{"minLength":1},"additionalProperties":{"$ref":"#/$defs/id"}},
+                "clearInputs":{"type":"boolean"}}),
             &["label", "action"],
             &["button"],
         ),
+        node(
+            json!({"label":text,"placeholder":{"type":"string","maxLength":200},"multiline":{"type":"boolean"},
+                "maxLength":{"type":"integer","minimum":1,"maximum":MAX_ACTION_BYTES},"submit":{"$ref":"#/$defs/id"}}),
+            &[],
+            &["text-input"],
+        ),
     ];
+    let pixels = json!({"type":"integer","minimum":1,"maximum":MAX_IMAGE_BOX});
+    nodes.push(node(
+        json!({"src":{"anyOf":[{"$ref":"#/$defs/id"},{"$ref":"#/$defs/binding"}]},"alt":text,
+            "size":{"enum":["sm","md","lg"]},"width":pixels,"height":pixels,"shape":{"enum":["square","circle"]}}),
+        &["src", "alt"],
+        &["image"],
+    ));
     json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",
         "title":"Noa repository widget v1",
@@ -1069,6 +1441,8 @@ pub fn schema_document() -> Value {
             "dataSchema":{"$ref":"#/$defs/dataSchema"},
             "initialData":{"type":"object"},
             "view":{"$ref":"#/$defs/node"},
+            "assets":{"type":"object","minProperties":1,"maxProperties":crate::assets::MAX_ASSETS,"propertyNames":{"$ref":"#/$defs/id"},
+                "additionalProperties":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","maxLength":crate::assets::MAX_PATH_BYTES,"pattern":"^assets(/[^/.\\\\][^/\\\\]*)+$"}}}},
             "actions":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["id","kind","payloadSchema"],"properties":{"id":{"$ref":"#/$defs/id"},"kind":{"const":"agent-event"},"payloadSchema":{"$ref":"#/$defs/dataSchema"}}}}
         },
         "$defs":{

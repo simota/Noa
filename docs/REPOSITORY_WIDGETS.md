@@ -59,6 +59,7 @@ Put one package in `.noa-widgets/<id>/`:
 | `widget.json` | Required definition, schema, initial data and view |
 | `README.md` | What the widget means and how the agent handles its actions |
 | `fixtures/*.json` | Example data for validation and visual review |
+| `assets/*` | Images the manifest declares in `assets` (PNG, JPEG or WebP) |
 
 The directory name must match the manifest's `id`. IDs use lowercase ASCII
 letters, digits and single hyphens, start with a letter, and are at most 64
@@ -83,8 +84,8 @@ package is a separate agent file edit and Git commit.
 
 The complete working example is
 [test-summary/widget.json](../.noa-widgets/test-summary/widget.json).
-The top-level fields are listed below; `actions` may be omitted when empty.
-All other fields are required.
+The top-level fields are listed below; `actions` may be omitted when empty
+and `assets` when the widget has no images. All other fields are required.
 
 | Field | Contract |
 | --- | --- |
@@ -96,6 +97,7 @@ All other fields are required.
 | `initialData` | Complete initial data, validated against the schema and view |
 | `view` | One root component with unique node IDs |
 | `actions` | Array of uniquely named `agent-event` declarations; may be empty |
+| `assets` | Optional map of asset ID to `{"path": "assets/<file>"}`; see [Packaged images](#packaged-images) |
 
 Unknown fields, duplicate JSON object keys, unknown components/action kinds,
 unsupported schema keywords and future API versions are errors. `widget
@@ -137,11 +139,104 @@ set `gap` to `none`, `xs`, `sm`, `md` or `lg`.
 | `progress` | Numeric `value`, optional positive `max` (default 1) and `label` |
 | `table` | Object-array `rows`, `rowKey` pointer, `columns` with `title` and row-relative `pointer` |
 | `list` | Object-array `items`, `itemKey` pointer and row-relative `textPointer` |
-| `button` | `label`, declared `action`, optional object `payload` (default `{}`) |
+| `button` | `label`, declared `action`, optional object `payload` (default `{}`), `inputs` and `clearInputs` |
+| `text-input` | Optional `label`, literal `placeholder`, `multiline`, `maxLength` and `submit` |
+| `image` | Asset ID `src`, string `alt`, optional `size` or `width`/`height`, optional `shape` |
 
 Tones are `default`, `muted`, `success`, `warning` and `error` where supported.
 Table/list keys must exist and be unique in the supplied rows. Keep row IDs
 stable when updating the same logical items.
+
+### Text inputs
+
+A `text-input` lets a person type free text that a button sends to the agent
+inside its event payload. It has no value in the data: the text is never
+written into instance data or state, and the host never executes or
+evaluates it.
+
+```json
+{"type": "text-input", "id": "subject", "label": "件名",
+ "placeholder": "例: 失敗したテストの原因を調べて", "maxLength": 120, "submit": "send"},
+{"type": "button", "id": "send", "label": "送信", "action": "request",
+ "payload": {"kind": "request"}, "inputs": {"subject": "subject"}, "clearInputs": true}
+```
+
+| Field | Contract |
+| --- | --- |
+| `label` | Optional bindable string shown above the input |
+| `placeholder` | Optional literal string, at most 200 characters |
+| `multiline` | Boolean, default `false`; a multi-line input grows with its text |
+| `maxLength` | Positive integer, in characters |
+| `submit` | ID of a button in the view whose `inputs` list this input |
+
+A button's `inputs` maps payload property names to text-input node IDs; its
+`clearInputs` (default `false`) clears those inputs once the event is
+accepted. On a click the host resolves `payload` as before, then inserts each
+input's current text, as a string, under its property. `widget validate`
+requires every target to be a text-input, the action's `payloadSchema` to
+declare each property with type `string`, the property to be absent from the
+button's payload, and an input's `maxLength` not to exceed that property's
+`maxLength`. A bound payload's schema must set `additionalProperties` to
+`false` and not declare an input property, so data can never carry a value
+that typed text would silently overwrite. Input properties may be listed in
+the action's `required`, and a whole-payload `enum` applies to the final
+payload: the host supplies the inputs first.
+
+Enter in a single-line input presses its `submit` button. In a multi-line
+input Enter inserts a line break and Cmd+Enter (Ctrl+Enter off macOS) submits.
+Neither submits while an input method composition, such as a Japanese
+conversion, is in progress. Before sending, the host checks the input's
+`maxLength` and validates the complete payload against the action schema and
+the 16 KiB limit; a failure sends nothing and the footer says why. Typed text
+is kept across live data updates. The service validates the final payload as
+for any other event.
+
+### Packaged images
+
+A widget shows only images committed in its own package. Declare each one
+under `assets` and reference it by ID; there are no URLs, `data:` URIs,
+arbitrary paths or network fetches.
+
+```json
+"assets": {
+  "logo": {"path": "assets/logo.png"},
+  "hero": {"path": "assets/hero.jpg"}
+},
+"view": {"type": "image", "id": "logo", "src": "logo", "alt": "Project logo", "size": "sm"}
+```
+
+Asset IDs follow the package ID rules. A path is relative to
+`.noa-widgets/<id>/` and lies below its `assets/` directory (at most three
+names deep). It cannot be absolute or contain `.`/`..`, hidden names or
+backslashes. Every path component must be a real directory or a regular
+file, never a symbolic link. The format is detected from the file's magic
+bytes, not its extension: PNG, JPEG (baseline or progressive) or still WebP.
+`widget validate` checks that each file exists and meets the format, size and
+dimension limits, and lists the assets it read.
+
+| Image field | Contract |
+| --- | --- |
+| `src` | Required. A declared asset ID, or a binding to a string schema whose `enum` lists only declared asset IDs |
+| `alt` | Required bindable string (a literal has 1–500 characters); read by assistive technology and shown when the image cannot be drawn |
+| `size` | `sm` (48), `md` (96, default) or `lg` (192 logical pixels), a square box |
+| `width`, `height` | Explicit box in logical pixels, both together, integers 1–1024; not combined with `size` |
+| `shape` | `square` (default) or `circle` |
+
+The picture keeps its aspect ratio inside the box (fit, centered). A circle
+is the centered square of the picture with a round mask; the toolkit has no
+rounded clip, so the host bakes the mask into the uploaded pixels. If a
+picture cannot be decoded, its `alt` text fills a box of the same size, so the
+layout does not change. A data update can switch a bound `src` to another
+declared asset; data cannot add images.
+
+Assets are part of the pinned definition. A manifest with assets has a
+definition digest that covers the canonical manifest and every asset's
+sha256 content digest, so changing one image byte changes the definition.
+Manifests without `assets` keep exactly their previous digest. Inline
+definitions (`open --definition-file`) have no package directory, so a
+manifest with `assets` is rejected there; commit the package and open it by
+ID. The palette catalogue's preview windows show the `alt` text in place of
+images; `widget preview` and live instances draw them.
 
 ### Actions
 
@@ -253,7 +348,12 @@ Each managed `widget-host` gets one private stdin/stdout JSON-lines channel.
 It cannot name another instance, receive the global control token, or select
 an executable. The service starts only Noa's registered helper. The host
 pins the definition digest and accepts nondecreasing snapshots for that
-instance. Editing a repository manifest does not alter an existing instance;
+instance. A managed host is never given a filesystem path: when an instance
+opens, the service reads and verifies the package's assets and sends their
+bytes over the same pipe, in base64 chunks before the first snapshot. The
+host checks each asset against its content digest and the snapshot's
+definition digest. Asset bytes are not stored in the instance state, which
+keeps only their digests; a restored instance does not reopen a window. Editing a repository manifest does not alter an existing instance;
 close and reopen to use the new definition.
 
 Public `noa.widget.*` calls retain the existing **trusted-controller**
@@ -268,6 +368,7 @@ describe this release as a sandbox for untrusted controller clients.
 | Resource | Limit |
 | --- | ---: |
 | Manifest / current data / action payload | 64 / 128 / 16 KiB |
+| Text inputs per button / text-input `maxLength` / placeholder | 16 / 16,384 characters / 200 characters |
 | Schema/view depth / view nodes | 32 / 512 |
 | Definitions per worktree | 128 |
 | Rows per table or list | 1,000 |
@@ -276,6 +377,8 @@ describe this release as a sandbox for untrusted controller clients.
 | Pending events per instance / serialized event queue | 128 / 256 KiB |
 | Mutation retry ledger / action retry ledger | 1,024 each while open |
 | Persisted state per instance / private pipe line | 1 MiB / 256 KiB |
+| Assets per package / bytes per asset / asset bytes per package | 16 / 512 KiB / 2 MiB |
+| Asset dimensions / explicit image box | 2,048 × 2,048 px / 1,024 × 1,024 logical px |
 
 An event queue at capacity rejects new clicks; consuming and acknowledging
 events frees it. Retry ledgers are not silently evicted. At their lifetime

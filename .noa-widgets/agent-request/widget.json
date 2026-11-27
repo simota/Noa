@@ -1,0 +1,80 @@
+{
+  "apiVersion": "noa.widget/v1",
+  "id": "agent-request",
+  "version": "0.1.0",
+  "title": "エージェントへの依頼",
+  "description": "担当エージェントの状況を表示し、件名と詳細を書いた依頼を送る。入力はイベントの payload の文字列として届くだけで、実行も評価もされない。",
+  "dataSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["status", "task"],
+    "properties": {
+      "status": { "type": "string", "maxLength": 2000 },
+      "task": { "type": "string", "maxLength": 200 }
+    }
+  },
+  "initialData": {
+    "status": "依頼を待っています。",
+    "task": "未割り当て"
+  },
+  "view": {
+    "type": "column",
+    "id": "root",
+    "gap": "md",
+    "children": [
+      {
+        "type": "text",
+        "id": "status",
+        "text": { "source": "data", "pointer": "/status" }
+      },
+      {
+        "type": "metric",
+        "id": "task",
+        "label": "現在のタスク",
+        "value": { "source": "data", "pointer": "/task" }
+      },
+      {
+        "type": "text-input",
+        "id": "subject",
+        "label": "件名（Enter で送信）",
+        "placeholder": "例: 失敗したテストの原因を調べて",
+        "maxLength": 120,
+        "submit": "send"
+      },
+      {
+        "type": "text-input",
+        "id": "details",
+        "label": "詳細（Cmd+Enter で送信）",
+        "placeholder": "背景や制約があれば書いてください",
+        "multiline": true,
+        "maxLength": 4000,
+        "submit": "send"
+      },
+      {
+        "type": "button",
+        "id": "send",
+        "label": "エージェントに送信",
+        "action": "request",
+        "payload": { "kind": "request" },
+        "inputs": { "subject": "subject", "details": "details" },
+        "clearInputs": true
+      }
+    ]
+  },
+  "actions": [
+    {
+      "id": "request",
+      "kind": "agent-event",
+      "payloadSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "subject", "details"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["request"] },
+          "subject": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "details": { "type": "string", "maxLength": 4000 }
+        }
+      }
+    }
+  ]
+}

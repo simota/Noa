@@ -33,7 +33,9 @@ skill was installed as a symlink outside the target repository.
    stable IDs for table/list records. Bound strings and arrays in dataSchema.
 4. Define each button as a named intent the agent can handle. Document its
    payload and meaning. Do not place a shell command, script, URL fetch or
-   executable entry point in the manifest.
+   executable entry point in the manifest. When the person must write the
+   request, add a `text-input` and send it through the button's `inputs`
+   (see the reference); its text arrives only as a payload string.
 5. Choose a unique lowercase-hyphen package ID and stable `major.minor.patch`
    version. Match the directory name to the manifest ID.
 
@@ -48,7 +50,14 @@ For a shared widget, create these tracked files under the target worktree:
 .noa-widgets/<id>/fixtures/empty.json
 .noa-widgets/<id>/fixtures/error.json
 .noa-widgets/<id>/fixtures/long.json
+.noa-widgets/<id>/assets/<image>      # only if the view shows images
 ```
+
+Images come only from the package: declare each under `assets` and show it
+with an `image` component (see [manifest.md](references/manifest.md#images)).
+Use small PNG, JPEG or WebP files you created or are allowed to commit; never
+a URL, `data:` URI, symlink or a path outside `assets/`. Give every image a
+meaningful `alt`. A one-off inline draft cannot carry images.
 
 Use `.noa-widgets/` for shared definitions. `.noa/` holds ignored local task
 and run state; do not put a shareable definition there. Do not edit another
@@ -80,7 +89,9 @@ for state in normal empty error long; do
 done
 ```
 
-Set `package` to the actual package or draft directory. Use `widget validate`
+Set `package` to the actual package or draft directory. Validate the
+package's own `widget.json` path (not stdin) when it declares `assets`: images
+are read from that directory. Use `widget validate`
 as the authoritative check: editor JSON Schema alone cannot establish pointer
 types, unique node/row IDs, action references or rendered-content limits.
 

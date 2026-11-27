@@ -5,11 +5,12 @@
 use std::collections::BTreeSet;
 
 use noa_gpui_core::style::{Size as LayoutSize, auto, length};
-use noa_gpui_core::widgets::{Button, Container, Label, Tag, Tone};
+use noa_gpui_core::widgets::{Button, Container, Label, Tag, TextArea, TextField, Tone};
 use noa_gpui_core::{Paint, PaintCx, Role, Style, UiTree, Widget, WidgetId};
 use noa_gpui_scene::{Border, Color, Rect};
 use serde_json::{Value, json};
 
+use crate::images::{self, Picture};
 use crate::style;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +59,134 @@ pub enum Node {
         label: String,
         action: Action,
     },
+    /// A button whose payload also carries the text of `inputs`
+    /// (payload property, text-input node id).
+    FormButton {
+        id: String,
+        label: String,
+        action: Action,
+        inputs: Vec<(String, String)>,
+        clear: bool,
+    },
+    TextInput {
+        id: String,
+        label: Option<String>,
+        placeholder: String,
+        multiline: bool,
+        max_length: Option<usize>,
+        submit: Option<String>,
+    },
+    Image {
+        asset: String,
+        alt: String,
+        width: f32,
+        height: f32,
+        shape: Shape,
+        /// Filled in by `Images::attach`; `None` draws the alt text.
+        picture: Option<Picture>,
+    },
+}
+
+/// The text inputs of a rendered view and the buttons that send them, keyed
+/// by view node id so that typed text survives a rebuild of the tree.
+#[derive(Debug, Default)]
+pub struct Inputs {
+    pub fields: Vec<InputField>,
+    pub buttons: Vec<FormButton>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InputField {
+    pub id: String,
+    pub widget: WidgetId,
+    pub multiline: bool,
+    pub max_length: Option<usize>,
+    pub submit: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FormButton {
+    pub id: String,
+    pub widget: WidgetId,
+    pub inputs: Vec<(String, String)>,
+    pub clear: bool,
+}
+
+impl InputField {
+    pub fn text(&self, tree: &UiTree) -> String {
+        if self.multiline {
+            tree.get::<TextArea>(self.widget)
+                .map(|area| area.text().to_owned())
+        } else {
+            tree.get::<TextField>(self.widget)
+                .map(|field| field.text().to_owned())
+        }
+        .unwrap_or_default()
+    }
+
+    /// Whether an input method composition (for example a Japanese
+    /// conversion) is in progress; keys then belong to the IME.
+    pub fn composing(&self, tree: &UiTree) -> bool {
+        if self.multiline {
+            tree.get::<TextArea>(self.widget)
+                .is_some_and(|area| !area.composition().is_empty())
+        } else {
+            tree.get::<TextField>(self.widget)
+                .is_some_and(|field| !field.composition().is_empty())
+        }
+    }
+
+    pub fn set_text(&self, tree: &mut UiTree, text: String) {
+        if self.multiline {
+            tree.update::<TextArea, _>(self.widget, |area, cx| area.set_text(cx, text));
+        } else {
+            tree.update::<TextField, _>(self.widget, |field, cx| field.set_text(cx, text));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Shape {
+    Square,
+    Circle,
+}
+
+fn image(view: &Value, data: &Value) -> Result<Node, String> {
+    let (width, height) = image_box(view)?;
+    Ok(Node::Image {
+        asset: bound(view, "src", data)?
+            .as_str()
+            .ok_or("image src must resolve to an asset id")?
+            .to_owned(),
+        alt: display(&bound(view, "alt", data)?)?,
+        width,
+        height,
+        shape: match view.get("shape").and_then(Value::as_str) {
+            Some("circle") => Shape::Circle,
+            _ => Shape::Square,
+        },
+        picture: None,
+    })
+}
+
+/// The logical box of an image node: `width`/`height`, else `size` (md).
+fn image_box(view: &Value) -> Result<(f32, f32), String> {
+    if let (Some(width), Some(height)) = (view.get("width"), view.get("height")) {
+        let side = |value: &Value| {
+            value
+                .as_u64()
+                .filter(|n| (1..=noa_widget::manifest::MAX_IMAGE_BOX).contains(n))
+                .map(|n| n as f32)
+                .ok_or("image width and height must be integers 1..=1024")
+        };
+        return Ok((side(width)?, side(height)?));
+    }
+    let size = view.get("size").and_then(Value::as_str).unwrap_or("md");
+    noa_widget::manifest::IMAGE_SIZES
+        .iter()
+        .find(|(name, _)| *name == size)
+        .map(|(_, side)| (*side as f32, *side as f32))
+        .ok_or_else(|| format!("unsupported image size {size:?}"))
 }
 
 fn field<'a>(view: &'a Value, key: &str) -> Result<&'a Value, String> {
@@ -229,6 +358,8 @@ pub fn resolve(view: &Value, data: &Value) -> Result<Node, String> {
                     .collect::<Result<_, _>>()?,
             ))
         }
+        "button" if view.get("inputs").is_some() => form_button(view, data),
+        "text-input" => text_input(view, data),
         "button" => Ok(Node::Button {
             label: display(&bound(view, "label", data)?)?,
             action: Action {
@@ -241,8 +372,68 @@ pub fn resolve(view: &Value, data: &Value) -> Result<Node, String> {
                 },
             },
         }),
+        "image" => image(view, data),
         other => Err(format!("unsupported component {other:?}")),
     }
+}
+
+fn form_button(view: &Value, data: &Value) -> Result<Node, String> {
+    let inputs = field(view, "inputs")?
+        .as_object()
+        .ok_or("button inputs must be an object")?
+        .iter()
+        .map(|(property, input)| {
+            input
+                .as_str()
+                .map(|input| (property.clone(), input.to_owned()))
+                .ok_or_else(|| format!("button input {property:?} must name a node"))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Node::FormButton {
+        id: string(view, "id")?,
+        label: display(&bound(view, "label", data)?)?,
+        action: Action {
+            id: string(view, "action")?,
+            payload: match view.get("payload") {
+                Some(payload) => {
+                    noa_widget::resolve(payload, data).map_err(|error| error.to_string())?
+                }
+                None => json!({}),
+            },
+        },
+        inputs,
+        clear: view
+            .get("clearInputs")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn text_input(view: &Value, data: &Value) -> Result<Node, String> {
+    Ok(Node::TextInput {
+        id: string(view, "id")?,
+        label: view
+            .get("label")
+            .map(|_| bound(view, "label", data).and_then(|value| display(&value)))
+            .transpose()?,
+        placeholder: view
+            .get("placeholder")
+            .map(|_| string(view, "placeholder"))
+            .transpose()?
+            .unwrap_or_default(),
+        multiline: view
+            .get("multiline")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        max_length: view
+            .get("maxLength")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize),
+        submit: view
+            .get("submit")
+            .map(|_| string(view, "submit"))
+            .transpose()?,
+    })
 }
 
 fn tone(name: &str) -> Tone {
@@ -269,6 +460,7 @@ pub fn insert(
     parent: WidgetId,
     node: &Node,
     actions: &mut Vec<(WidgetId, Action)>,
+    inputs: &mut Inputs,
 ) {
     match node {
         Node::Column { gap, children } | Node::Row { gap, children } => {
@@ -284,9 +476,9 @@ pub fn insert(
             for child in children {
                 if row {
                     let slot = tree.insert(Some(container), Container::new(style::grow()));
-                    insert(tree, slot, child, actions);
+                    insert(tree, slot, child, actions, inputs);
                 } else {
-                    insert(tree, container, child, actions);
+                    insert(tree, container, child, actions, inputs);
                 }
             }
         }
@@ -308,7 +500,7 @@ pub fn insert(
                 Label::new(title).font_size(15.0).weight(700),
             );
             for child in children {
-                insert(tree, container, child, actions);
+                insert(tree, container, child, actions, inputs);
             }
         }
         Node::Text { text, tone } => {
@@ -398,6 +590,70 @@ pub fn insert(
         Node::Button { label, action } => {
             let button = tree.insert(Some(parent), Button::new(label));
             actions.push((button, action.clone()));
+        }
+        Node::FormButton {
+            id,
+            label,
+            action,
+            inputs: fields,
+            clear,
+        } => {
+            let button = tree.insert(Some(parent), Button::new(label));
+            actions.push((button, action.clone()));
+            inputs.buttons.push(FormButton {
+                id: id.clone(),
+                widget: button,
+                inputs: fields.clone(),
+                clear: *clear,
+            });
+        }
+        Node::TextInput {
+            id,
+            label,
+            placeholder,
+            multiline,
+            max_length,
+            submit,
+        } => {
+            let container = tree.insert(
+                Some(parent),
+                Container::new(style::wide(style::column(6.0))),
+            );
+            if let Some(label) = label {
+                tree.insert(
+                    Some(container),
+                    Label::new(label).font_size(12.0).color(Role::Muted),
+                );
+            }
+            let widget = if *multiline {
+                tree.insert(Some(container), TextArea::new(placeholder).min_lines(4))
+            } else {
+                tree.insert(Some(container), TextField::new(placeholder, 360.0))
+            };
+            inputs.fields.push(InputField {
+                id: id.clone(),
+                widget,
+                multiline: *multiline,
+                max_length: *max_length,
+                submit: submit.clone(),
+            });
+        }
+        Node::Image {
+            alt,
+            width,
+            height,
+            shape,
+            picture,
+            ..
+        } => {
+            images::insert(
+                tree,
+                parent,
+                alt,
+                (*width, *height),
+                *shape,
+                picture.as_ref(),
+            );
         }
     }
 }

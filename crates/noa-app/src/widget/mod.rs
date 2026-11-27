@@ -16,7 +16,7 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use noa_ipc::widget::{
     AckParams, CloseParams, EventsParams, HostMessage, HostRequest, MAX_ACTION_BYTES,
     MAX_BRIDGE_LINE_BYTES, MAX_DATA_BYTES, OpenParams, SetParams, WidgetCall, WidgetError,
-    WidgetErrorKind, WidgetEvent, validate_size, validate_token,
+    WidgetErrorKind, WidgetEvent, asset_frames, validate_size, validate_token,
 };
 use noa_widget::{Manifest, content_digest, discovery};
 use parking_lot::Mutex;
@@ -160,6 +160,10 @@ struct Instance {
     worktree_id: String,
     manifest: Manifest,
     definition_digest: String,
+    /// Content digests of the pinned definition's assets. The bytes are not
+    /// stored: a restored instance never relaunches a host that needs them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    asset_digests: BTreeMap<String, String>,
     definition_source: String,
     data: Value,
     data_revision: u64,
@@ -384,7 +388,10 @@ impl Store {
                 .manifest
                 .validate_data(&instance.data)
                 .map_err(domain_error)?;
-            if instance.manifest.digest() != instance.definition_digest {
+            if noa_widget::definition_digest(&instance.manifest, &instance.asset_digests)
+                .map_err(domain_error)?
+                != instance.definition_digest
+            {
                 return Err(io_error("widget definition digest mismatch"));
             }
             instance.validate_stored()?;
@@ -565,16 +572,22 @@ impl Store {
             ));
         }
         let context = discovery::repo_context(Path::new(&p.repo)).map_err(domain_error)?;
-        let (manifest, source) = if let Some(id) = p.id {
+        let (manifest, digest, assets, source) = if let Some(id) = p.id {
             let d = discovery::load(&context.worktree_root, &id).map_err(domain_error)?;
-            (d.manifest, "repository")
+            (d.manifest, d.digest, d.assets, "repository")
         } else {
             let bytes = serde_json::to_vec(p.definition.as_ref().expect("validated open source"))
                 .map_err(domain_error)?;
-            (
-                Manifest::from_slice(&bytes).map_err(domain_error)?,
-                "inline",
-            )
+            let manifest = Manifest::from_slice(&bytes).map_err(domain_error)?;
+            if manifest.assets.is_some() {
+                // Asset paths are relative to a package directory, and an
+                // inline definition has none to read them from.
+                return Err(WidgetError::invalid(
+                    "a definition with assets cannot be opened inline; open its repository package by id",
+                ));
+            }
+            let digest = manifest.digest();
+            (manifest, digest, Vec::new(), "inline")
         };
         let data = p.data.unwrap_or_else(|| manifest.initial_data.clone());
         validate_size(&data, MAX_DATA_BYTES)?;
@@ -586,7 +599,8 @@ impl Store {
             worktree_root: context.worktree_root,
             repository_id: context.repository_id,
             worktree_id: context.worktree_id,
-            definition_digest: manifest.digest(),
+            definition_digest: digest,
+            asset_digests: noa_widget::assets::digests(&assets),
             definition_source: source.into(),
             manifest,
             data,
@@ -608,7 +622,16 @@ impl Store {
         // Resolve only Noa's registered helper, never PATH or a manifest path.
         let host = if self.launch_hosts {
             let path = self.host_program()?;
-            Some(launch_host(&path, &instance.instance_id, self.tx.clone())?)
+            let frames = assets
+                .iter()
+                .flat_map(|asset| asset_frames(&asset.id, &asset.digest, &asset.bytes))
+                .collect();
+            Some(launch_host(
+                &path,
+                &instance.instance_id,
+                frames,
+                self.tx.clone(),
+            )?)
         } else {
             None
         };
@@ -954,9 +977,13 @@ impl Store {
     }
 }
 
+/// `assets` are written before anything from the update channel, so the host
+/// holds every image before the initial snapshot that pins them arrives.
+/// They bypass the bounded channel, which only needs room for updates.
 fn launch_host(
     program: &Path,
     instance_id: &str,
+    assets: Vec<HostMessage>,
     tx: Sender<Message>,
 ) -> Result<Host, WidgetError> {
     let mut command = Command::new(program);
@@ -1039,7 +1066,7 @@ fn launch_host(
     thread::Builder::new()
         .name("widget-host-writer".into())
         .spawn(move || {
-            for message in messages {
+            for message in assets.into_iter().chain(messages) {
                 let Ok(mut bytes) = serde_json::to_vec(&message) else {
                     break;
                 };
@@ -1756,5 +1783,159 @@ mod tests {
             .unwrap();
         assert_eq!(store.instance(&id).unwrap().events.len(), 1);
         assert_eq!(store.instance(&id).unwrap().last_seq, 1);
+    }
+
+    const LOGO: &[u8] = include_bytes!("../../../../.noa-widgets/image-gallery/assets/logo.png");
+
+    fn gallery_manifest() -> Value {
+        json!({"apiVersion":"noa.widget/v1", "id":"gallery", "version":"1.0.0", "title":"Gallery",
+            "description":"Packaged image", "assets":{"logo":{"path":"assets/logo.png"}},
+            "dataSchema":{"type":"object","properties":{},"additionalProperties":false},
+            "initialData":{},
+            "view":{"type":"image","id":"logo","src":"logo","alt":"Logo"}})
+    }
+
+    impl Fixture {
+        fn gallery(&self) -> PathBuf {
+            let package = self.repo.join(".noa-widgets/gallery");
+            fs::create_dir_all(package.join("assets")).unwrap();
+            fs::write(
+                package.join("widget.json"),
+                serde_json::to_vec(&gallery_manifest()).unwrap(),
+            )
+            .unwrap();
+            fs::write(package.join("assets/logo.png"), LOGO).unwrap();
+            package
+        }
+
+        fn open_gallery(&self, request: &str) -> WidgetCall {
+            let mut call = self.open(request);
+            if let WidgetCall::Open(params) = &mut call {
+                params.id = Some("gallery".into());
+            }
+            call
+        }
+    }
+
+    #[test]
+    fn packaged_assets_reach_the_host_before_the_snapshot_and_only_digests_persist() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let package = fixture.gallery();
+        let received = fixture.root.join("host-input");
+        let fake_host = fixture.root.join("fake-host");
+        fs::write(
+            &fake_host,
+            format!("#!/bin/sh\nexec cat > '{}'\n", received.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_host, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut store = fixture.store();
+        store.launch_hosts = true;
+        store.host_program = Some(fake_host);
+        let opened = store.call(fixture.open_gallery("open"), &[]).unwrap();
+        let id = instance_id(&opened);
+        let manifest =
+            Manifest::from_slice(&serde_json::to_vec(&gallery_manifest()).unwrap()).unwrap();
+        let digests = BTreeMap::from([("logo".to_owned(), content_digest(LOGO))]);
+        let pinned = noa_widget::definition_digest(&manifest, &digests).unwrap();
+        assert_eq!(opened["definitionDigest"], pinned);
+        assert_ne!(pinned, manifest.digest());
+
+        // The host's input: every asset frame, then the pinning snapshot.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let lines = loop {
+            let text = fs::read_to_string(&received).unwrap_or_default();
+            if text.contains("\"type\":\"snapshot\"") || std::time::Instant::now() > deadline {
+                break text.lines().map(str::to_owned).collect::<Vec<_>>();
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let (snapshot, frames) = lines.split_last().expect("host input");
+        let HostMessage::Snapshot {
+            definition_digest, ..
+        } = serde_json::from_str(snapshot).unwrap()
+        else {
+            panic!("the snapshot follows the asset frames");
+        };
+        assert_eq!(definition_digest, pinned);
+        let mut bytes = Vec::new();
+        for line in frames {
+            let HostMessage::Asset {
+                id, digest, data, ..
+            } = serde_json::from_str(line).unwrap()
+            else {
+                panic!("only asset frames precede the snapshot");
+            };
+            assert_eq!(
+                (id.as_str(), digest.as_str()),
+                ("logo", digests["logo"].as_str())
+            );
+            bytes.extend(noa_ipc::widget::base64_decode(&data).unwrap());
+        }
+        assert_eq!(bytes, LOGO);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains(&*package.to_string_lossy()))
+        );
+
+        // The state keeps the digest, never the image bytes.
+        let state = fs::read_to_string(fixture.state.join(format!("{id}.json"))).unwrap();
+        assert!(state.contains(&digests["logo"]));
+        assert!(!state.contains(&noa_ipc::widget::base64_encode(&LOGO[..48])));
+        drop(store);
+        let restored = fixture.store();
+        assert_eq!(restored.instance(&id).unwrap().status, "restored");
+        assert_eq!(restored.instance(&id).unwrap().definition_digest, pinned);
+        drop(restored);
+
+        // One changed image byte is a different definition.
+        let mut changed = LOGO.to_vec();
+        *changed.last_mut().unwrap() ^= 1;
+        fs::write(package.join("assets/logo.png"), changed).unwrap();
+        let mut store = fixture.store();
+        let reopened = store.call(fixture.open_gallery("reopen"), &[]).unwrap();
+        assert_ne!(reopened["definitionDigest"], pinned);
+    }
+
+    #[test]
+    fn inline_definitions_with_assets_are_rejected_clearly() {
+        let fixture = Fixture::new();
+        let mut store = fixture.store();
+        let inline = WidgetCall::Open(OpenParams {
+            repo: fixture.repo.to_string_lossy().into_owned(),
+            id: None,
+            definition: Some(gallery_manifest()),
+            data: None,
+            request_id: "inline".into(),
+            owner_pane_id: None,
+        });
+        let error = store.call(inline, &[]).unwrap_err();
+        assert_eq!(error.kind, WidgetErrorKind::InvalidParams);
+        assert!(error.message.contains("cannot be opened inline"));
+        assert!(store.instances.is_empty());
+    }
+
+    #[test]
+    fn missing_or_linked_assets_fail_the_open_before_any_state_is_written() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let package = fixture.gallery();
+        let mut store = fixture.store();
+        fs::remove_file(package.join("assets/logo.png")).unwrap();
+        assert_eq!(
+            store
+                .call(fixture.open_gallery("missing"), &[])
+                .unwrap_err()
+                .kind,
+            WidgetErrorKind::InvalidParams
+        );
+        let outside = fixture.root.join("outside.png");
+        fs::write(&outside, LOGO).unwrap();
+        symlink(&outside, package.join("assets/logo.png")).unwrap();
+        let error = store.call(fixture.open_gallery("linked"), &[]).unwrap_err();
+        assert!(error.message.contains("symbolic link"), "{}", error.message);
+        assert!(store.instances.is_empty());
     }
 }

@@ -25,7 +25,13 @@ impl std::fmt::Display for Error {
 
 fn error(error: ClientError) -> Error {
     match error {
-        ClientError::Rpc { code, message } => Error::Refused(format!("{message} ({code})")),
+        // A spawn can still execute after the UI-thread deadline; treating
+        // that response as refused would allow a second worker to start.
+        ClientError::Rpc { code, message }
+            if code != noa_ipc::ErrorCode::OutcomeUnknown.code() =>
+        {
+            Error::Refused(format!("{message} ({code})"))
+        }
         ClientError::InvalidInput(message) => Error::Refused(message),
         _ => Error::Uncertain(
             "Noaから応答を確認できません。重複実行を避けるため結果を照合してください".into(),
@@ -139,6 +145,11 @@ pub fn detect_agent() -> Result<String, String> {
 }
 
 impl Ipc {
+    #[cfg(test)]
+    pub(super) fn from_client(client: Client) -> Self {
+        Self { client }
+    }
+
     pub fn connect() -> Result<Self, String> {
         let (config, _) = noa_config::load_startup_config(noa_config::ConfigOverrides::default())
             .map_err(|_| "Noaの設定を読めません".to_owned())?;
@@ -332,6 +343,47 @@ fn supported_version(version: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_rpc_outcomes_require_reconciliation_before_retrying() {
+        let result = error(ClientError::Rpc {
+            code: noa_ipc::ErrorCode::OutcomeUnknown.code(),
+            message: "request timed out; the worker may still start".into(),
+        });
+        assert!(matches!(result, Error::Uncertain(_)));
+    }
+
+    #[test]
+    fn definite_rpc_and_local_refusals_remain_retryable_failures() {
+        for code in [
+            noa_ipc::ErrorCode::InvalidParams,
+            noa_ipc::ErrorCode::NotReady,
+            noa_ipc::ErrorCode::LimitReached,
+        ] {
+            assert_eq!(
+                error(ClientError::Rpc {
+                    code: code.code(),
+                    message: "refused".into(),
+                }),
+                Error::Refused(format!("refused ({})", code.code()))
+            );
+        }
+        assert_eq!(
+            error(ClientError::InvalidInput("invalid request".into())),
+            Error::Refused("invalid request".into())
+        );
+    }
+
+    #[test]
+    fn missing_responses_remain_uncertain() {
+        for failure in [
+            ClientError::Timeout("response deadline elapsed".into()),
+            ClientError::Transport("connection reset".into()),
+            ClientError::Closed("server disconnected".into()),
+        ] {
+            assert!(matches!(error(failure), Error::Uncertain(_)));
+        }
+    }
 
     #[test]
     fn selected_models_and_efforts_are_validated_before_shell_construction() {

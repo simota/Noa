@@ -1527,6 +1527,17 @@ fn dispatch(
             ));
         }
     };
+    // Serde also decodes a struct from an array in field order. A request
+    // such as ["2.0", 1, "noa.closePane", {"paneId":"1"}] would therefore
+    // reach the backend without this envelope check. Batch requests are not
+    // supported either; only a JSON object may authenticate or dispatch.
+    if !value.is_object() {
+        return Some(error_response(
+            Value::Null,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        ));
+    }
     let req: RpcRequest = match serde_json::from_value(value) {
         Ok(r) => r,
         Err(_) => {

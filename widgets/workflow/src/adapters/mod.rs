@@ -686,6 +686,9 @@ impl Adapters {
                     .into(),
             });
         }
+        if job.phase == Phase::CancelIntent {
+            return self.cancel_job(job);
+        }
         if let Err(message) = self.connect() {
             return Ok(Observation::Uncertain {
                 external_ref,
@@ -704,11 +707,6 @@ impl Adapters {
         };
         let pane = ipc::matched(&panels, &job.label, &job.worktree)?;
         let Some(pane) = pane else {
-            if job.phase == Phase::CancelIntent {
-                job.phase = Phase::Canceled;
-                self.save(&job)?;
-                return Ok(Observation::Canceled);
-            }
             return Ok(Observation::Uncertain {
                 external_ref,
                 message: "実行ペインが見つかりません。再起動せず結果を確認してください".into(),
@@ -719,9 +717,6 @@ impl Adapters {
             job.server_instance = Some(self.connection.as_ref().expect("connected").instance());
             job.phase = Phase::Running;
             self.save(&job)?;
-        }
-        if job.phase == Phase::CancelIntent {
-            return self.cancel_job(job);
         }
         let agent = pane.agent.as_ref();
         let state = agent.and_then(|agent| agent.state.as_deref());
@@ -968,7 +963,9 @@ impl Adapters {
                         .into(),
             });
         }
-        if job.phase == Phase::Prepared || job.phase == Phase::Canceled {
+        if matches!(job.phase, Phase::Prepared | Phase::Canceled)
+            || (job.phase == Phase::Failed && job.pane_id.is_none())
+        {
             job.phase = Phase::Canceled;
             self.save(&job)?;
             return Ok(Observation::Canceled);
@@ -977,7 +974,20 @@ impl Adapters {
         self.save(&job)?;
         let panels = self.panels()?;
         if let Some(pane) = ipc::matched(&panels, &job.label, &job.worktree)? {
+            // Persist the observation before closing: a lost close response
+            // can then be reconciled by the worker's absence after restart.
+            job.pane_id = Some(pane.pane_id.0);
+            job.server_instance = Some(self.connection.as_ref().expect("connected").instance());
+            self.save(&job)?;
             self.close_pane(pane.pane_id.0)?;
+        } else if job.pane_id.is_none() {
+            // A timed-out spawn may still be queued on Noa's UI thread.
+            // Until its worker has been seen, absence is not cancellation.
+            return Ok(Observation::Uncertain {
+                external_ref: None,
+                message: "起動要求の結果が未確認のため、停止完了を確認できません。結果を照合してください"
+                    .into(),
+            });
         }
         job.phase = Phase::Canceled;
         self.save(&job)?;
@@ -1258,6 +1268,97 @@ fn brief(run: &Run, job: &Job, inputs: &[Artifact]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct CancellationBackend {
+        panels: Mutex<Vec<noa_ipc::Panel>>,
+        closed: Mutex<Vec<u64>>,
+        uncertain_close: AtomicBool,
+    }
+
+    impl noa_ipc::IpcBackend for CancellationBackend {
+        fn list_panels(&self) -> Arc<Vec<noa_ipc::Panel>> {
+            Arc::new(self.panels.lock().unwrap().clone())
+        }
+        fn get_text(
+            &self,
+            _: u64,
+            _: noa_ipc::TextSource,
+            _: usize,
+        ) -> Result<noa_ipc::TextResult, noa_ipc::IpcError> {
+            Err(noa_ipc::IpcError::UnknownPane)
+        }
+        fn get_grid(&self, _: u64, _: u64, _: u64) -> Result<noa_ipc::GridResult, noa_ipc::IpcError> {
+            Err(noa_ipc::IpcError::UnknownPane)
+        }
+        fn send_text(
+            &self,
+            _: u64,
+            _: &str,
+            _: bool,
+            _: bool,
+            _: bool,
+        ) -> Result<(), noa_ipc::IpcError> {
+            panic!("cancellation must not send input")
+        }
+        fn focus_pane(&self, _: u64) -> Result<(), noa_ipc::IpcError> {
+            Err(noa_ipc::IpcError::UnknownPane)
+        }
+        fn new_tab(&self, _: Option<u64>) -> Result<u64, noa_ipc::IpcError> {
+            panic!("cancellation must not spawn a tab")
+        }
+        fn split(&self, _: u64, _: noa_ipc::SplitDirection) -> Result<u64, noa_ipc::IpcError> {
+            panic!("cancellation must not spawn a split")
+        }
+        fn close_pane(&self, pane: u64) -> Result<(), noa_ipc::IpcError> {
+            self.panels.lock().unwrap().retain(|p| p.pane_id.0 != pane);
+            self.closed.lock().unwrap().push(pane);
+            if self.uncertain_close.swap(false, Ordering::SeqCst) {
+                return Err(noa_ipc::IpcError::OutcomeUnknown("close timed out".into()));
+            }
+            Ok(())
+        }
+    }
+
+    fn cancellation_server() -> (Arc<CancellationBackend>, noa_ipc::ServerHandle) {
+        let backend = Arc::new(CancellationBackend::default());
+        let server = noa_ipc::Server::start(
+            noa_ipc::ServerConfig {
+                port: 0,
+                bind_addr: noa_ipc::ServerConfig::DEFAULT_BIND_ADDR,
+                token: "workflow-cancel-test".into(),
+                allowed_scopes: noa_ipc::ScopeSet::from_strings(["read", "control"]),
+                hello_deadline: noa_ipc::ServerConfig::DEFAULT_HELLO_DEADLINE,
+                handshake_timeout: noa_ipc::ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
+            },
+            backend.clone(),
+            noa_ipc::Broadcaster::new(),
+        )
+        .unwrap();
+        (backend, server)
+    }
+
+    fn cancellation_connection(server: &noa_ipc::ServerHandle) -> ipc::Ipc {
+        ipc::Ipc::from_client(
+            noa_ipc::Client::connect(
+                &format!("ws://127.0.0.1:{}/", server.port()),
+                "workflow-cancel-test",
+                noa_ipc::ScopeSet::from_strings(["read", "control"]),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn worker_panel(job: &Job) -> noa_ipc::Panel {
+        serde_json::from_value(serde_json::json!({
+            "windowGroupId": "1", "windowId": "1", "paneId": "7",
+            "name": "worker", "cwd": job.worktree, "label": job.label,
+            "busy": false, "attention": false, "preview": []
+        }))
+        .unwrap()
+    }
 
     fn job(root: &Path) -> Job {
         let worktree = root.join("run").join("verify-1");
@@ -1358,6 +1459,111 @@ mod tests {
         assert_eq!(
             reopened.load("run", "verify", 1).unwrap().unwrap().phase,
             Phase::Prepared
+        );
+    }
+
+    #[test]
+    fn cancellation_waits_for_an_unconfirmed_spawn_across_restarts() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (backend, server) = cancellation_server();
+        let mut adapters = Adapters::new(root.join("repository"), root.join("runs")).unwrap();
+        adapters.connection = Some(cancellation_connection(&server));
+        let mut job = job(&adapters.root);
+        job.phase = Phase::SpawnIntent;
+        fs::plain_dirs(&job.worktree).unwrap();
+        adapters.save(&job).unwrap();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                adapters.cancel("run", "verify", 1),
+                Observation::Uncertain { .. }
+            ));
+            let saved = adapters.load("run", "verify", 1).unwrap().unwrap();
+            assert_eq!(saved.phase, Phase::CancelIntent);
+            assert_eq!(saved.pane_id, None);
+        }
+        drop(adapters);
+
+        let mut reopened = Adapters::new(root.join("repository"), root.join("runs")).unwrap();
+        reopened.connection = Some(cancellation_connection(&server));
+        assert!(matches!(
+            reopened.observe("run", "verify", 1, true),
+            Observation::Uncertain { .. }
+        ));
+
+        // Noa finally executes the spawn that timed out before cancellation.
+        backend.panels.lock().unwrap().push(worker_panel(&job));
+        assert!(matches!(
+            reopened.observe("run", "verify", 1, true),
+            Observation::Canceled
+        ));
+        let saved = reopened.load("run", "verify", 1).unwrap().unwrap();
+        assert_eq!(saved.phase, Phase::Canceled);
+        assert_eq!(saved.pane_id, Some(7));
+        assert!(backend.panels.lock().unwrap().is_empty());
+        assert_eq!(*backend.closed.lock().unwrap(), vec![7]);
+        assert!(matches!(
+            reopened.observe("run", "verify", 1, true),
+            Observation::Canceled
+        ));
+        assert_eq!(*backend.closed.lock().unwrap(), vec![7]);
+    }
+
+    #[test]
+    fn cancellation_records_a_late_worker_before_an_uncertain_close() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (backend, server) = cancellation_server();
+        let mut adapters = Adapters::new(root.join("repository"), root.join("runs")).unwrap();
+        adapters.connection = Some(cancellation_connection(&server));
+        let mut job = job(&adapters.root);
+        job.phase = Phase::CancelIntent;
+        fs::plain_dirs(&job.worktree).unwrap();
+        adapters.save(&job).unwrap();
+        backend.panels.lock().unwrap().push(worker_panel(&job));
+        backend.uncertain_close.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            adapters.observe("run", "verify", 1, true),
+            Observation::Uncertain { .. }
+        ));
+        let saved = adapters.load("run", "verify", 1).unwrap().unwrap();
+        assert_eq!(saved.phase, Phase::CancelIntent);
+        assert_eq!(saved.pane_id, Some(7));
+        assert!(backend.panels.lock().unwrap().is_empty());
+        drop(adapters);
+
+        let mut reopened = Adapters::new(root.join("repository"), root.join("runs")).unwrap();
+        reopened.connection = Some(cancellation_connection(&server));
+        assert!(matches!(
+            reopened.observe("run", "verify", 1, true),
+            Observation::Canceled
+        ));
+        assert_eq!(
+            reopened.load("run", "verify", 1).unwrap().unwrap().phase,
+            Phase::Canceled
+        );
+        assert_eq!(*backend.closed.lock().unwrap(), vec![7]);
+    }
+
+    #[test]
+    fn a_definitely_refused_spawn_can_be_canceled_without_reconnecting() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let mut adapters = Adapters::new(root.join("repository"), root.join("runs")).unwrap();
+        let mut job = job(&adapters.root);
+        job.phase = Phase::Failed;
+        job.failure = Some("worker limit reached".into());
+        adapters.save(&job).unwrap();
+        assert!(matches!(
+            adapters.cancel("run", "verify", 1),
+            Observation::Canceled
+        ));
+        assert!(!adapters.connected());
+        assert_eq!(
+            adapters.load("run", "verify", 1).unwrap().unwrap().phase,
+            Phase::Canceled
         );
     }
 

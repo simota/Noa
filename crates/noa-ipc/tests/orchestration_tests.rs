@@ -548,20 +548,92 @@ fn a_connection_over_the_limit_is_closed_as_busy() {
     drop(held);
 }
 
-// REL-04: a request frame over the server's bound closes the connection with
-// 1009, which the client reports as its own error.
+// REL-04: the server still closes oversized frames with 1009, even when a
+// peer does not use the typed client's local request-size check.
 #[test]
 fn an_oversized_send_is_closed_as_too_big() {
+    use tungstenite::Message;
+    use tungstenite::protocol::frame::coding::CloseCode;
+
     let (backend, _broadcaster, handle) = start(&["read", "input"]);
+    let stream = std::net::TcpStream::connect(("127.0.0.1", handle.port())).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let (mut socket, _) =
+        tungstenite::client(format!("ws://127.0.0.1:{}/", handle.port()), stream).unwrap();
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "noa.hello",
+                "params": {
+                    "protocolVersion": noa_ipc::PROTOCOL_VERSION,
+                    "token": TOKEN,
+                    "scopes": ["read", "input"],
+                },
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let Message::Text(hello) = socket.read().unwrap() else {
+        panic!("hello response expected");
+    };
+    let hello: serde_json::Value = serde_json::from_str(&hello).unwrap();
+    assert_eq!(hello["id"], 1);
+    assert_eq!(
+        hello["result"]["protocolVersion"],
+        noa_ipc::PROTOCOL_VERSION
+    );
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "noa.sendText",
+        "params": { "paneId": "1", "text": "x".repeat(300 * 1024), "paste": true },
+    });
+    let _ = socket.send(Message::Text(request.to_string()));
+
+    match socket.read() {
+        Ok(Message::Close(Some(frame))) => {
+            assert_eq!(frame.code, CloseCode::Size);
+            assert_eq!(frame.reason, noa_ipc::MESSAGE_TOO_BIG_REASON);
+        }
+        other => panic!("oversized request should close with 1009, got {other:?}"),
+    }
+    assert!(backend.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_locally_rejected_oversized_send_preserves_requests_and_subscriptions() {
+    let (backend, broadcaster, handle) = start(&["read", "input"]);
     let mut client = connect(&handle, &["read", "input"]);
+    client
+        .subscribe(&[EventKind::StateChanged], Some(&[1]))
+        .unwrap();
 
     let refused = client.send_text(1, &"x".repeat(300 * 1024), true);
 
     assert!(
-        matches!(refused, Err(ClientError::MessageTooBig(_))),
+        matches!(refused, Err(ClientError::InvalidInput(_))),
         "{refused:?}"
     );
     assert!(backend.sent.lock().unwrap().is_empty());
+    assert_eq!(client.list_panels().unwrap(), vec![panel(1, 0)]);
+    client.send_text(1, "hello", true).unwrap();
+    assert_eq!(
+        *backend.sent.lock().unwrap(),
+        vec![(1, "hello".to_string(), true, false)]
+    );
+
+    broadcaster.broadcast_state_changed(vec![panel(1, 7)]);
+    let (panels, removed) = next_state_changed(&mut client);
+    assert_eq!(panels, vec![panel(1, 7)]);
+    assert!(removed.is_empty());
 }
 
 #[test]

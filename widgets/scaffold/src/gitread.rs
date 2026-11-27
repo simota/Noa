@@ -32,14 +32,22 @@ pub fn git_dir(repo: &Path) -> Option<PathBuf> {
 }
 
 /// The work tree `dir` lies in: the first of `dir` and its ancestors with a
-/// `.git` folder or file, found without `git` (Decision 2); `dir` itself
+/// `.git` folder or a `gitdir:` file, found without `git` (Decision 2); `dir` itself
 /// when none has one. Noa passes the focused pane's directory, often a
 /// subdirectory of the repo.
 pub fn repo_root(dir: &Path) -> PathBuf {
     dir.ancestors()
         .find(|d| {
-            std::fs::symlink_metadata(d.join(".git"))
-                .is_ok_and(|m| m.file_type().is_dir() || m.file_type().is_file())
+            std::fs::symlink_metadata(d.join(".git")).is_ok_and(|m| {
+                m.file_type().is_dir()
+                    || (m.file_type().is_file()
+                        && read_text(&d.join(".git")).is_some_and(|text| {
+                            text.lines().next().is_some_and(|line| {
+                                line.strip_prefix("gitdir:")
+                                    .is_some_and(|target| !target.trim().is_empty())
+                            })
+                        }))
+            })
         })
         .unwrap_or(dir)
         .to_owned()
@@ -198,6 +206,22 @@ mod tests {
         let plain = dir.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
         assert_eq!(repo_root(&plain), plain, "no repo: the directory itself");
+    }
+
+    #[test]
+    fn an_invalid_git_file_does_not_change_the_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let nested = repo.join("project");
+        let deep = nested.join("src");
+        std::fs::create_dir_all(&deep).unwrap();
+        for invalid in ["", "not a worktree\n", "gitdir: \n"] {
+            put(&nested.join(".git"), invalid);
+            assert_eq!(repo_root(&deep), repo, "{invalid:?}");
+        }
+        put(&nested.join(".git"), "gitdir: ../.git/worktrees/project\n");
+        assert_eq!(repo_root(&deep), nested);
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod hash;
 pub mod model;
 pub mod registry;
 pub mod scan;
+pub mod setup;
 pub mod store;
 pub mod time;
 pub mod verify_log;

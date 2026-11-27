@@ -14,7 +14,25 @@ use noa_gpui_text::TextStore;
 
 use ui::{Live, Scaffold};
 
-const USAGE: &str = "usage: scaffold [--demo | --repo=DIR] [--snapshot=FILE.png [--size=WxH]]";
+const USAGE: &str =
+    "Scaffold — see a project's setup, register its development assets, and plan the next step.
+
+usage: scaffold [DIR | --repo DIR] [--demo]
+       scaffold --demo --snapshot FILE.png [--size WxH]
+
+  DIR, --repo DIR    Project directory (default: current directory; finds the Git root)
+  --demo            Explore sample data without reading or changing a project
+  --snapshot FILE   Save the demo as a PNG without opening a window (requires --demo)
+  --size WxH        Snapshot size in logical pixels (default: 1280x860)
+  -h, --help        Show this help
+
+Options also accept --name=value. Opening a project only reads its files;
+asset registration and task creation require an explicit action in the window.
+
+examples:
+  scaffold .
+  scaffold --repo ~/src/my-project
+  scaffold --demo";
 const DEFAULT_SIZE: (u32, u32) = (1280, 860);
 const SNAPSHOT_SCALE: f32 = 2.0;
 /// How often the window wakes on its own, to rescan.
@@ -86,20 +104,37 @@ fn parse_size(arg: &str) -> Result<(u32, u32), String> {
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut a = Args::default();
-    for arg in args {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            a.help = true;
+            return Ok(a);
+        }
+        let (name, inline) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(k, v)| (k, Some(v)));
+        let mut value = || -> Result<String, String> {
+            let value = inline.map(str::to_owned).or_else(|| args.next());
+            value
+                .filter(|v| !v.is_empty() && (inline.is_some() || !v.starts_with('-')))
+                .ok_or_else(|| format!("{name} needs a value\n{USAGE}"))
+        };
         if arg == "--demo" {
             a.demo = true;
-        } else if let Some(v) = arg.strip_prefix("--repo=") {
-            if v.is_empty() {
-                return Err(format!("--repo needs a directory\n{USAGE}"));
+        } else if name == "--repo" {
+            if a.repo.is_some() {
+                return Err(format!("choose one project directory\n{USAGE}"));
             }
-            a.repo = Some(PathBuf::from(v));
-        } else if let Some(v) = arg.strip_prefix("--snapshot=") {
-            a.snapshot = Some(PathBuf::from(v));
-        } else if let Some(v) = arg.strip_prefix("--size=") {
-            a.size = Some(parse_size(v)?);
-        } else if arg == "--help" || arg == "-h" {
-            a.help = true;
+            a.repo = Some(PathBuf::from(value()?));
+        } else if name == "--snapshot" {
+            a.snapshot = Some(PathBuf::from(value()?));
+        } else if name == "--size" {
+            a.size = Some(parse_size(&value()?)?);
+        } else if !arg.starts_with('-') {
+            if a.repo.is_some() || arg.is_empty() {
+                return Err(format!("choose one project directory\n{USAGE}"));
+            }
+            a.repo = Some(PathBuf::from(arg));
         } else {
             return Err(format!("unknown option {arg:?}\n{USAGE}"));
         }
@@ -126,6 +161,20 @@ fn repo_dir(repo: Option<&Path>, cwd: &Path) -> PathBuf {
         None => cwd.to_owned(),
     };
     dir.components().collect()
+}
+
+fn validate_repo(repo: &Path) -> Result<(), String> {
+    match std::fs::metadata(repo) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(format!(
+            "{} is not a directory; choose a project folder",
+            repo.display()
+        )),
+        Err(e) => Err(format!(
+            "cannot open project directory {}: {e}",
+            repo.display()
+        )),
+    }
 }
 
 fn render_snapshot(path: &Path, screen: &mut dyn Screen, size: (u32, u32)) -> Result<(), String> {
@@ -158,7 +207,9 @@ fn main() -> Result<(), String> {
         None
     } else {
         let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
-        Some(repo_dir(args.repo.as_deref(), &cwd))
+        let repo = repo_dir(args.repo.as_deref(), &cwd);
+        validate_repo(&repo)?;
+        Some(repo)
     };
     App::new(options(), move |setup| {
         let ticker = setup.waker.clone();
@@ -244,6 +295,47 @@ mod tests {
         assert_eq!(
             repo_dir(Some(Path::new("/src/noa/")), cwd).as_os_str(),
             "/src/noa"
+        );
+    }
+
+    #[test]
+    fn common_cli_spellings_and_help_work_without_a_window() {
+        assert_eq!(
+            args(&["--repo", "my project"]).unwrap(),
+            args(&["--repo=my project"]).unwrap()
+        );
+        assert_eq!(
+            args(&["my project"]).unwrap(),
+            args(&["--repo=my project"]).unwrap()
+        );
+        assert_eq!(
+            args(&["--demo", "--snapshot", "out.png", "--size", "960x600"]).unwrap(),
+            args(&["--demo", "--snapshot=out.png", "--size=960x600"]).unwrap()
+        );
+        assert!(args(&["--help"]).unwrap().help);
+        for invalid in [
+            vec!["--repo"],
+            vec!["--repo", "--demo"],
+            vec!["--repo=a", "b"],
+            vec!["a", "--repo=b"],
+            vec!["--snapshot="],
+            vec!["--demo", "--snapshot"],
+        ] {
+            assert!(args(&invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_must_be_an_existing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(validate_repo(dir.path()).is_ok());
+        assert!(validate_repo(&dir.path().join("missing")).is_err());
+        let file = dir.path().join("README.md");
+        std::fs::write(&file, "hello").unwrap();
+        assert!(
+            validate_repo(&file)
+                .unwrap_err()
+                .contains("not a directory")
         );
     }
 }

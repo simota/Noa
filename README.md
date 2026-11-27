@@ -121,6 +121,24 @@ Kitty keyboard and graphics protocols, Sixel, shell integration for bash, zsh,
 and fish, and 575 bundled themes (574 from Ghostty plus `Noa`).
 [docs/FEATURES.md](docs/FEATURES.md) is the complete inventory.
 
+### Start a project with Scaffold
+
+Open **View → Scaffold** on macOS, or **Open Scaffold** from the command
+palette, to inspect the project in the focused pane. The setup view finds
+getting-started documents, working agreements, dependency definitions,
+runtime settings, verification entry points, and CI configuration, including
+projects that have no Noa asset registry yet.
+
+Review the detected assets before adding them to the project's registry, or
+preview a task for the missing preparation and continue in **View → Tasks**.
+Scaffold reads project files without running their commands; a detected file
+does not mean the environment is installed or verified. Search and the
+**要対応** (Needs attention) filter help you choose the next step.
+
+See [the Scaffold guide](docs/SCAFFOLD.md) for the workflow, keyboard controls,
+and what each action writes. Scaffold is included in the macOS app; Linux
+users can build it from source, but it is not in the Linux release package.
+
 ## Configuration
 
 Noa reads `$XDG_CONFIG_HOME/noa/config`, or `~/.config/noa/config` when

@@ -108,5 +108,6 @@ fn scanning_a_trapped_repo_runs_nothing() {
     );
     let _ = scaffold::gitread::repo_identity(&repo);
     let _ = scaffold::registry::load(&repo);
+    let _ = scaffold::setup::scan(&repo);
     assert!(!marker.exists(), "a trap ran");
 }

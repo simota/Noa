@@ -3,24 +3,22 @@
 | | |
 |---|---|
 | slug | scaffold-widget |
-| status | proposed (2026-11-26); design only, nothing built; no owner sign-off |
+| status | implemented; setup workflow extended 2026-11-27 |
 | owner | simota |
-| as-of | 2026-11-26 (HEAD b91a776d) |
+| as-of | 2026-11-27; original checker anchors below are from HEAD b91a776d |
 | crate | `widgets/scaffold` (binary `scaffold`, bundled as `Noa Scaffold`, window title 「Noa · 足場」 / "Noa · Scaffold") |
 | checker | `scripts/check-widget-registration.py` (python3 stdlib only) |
-| request | Scaffold widget MVP, proposal stages 1–3, acceptance criteria AC1–AC11 (fixed by the request; restated per criterion in "Per-criterion approach") |
+| request | Implemented Scaffold MVP (AC1–AC11) and general-project setup workflow; the I3 checker and I4 parity fixtures retain their contracts |
 
-Like `docs/specs/task-widget.md`, this document is scaffolding: what outlives the build is the Decisions section and its reasons. Once a unit lands, its code is the only copy of its shape.
+The widget and checker are implemented. [The user guide](../SCAFFOLD.md) describes the current workflow; `widgets/scaffold/src/` is the source of truth for implementation details. The Decisions and Interfaces preserve the checker and persistence contracts. Original implementation units and file:line anchors are retained as historical context, not as pending work or a record of completed manual verification.
 
-Everything stated about today's code was read at HEAD b91a776d, with the file and line it came from.
+## Original motivation and checker acceptance
 
-## L0: Vision
-
-- Problem: adding a widget means touching ~15 places (crate, `helper_program.rs`, five `noa-app` command files, the macOS menu, `verify.sh`, two packaging scripts, docs). Nothing checks that they agree, so they drift. `scripts/verify.sh:64-70` says "only widgets/agent-usage ships on Linux", while `scripts/package-linux.sh:48-55` ships six widgets, and nothing records why `verify` and `tasks` are left out.
+- Original problem: adding a widget required changes in about fifteen places, without a check that they agreed. At b91a776d, `scripts/verify.sh:64-70` said "only widgets/agent-usage ships on Linux" while `scripts/package-linux.sh:48-55` shipped six widgets, with no recorded reason for leaving out `verify` and `tasks`. The implemented registration checker and registry now make those decisions explicit.
 - Job to be done: (1) a checker that reads the repo and reports every registration that disagrees with the human-decided intent, run by `scripts/verify.sh`; (2) a window that lists the repo's development assets (checkers, runbooks, rules), the improvement candidates the registration scan finds, and their evidence. From a candidate the window writes a work brief and creates a local task for an agent. It never runs anything from the repo.
 - Success definition: on the integration branch, `python3 -I -B scripts/check-widget-registration.py` prints `result: consistent` and exits 0 with `scaffold` registered everywhere (the self-check); deleting `scaffold`'s line from `scripts/bundle-macos.sh` makes it exit 1 naming `scaffold macos`; View → Scaffold opens the window on the focused pane's repo, which lists the two declared assets and no candidate; on a fixture with a gap it lists the candidate with file:line, and タスクにする creates a `.noa/tasks/t-….md` that the Tasks widget shows.
 
-## Today's registration points (read at b91a776d)
+## Registration points (original anchors at b91a776d)
 
 Each widget is registered in these places. The checker checks the ones marked ✓. The ones marked "compiler" are exhaustive `match`es: rustc refuses a missing arm, so the checker does not read them.
 
@@ -51,15 +49,119 @@ There is no Linux menu: on Linux the widgets open from the command palette (`doc
 1. **The widget gets its findings from a Rust port of the checker's rules, and both implementations are tested against one set of fixture repos.** Running the checker would execute a file from the repo being scanned (`scripts/check-widget-registration.py` is repo code), which AC5 forbids. Reading a JSON file the checker wrote earlier gives stale or missing data, and nothing exists for an unknown repo. So the rules are written twice. To stop the two copies drifting: (a) this spec's Interface I3 is the one written definition of the rules; (b) the fixture repos and their expected `--json` output under `scripts/tests/fixtures/widget-registration/` are the shared oracle: the Python unittest compares the checker's output to `expected.json` byte for byte, and the Rust test `widgets/scaffold/tests/registration_parity.rs` compares the port's report to the same `expected.json` as JSON values; (c) every rule id of I3 appears in at least one `expected.json` (asserted by the Python test), so no rule goes untested on either side; (d) `scripts/verify.sh` runs the scaffold widget's tests whenever a fixture changes.
 2. **Nothing runs a process, in either implementation.** The checker reads files only. The widget reads `.git/HEAD`, refs and `packed-refs` itself instead of calling `git`: `git` would honour the repo's own `.git/config` (`core.fsmonitor`, aliases, hooks), which is repo-controlled code. A source-level test in each implementation asserts this (no `subprocess`/`os.system`/`exec`/`eval`/`importlib`; no `std::process` in `widgets/scaffold/src`).
 3. **The registry holds only human decisions** (`dev/scaffold/registry.json`, I1): the platforms each widget is meant to ship on plus the reason for any platform it leaves out; and the assets with the decision log that moves each through its lifecycle. Everything else is derived: which scripts ship a widget, names, `--repo`, an asset's current lifecycle (its last decision's `to`), verification state, scores and candidates. There is no `lifecycle` field.
-4. **The widget writes the registry only on an explicit 決定を記録 action**, in the canonical format of I1, and refuses with 「registry.json が外部で変更されました。再読込してください」 if the file's bytes changed since it was read. Scanning and opening never write anything under the repo. The only other repo write is a hand-off task file under the gitignored `.noa/tasks/` (Decision 8).
+4. **Registry writes require explicit asset-registration confirmation or 決定を記録.** The canonical format of I1 is unchanged. First registration publishes a complete file without replacing an existing path; updates refuse with 「registry.json が外部で変更されました。再読込してください」 if the file's bytes changed since it was read. Scanning and opening never write under the repo. Other project writes are local task files and their supporting ignore/coordination files under `.noa/` (Decision 8 and the setup workflow below).
 5. **Crate dependencies are exactly `widgets/agent-usage`'s** (`noa-gpui-* 0.2.1`, `serde`, `serde_json`, `libc`, `dirs 6`, macOS `objc2-foundation`, dev `tempfile 3`). The lock is a copy of `widgets/agent-usage/Cargo.lock` (L2-1). It needs no `noa-ipc`: the widget drives no panes. Hand-off goes through a task file, which the Tasks widget picks up within 2 s (`docs/specs/task-widget.md` L1-2). It needs no `noa-config` either: `dirs::data_dir()` is what `noa_config::session_state_path` uses (`crates/noa-config/src/lib.rs:2247`), so `<data dir>/noa/scaffold` sits beside the other widgets' folders.
-6. **Linux shipping.** `scaffold` ships on macOS only, with its reason in the registry (AC8; Q2). `verify` and `tasks` are not in `package-linux.sh` today, and nothing records why (Q1). U1 records them as macOS-only with a reason that says the decision is still open, so the checker is honest and green. The maintainer replaces that text with the real reason, or adds the widgets to `package-linux.sh`.
+6. **Linux shipping.** `scaffold` ships on macOS only, with its reason in the registry (AC8; Q2), while its build and tests also run on Linux. `verify` and `tasks` have explicit macOS-only entries recording the still-open Linux shipping decision (Q1). The setup workflow does not change packaging or those platform decisions.
 7. **Verify results are read conservatively** (L2-4). The widget never reduces a Verify log the way `widgets/verify` does. A session counts as finished only once its log holds a `session_closed` line. Its decision counts only if the last `judge_accepted` with a verdict comes after the last `round_started`. Anything it cannot place reads as 未実施 or 不明, never as 確認済み.
-8. **Hand-off writes a task file and links by reference.** The brief goes into a new `<repo>/.noa/tasks/t-<millis>.md` in the format of `skills/noa-tasks/SKILL.md`, with header keys `scaffold-asset` and `scaffold-improvement`, which the Tasks parser keeps as extra keys (`widgets/tasks/src/local.rs:110-133`). Review and Verify sessions are linked by id and folder path, recorded in the widget's own data dir. Their content is never copied.
+8. **Hand-off writes a task file and links by reference.** Registration candidates retain the I6 brief and its `scaffold-asset` / `scaffold-improvement` headers. Setup briefs use a `scaffold-setup` header and recover an existing task from that file independently of observations. Both use `<repo>/.noa/tasks/t-<millis>[-n].md` and the Tasks front-matter format. Review and Verify sessions are linked by id and folder path, recorded in the widget's own data dir; their content is never copied.
 9. **Lifecycle belongs to assets; improvements have a derived status only** (未着手 / 引き渡し済み / 解消). The six-stage lifecycle and the verification state are two separate fields, computed by two separate pure functions (L2-3).
-10. **Three units, split by owned files; the widget crate is one unit.** The suggested split (widget core / widget UI + launch path) would give the UI unit no compilable crate until the core merges. Splitting `src/lib.rs` from `src/ui/` cannot be done without the two units sharing `Cargo.toml` and `lib.rs`. The crate stays in one deep unit, and the `noa-app` launch path and packaging form their own unit, which builds in parallel.
+10. **Original implementation split: three units, with the widget crate kept together.** The suggested split (widget core / widget UI + launch path) would give the UI unit no compilable crate until the core merges. Splitting `src/lib.rs` from `src/ui/` cannot be done without the two units sharing `Cargo.toml` and `lib.rs`. The crate stays in one deep unit, and the `noa-app` launch path and packaging form their own unit, which builds in parallel.
 
-## Interfaces (fixed; every unit builds against these)
+## Implemented setup workflow (2026-11-27)
+
+### Inventory and scope
+
+`src/setup.rs` adds an independent, read-only inventory. `Setup` contains
+`stacks`, six `checks`, detected `assets`, observed `sources`, and
+`registration_applicable`. Each check has a stable id, title, description,
+`Found` / `Missing` / `Unknown` state, file:line evidence, and a next step.
+
+| Check id | Area |
+|---|---|
+| `getting-started` | README and setup documentation |
+| `working-agreements` | Human/agent rules and editor conventions |
+| `dependencies` | Rust, Node.js, Python, and Go dependency definitions |
+| `runtime` | Toolchain and language-version settings |
+| `verification` | Explicit scripts, targets, or test configuration |
+| `continuous-integration` | Recognized CI/workflow files |
+
+The inventory recognizes known paths and a bounded GitHub workflow directory.
+`Found` means a readable file or recognized entry point exists, not that tools
+are installed, the configuration is correct, or verification passed. Missing
+optional filenames do not fill the Sources tab with errors. A custom project
+layout can require a documented alternative. JSON is parsed; TOML/YAML
+recognition does not promise full syntax validation.
+
+Descriptor-relative reads with `O_NOFOLLOW` reject intermediate and final
+symlinks inside the selected project. Reads are bounded to 1 MiB per file and
+8 MiB per inventory, with 64 workflows and 256 directory entries as discovery
+limits. Oversized, empty, unreadable, invalid UTF-8, and malformed JSON sources
+are `Unknown`. Opening the project performs no project write or execution.
+
+The Noa registration profile applies when the registry declares widgets or
+the complete Noa helper path itself is observed. An unreadable or linked
+ancestor such as `crates/` alone does not identify a Noa repository. Other
+projects get a setup-source report, without diagnostics demanding Noa
+internals. `scan::scan`, I2/I3, the Python checker, and the I4 parity fixtures
+are unchanged. The registration score retains its existing meaning; a general
+project's header instead counts detected setup areas.
+
+### Four tabs and explicit previews
+
+`src/ui/mod.rs` opens on Setup (`0`), followed by Assets (`1`), Registration
+candidates (`2`), and Sources (`3`). Search uses case-insensitive AND matching
+of whitespace-separated terms against each tab's relevant names, paths,
+descriptions, and status text. The shared All / Needs attention filter keeps
+missing/unknown setup checks, active assets without verification or a skip
+(and conflicting histories), open registration candidates, and unknown
+sources. Selection is keyed by item identity across rescans.
+
+`src/ui/setup.rs` holds the exact asset list or setup task key/text being
+reviewed. Opening a preview does not write. Confirmation is an explicit button
+and rechecks the relevant state; a changed preview requires a fresh review.
+Search or automatic refresh does not silently replace the reviewed content.
+`Enter` and list navigation do not confirm a setup preview.
+
+Confirmed registration appends detected, unregistered assets to schema 1 with
+empty decision histories. Their lifecycle is Candidate and their verification
+state starts unrun. Existing ids or paths are not duplicated. First creation
+uses a complete temporary file plus a no-clobber publish; existing registries
+retain the byte-conflict check. Registration can work without the optional
+personal data folder. It does not modify detected project files.
+
+### Durable setup task hand-off
+
+`Setup::task_text` produces a Tasks-compatible brief with evidence, missing or
+unknown preparation, acceptance conditions, and `$NOA_RESULT` reporting.
+`Setup::task_key` includes the setup plan and relevant unreadable evidence,
+without timestamps, absolute paths, or unrelated registry/helper diagnostics.
+Registering assets alone does not change the key.
+
+`src/handoff/setup.rs` treats the task file as the durable hand-off record.
+It finds `t-*.md` files with a matching `scaffold-setup` header, a title, and an
+open or closed state. Header reads are bounded to 8 KiB; the task directory
+scan is bounded to 4096 entries. It reuses an existing task across restarts,
+even without an observation log or data folder. A missing task can be created
+again; a mere stale observation cannot suppress recreation.
+
+Lookup and creation run under a short, nonblocking `flock` on
+`.noa/tasks/.scaffold-setup.lock`. The lock inode remains in place; closing the
+file releases the lock. A concurrent creator gets a rescan message instead
+of blocking the UI or creating another task. Tasks keep the existing
+`t-<millis>[-n].md` naming and never overwrite an existing file. Missing
+`.noa/tasks/` directories and `.noa/.gitignore` are created only as part of a
+hand-off, and an existing ignore file is preserved.
+
+The optional observation is a reference. If recording it fails after the task
+was saved, the action reports the saved task and the failure; later scans
+recover the reference from the task header. Creating a task does not launch
+an agent or open Tasks automatically.
+
+### Entry points and regression coverage
+
+The CLI accepts `DIR`, `--repo DIR`, and `--repo=DIR`; it validates the selected
+folder before opening a window. `--demo` uses fixed sample data and excludes a
+project directory. `--snapshot FILE` requires the demo; `--size WxH` requires
+a snapshot. Both separated values and `--name=value` are accepted.
+
+Inline setup, registry, hand-off, backend, and UI tests cover the generic
+project path, no implicit project writes, symlinks and bounded sources,
+registration conflicts, preview changes, task recovery/concurrent creation,
+search/filter selection, and retained form state. The existing registration
+parity, no-execution, and snapshot tests remain in place. Source-level and
+headless checks do not replace manual macOS application verification.
+
+## Interfaces (implemented checker and persistence contracts)
 
 ### I1. `dev/scaffold/registry.json`
 
@@ -306,15 +408,15 @@ The brief, in Markdown, has these sections in order:
 
 `AppCommand::OpenScaffold`, `OPEN_SCAFFOLD_MENU_ID = "noa.view.open-scaffold"`, action `scaffold.open`, palette title "Open Scaffold", palette description "Show the repository's development assets (checkers, runbooks, rules) and the registration gaps found in it, and hand a gap to an agent as a task, in a window of its own.", View menu item "Scaffold" after "Tasks", `helper_program::SCAFFOLD = HelperProgram { title: "Scaffold", bundled: "Noa Scaffold", crate_name: "scaffold" }`.
 
-## Per-criterion approach
+## Original MVP criteria and implementation traceability
 
 | AC | Approach | Files | Unit |
 |---|---|---|---|
 | AC1 | Implement I2 and I3 in one stdlib-only script (`argparse` not required; `json`, `os`, `re`, `stat`, `sys` suffice). Read files only. Exit codes and ordering as in I2 | `scripts/check-widget-registration.py`, `dev/scaffold/registry.json` | U1 |
 | AC2 | `scripts/tests/test_check_widget_registration.py`, run by `python3 -I -B -m unittest discover -s scripts/tests -p 'test_check_widget_registration.py'`. For each I4 case it runs the checker as a subprocess (`sys.executable -I -B <checker> --repo=<case>/repo [--json]`) twice per format and asserts: equal bytes across the two runs (e); equal to `expected.json` / `expected.txt`; the exit code; the scope sentence as line 1 of the text and in `scope` (f); every I3 rule id present in some `expected.json`; the checker source contains none of `subprocess`, `os.system`, `os.popen`, `os.exec`, `exec(`, `eval(`, `compile(`, `runpy`, `importlib`, `__import__`. Cases a–d as in I4 | `scripts/tests/test_check_widget_registration.py`, `scripts/tests/fixtures/widget-registration/**` | U1 |
 | AC3 | `verify.sh` runs `registration` (the checker) in both modes, right after `boundaries`; `registration-test` (AC2's unittest) in `--full` and when `scripts/check-widget-registration.py` or `scripts/tests/*` changed. The comment at `scripts/verify.sh:64-70` drops "only widgets/agent-usage ships on Linux" and says that which widget ships where is `dev/scaffold/registry.json`'s to say, checked by the checker. Green on the integration branch, with U1's registry entry for `scaffold` and U2/U3's registrations | `scripts/verify.sh` | U3 (file), U1+U2+U3 (green) |
-| AC4 | `widgets/scaffold`: own `[workspace]` and `Cargo.lock`, deps of Decision 5, `[lib] name = "scaffold"`, `[[bin]] name = "scaffold"`, `AppOptions::new("Noa Scaffold")`, title 「Noa · 足場」 (ja, macOS) / "Noa · Scaffold" (otherwise, and always off macOS, as `widgets/tasks/src/main.rs:59-70`). CLI `scaffold [--demo \| --repo=DIR] [--snapshot=FILE.png [--size=WxH]]`; `--snapshot` needs `--demo` and `--demo` excludes `--repo`, as `widgets/tasks/src/main.rs:124-133`; `--repo` defaults to the current directory, made absolute. Lock produced offline (L2-1) | `widgets/scaffold/{Cargo.toml,Cargo.lock,.gitignore,check-lock.sh}`, `src/main.rs` | U2 |
-| AC5 | `scan::scan(repo) -> Report`, the I3 port, reads files only. The UI shows the registry assets (evidence: the `"id"` line in `registry.json`), the candidates (one per finding, I3 id, its evidence), and the sources with 不明 and the error for unknown ones. A repo with no `registry.json` is 未登録リポジトリ: sources only, no candidates, no score. Score = 「整合 n/m」 (m widgets, n with no finding naming them), shown only when there is a registry and no unknown source. Tests: rescanning merges without duplicates; scanning a repo seeded with traps (a `.git/config` with `core.fsmonitor` and `.git/hooks/*` that would create a marker file, an executable `scripts/verify.sh` that would too) creates no marker; no `std::process` in `src` | `src/scan/*.rs`, `src/store.rs`, `src/gitread.rs`, `src/ui/*`, `tests/registration_parity.rs`, `tests/no_exec.rs` | U2 |
+| AC4 | `widgets/scaffold`: own `[workspace]` and `Cargo.lock`, deps of Decision 5, `[lib] name = "scaffold"`, `[[bin]] name = "scaffold"`, `AppOptions::new("Noa Scaffold")`, title 「Noa · 足場」 (ja, macOS) / "Noa · Scaffold" (otherwise, and always off macOS, as `widgets/tasks/src/main.rs:59-70`). CLI `scaffold [DIR \| --repo DIR]` or `scaffold --demo [--snapshot FILE.png [--size WxH]]`; `--snapshot` needs `--demo` and `--demo` excludes `--repo`, as `widgets/tasks/src/main.rs:124-133`; `--repo` defaults to the current directory, made absolute. Lock produced offline (L2-1) | `widgets/scaffold/{Cargo.toml,Cargo.lock,.gitignore,check-lock.sh}`, `src/main.rs` | U2 |
+| AC5 | `scan::scan(repo) -> Report`, the I3 port, reads files only. The UI shows the registry assets (evidence: the `"id"` line in `registry.json`), the candidates (one per finding, I3 id, its evidence), and the sources with 不明 and the error for unknown ones. A repo with no `registry.json` still gets the setup inventory and explicit registration/task previews; registration candidates and the registration score remain unavailable until its registry exists. Score = 「整合 n/m」 (m widgets, n with no finding naming them), shown only when there is a registry and no unknown source. Tests: rescanning merges without duplicates; scanning a repo seeded with traps (a `.git/config` with `core.fsmonitor` and `.git/hooks/*` that would create a marker file, an executable `scripts/verify.sh` that would too) creates no marker; no `std::process` in `src` | `src/scan/*.rs`, `src/store.rs`, `src/gitread.rs`, `src/ui/*`, `tests/registration_parity.rs`, `tests/no_exec.rs` | U2 |
 | AC6 | L2-3 types and pure functions. Tests: adopting with no evidence ref is refused; a linked Verify that is only registered, or still running, gives 未実施, never 確認済み; a finished `pass` on another commit gives 現版未確認; on the current commit, 確認済み. Decisions are written only into `registry.json`; scans, observations and links only into I5 (test: a scan + link + skip leaves the repo tree byte-identical) | `src/model.rs`, `src/verify_log.rs`, `src/registry.rs`, `src/store.rs` | U2 |
 | AC7 | `handoff::brief`, `handoff::create_task` (I6), then a `linked … kind: task` observation. Tests: a golden file `src/testdata/handoff-task.md`; the written file passes a check of the skill's format rules (fences, `title`, `state`, `labels`, `key: value` lines); the asset id is in the header; linking a review or verification stores only ref + path (no other file appears under the data dir or the repo) | `src/handoff.rs`, `src/testdata/handoff-task.md` | U2 |
 | AC8 | `SCAFFOLD` const, added to `launch_args`' `--repo` match and the module doc; tests extended: the dev-build-dirs list, `ac28_only_the_review_the_verify_and_the_tasks_…` gains `SCAFFOLD` in its first loop (name kept), a new `scaffold_is_found_by_its_own_binary_name`. I7 identifiers in every file of points 4–13, plus `commands/tests.rs` `scaffold_is_addressable_by_action_and_menu_id`. `bundle-macos.sh`: build loop, `SCAFFOLD_BIN`, `-x` check, copy to `Helpers/Noa Scaffold`, `codesign`, comment. Linux: not shipped (registry reason, U1) | `crates/noa-app/src/helper_program.rs`, `commands/command.rs`, `commands/tests.rs`, `command_palette.rs`, `app/commands.rs`, `app/helpers/dispatch.rs`, `split_tree/tree/commands.rs`, `macos_menu.rs`, `scripts/bundle-macos.sh` | U3 |
@@ -329,21 +431,23 @@ The brief, in Markdown, has these sections in order:
 ```text
 widgets/scaffold/
   Cargo.toml  Cargo.lock  .gitignore (/target, *.png)  check-lock.sh
-  src/lib.rs           pub mod gitread, handoff, hash, model, registry, scan, store, time, verify_log
+  src/lib.rs           pub mod gitread, handoff, hash, model, registry, scan, setup, store, time, verify_log
   src/hash.rs          fnv1a64
   src/time.rs          now_ms, ms → YYYY-MM-DD (UTC civil date)
   src/gitread.rs       git_dir, common_dir, head_commit: from files only (L2-5)
-  src/registry.rs      load (I1 + asset validation), save (canonical, conflict check), line_of
+  src/registry.rs      load, create (no clobber), save (canonical, conflict check), line_of
   src/scan/mod.rs      Report and friends (serde, I2 shape), scan(repo) -> Report
   src/scan/source.rs   reading (I3), anchors, function bodies
   src/scan/points.rs   the eight points
   src/scan/rules.rs    findings, explained, status, exit
+  src/setup.rs         general-project inventory, task brief and stable key
   src/model.rs         L2-3
   src/verify_log.rs    L2-4
   src/store.rs         I5
   src/handoff.rs       I6
+  src/handoff/setup.rs durable setup task lookup, recovery, nonblocking lock
   src/testdata/handoff-task.md
-  src/main.rs  src/demo.rs  src/ui/mod.rs  src/ui/tests.rs
+  src/main.rs  src/demo.rs  src/ui/mod.rs  src/ui/setup.rs  src/ui/tests.rs
   tests/registration_parity.rs  tests/no_exec.rs  tests/snapshot.rs
 ```
 
@@ -444,17 +548,17 @@ Any failure gives None (shown as 不明). Paths are lstat'ed and read with the I
 
 ### L2-6. UI (Japanese labels)
 
-- Header: the repo path, the short commit (or 不明), the score 「整合 n/m」 or 「スコアなし（registry なし）」 / 「スコアなし（不明な情報源あり）」, and the time of the last scan.
-- Three tabs (`1` `2` `3`):
-  - 資産: id, kind, title, `path`, the registry line, the lifecycle label, the verification-state label, 記録に矛盾 if `check_history` fails.
-  - 改善候補: rule label, `widget/target`, the first evidence `path:line`, the status. Resolved candidates are dimmed.
-  - 情報源: path, ok/不明, the error.
-- Detail pane: all evidence, the links (observations), and the actions. Actions on a candidate: 作業指示を表示, タスクにする (`t`). On a candidate or an asset: 検証を関連付け / レビューを関連付け (a form taking an id, `l`), 外す. On an asset: 省略にする (needs a reason), 決定を記録 (a form for `to`, reason, and evidence refs picked from the asset's links and typed paths; refused with the `DecisionError` text).
-- Keys: `j`/`k` move, `Enter` opens the detail, `r` rescans, `Esc` closes.
-- Rescan runs on open, on `r`, and every 30 s (the same tick as Tasks).
-- `--demo` gives a canned `Report`, registry and observations with a fixed clock, so `--demo --snapshot` gives the same bytes on every run on one platform.
+- Header: repo path, short commit (or unknown), last scan, and either the Noa registration score or the count of detected setup areas.
+- Four tabs (`0` / `1` / `2` / `3`): Setup with six areas, evidence, next steps, and explicit write previews; Assets with lifecycle and verification; Registration candidates with findings and hand-off status; Sources with paths and read errors.
+- Search (`/`, `⌘F` / `Ctrl+F`) and All / Needs attention apply across tabs. Filters and selection survive rescans in the current window; no cross-launch view-preference persistence is promised.
+- Detail actions retain Verify/Review links, unlinking, skips, and lifecycle decisions. Registration candidates retain their work-brief preview and `T` hand-off; setup writes use their own explicit confirmation buttons.
+- Keys outside text inputs: `j`/`k` or arrows move, `Enter` opens details, `R` rescans, `L` links a Verify session, and `Esc` backs out of the active form/search/preview/detail. Text editing does not trigger single-letter commands.
+- Scans run on open, on refresh, and about every 30 seconds. A refresh preserves active form input. Previews retain the content being reviewed and refuse changed confirmation targets.
+- `--demo` provides a fixed setup inventory, report, registry, and observations; `--demo --snapshot` repeats on the same platform/font environment.
 
-## Units
+## Original implementation units (historical)
+
+These units record the original delivery plan. Their branch instructions are historical; the setup workflow above describes the current implementation.
 
 No two units edit the same file. Every cargo command runs with `--offline --locked`. No unit touches `.github/`, `package-linux.sh`, or any file not listed under its "Owns".
 
@@ -514,7 +618,7 @@ No two units edit the same file. Every cargo command runs with `--offline --lock
 - The negative check: delete `scaffold`'s `cp` line from `scripts/bundle-macos.sh` in a scratch copy; the checker exits 1 naming `scaffold macos: ship-missing`. Revert it.
 - AC11 by hand on macOS.
 
-## Needs the maintainer's agreement before implementation
+## Original implementation approval scope
 
 `AGENTS.md` Safety covers these: the new `widgets/scaffold/Cargo.lock` (no new crate, a copy of the agent-usage lock), the `scripts/verify.sh` change (new checks), and the `AGENTS.md` edit. The request's AC3, AC9 and AC10 ask for all three; the PR must still say so.
 
@@ -527,7 +631,7 @@ No two units edit the same file. Every cargo command runs with `--offline --lock
 - **The repo identity is a path.** Moving the clone changes candidate ids, so old candidates show as 解消 and new ones appear once.
 - **CI time:** one more widget build plus a test run on macOS and Linux (cold, roughly as long as `widgets/tasks`).
 
-## Open questions (with the default taken if nobody answers)
+## Retained platform decisions and original defaults
 
 - **Q1** Why are `verify` and `tasks` not shipped on Linux? Default: record them as macOS-only with the "未判断" reason of I1, so the checker is green and the gap is visible in the registry. The maintainer either writes the real reason or adds them to `scripts/package-linux.sh` (outside this scope).
 - **Q2** Should `scaffold` ship on Linux? Default: no, with the reason in I1. It builds and its tests run on Linux.

@@ -1,6 +1,7 @@
 //! `dev/scaffold/registry.json` (I1): the human decisions. Read with the
-//! assets validated; written only by 決定を記録 (Decision 4), in the
-//! canonical format, and refused when the file changed since it was read.
+//! assets validated; written by explicit registration and decision actions,
+//! in the canonical format. Initial registration never replaces a file;
+//! later edits refuse a file changed since it was read.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -151,6 +152,60 @@ pub fn canonical(r: &Registry) -> String {
     let mut s = serde_json::to_string_pretty(r).unwrap_or_default();
     s.push('\n');
     s
+}
+
+/// Publishes a complete first registry without replacing a path that another
+/// window or editor created after the registration preview.
+pub fn create(repo: &Path, registry: &Registry) -> Result<Loaded, String> {
+    validate(registry)?;
+    for dir in ["dev", "dev/scaffold"] {
+        let path = abs_path(repo, dir);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "{dir} がフォルダではありません（リンクには書きません）"
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let meta = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+                        if !meta.file_type().is_dir() {
+                            return Err(format!("{dir} がフォルダではありません"));
+                        }
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let target = path(repo);
+    let text = canonical(registry);
+    let tmp = crate::store::temp_sibling(&target);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::hard_link(&tmp, &target)
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = result {
+        return Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
+            CONFLICT.to_owned()
+        } else {
+            e.to_string()
+        });
+    }
+    Ok(Loaded {
+        registry: registry.clone(),
+        bytes: text.into_bytes(),
+    })
 }
 
 /// Writes `registry` over the file `loaded` was read from, unless the file
@@ -334,5 +389,46 @@ mod tests {
         std::fs::remove_dir_all(dir.path().join("dev")).unwrap();
         std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("dev")).unwrap();
         assert!(save(dir.path(), &loaded, &loaded.registry).is_err());
+    }
+
+    #[test]
+    fn first_registration_is_atomic_and_never_replaces_a_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = parse(SAMPLE.as_bytes()).unwrap();
+        let created = create(dir.path(), &r).unwrap();
+        assert_eq!(created, load(dir.path()).unwrap());
+        assert_eq!(create(dir.path(), &r), Err(CONFLICT.to_owned()));
+        assert_eq!(load(dir.path()).unwrap(), created);
+        let entries: Vec<_> = std::fs::read_dir(dir.path().join("dev/scaffold"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["registry.json"]);
+    }
+
+    #[test]
+    fn first_registration_refuses_links_at_each_write_boundary() {
+        for linked in ["dev", "dev/scaffold", REGISTRY] {
+            let repo = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let target = outside.path().join("target");
+            if linked == REGISTRY {
+                std::fs::write(&target, "keep").unwrap();
+            } else {
+                std::fs::create_dir(&target).unwrap();
+            }
+            let link = repo.path().join(linked);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(
+                create(repo.path(), &parse(SAMPLE.as_bytes()).unwrap()).is_err(),
+                "{linked}"
+            );
+            if linked == REGISTRY {
+                assert_eq!(std::fs::read_to_string(target).unwrap(), "keep");
+            } else {
+                assert_eq!(std::fs::read_dir(target).unwrap().count(), 0);
+            }
+        }
     }
 }

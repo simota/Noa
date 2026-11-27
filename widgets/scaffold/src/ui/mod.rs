@@ -1,21 +1,20 @@
-//! The window (L2-6): a header (repo, commit, score, last scan), three tabs
-//! (資産, 改善候補, 情報源) listing the registry's assets, the candidates
-//! the scan found and the sources it read, and a detail pane with the
-//! selected item's evidence, links and actions.
+//! A setup overview, followed by assets, registration candidates and sources.
+//! Search and attention filters apply to every tab; selected items stay pinned
+//! by identity across rescans. Writes go through explicit preview actions.
 //!
-//! Keys, while no text field has focus and no form is open: `1` `2` `3`
-//! tabs, `j`/`k` (or the arrows) move, `Enter` opens the detail, `Esc`
-//! closes the form, then the detail, `r` rescans, `t` hands the selected
-//! candidate off as a task, `l` opens the link form.
+//! Keys outside text inputs: `0` setup, `1`/`2`/`3` the existing tabs,
+//! `j`/`k` or arrows move, `Enter` opens detail, `/` searches, `Esc` backs
+//! out, `r` rescans, `t` hands a candidate off, `l` links a verification.
 
 pub mod backend;
 mod form;
+mod setup;
 mod style;
 
 use noa_gpui_core::style::{FlexDirection, Rect as LayoutRect, Size as LayoutSize, length};
 use noa_gpui_core::widgets::{
     Button, ButtonClicked, Container, ControlSize, Label, Pressable, ScrollView, SegmentMode,
-    SegmentedControl, SelectionChanged, Tag, TextArea, TextField, Tone,
+    SegmentedControl, SelectionChanged, Tag, TextArea, TextChanged, TextField, TextSubmitted, Tone,
 };
 use noa_gpui_core::{
     Appearance, Event, Key, Message, Modifiers, Paint, Role, Style, Theme, UiTree, Widget as _,
@@ -42,13 +41,14 @@ pub const RESCAN_MS: Millis = 30_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    Setup,
     Assets,
     Candidates,
     Sources,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Assets, Tab::Candidates, Tab::Sources];
+    pub const ALL: [Tab; 4] = [Tab::Setup, Tab::Assets, Tab::Candidates, Tab::Sources];
 
     pub fn index(self) -> usize {
         Tab::ALL.iter().position(|t| *t == self).unwrap_or(0)
@@ -56,6 +56,7 @@ impl Tab {
 
     pub fn label(self) -> &'static str {
         match self {
+            Tab::Setup => "セットアップ",
             Tab::Assets => "資産",
             Tab::Candidates => "改善候補",
             Tab::Sources => "情報源",
@@ -66,6 +67,7 @@ impl Tab {
 /// What a list row names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
+    Setup(String),
     Asset(String),
     Candidate(String),
     Source(String),
@@ -76,7 +78,7 @@ impl Item {
         match self {
             Item::Asset(id) => Some(Subject::Asset(id.clone())),
             Item::Candidate(id) => Some(Subject::Improvement(id.clone())),
-            Item::Source(_) => None,
+            Item::Setup(_) | Item::Source(_) => None,
         }
     }
 }
@@ -84,6 +86,14 @@ impl Item {
 /// What a button in the detail pane does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Press {
+    RegisterPreview,
+    RegisterAssets,
+    SetupTaskPreview,
+    SetupTask,
+    ClosePreview,
+    GoTab(Tab),
+    ClearFilters,
+    CloseDetail,
     ToggleBrief,
     HandOff,
     OpenLink(LinkKind),
@@ -101,6 +111,9 @@ struct Ids {
     rescan: WidgetId,
     tabs: WidgetId,
     notice: WidgetId,
+    search: WidgetId,
+    filter: WidgetId,
+    count: WidgetId,
     list: WidgetId,
     detail: WidgetId,
     info: WidgetId,
@@ -113,7 +126,10 @@ pub struct Scaffold {
     state: State,
     tab: Tab,
     /// The selection of each tab, by what it names (kept across rescans).
-    selected: [Option<Item>; 3],
+    selected: [Option<Item>; 4],
+    query: String,
+    attention_only: bool,
+    setup_preview: Option<setup::Preview>,
     detail_open: bool,
     brief_open: bool,
     form: Option<Form>,
@@ -132,7 +148,10 @@ pub struct Scaffold {
 impl Scaffold {
     pub fn new(backend: Box<dyn Backend>) -> Scaffold {
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::for_appearance(Appearance::Dark));
+        let mut theme = Theme::for_appearance(Appearance::Dark);
+        // Keep secondary text and status colors readable on the selected row.
+        theme.selection = noa_gpui_core::theme::mix(theme.surface, theme.accent, 0.12);
+        tree.set_theme(theme);
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -145,23 +164,17 @@ impl Scaffold {
         let header = tree.insert(
             Some(root),
             Container::new(Style {
-                padding: LayoutRect {
-                    left: length(GUTTER),
-                    right: length(GUTTER),
-                    top: length(10.0),
-                    bottom: length(10.0),
-                },
-                ..row(14.0)
+                padding: LayoutRect::length(GUTTER),
+                ..style::column(10.0)
             })
             .background(Role::Surface),
         );
-        tree.insert(Some(header), Label::new("足場").font_size(15.0).weight(700));
-        let tabs = tree.insert(
-            Some(header),
-            SegmentedControl::new(Tab::ALL.map(Tab::label), SegmentMode::SelectOne)
-                .with_selected(&[0]),
+        let identity = tree.insert(Some(header), Container::new(row(12.0)));
+        tree.insert(
+            Some(identity),
+            Label::new("足場").font_size(20.0).weight(700),
         );
-        let repo_host = tree.insert(Some(header), Container::new(grow()));
+        let repo_host = tree.insert(Some(identity), Container::new(grow()));
         let repo = tree.insert(
             Some(repo_host),
             Label::new("")
@@ -169,14 +182,51 @@ impl Scaffold {
                 .max_lines(1)
                 .color(Role::Muted),
         );
-        let commit = tree.insert(Some(header), Tag::new(""));
-        let score = tree.insert(Some(header), Tag::new(""));
+        let rescan = tree.insert(Some(identity), Button::new("再スキャン (R)"));
+        let status = tree.insert(Some(header), Container::new(row(10.0)));
+        let score = tree.insert(Some(status), Tag::new(""));
+        let commit = tree.insert(Some(status), Tag::new(""));
         let scanned = tree.insert(
-            Some(header),
+            Some(status),
             Label::new("").font_size(11.0).color(Role::Muted),
         );
-        let rescan = tree.insert(Some(header), Button::new("再スキャン (R)"));
-        let notice = tree.insert(Some(root), Label::new("").font_size(12.0).max_lines(2));
+        let navigation = tree.insert(Some(header), Container::new(row(12.0)));
+        let tabs = tree.insert(
+            Some(navigation),
+            SegmentedControl::new(Tab::ALL.map(Tab::label), SegmentMode::SelectOne)
+                .with_selected(&[0]),
+        );
+        let search = tree.insert(
+            Some(navigation),
+            TextField::new("名称・パスを検索 (/)", 230.0),
+        );
+        let filter = tree.insert(
+            Some(navigation),
+            SegmentedControl::new(["すべて", "要対応"], SegmentMode::SelectOne)
+                .control_size(ControlSize::Small)
+                .with_selected(&[0]),
+        );
+        let count_host = tree.insert(Some(navigation), Container::new(grow()));
+        let count = tree.insert(
+            Some(count_host),
+            Label::new("")
+                .font_size(11.0)
+                .color(Role::Muted)
+                .max_lines(1),
+        );
+        let notice_host = tree.insert(
+            Some(root),
+            Container::new(Style {
+                padding: LayoutRect {
+                    left: length(GUTTER),
+                    right: length(GUTTER),
+                    top: length(0.0),
+                    bottom: length(0.0),
+                },
+                ..style::column(0.0)
+            }),
+        );
+        let notice = tree.insert(Some(notice_host), Label::new("").font_size(12.0).wrap(true));
         let body = tree.insert(
             Some(root),
             Container::new(Style {
@@ -210,14 +260,34 @@ impl Scaffold {
         let info = tree.insert(Some(detail), Container::new(style::column(8.0)));
         let form_host = tree.insert(Some(detail), Container::new(style::column(8.0)));
 
+        let footer = tree.insert(
+            Some(root),
+            Container::new(Style {
+                padding: LayoutRect {
+                    left: length(GUTTER),
+                    right: length(GUTTER),
+                    top: length(8.0),
+                    bottom: length(8.0),
+                },
+                ..style::column(0.0)
+            })
+            .background(Role::Surface),
+        );
+        tree.insert(Some(footer), Label::new(
+            "0 セットアップ · 1 資産 · 2 改善候補 · 3 情報源    ↑↓ 選択 · Enter 詳細 · / 検索 · Esc 戻る · R 再スキャン"
+        ).font_size(10.0).color(Role::Muted).max_lines(1));
+
         let mut backend = backend;
         let state = backend.scan();
         let mut screen = Scaffold {
             tree,
             backend,
             state,
-            tab: Tab::Assets,
-            selected: [None, None, None],
+            tab: Tab::Setup,
+            selected: [None, None, None, None],
+            query: String::new(),
+            attention_only: false,
+            setup_preview: None,
             detail_open: false,
             brief_open: false,
             form: None,
@@ -232,6 +302,9 @@ impl Scaffold {
                 rescan,
                 tabs,
                 notice,
+                search,
+                filter,
+                count,
                 list,
                 detail,
                 info,
@@ -255,9 +328,33 @@ impl Scaffold {
             .or_else(|| items.first().cloned())
     }
 
-    /// The rows of `tab`, in order.
+    /// The visible rows of `tab`, in order, sharing the toolbar's filters.
     pub fn items(&self, tab: Tab) -> Vec<Item> {
+        let terms: Vec<String> = self
+            .query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        self.all_items(tab)
+            .into_iter()
+            .filter(|item| {
+                (!self.attention_only || self.needs_attention(item))
+                    && terms
+                        .iter()
+                        .all(|term| self.search_text(item).to_lowercase().contains(term))
+            })
+            .collect()
+    }
+
+    fn all_items(&self, tab: Tab) -> Vec<Item> {
         match tab {
+            Tab::Setup => self
+                .state
+                .setup
+                .checks
+                .iter()
+                .map(|check| Item::Setup(check.id.clone()))
+                .collect(),
             Tab::Assets => self
                 .state
                 .registry
@@ -283,6 +380,131 @@ impl Scaffold {
                 .map(|s| Item::Source(s.path.clone()))
                 .collect(),
         }
+    }
+
+    fn search_text(&self, item: &Item) -> String {
+        match item {
+            Item::Setup(id) => self
+                .state
+                .setup
+                .checks
+                .iter()
+                .find(|c| &c.id == id)
+                .map(|c| {
+                    format!(
+                        "{} {} {} {} {}",
+                        c.id,
+                        c.title,
+                        c.description,
+                        c.next_step,
+                        c.evidence
+                            .iter()
+                            .map(|e| e.path.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                })
+                .unwrap_or_default(),
+            Item::Asset(id) => self
+                .asset(id)
+                .map(|a| {
+                    format!(
+                        "{} {} {} {} {} {}",
+                        a.id,
+                        a.title,
+                        a.path,
+                        a.kind.label(),
+                        a.lifecycle().label(),
+                        self.verification_of(id).label()
+                    )
+                })
+                .unwrap_or_default(),
+            Item::Candidate(id) => self
+                .improvement(id)
+                .map(|i| {
+                    format!(
+                        "{} {} {} {} {} {}",
+                        i.widget,
+                        i.target,
+                        i.rule,
+                        rule_label(&i.rule),
+                        self.status_of(i).label(),
+                        i.evidence
+                            .iter()
+                            .map(|e| e.path.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                })
+                .unwrap_or_default(),
+            Item::Source(path) => self
+                .state
+                .report
+                .sources
+                .iter()
+                .find(|s| &s.path == path)
+                .map(|s| format!("{} {}", s.path, s.error.as_deref().unwrap_or("ok")))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn needs_attention(&self, item: &Item) -> bool {
+        match item {
+            Item::Setup(id) => self
+                .state
+                .setup
+                .checks
+                .iter()
+                .find(|c| &c.id == id)
+                .is_some_and(|c| c.state != scaffold::setup::CheckState::Found),
+            Item::Asset(id) => self.asset(id).is_some_and(|a| {
+                check_history(a).is_err()
+                    || (!matches!(a.lifecycle(), scaffold::model::Lifecycle::Retired)
+                        && !matches!(
+                            self.verification_of(id),
+                            VerifyState::Verified | VerifyState::Skipped
+                        ))
+            }),
+            Item::Candidate(id) => self
+                .improvement(id)
+                .is_some_and(|i| self.status_of(i) == ImprovementStatus::Open),
+            Item::Source(path) => self
+                .state
+                .report
+                .sources
+                .iter()
+                .find(|s| &s.path == path)
+                .is_some_and(|s| s.state == SourceState::Unknown),
+        }
+    }
+
+    fn filters_changed(&mut self, text: &mut TextStore) {
+        if self.selected[self.tab.index()]
+            .as_ref()
+            .is_some_and(|s| !self.items(self.tab).contains(s))
+        {
+            self.detail_open = false;
+            self.brief_open = false;
+            self.close_form(text);
+        }
+        self.reveal = true;
+        self.rebuild(text);
+    }
+
+    fn clear_filters(&mut self, text: &mut TextStore) {
+        self.query.clear();
+        self.attention_only = false;
+        self.tree
+            .update::<TextField, _>(self.ids.search, |f, cx| f.set_text(cx, ""));
+        self.tree
+            .update::<SegmentedControl, _>(self.ids.filter, |s, cx| s.set_selected(cx, &[0]));
+        self.filters_changed(text);
+    }
+
+    fn focus_search(&mut self) {
+        self.tree.set_focus(Some(self.ids.search));
+        self.tree
+            .update::<TextField, _>(self.ids.search, |f, cx| f.select(cx, 0..f.text().len()));
     }
 
     /// Open candidates first (by widget, target, rule), then resolved ones.
@@ -319,6 +541,13 @@ impl Scaffold {
 
     /// 「整合 n/m」, or why there is no score.
     pub fn score_label(&self) -> String {
+        if !self.state.setup.registration_applicable {
+            return format!(
+                "構成を検出 {}/{}",
+                self.state.setup.found_count(),
+                self.state.setup.checks.len()
+            );
+        }
         if self.state.unregistered() {
             return "スコアなし（registry なし）".into();
         }
@@ -383,6 +612,7 @@ impl Scaffold {
         // adds a row before it does not move the selection or the detail.
         self.selected[self.tab.index()] = selection.clone();
         match self.tab {
+            Tab::Setup => self.build_setup(selection.as_ref()),
             Tab::Assets => self.build_assets(selection.as_ref()),
             Tab::Candidates => self.build_candidates(selection.as_ref()),
             Tab::Sources => self.build_sources(selection.as_ref()),
@@ -413,11 +643,17 @@ impl Scaffold {
             format!("最終スキャン {}", self.stamp(self.state.scanned_at))
         };
         let tab = self.tab.index();
+        let count = format!(
+            "{} / {} 件",
+            self.items(self.tab).len(),
+            self.all_items(self.tab).len()
+        );
         let tree = &mut self.tree;
         tree.update::<Label, _>(self.ids.repo, |l, cx| l.set_text(cx, repo));
         tree.update::<Tag, _>(self.ids.commit, |t, cx| t.set_text(cx, commit));
         tree.update::<Tag, _>(self.ids.score, |t, cx| t.set_text(cx, score));
         tree.update::<Label, _>(self.ids.scanned, |l, cx| l.set_text(cx, scanned));
+        tree.update::<Label, _>(self.ids.count, |l, cx| l.set_text(cx, count));
         tree.update::<SegmentedControl, _>(self.ids.tabs, |s, cx| {
             if s.selected().get(tab) != Some(&true) {
                 s.set_selected(cx, &[tab]);
@@ -439,6 +675,57 @@ impl Scaffold {
 
     /// A row frame; its pressable holds the row's labels.
     fn row(&mut self, item: Item, selected: bool, faded: bool) -> WidgetId {
+        let label = match &item {
+            Item::Setup(id) => self
+                .state
+                .setup
+                .checks
+                .iter()
+                .find(|c| &c.id == id)
+                .map(|c| format!("{}、{}", c.title, c.state.label()))
+                .unwrap_or_default(),
+            Item::Asset(id) => self
+                .asset(id)
+                .map(|a| {
+                    format!(
+                        "{}、{}、{}",
+                        a.title,
+                        a.lifecycle().label(),
+                        self.verification_of(id).label()
+                    )
+                })
+                .unwrap_or_default(),
+            Item::Candidate(id) => self
+                .improvement(id)
+                .map(|i| {
+                    format!(
+                        "{} {}、{}、{}",
+                        i.widget,
+                        i.target,
+                        rule_label(&i.rule),
+                        self.status_of(i).label()
+                    )
+                })
+                .unwrap_or_default(),
+            Item::Source(path) => self
+                .state
+                .report
+                .sources
+                .iter()
+                .find(|s| &s.path == path)
+                .map(|s| {
+                    format!(
+                        "{}、{}",
+                        s.path,
+                        if s.state == SourceState::Ok {
+                            "読込済み"
+                        } else {
+                            "確認できません"
+                        }
+                    )
+                })
+                .unwrap_or_default(),
+        };
         let parent = if faded {
             self.tree.insert(
                 Some(self.ids.list),
@@ -474,11 +761,12 @@ impl Scaffold {
                 padding: LayoutRect {
                     left: length(10.0),
                     right: length(10.0),
-                    top: length(6.0),
-                    bottom: length(6.0),
+                    top: length(10.0),
+                    bottom: length(10.0),
                 },
-                ..row(8.0)
+                ..style::column(5.0)
             }))
+            .label(label)
             .selected(selected)
             .radius(6.0),
         );
@@ -496,141 +784,226 @@ impl Scaffold {
         );
     }
 
+    fn empty(&mut self, title: &str, description: impl Into<String>) {
+        let card = self.tree.insert(
+            Some(self.ids.list),
+            Container::new(wide(style::column(10.0)))
+                .background(Role::Surface)
+                .border(1.0, Role::Separator)
+                .radius(8.0)
+                .padding(18.0),
+        );
+        self.tree.insert(
+            Some(card),
+            Label::new(title).font_size(15.0).weight(600).wrap(true),
+        );
+        self.note(card, description);
+    }
+
+    fn filtered_empty(&mut self) {
+        self.empty(
+            "一致する項目がありません",
+            "検索語を短くするか、「すべて」に戻して確認できます。",
+        );
+        self.button(self.ids.list, "検索・絞り込みを解除", Press::ClearFilters);
+    }
+
     fn build_assets(&mut self, selection: Option<&Item>) {
-        let list = self.ids.list;
-        let assets = match &self.state.registry {
+        match &self.state.registry {
             Err(scaffold::registry::LoadError::Absent) => {
-                self.note(
-                    list,
-                    format!("未登録リポジトリ: {REGISTRY} がありません。情報源だけを表示します。"),
-                );
+                self.empty("開発資産を登録してはじめましょう", "未登録リポジトリです。セットアップで見つかった手順書・ルール・検証設定を確認し、資産として登録できます。");
+                self.button(self.ids.list, "セットアップへ", Press::GoTab(Tab::Setup));
                 return;
             }
             Err(e) => {
-                let e = e.to_string();
-                self.note(list, e);
+                let error = e.to_string();
+                self.empty(
+                    "資産台帳を読み込めません",
+                    format!(
+                        "{error}。情報源で原因を確認し、ファイルを修正して再スキャンしてください。"
+                    ),
+                );
+                self.button(self.ids.list, "情報源を確認", Press::GoTab(Tab::Sources));
                 return;
             }
-            Ok(loaded) => loaded.registry.assets.clone(),
-        };
-        if assets.is_empty() {
-            self.note(list, "registry に資産がありません");
+            Ok(loaded) if loaded.registry.assets.is_empty() => {
+                self.empty("登録済みの資産はまだありません", "セットアップで検出した開発資産を登録すると、判断と検証の記録をここに残せます。");
+                self.button(self.ids.list, "セットアップへ", Press::GoTab(Tab::Setup));
+                return;
+            }
+            Ok(_) => {}
         }
-        for a in &assets {
-            let item = Item::Asset(a.id.clone());
-            let r = self.row(item.clone(), selection == Some(&item), false);
-            let line = self
-                .state
-                .registry
-                .as_ref()
-                .ok()
-                .and_then(|l| l.id_line(&a.id));
+        let items = self.items(Tab::Assets);
+        if items.is_empty() {
+            self.filtered_empty();
+            return;
+        }
+        for item in items {
+            let Item::Asset(id) = &item else { continue };
+            let Some(a) = self.asset(id).cloned() else {
+                continue;
+            };
             let verify = self.verification_of(&a.id);
-            let tree = &mut self.tree;
-            tree.insert(Some(r), Tag::new(a.kind.label()));
-            let host = tree.insert(Some(r), Container::new(grow()));
-            let col = tree.insert(Some(host), Container::new(style::column(2.0)));
-            tree.insert(
-                Some(col),
-                Label::new(a.id.clone())
-                    .font_size(13.0)
+            let r = self.row(item.clone(), selection == Some(&item), false);
+            let top = self.tree.insert(Some(r), Container::new(wide(row(8.0))));
+            let host = self.tree.insert(Some(top), Container::new(grow()));
+            self.tree.insert(
+                Some(host),
+                Label::new(&a.title)
+                    .font_size(14.0)
                     .weight(600)
                     .max_lines(1),
             );
-            tree.insert(
-                Some(col),
-                Label::new(format!("{} · {}", a.title, a.path))
+            self.tree.insert(
+                Some(top),
+                Tag::new(verify.label()).tone(verify_tone(verify)),
+            );
+            let bottom = self.tree.insert(Some(r), Container::new(wide(row(8.0))));
+            let host = self.tree.insert(Some(bottom), Container::new(grow()));
+            self.tree.insert(
+                Some(host),
+                Label::new(format!("{} · {}", a.kind.label(), a.path))
                     .font_size(11.0)
                     .max_lines(1)
                     .color(Role::Muted),
             );
-            if let Some(line) = line {
-                tree.insert(
-                    Some(r),
-                    Label::new(format!("{REGISTRY}:{line}"))
-                        .font_size(11.0)
-                        .color(Role::Muted),
-                );
-            }
-            tree.insert(Some(r), Tag::new(a.lifecycle().label()).tone(Tone::Accent));
-            tree.insert(Some(r), Tag::new(verify.label()).tone(verify_tone(verify)));
-            if check_history(a).is_err() {
-                tree.insert(Some(r), Tag::new("記録に矛盾").tone(Tone::Critical));
+            self.tree.insert(
+                Some(bottom),
+                Tag::new(a.lifecycle().label()).tone(Tone::Accent),
+            );
+            if check_history(&a).is_err() {
+                self.tree
+                    .insert(Some(bottom), Tag::new("記録に矛盾").tone(Tone::Critical));
             }
         }
     }
 
     fn build_candidates(&mut self, selection: Option<&Item>) {
-        let list = self.ids.list;
         if self.state.unregistered() {
-            self.note(
-                list,
-                "未登録リポジトリのため改善候補はありません（registry.json がありません）",
+            self.empty(
+                "未登録リポジトリです",
+                "改善候補を記録するには、セットアップで開発資産を確認して登録してください。",
             );
+            self.button(self.ids.list, "セットアップへ", Press::GoTab(Tab::Setup));
             return;
         }
-        let candidates: Vec<Improvement> = self.candidates().into_iter().cloned().collect();
-        if candidates.is_empty() {
-            self.note(list, "改善候補はありません");
+        let items = self.items(Tab::Candidates);
+        if items.is_empty() {
+            if !self.all_items(Tab::Candidates).is_empty() {
+                self.filtered_empty();
+            } else if self
+                .state
+                .report
+                .sources
+                .iter()
+                .any(|s| s.state == SourceState::Unknown)
+            {
+                self.empty("確認できない情報源があります", "改善候補はありませんが、すべての情報源を確認できていません。読込状況を確認してください。");
+                self.button(self.ids.list, "情報源を確認", Press::GoTab(Tab::Sources));
+            } else {
+                self.empty("改善候補はありません", "登録の不整合は見つかりませんでした。開発の準備状況はセットアップで確認できます。");
+                self.button(self.ids.list, "セットアップへ", Press::GoTab(Tab::Setup));
+            }
+            return;
         }
-        for imp in &candidates {
-            let item = Item::Candidate(imp.id.clone());
-            let status = self.status_of(imp);
+        for item in items {
+            let Item::Candidate(id) = &item else { continue };
+            let Some(imp) = self.improvement(id).cloned() else {
+                continue;
+            };
+            let status = self.status_of(&imp);
             let r = self.row(
                 item.clone(),
                 selection == Some(&item),
                 status == ImprovementStatus::Resolved,
             );
-            let tree = &mut self.tree;
-            tree.insert(Some(r), Tag::new(rule_label(&imp.rule)).tone(Tone::Warning));
-            let host = tree.insert(Some(r), Container::new(grow()));
-            let col = tree.insert(Some(host), Container::new(style::column(2.0)));
-            tree.insert(
-                Some(col),
+            let top = self.tree.insert(Some(r), Container::new(wide(row(8.0))));
+            let host = self.tree.insert(Some(top), Container::new(grow()));
+            self.tree.insert(
+                Some(host),
                 Label::new(format!("{}/{}", imp.widget, imp.target))
-                    .font_size(13.0)
+                    .font_size(14.0)
                     .weight(600)
                     .max_lines(1),
             );
-            if let Some(e) = imp.evidence.first() {
-                tree.insert(
-                    Some(col),
-                    Label::new(format!("{}:{}", e.path, e.line))
-                        .font_size(11.0)
-                        .max_lines(1)
-                        .color(Role::Muted),
-                );
-            }
-            tree.insert(Some(r), Tag::new(status.label()).tone(status_tone(&status)));
+            self.tree.insert(
+                Some(top),
+                Tag::new(status.label()).tone(status_tone(&status)),
+            );
+            let evidence = imp
+                .evidence
+                .first()
+                .map(|e| format!(" · {}:{}", e.path, e.line))
+                .unwrap_or_default();
+            self.tree.insert(
+                Some(r),
+                Label::new(format!("{}{evidence}", rule_label(&imp.rule)))
+                    .font_size(11.0)
+                    .max_lines(1)
+                    .color(Role::Muted),
+            );
         }
     }
 
     fn build_sources(&mut self, selection: Option<&Item>) {
-        let sources = self.state.report.sources.clone();
-        for s in &sources {
-            let item = Item::Source(s.path.clone());
+        let items = self.items(Tab::Sources);
+        if items.is_empty() {
+            if self.state.report.sources.is_empty() {
+                self.empty(
+                    "読み込んだ情報源はまだありません",
+                    "開発用の設定や手順を追加したら、再スキャンして確認できます。",
+                );
+            } else {
+                self.filtered_empty();
+            }
+            return;
+        }
+        for item in items {
+            let Item::Source(path) = &item else { continue };
+            let Some(source) = self
+                .state
+                .report
+                .sources
+                .iter()
+                .find(|s| &s.path == path)
+                .cloned()
+            else {
+                continue;
+            };
             let r = self.row(item.clone(), selection == Some(&item), false);
-            let ok = s.state == SourceState::Ok;
-            let tree = &mut self.tree;
-            tree.insert(
-                Some(r),
+            let top = self.tree.insert(Some(r), Container::new(wide(row(8.0))));
+            let host = self.tree.insert(Some(top), Container::new(grow()));
+            self.tree.insert(
+                Some(host),
+                Label::new(&source.path)
+                    .font_size(13.0)
+                    .weight(600)
+                    .max_lines(1),
+            );
+            let ok = source.state == SourceState::Ok;
+            self.tree.insert(
+                Some(top),
                 Tag::new(if ok { "ok" } else { "不明" }).tone(if ok {
                     Tone::Success
                 } else {
                     Tone::Critical
                 }),
             );
-            let host = tree.insert(Some(r), Container::new(grow()));
-            tree.insert(
-                Some(host),
-                Label::new(s.path.clone()).font_size(13.0).max_lines(1),
+            self.tree.insert(
+                Some(r),
+                Label::new(
+                    source
+                        .error
+                        .unwrap_or_else(|| "スキャンの根拠として読み込みました".into()),
+                )
+                .font_size(11.0)
+                .max_lines(2)
+                .color(if ok {
+                    Paint::Role(Role::Muted)
+                } else {
+                    Paint::Fixed(style::RED)
+                }),
             );
-            if let Some(e) = &s.error {
-                tree.insert(
-                    Some(r),
-                    Label::new(e.clone()).font_size(11.0).color(style::RED),
-                );
-            }
         }
     }
 
@@ -654,7 +1027,7 @@ impl Scaffold {
     fn line(&mut self, text: impl Into<String>) {
         self.tree.insert(
             Some(self.ids.info),
-            Label::new(text).font_size(12.0).wrap(true),
+            Label::new(text).font_size(12.0).wrap(true).selectable(true),
         );
     }
 
@@ -688,7 +1061,9 @@ impl Scaffold {
     }
 
     fn build_detail(&mut self, item: &Item) {
+        self.button(self.ids.info, "詳細を閉じる (Esc)", Press::CloseDetail);
         match item {
+            Item::Setup(id) => self.setup_detail(id),
             Item::Asset(id) => self.asset_detail(id),
             Item::Candidate(id) => self.candidate_detail(id),
             Item::Source(path) => {
@@ -725,7 +1100,8 @@ impl Scaffold {
             .ok()
             .and_then(|l| l.id_line(id));
         let verify = self.verification_of(id);
-        self.heading(format!("{} — {}", a.id, a.title));
+        self.heading(a.title.clone());
+        self.line(format!("id: {}", a.id));
         self.line(format!("種別: {}", a.kind.label()));
         self.line(format!("パス: {}", a.path));
         if let Some(line) = line {
@@ -823,7 +1199,17 @@ impl Scaffold {
             },
             Press::ToggleBrief,
         );
-        self.button(actions, "タスクにする (T)", Press::HandOff);
+        match &status {
+            ImprovementStatus::Open => self.button(actions, "タスクにする (T)", Press::HandOff),
+            ImprovementStatus::HandedOff(task) => {
+                self.line(format!(
+                    "タスク {task} に引き渡し済みです。View → Tasks で作業を続けられます。"
+                ));
+            }
+            ImprovementStatus::Resolved => {
+                self.line("この候補は解消しています。関連する作業と検証の記録を確認できます。");
+            }
+        }
         let actions = self
             .tree
             .insert(Some(self.ids.info), Container::new(row(6.0)));
@@ -873,6 +1259,13 @@ impl Scaffold {
     fn hand_off(&mut self, id: String, text: &mut TextStore) {
         self.detail_open = true;
         let status = self.improvement(&id).map(|i| self.status_of(i));
+        if status == Some(ImprovementStatus::Resolved) {
+            self.set_notice(Ok(
+                "この候補は解消済みです。作業と検証の記録を確認できます。".into(),
+            ));
+            self.rebuild(text);
+            return;
+        }
         if let Some(ImprovementStatus::HandedOff(task)) = status {
             self.set_notice(Err(format!(
                 "引き渡し済みです（タスク {task}）。新しいタスクは作りません"
@@ -888,6 +1281,7 @@ impl Scaffold {
             self.tab = tab;
             self.brief_open = false;
             self.close_form(text);
+            self.setup_preview = None;
         }
         self.reveal = true;
         self.rebuild(text);
@@ -897,6 +1291,8 @@ impl Scaffold {
         if self.selection().as_ref() != Some(&item) {
             self.brief_open = false;
             self.close_form(text);
+            self.tree
+                .update::<ScrollView, _>(self.ids.detail, |s, cx| s.set_offset(cx, 0.0));
         }
         self.selected[self.tab.index()] = Some(item);
         self.rebuild(text);
@@ -977,10 +1373,40 @@ impl Scaffold {
     }
 
     fn do_press(&mut self, press: Press, text: &mut TextStore) {
+        if self.setup_press(&press, text) {
+            return;
+        }
+        match &press {
+            Press::GoTab(tab) => {
+                self.clear_filters(text);
+                self.set_tab(*tab, text);
+                return;
+            }
+            Press::ClearFilters => {
+                self.clear_filters(text);
+                return;
+            }
+            Press::CloseDetail => {
+                self.detail_open = false;
+                self.brief_open = false;
+                self.close_form(text);
+                self.rebuild(text);
+                return;
+            }
+            _ => {}
+        }
         let Some(item) = self.selection() else {
             return;
         };
         match press {
+            Press::RegisterPreview
+            | Press::RegisterAssets
+            | Press::SetupTaskPreview
+            | Press::SetupTask
+            | Press::ClosePreview
+            | Press::GoTab(_)
+            | Press::ClearFilters
+            | Press::CloseDetail => {}
             Press::ToggleBrief => {
                 self.brief_open = !self.brief_open;
                 self.rebuild(text);
@@ -1034,7 +1460,17 @@ impl Scaffold {
 
     /// A shortcut key; whether it was one.
     pub fn press(&mut self, key: &Key, text: &mut TextStore) -> bool {
+        if self.setup_preview.is_some()
+            && matches!(
+                key,
+                Key::Enter | Key::ArrowDown | Key::ArrowUp | Key::Char('j' | 'k')
+            )
+        {
+            return false;
+        }
         match key {
+            Key::Char('0') => self.set_tab(Tab::Setup, text),
+            Key::Char('/') => self.focus_search(),
             Key::Char('1') => self.set_tab(Tab::Assets, text),
             Key::Char('2') => self.set_tab(Tab::Candidates, text),
             Key::Char('3') => self.set_tab(Tab::Sources, text),
@@ -1081,6 +1517,21 @@ impl Scaffold {
     fn escape(&mut self, text: &mut TextStore) -> bool {
         if self.form.is_some() {
             self.close_form(text);
+            return true;
+        }
+        if self.tree.focused() == Some(self.ids.search) {
+            if !self.query.is_empty() {
+                self.query.clear();
+                self.tree
+                    .update::<TextField, _>(self.ids.search, |f, cx| f.set_text(cx, ""));
+                self.filters_changed(text);
+            } else {
+                self.tree.set_focus(None);
+            }
+            return true;
+        }
+        if self.setup_preview.take().is_some() {
+            self.rebuild(text);
             return true;
         }
         if self.detail_open {
@@ -1172,6 +1623,13 @@ impl Screen for Scaffold {
             Event::KeyDown {
                 key: Key::Escape, ..
             } if self.escape(text) => return,
+            Event::KeyDown {
+                key: Key::Char('f' | 'F'),
+                modifiers,
+            } if (modifiers.ctrl || modifiers.meta || modifiers.command) && !modifiers.alt => {
+                self.focus_search();
+                return;
+            }
             Event::KeyDown { key, modifiers }
                 if !shortcut_modifiers(key, modifiers) || self.typing() => {}
             Event::KeyDown { key, .. } => {
@@ -1216,11 +1674,26 @@ impl Screen for Scaffold {
             }
         }
         let source = message.source;
+        if let Some(TextChanged(typed)) = message.downcast_ref::<TextChanged>() {
+            if source == self.ids.search {
+                self.query = typed.clone();
+                self.filters_changed(text);
+            }
+            return;
+        }
+        if message.downcast_ref::<TextSubmitted>().is_some() && source == self.ids.search {
+            self.tree.set_focus(None);
+            self.reveal = true;
+            return;
+        }
         if let Some(SelectionChanged(i)) = message.downcast_ref::<SelectionChanged>() {
             if source == self.ids.tabs
                 && let Some(tab) = Tab::ALL.get(*i)
             {
                 self.set_tab(*tab, text);
+            } else if source == self.ids.filter {
+                self.attention_only = *i == 1;
+                self.filters_changed(text);
             }
             return;
         }

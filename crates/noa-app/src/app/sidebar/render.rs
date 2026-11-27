@@ -4,8 +4,6 @@ use super::*;
 
 const SIDEBAR_CARD_RULE_HEIGHT: f32 = 1.0;
 const SIDEBAR_CARD_RULE_BORDER_MIX: f32 = 0.34;
-const SIDEBAR_CARD_STATIC_FILL_OPACITY: f32 = 0.0;
-const SIDEBAR_CARD_FLASH_FILL_OPACITY: f32 = 1.0;
 const SIDEBAR_PROGRESS_HEIGHT: f32 = 3.0;
 const SIDEBAR_PROGRESS_INSET_X: f32 = 5.0;
 
@@ -57,11 +55,11 @@ fn sidebar_model_has_progress(model: &SidebarDrawModel) -> bool {
             .is_some_and(|card| card.progress_bar.is_some())
 }
 
-fn sidebar_card_fill_opacity(flash_fill: bool) -> f32 {
-    if flash_fill {
-        SIDEBAR_CARD_FLASH_FILL_OPACITY
+fn sidebar_card_fill_opacity(flash_fill: bool, selected: bool, hovered: bool) -> f32 {
+    if flash_fill || selected || hovered {
+        1.0
     } else {
-        SIDEBAR_CARD_STATIC_FILL_OPACITY
+        0.0
     }
 }
 
@@ -449,8 +447,8 @@ fn sidebar_card_frame(selected: bool, attention: bool) -> SidebarCardFrame {
 /// Rasterize the sidebar and composite it onto `view` at the window's left
 /// inset via the reused card pipeline: a flat backdrop matching the terminal
 /// theme's background (so the band reads as one surface with the panes), then
-/// each fully-visible card as a square, borderless row with state carried by
-/// its fill and status markers, then the optional `…` menu popup above them
+/// each visible card as a flat row with state carried by its fill and status
+/// markers, then the optional `…` menu popup above them
 /// all. Runs inline in `redraw` with the already-borrowed `gpu`, so the model
 /// must be prebuilt (no `self` here).
 ///
@@ -463,11 +461,11 @@ pub(in crate::app) fn draw_sidebar_band(
     surface_format: wgpu::TextureFormat,
     // Sidebar pixel size of the window being drawn into.
     sidebar_font_px: f32,
-    padding: GridPadding,
     view: &wgpu::TextureView,
     surface_size: PixelSize,
     model: &SidebarDrawModel,
 ) {
+    let padding = SIDEBAR_GRID_PADDING;
     ensure_sidebar_pipelines(gpu, surface_format, padding, sidebar_font_px);
     let band_size = PixelSize {
         w: model.inset.max(1),
@@ -987,11 +985,9 @@ fn draw_sidebar_new_button(
     );
 }
 
-/// Pass 2 — each fully-visible card as text-only content over the seamless
-/// band, plus the categorical per-card status rail along
-/// its left edge. Static card texture clears are transparent, so rows do not
-/// create a separate rectangular surface; a bounded one-shot cue temporarily
-/// makes its selected background opaque before this composite.
+/// Pass 2 — cards over the seamless band, with a categorical status rail along
+/// the left edge. Resting rows stay transparent; selection, hover and bounded
+/// one-shot cues expose the model's background using the window/palette alpha.
 fn draw_sidebar_cards(
     gpu: &mut GpuState,
     model: &SidebarDrawModel,
@@ -1027,10 +1023,10 @@ fn draw_sidebar_cards(
     let card_style = CardStyle {
         background: chrome().surface_rgba(sidebar_card_bg(panel_bg)),
         border_color: [0.0; 4],
-        focus_color: [0.0; 4],
+        focus_color: rgb_to_rgba(mix_rgb(panel_bg, chrome().accent, 0.45)),
         corner_radius: 0.0,
         border_width: 0.0,
-        focus_width: 0.0,
+        focus_width: model.scale.max(1.0),
         focus_glow_width: 0.0,
     };
 
@@ -1091,14 +1087,22 @@ fn draw_sidebar_cards(
             card_size,
             card_draw.grid,
             card_draw.bg,
-            sidebar_card_fill_opacity(card_draw.flash_fill),
+            chrome_raster_alpha(
+                model.background_opacity
+                    * sidebar_card_fill_opacity(
+                        card_draw.flash_fill,
+                        card_draw.selected,
+                        card_draw.hovered,
+                    ),
+                chrome().surface_alpha,
+            ),
             &card_draw.runs,
         );
-        // Attention keeps the same flat row treatment as Selected; the red
-        // indicator/label/status rail carry urgency without an outline seam.
+        // Only selection gets the quiet focus stroke. Attention has its own
+        // indicator/label/status rail, so it cannot look like another selection.
         let selected = matches!(
             sidebar_card_frame(card_draw.selected, card_draw.attention),
-            SidebarCardFrame::Selected | SidebarCardFrame::Attention
+            SidebarCardFrame::Selected
         );
         pipeline.overlay_texture_cards_clipped(
             &gpu.device,
@@ -1374,10 +1378,10 @@ fn draw_sidebar_drag(
     let card_style = CardStyle {
         background: chrome().surface_rgba(sidebar_card_bg(panel_bg)),
         border_color: [0.0; 4],
-        focus_color: [0.0; 4],
+        focus_color: rgb_to_rgba(mix_rgb(panel_bg, chrome().accent, 0.45)),
         corner_radius: 0.0,
         border_width: 0.0,
-        focus_width: 0.0,
+        focus_width: model.scale.max(1.0),
         focus_glow_width: 0.0,
     };
     let theme = active_theme(&gpu.theme, &gpu.preview_theme);
@@ -1407,8 +1411,13 @@ fn draw_sidebar_drag(
         },
         drag.grid,
         drag.bg,
-        // The floating drag ghost is a card, so it frosts like one.
-        chrome_raster_alpha(model.background_opacity, chrome().surface_alpha),
+        // The floating card keeps the same focus/fill and glass treatment as
+        // the selected row it was lifted from.
+        chrome_raster_alpha(
+            model.background_opacity
+                * sidebar_card_fill_opacity(drag.flash_fill, drag.selected, drag.hovered),
+            chrome().surface_alpha,
+        ),
         &drag.runs,
     );
     card.pipeline.overlay_texture_cards(
@@ -1540,6 +1549,7 @@ mod tests {
                 bg: Rgb::new(10, 11, 12),
                 flash_fill: false,
                 selected: true,
+                hovered: false,
                 attention: false,
                 status_rail: None,
                 progress_bar: None,
@@ -1583,17 +1593,12 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_card_fill_is_opaque_while_static_cards_remain_text_only() {
-        assert_eq!(
-            sidebar_card_fill_opacity(false),
-            SIDEBAR_CARD_STATIC_FILL_OPACITY
-        );
-        assert_eq!(
-            sidebar_card_fill_opacity(true),
-            SIDEBAR_CARD_FLASH_FILL_OPACITY
-        );
-        assert_eq!(sidebar_card_fill_opacity(false), 0.0);
-        assert_eq!(sidebar_card_fill_opacity(true), 1.0);
+    fn card_fill_distinguishes_interaction_and_flash_from_resting_rows() {
+        assert_eq!(sidebar_card_fill_opacity(false, false, false), 0.0);
+        assert_eq!(sidebar_card_fill_opacity(false, true, false), 1.0);
+        assert_eq!(sidebar_card_fill_opacity(false, false, true), 1.0);
+        assert_eq!(sidebar_card_fill_opacity(true, false, false), 1.0);
+        assert_eq!(sidebar_card_fill_opacity(true, true, true), 1.0);
     }
 
     // The composite takes a surface's alpha from the texture it sampled
@@ -1742,6 +1747,8 @@ mod tests {
         let previous = cache_key(model.clone());
         let mut changed_hover = model.clone();
         changed_hover.new_button_hover = true;
+        let mut changed_card_hover = model.clone();
+        changed_card_hover.cards[0].hovered = true;
         let mut changed_flash = model.clone();
         changed_flash.cards[0].flash_fill = true;
         let mut changed_text = model;
@@ -1750,6 +1757,10 @@ mod tests {
         assert!(!sidebar_cache_hit(
             Some(&previous),
             cache_key(changed_hover).inputs()
+        ));
+        assert!(!sidebar_cache_hit(
+            Some(&previous),
+            cache_key(changed_card_hover).inputs()
         ));
         assert!(!sidebar_cache_hit(
             Some(&previous),

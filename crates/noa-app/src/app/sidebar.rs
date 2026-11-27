@@ -58,6 +58,10 @@ fn chrome() -> crate::chrome::ChromePalette {
     crate::chrome::palette()
 }
 
+// CardRects already includes the sidebar's own insets. Terminal padding would
+// shift this separate grid and can collapse the status and project-icon slots.
+const SIDEBAR_GRID_PADDING: GridPadding = GridPadding::ZERO;
+
 // Flat card color tuning. The base row mostly follows the resolved terminal
 // panel background so it does not read as a separate navy card surface.
 const SIDEBAR_CARD_PANEL_BG_MIX: f32 = 0.08;
@@ -328,23 +332,20 @@ impl SidebarTextRun {
     }
 }
 
-/// One session card's own rounded-card render: its window-space rect, the
-/// per-card grid, background color, selection flag, and the text runs in the
-/// card's local texture space. Fully-visible cards get one; a partially
-/// scrolled card carries a clipping `src_uv`.
+/// One session card's window-space rect, grid, interaction state, and local
+/// text runs. Every visible card gets a texture; a partially scrolled card
+/// carries a clipping `src_uv`.
 #[derive(Clone, Debug, PartialEq)]
 struct SidebarCardDraw {
     rect: SidebarRect,
     grid: GridSize,
     bg: Rgb,
-    /// The selected `bg` is normally text-only over the seamless band. A
-    /// bounded arrival/progress cue sets this so the color becomes an actual
-    /// card-surface fill for the lifetime of the flash.
+    /// A bounded arrival/progress cue also fills an otherwise resting row.
     flash_fill: bool,
     selected: bool,
-    /// A pending interaction request (FR-16): non-focused cards get a red ring
-    /// and glow, while the focused card keeps its blue focus ring and uses the
-    /// red indicator/label for the request state.
+    hovered: bool,
+    /// A pending interaction request (FR-16), carried by its status glyph,
+    /// label and rail independently of the selected card's focus stroke.
     attention: bool,
     /// Categorical status marker along the card's left edge, or `None` for
     /// idle. Its shape, not its filled length, carries the meaning.
@@ -356,7 +357,7 @@ struct SidebarCardDraw {
     runs: Vec<SidebarTextRun>,
     /// Source-UV sub-rect `[u, v, w, h]` for sampling the full-height card
     /// texture. `[0, 0, 1, 1]` for a fully-visible card; a partial (edge-
-    /// clipped) drop-target card samples only its visible vertical slice so its
+    /// clipped) card samples only its visible vertical slice so its
     /// full-height content is not squashed into the clipped `rect`.
     src_uv: [f32; 4],
 }
@@ -431,6 +432,7 @@ mod model;
 mod palette;
 mod render;
 mod state;
+mod text;
 
 pub(super) use palette::{ScrollThumb, draw_bell_flash, draw_scrollbar_thumbs};
 // The wgpu modal cards are the non-macOS fallback; macOS composites native

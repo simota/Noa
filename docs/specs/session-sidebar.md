@@ -1,19 +1,28 @@
 # Session Sidebar: Specification
 
 ## Metadata
+
 - slug: `session-sidebar`
 - title: Session Sidebar (new tab-list UI)
 - status: `locked` (2026-07-05)
 - owner: simota
 - build-path: **apex** (`/nexus apex`: design → risk gate → implementation loop → AC verification → ship. L3 AC is the verification contract. 7 [manual] ACs require human confirmation)
 - source mockup: `~/Downloads/ChatGPT Image 2026-07-05 08_43_15.png`
+- rendering revision: 2026-11-27 (agent status, width constraints, and font-based layout)
+
+The dated design discussions below record the original decisions. L1 and the
+current rendering contract in L2 describe the sidebar's present behavior.
 
 ## L0: Vision
-noa's current tabs are native macOS tabs, and the only overview is the separate Tab Overview window. When working across multiple projects in parallel, there's no way to constantly see "what's happening in which session" (cwd, branch, last output, running state) and switch instantly. So we're adding a persistent left sidebar listing session cards (icon, name, cwd, branch, updated time, status dot, last-output preview; originally 2 lines, now `sidebar-preview-lines`, default 5).
+
+Noa's persistent left sidebar shows session identity, agent state, working
+directory, branch, and recent output while the terminal remains in use. It
+supports monitoring parallel work and switching sessions with one click. The
+preview budget is configured by `sidebar-preview-lines` (default 5).
 
 - audience: developers working across multiple projects/sessions in parallel (i.e. the author)
 - job-to-be-done: keep track of every session's state without leaving the terminal, and switch with one click
-- success: every session's cwd, branch, last output, and status are always visible in the sidebar, and click-to-switch works
+- success: each visible card keeps identity, status, and working context distinct; optional previews fit their configured budget, and click-to-switch works
 
 ### FRAME decisions
 1. Session scope: a sidebar spanning all windows. However, a **mode toggle** preserves the traditional native-tab mode too (sidebar mode / native-tab mode).
@@ -89,8 +98,10 @@ Conditions adopted as constraints:
 ### Solution
 A persistent, toggle-based left sidebar with a central `SessionStore` (channel-delta type, owned by the main thread) as the source of truth, read read-only by each window. The io thread sends session state through a publish slot of the same shape as `overview_snapshot`, and a dedicated branch-poll thread supplies the git branch. Switching = window focus (A-flavor).
 
-Card layout: `[icon] name … ●dot` / `cwd … branch` / 2 lines of ANSI last-output / relative updated-time.
-Header bar: busy label (reduced form) + centered title + session-name pill. + button and … menu at the top of the sidebar.
+Current card layout: identity row (status glyph, project icon, name, optional
+updated time, `…`) / agent-status row / branch-and-directory row / configured
+preview rows. The redundant header is removed; the toolbar retains `+`, and
+each card exposes its own close/rename menu.
 
 ### Open Question resolutions (approved by user)
 - Icon: rendered as a cell-drawn Nerd Font glyph. Determined by first-match on cwd markers (`Cargo.toml`→rust, `package.json`→node, `*.tf`→terraform, `go.mod`→go, `pyproject.toml`→python, `.git` only→git, none→folder). Re-evaluated only on cwd change (co-located with the branch-poll thread).
@@ -115,16 +126,21 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 ## L1: Requirements
 
 ### Functional
+
 - FR-1 SessionStore: a central `SessionStore` holding session card state across all windows is the source of truth; deltas from the io thread are applied and owned by the main thread (no cross-thread locking).
-- FR-2 Card rendering: each card is rendered as 3 lines, `●dot [icon] name … relative updated-time` / `cwd … branch` / a running-process line (`✳ proc` = busy / `❯ shell` = idle) (2026-07-05 user ruling: the last-output 2-line preview was replaced by the process line. The preview plumbing is kept in the store/io_thread, only rendering was stopped). (Later update: preview rendering has since returned below the meta row, which now carries the process, branch and cwd on one line; its row count became configurable via `sidebar-preview-lines` on 2026-07-07, commit b1b6b6a.)
+- FR-2 Card rendering: identity, agent/process status, working context (branch and cwd), and preview are separate rows or blocks. Each text field fits its own terminal-cell budget before composition. Agent state and AUTO indicators take priority over a long process name; branch and cwd each retain a share of the context row. Preview summaries and output share the configured `sidebar-preview-lines` budget, following the priority order in L2. A value of `0` hides the entire preview/detail block.
 - FR-3 Click-to-switch: clicking a card moves window focus to that session's `{window_id, pane_id}` (A-flavor, no active-swap).
 - FR-4 Toggle + resize: sidebar visibility is toggled **per focused window** via hotkey/config, and toggling applies a grid-first resize (grid → pty winsize) to **every pane of that window** (quick-terminal windows excluded). Other windows' visibility/grid are unaffected.
 - FR-5 Header bar: ~~renders an execution-status label at the top of the sidebar (the focused session's actual process name `✳ <proc>`, or Running/Idle when undetected) + centered title + session-name pill on the right.~~ (2026-07-11 update: **removed** from the implementation. Collapsed to `SIDEBAR_HEADER_H = 0` due to information duplication with the terminal title bar; see the constant comment in `sidebar.rs`. AC-7 is obsolete)
 - FR-6 + button: opens a new tab in the focused window, inheriting cwd from the active session (reuses the existing new-tab path).
 - FR-7 … menu: each card provides a close action; rename is kept as a name override in SessionStore. Close delegates to the existing close_pane/close_tab teardown path (including the confirm dialog, pty termination, and GC choke-point). Since cards are per-pane (SessionCardId holds a pane_id), close_pane is correct, cascading to close_tab for the last pane (Judge ruling, 2026-07-05). Inline text-input UI for rename is **implemented** (2026-07-11 update: inline on-card editing via `SidebarRenameSession`. The deferral in Open Question 5 is resolved).
+  The popup remains inside the available bounds and opens above its anchor when
+  there is insufficient room below. Drawing and hit-testing use the same popup
+  rectangle. Inline rename retains the end of the input and its caret when space
+  is limited.
 - FR-8 Git branch: a throttled `git -C <cwd> branch --show-current` supplies results into SessionStore.
 - FR-9 Icon detection: determines the project icon by first-match on cwd markers (`Cargo.toml`→rust, `package.json`→node, `*.tf`→terraform, `go.mod`→go, `pyproject.toml`→python, `.git` only→git, none→folder).
-- FR-10 Updated-time: shows the last-output timestamp relatively as `just now` / `Nm ago` / `Nh ago` same-day, `Yday HH:MM` for yesterday, `Mon D` beyond that. Every form is abbreviated to fit the ~11-cell right-aligned column (`CARD_UPDATED_W`); an overlong form would be drawn over the card name.
+- FR-10 Updated-time: formats age as `just now` / `Nm ago` / `Nh ago` same-day, `Yday HH:MM` for yesterday, and `Mon D` beyond that. Running cards omit redundant output age; a structured request needing attention uses its status timestamp. The right-aligned age is shown only when it fits alongside an identifying portion of the name, and is hidden during rename. Its unused width returns to the name rather than remaining reserved.
 - FR-11 Status indicators: busy (OSC 133 `has_running_program`) = blue play icon + segmented rail / idle = hollow green circle + no rail / unread bell = yellow bell + short rail notch. The unread bell is drained by the io thread from `Terminal::take_pending_bell` (terminal.rs:305, sourced from BEL) and sent as a SessionDelta, cleared once that session's window is focused. Rail shapes are categorical, not completion percentages.
 - FR-12 GC/teardown: removes the corresponding entry from SessionStore at all 5 teardown sites when a session ends.
 - FR-13 Config keys: adds `sidebar-enabled` (bool initial value), `sidebar-width` (points, default 360), `sidebar-hotkey` (toggle chord, following the existing parse/dispatch pattern of `quick-terminal-hotkey`), and `sidebar-preview-lines` (card last-output preview line count, default 5; was 3 until the 2026-07-08 card redesign, commit 9d849ab) to noa-config. No generic keybind→action system is introduced.
@@ -133,12 +149,14 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - FR-16 Attention (notification indicator): when a pane in a non-focused window issues an OSC 9/777 desktop notification, an `attention` flag is set on that session card. This shows as (a) red exclamation icon + solid status rail (priority: attention > bell > busy > idle), (b) `· notification` appended to the process line, and (c) a persistent red marker/ring in the tab overview. The initial transition gets a one-shot 150 ms emphasis and then stays still. Cleared together with unread bell when the window gains focus. Notifications on the currently focused window don't raise attention because the user is already looking at it.
 
 ### Non-Functional
+
 - NFR-1 No render-path lock: the render path never locks Terminal, reading session state only via a publish slot of the same shape as `overview_snapshot`.
 - NFR-2 No git on io loop: git spawn never runs on the io read loop (dedicated branch-poll thread).
 - NFR-3 Throttles: the last-output preview is reused at a minimum render interval (~10Hz); branch-poll throttles per-cwd (≥1s) with a negative cache for non-git.
 - NFR-4 Pure layout: sidebar layout/hit-testing/scroll math live in a pure, unit-testable module, same as `tab_overview.rs`.
 - NFR-5 Graceful degradation: degrades gracefully; no Nerd Font installed → icons still render via `noa-font`'s embedded Symbols Nerd Font Mono fallback (no tofu); shell without OSC 133 → busy=false, non-git cwd → branch hidden.
 - NFR-6 Crate boundaries: wgpu only in noa-app/noa-render, winit only in noa-app. SessionStore/layout stay GUI-independent.
+- NFR-7 Cell geometry: vertical text placement uses the active sidebar `FontGrid`'s measured `cell_h`. Sidebar rendering and layout use `SIDEBAR_GRID_PADDING = GridPadding::ZERO`, independently of terminal-pane padding. Changing font size, platform font metrics, or display scale must not merge neighboring rows.
 
 ## L2: Detail
 
@@ -146,17 +164,72 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - io-thread publishing (`crates/noa-app/src/io_thread.rs`): near `publish_overview_snapshot`, stamps `Instant` + wall-clock time on new output and sends SessionDelta::Upsert. In the same lock section, drains `Terminal::take_pending_bell`, and if true, sends SessionDelta::Bell (cleared by the main thread on focus). The preview is **bundled into SessionDelta::Upsert** rather than a second snapshot slot (implementation-time Judge ruling, 2026-07-05: bundling into the delta wins on coherence, memory, and lock time. A dedicated `SidebarPublish` gate + `decide_sidebar_publish` throttle is implemented by **reusing the pattern, in a separate instance,** from `OverviewPublish`; Omen T1).
 - branch-poll thread (new): triggered by cwd-change events sourced from OSC-7. Caches `(branch, Instant)` per cwd (≥1s throttle), negative-cache for non-git. Results posted via `UserEvent` (SessionDelta::Branch). Icon detection (FR-9) is co-located and re-evaluated only on cwd change.
 - sidebar layout (`crates/noa-app/src/sidebar.rs`, new): mirrors `tab_overview.rs`, computing card-rectangle vertical stacking geometry, scroll offset, `hit_test` (→ SessionCardId), and close/… button rectangles as pure functions. Independent of winit/wgpu.
-- rendering (reuses `crates/noa-render/src/blit.rs`): card frames use `CardStyle` + `overlay_texture_cards`. Text (name/cwd/branch/preview) uses a small dedicated `Renderer`, overview-style (one instance reused across all cards, not a per-card renderer). Status dots are small filled quads.
+- rendering (reuses `crates/noa-render/src/blit.rs`): card frames use `CardStyle` and texture composition. Text uses a small dedicated `Renderer`, reused across cards. Status uses distinct glyphs and categorical rails; the detailed rendering contract follows below.
 - resize path (`crates/noa-app/src/app.rs`): on toggle, applies the sidebar-width inset to `pane_bounds_for_size` for the target `WindowState` group → `relayout_and_resize_window` (grid → pty winsize) → `request_redraw`, in that order (quick-terminal excluded).
 - config (`crates/noa-config/src/lib.rs` `StartupConfig`, `parser.rs`): adds `sidebar-enabled`/`sidebar-width`/`sidebar-hotkey`/`sidebar-preview-lines`, following the `quick_terminal_hotkey` pattern. No generic keybind→action system is introduced (parser.rs's keybind handling is currently diagnostic-only).
-- header bar (`sidebar.rs` + rendering): execution status is reduced to a boolean via `group_running_program_count`. Centered title is `WindowState.title`, pill is SessionCard.name.
+- header bar: collapsed to zero height under FR-5; the toolbar contains the new-session button.
 - teardown GC sites (`crates/noa-app/src/app.rs`): sends SessionDelta::Remove at the 5 sites `close_tab`, `close_pane_after_pty_exit`, `close_pane`, window remove, and `request_quit`.
+
+### Current card rendering contract (2026-11-27)
+
+| Region | Content and width policy |
+|---|---|
+| Identity | Fixed status/icon slots, a bold session name, optional right-aligned age, and a menu target. The name uses space released by an absent age. |
+| Agent status | Process/agent badge, structured state or notification label, and AUTO state. Narrow rows shorten labels and the badge while preserving status and automation first. Remote panes retain `PROCESS N/A` / `AUTO N/A` instead of implying support. |
+| Working context | Branch and home-abbreviated cwd receive separate column budgets. Short fields return unused space to their neighbor; middle elision retains identifying suffixes. |
+| Preview | A configured number of rows shared by request detail, approval audit, other detail, and the newest output that fits. Original output colors are retained. |
+
+**Font and spacing.** The measured `FontGrid` cell height determines distinct
+text rows, preview steps, and the height needed for the configured content.
+Design-space offsets remain inputs for spacing, but they must not place two
+fields on the same cell row after pixel-to-cell conversion. Fixed-height
+examples such as 163px for five preview rows or 71px for no preview are not a
+runtime contract: measured cell height takes precedence. A zero-preview card
+ends after its working-context row and bottom padding, without reserving an
+empty preview block. All sidebar grids, including card and menu textures, use
+the dedicated zero grid padding rather than the user's terminal padding.
+
+**Text fitting.** Fit fields to display columns rather than bytes or scalar
+counts. Japanese wide characters, combining sequences, emoji, and keycaps
+remain intact at grapheme boundaries. Width accounting follows the terminal
+grid, including the two-column footprint of keycaps without VS16. Control
+characters in displayed data become spaces so they cannot move the synthetic
+terminal cursor. For colored text, join the plain spans, select complete
+graphemes within the width budget, and only then add SGR color sequences;
+escape bytes consume no display columns. A color boundary must not split a
+grapheme. Names use end elision, paths and branches use middle elision, and
+inline rename keeps its insertion end visible. Fields never rely on a later
+time or menu run overwriting overflowing text.
+
+**Preview priority.** Consume the available rows in this order: current
+`needs_attention` detail, newest auto-approval audit summary, other current
+agent detail, then the newest terminal-output rows that fit. The current
+detail appears at most once. With one preview row, an active request therefore
+remains visible even when an older audit entry exists. With
+`sidebar-preview-lines = 0`, none of these details or output rows is shown;
+the identity, status/AUTO, and working-context rows remain available.
+
+**Interaction states.** Resting cards keep the seamless transparent surface.
+Selected, hovered, or flashing cards show the background chosen by the draw
+model, multiplied by window background opacity and the chrome surface alpha.
+Only the selected card gets a subtle focus stroke, with no glow. Attention
+continues to use its glyph, status label, and rail, so it does not resemble a
+second selected card. Dragged cards use the same selected surface treatment.
+The raster cache includes these interaction states.
+
+**Clipping and menus.** Render every visible card into a full-height local
+texture and sample the visible source slice when scrolling clips its top,
+bottom, or both. Keep the amount clipped from the top independently of the
+visible height. A progress track is drawn only when the card's real bottom is
+visible; it must not move to a viewport clipping edge. The menu popup is
+bounded to the available area and prefers opening above its anchor when the
+space below is insufficient. Its rendered and clickable geometry must agree.
 
 ## L3: Acceptance Criteria
 
 - AC-1 (FR-1): applying SessionDelta::Upsert then Remove in sequence increases/decreases the store size, and after Remove the corresponding `SessionCardId` is gone, verified by a unit test.
 - AC-2 (FR-1, NFR-6): a source-scan `#[test]` that reads the module source asserts that `use winit`/`use wgpu`/`winit::`/`wgpu::` never appear in `session_store.rs` or `sidebar.rs`.
-- AC-3 (FR-2): text lines generated from a given SessionCard include `[icon] name`, `cwd … branch`, and updated-time (asserted on the layout's line strings via a unit test).
+- AC-3 (FR-2): a SessionCard generates separate identity, agent-status, context, and configured preview content. Name, status/AUTO, and branch/cwd are fitted within their own row budgets; updated-time follows FR-10's visibility rule (unit tests).
 - AC-4 (FR-3): `hit_test(point)` returns the correct `SessionCardId` for a point inside a card's area, and `None` outside it (unit test).
 - AC-4b (FR-3) [manual]: clicking a card focuses the target window, and other windows' Terminal contents don't change.
 - AC-5 (FR-4): on toggle, every pane grid of the focused window is resized before the pty winsize send, in the same shape as the existing `pane_resize_batch_plan` test (`multi_pane_resize_batching_resizes_all_grids_before_pty_winsize_sends`, app/helpers/tests.rs:773), asserting the order when the sidebar inset is applied.
@@ -181,6 +254,12 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - AC-21 (NFR-5) [manual]: no Nerd Font installed → icons still render via the embedded Symbols Nerd Font Mono fallback (no tofu); shell without OSC 133 → all dots green (idle); non-git cwd → branch field is empty.
 - AC-22 (NFR-6): satisfied by AC-2's source-scan test covering SessionStore and sidebar layout (`cargo tree` isn't used since it can't see module boundaries; noa-config's wgpu/winit independence can be confirmed via `cargo tree` as a crate dependency).
 - AC-23 (FR-15): increasing/decreasing the scroll offset with a card count exceeding the viewport height allows reaching the first/last card respectively, with the offset clamped to [0, max] (unit test).
+- AC-24 (FR-2, NFR-7): identity, status, context, and preview resolve to distinct cell rows for representative font heights and display scales. Preview counts of 0, 1, and 5 fit inside the resulting card, independent of terminal padding (unit tests and manual GUI verification).
+- AC-25 (FR-2): bounded text preserves Japanese, combining sequences, emoji, and keycaps; colored-span boundaries do not split graphemes or consume columns. Control characters cannot change the synthetic terminal cursor position (unit tests).
+- AC-26 (FR-2): with an audit entry and current request detail, a one-row preview shows the request first; remaining rows follow the documented priority and use the newest output. A zero-row preview emits no details or output (unit tests).
+- AC-27 (FR-2) [manual]: selection and hover are visible in light and dark themes, attention remains distinct from selection, and configured transparency remains effective. Interaction changes invalidate the raster cache (unit tests).
+- AC-28 (FR-15): top-, bottom-, and both-edge clipping sample the correct source slice. Progress is shown only at the card's real bottom (unit tests and manual GUI verification).
+- AC-29 (FR-7): a menu near the bottom opens above its anchor when necessary, stays bounded, and uses identical geometry for rendering and hit-testing (unit tests and manual GUI verification).
 
 ## Scope
 
@@ -208,7 +287,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 See CHALLENGE, "Considered but rejected (from EXPAND)" (A, B, D, E).
 
 ## Open Questions / Deferred Decisions
-1. ~~Foreground process-name detection~~: **implemented 2026-07-05** (tcgetpgrp + libproc, session-metadata worker. Used in both card and header). Remaining: an option to re-enable the last-output preview (plumbing kept, only rendering stopped).
+1. ~~Foreground process-name detection~~: **implemented 2026-07-05** (tcgetpgrp + libproc, session-metadata worker). Preview rendering is also implemented and controlled by `sidebar-preview-lines`; the header was removed under FR-5.
 2. Handling scale beyond 20 cards: repo-root/cwd grouping, collapsing, unread badges (a Slack-style UI's survival condition, Flux warning #3). v1 is scroll-only.
 3. B-flavor active-swap: switching via multiple Terminals multiplexed in one window. Kept as an internal seam behind the switching policy.
 4. A new-window variant for the + button: v1 opens only a new tab in the current window.

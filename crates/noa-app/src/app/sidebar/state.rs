@@ -513,14 +513,29 @@ impl App {
     /// so the card heights and interior offsets scale with the inset. Falls back
     /// to scale 1.0 for an unknown window. Also folds in [`Self::sidebar_font_zoom`]
     /// so the sidebar's own font-size setting scales cards and hit-testing
-    /// coherently with the chrome drawn from `sidebar_draw_model`.
+    /// coherently with the chrome drawn from `sidebar_draw_model`. Snap the
+    /// vertical rows to this window's actual font metrics to avoid collisions
+    /// when system fonts have different line heights.
     pub(in crate::app) fn sidebar_metrics(&self, window_id: WindowId) -> SidebarMetrics {
-        let scale = self
+        let dpr = self
             .windows
             .get(&window_id)
-            .map_or(1.0, |state| state.window.scale_factor() as f32)
-            * self.sidebar_font_zoom();
-        SidebarMetrics::new_with_preview_lines(scale, self.config.sidebar_preview_lines)
+            .map_or(1.0, |state| state.window.scale_factor());
+        let scale = dpr as f32 * self.sidebar_font_zoom();
+        let metrics =
+            SidebarMetrics::new_with_preview_lines(scale, self.config.sidebar_preview_lines);
+        let Some(gpu) = &self.gpu else {
+            return metrics;
+        };
+        let cell_h = gpu
+            .sidebar_fonts
+            .get(crate::app::helpers::sidebar_font_pixel_size(
+                self.config.sidebar_font_size,
+                dpr,
+            ))
+            .metrics()
+            .cell_h;
+        metrics.with_cell_height(cell_h)
     }
 
     /// Recompute the app-wide io-thread gate: on while any eligible window

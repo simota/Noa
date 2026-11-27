@@ -1057,7 +1057,6 @@ impl App {
                 gpu,
                 state.surface_config.format,
                 sidebar_font_pixel_size(self.config.sidebar_font_size, state.window.scale_factor()),
-                padding,
                 &view,
                 surface_size,
                 model,

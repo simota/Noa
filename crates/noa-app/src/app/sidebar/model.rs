@@ -1,3 +1,4 @@
+use super::text::{colored_prefix, elide_end, elide_middle, elide_start, width};
 use super::*;
 
 impl App {
@@ -62,7 +63,7 @@ impl App {
         let layout_metrics = self.sidebar_metrics(window_id);
         let height = state.window.inner_size().height.max(1);
         let band = PaneRectApp::new(0, 0, inset, height);
-        let grid = grid_size_for_pane_rect(band, metrics, self.padding);
+        let grid = grid_size_for_pane_rect(band, metrics, SIDEBAR_GRID_PADDING);
 
         let bounds = self.sidebar_layout_bounds(window_id, inset);
         let windows = self.session_windows_for_window(window_id);
@@ -73,14 +74,11 @@ impl App {
         // at the padding origin. One closure per grid (band / card / menu).
         let cell_w = metrics.cell_w.max(1.0);
         let cell_h = metrics.cell_h.max(1.0);
-        let pad_left = self.padding.left;
-        let pad_top = self.padding.top;
+        let pad_left = SIDEBAR_GRID_PADDING.left;
+        let pad_top = SIDEBAR_GRID_PADDING.top;
         let to_cell = |grid: GridSize| {
             move |x: u32, y: u32| px_to_cell(x, y, pad_left, pad_top, cell_w, cell_h, grid)
         };
-        let band_cell = to_cell(grid);
-
-        let mut runs: Vec<SidebarTextRun> = Vec::new();
         let selected_id = Self::session_card_id(window_id, state.focused_pane);
 
         // The top header band (status label / center title / name pill) was
@@ -92,9 +90,8 @@ impl App {
         let btn = layout.new_button;
         let new_button_hover = state.sidebar_button_hover;
 
-        // Card text on the flat backdrop, plus a transparent text overlay for
-        // every fully-visible card (FR-2). A top-clipped progress card is also
-        // promoted because its real bottom edge (and progress bar) is visible.
+        // Every card has a local text texture. Clipping that texture preserves
+        // the same row positions and selection treatment at both viewport edges.
         let now = crate::localtime::wall_clock_now();
         let now_instant = Instant::now();
         let home = home_dir();
@@ -107,7 +104,7 @@ impl App {
         // pure layout remains the single source of geometry.
         let card_w = layout_metrics.card_w(inset).max(1);
         let card_band = PaneRectApp::new(0, 0, card_w, layout_metrics.card_h);
-        let card_grid = grid_size_for_pane_rect(card_band, metrics, self.padding);
+        let card_grid = grid_size_for_pane_rect(card_band, metrics, SIDEBAR_GRID_PADDING);
         let card_cell = to_cell(card_grid);
         // The card being drag-reordered is drawn as a floating copy below (2b),
         // so its static slot is left as a bare backdrop gap — the affordance that
@@ -146,112 +143,80 @@ impl App {
             // stays visible while its menu popup is open.
             let menu_hint =
                 hovered_id == Some(card_rects.id) || state.sidebar_menu == Some(card_rects.id);
-            let full = card_rects.bounds.h == layout_metrics.card_h;
             let progress_bar = card_progress_bar(card);
-            let clipped_at_top = !full && card_rects.bounds.y == layout.viewport.y;
-            let via_overlay =
-                sidebar_card_uses_overlay(full, clipped_at_top, progress_bar.is_some());
-            // Text lives in the overlay for a promoted card; only a flat
-            // (non-promoted) partial card writes its text straight to the band.
-            if !via_overlay {
-                emit_card_text(
-                    &mut runs, card_rects, card, &lines, &band_cell, palette, renaming, menu_hint,
-                );
-            }
-
-            if via_overlay {
-                let selected = card_rects.id == selected_id;
-                let auto_flash = self
-                    .auto_approve_flash_until
-                    .get(&card_rects.id)
-                    .is_some_and(|until| now_instant < *until);
-                let attention_flash = self
-                    .attention_flash_until
-                    .get(&card_rects.id)
-                    .is_some_and(|until| now_instant < *until);
-                let progress_flash = self
-                    .progress_flashes
-                    .get(&card_rects.id)
-                    .filter(|flash| now_instant < flash.until)
-                    .map(|flash| flash.kind);
-                let local = layout_metrics.card_local_rects(card_rects.id, card_w);
-                let mut card_runs = Vec::new();
-                emit_card_text(
-                    &mut card_runs,
-                    &local,
-                    card,
-                    &lines,
-                    &card_cell,
-                    palette,
-                    renaming,
-                    menu_hint,
-                );
-                // A promoted partial card samples only its visible vertical
-                // slice of the full-height card texture: a card clipped at the
-                // viewport top shows its lower slice (uv starts past 0); one
-                // clipped only at the bottom shows its upper slice (uv from 0).
-                // (A card short enough to be clipped at both ends — a viewport
-                // narrower than one card — degrades to showing its lower slice.)
-                let src_uv = if full {
-                    [0.0, 0.0, 1.0, 1.0]
+            let selected = card_rects.id == selected_id;
+            let auto_flash = self
+                .auto_approve_flash_until
+                .get(&card_rects.id)
+                .is_some_and(|until| now_instant < *until);
+            let attention_flash = self
+                .attention_flash_until
+                .get(&card_rects.id)
+                .is_some_and(|until| now_instant < *until);
+            let progress_flash = self
+                .progress_flashes
+                .get(&card_rects.id)
+                .filter(|flash| now_instant < flash.until)
+                .map(|flash| flash.kind);
+            let local = layout_metrics.card_local_rects(card_rects.id, card_w);
+            let mut card_runs = Vec::new();
+            emit_card_text(
+                &mut card_runs,
+                &local,
+                card,
+                &lines,
+                &card_cell,
+                palette,
+                renaming,
+                menu_hint,
+            );
+            let src_uv = card_source_uv(card_rects, layout_metrics.card_h);
+            let selected_bg = sidebar_selected_card_bg(panel_bg);
+            let flash_fill = auto_flash || attention_flash || progress_flash.is_some();
+            cards.push(SidebarCardDraw {
+                rect: card_rects.bounds,
+                grid: card_grid,
+                bg: if auto_flash {
+                    sidebar_auto_flash_card_bg(panel_bg)
+                } else if attention_flash {
+                    sidebar_attention_flash_card_bg(panel_bg, selected)
+                } else if let Some(kind) = progress_flash {
+                    sidebar_progress_flash_card_bg(panel_bg, selected, kind)
+                } else if selected {
+                    selected_bg
+                } else if hovered_id == Some(card_rects.id) {
+                    sidebar_hover_card_bg(panel_bg)
                 } else {
-                    let card_h = layout_metrics.card_h.max(1) as f32;
-                    let clipped_top = if card_rects.bounds.y <= layout.viewport.y {
-                        layout_metrics.card_h.saturating_sub(card_rects.bounds.h)
-                    } else {
-                        0
-                    };
-                    [
-                        0.0,
-                        clipped_top as f32 / card_h,
-                        1.0,
-                        card_rects.bounds.h as f32 / card_h,
-                    ]
-                };
-                let selected_bg = sidebar_selected_card_bg(panel_bg);
-                let flash_fill = auto_flash || attention_flash || progress_flash.is_some();
-                cards.push(SidebarCardDraw {
-                    rect: card_rects.bounds,
-                    grid: card_grid,
-                    bg: if auto_flash {
-                        sidebar_auto_flash_card_bg(panel_bg)
-                    } else if attention_flash {
-                        sidebar_attention_flash_card_bg(panel_bg, selected)
-                    } else if let Some(kind) = progress_flash {
-                        sidebar_progress_flash_card_bg(panel_bg, selected, kind)
-                    } else if selected {
-                        selected_bg
-                    } else if hovered_id == Some(card_rects.id) {
-                        sidebar_hover_card_bg(panel_bg)
-                    } else {
-                        sidebar_card_bg(panel_bg)
-                    },
-                    flash_fill,
-                    selected,
-                    attention: card.attention,
-                    status_rail: card_status_rail(card),
-                    progress_bar,
-                    runs: card_runs,
-                    src_uv,
-                });
-            }
+                    sidebar_card_bg(panel_bg)
+                },
+                flash_fill,
+                selected,
+                hovered: hovered_id == Some(card_rects.id),
+                attention: card.attention,
+                status_rail: card_status_rail(card),
+                progress_bar: progress_bar.filter(|_| {
+                    card_rects.clipped_top + card_rects.bounds.h == layout_metrics.card_h
+                }),
+                runs: card_runs,
+                src_uv,
+            });
         }
 
         // Card `…` menu popup (FR-7): its own overlay, composited above the cards
-        // so a card row can never hide it. Skipped when the open card has
-        // scrolled out of view or the popup would spill past the window bottom.
+        // so a card row can never hide it. The layout places it above the anchor
+        // near the bottom, or omits it if the available area cannot contain it.
         let menu = state.sidebar_menu.and_then(|open| {
             let card_rects = layout.cards.iter().find(|c| c.id == open)?;
             let popup = layout_metrics.card_menu_popup_rect(
                 card_rects.menu_button,
                 CARD_MENU_ITEMS.len(),
-                inset,
+                bounds,
             );
             if popup.w == 0 || popup.h == 0 || popup.bottom() > height {
                 return None;
             }
             let menu_band = PaneRectApp::new(0, 0, popup.w, popup.h);
-            let menu_grid = grid_size_for_pane_rect(menu_band, metrics, self.padding);
+            let menu_grid = grid_size_for_pane_rect(menu_band, metrics, SIDEBAR_GRID_PADDING);
             let menu_cell = to_cell(menu_grid);
             let mut menu_runs = Vec::new();
             for (index, &item) in CARD_MENU_ITEMS.iter().enumerate() {
@@ -316,6 +281,7 @@ impl App {
                     bg: sidebar_selected_card_bg(panel_bg),
                     flash_fill: false,
                     selected: true,
+                    hovered: false,
                     attention: false,
                     status_rail: None,
                     progress_bar: card_progress_bar(card),
@@ -346,7 +312,7 @@ impl App {
             card_h: layout_metrics.card_h,
             card_w,
             grid,
-            runs,
+            runs: Vec::new(),
             new_button: btn,
             new_button_hover,
             cards,
@@ -358,8 +324,14 @@ impl App {
     }
 }
 
-fn sidebar_card_uses_overlay(full: bool, clipped_at_top: bool, has_progress: bool) -> bool {
-    full || (clipped_at_top && has_progress)
+fn card_source_uv(rects: &CardRects, card_h: u32) -> [f32; 4] {
+    let height = card_h.max(1) as f32;
+    [
+        0.0,
+        rects.clipped_top as f32 / height,
+        1.0,
+        rects.bounds.h as f32 / height,
+    ]
 }
 
 /// The viewer's home directory, resolved once and cached: it drives every
@@ -389,8 +361,17 @@ fn px_to_cell(
     )
 }
 
-/// A single-rect text run positioned via `to_cell`, or `None` for an empty rect
-/// or text (so callers can `extend`).
+/// Available terminal columns between the rectangle's quantized edges.
+fn text_columns(to_cell: &impl Fn(u32, u32) -> (u16, u16), rect: SidebarRect) -> usize {
+    if rect.w == 0 || rect.h == 0 {
+        return 0;
+    }
+    let (left, _) = to_cell(rect.x, rect.y);
+    let (right, _) = to_cell(rect.right(), rect.y);
+    usize::from(right.saturating_sub(left))
+}
+
+/// A bounded, single-line text run, or `None` when no text fits.
 fn window_run(
     to_cell: &impl Fn(u32, u32) -> (u16, u16),
     rect: SidebarRect,
@@ -398,7 +379,8 @@ fn window_run(
     fg: Rgb,
     bold: bool,
 ) -> Option<SidebarTextRun> {
-    if rect.w == 0 || rect.h == 0 || text.is_empty() {
+    let text = elide_end(&text, text_columns(to_cell, rect));
+    if text.is_empty() {
         return None;
     }
     let (col, row) = to_cell(rect.x, rect.y);
@@ -412,10 +394,19 @@ fn window_run(
     })
 }
 
-/// A truecolor SGR foreground prefix, embeddable inside a run's text (the run
-/// text is fed through a `Stream`, so inline escapes recolor mid-run).
-fn sgr_fg(color: Rgb) -> String {
-    format!("\x1b[38;2;{};{};{}m", color.r, color.g, color.b)
+/// Fit the plain text before adding color escapes, preserving whole graphemes
+/// even when the source spans split a combining or emoji sequence.
+fn colored_run(
+    to_cell: &impl Fn(u32, u32) -> (u16, u16),
+    rect: SidebarRect,
+    spans: &[(&str, Rgb)],
+) -> Option<SidebarTextRun> {
+    let text = colored_prefix(spans, text_columns(to_cell, rect));
+    if text.is_empty() {
+        return None;
+    }
+    let (col, row) = to_cell(rect.x, rect.y);
+    Some(SidebarTextRun::new(col, row, text, spans.first()?.1))
 }
 
 /// Resolve a preview span's pure `noa_core::Color` to a concrete sidebar RGB:
@@ -431,24 +422,20 @@ fn resolve_preview_color(color: noa_core::Color, palette: &[Rgb; 256]) -> Rgb {
 }
 
 /// A text run right-aligned within `rect`: the run's column is backed off from
-/// the rect's right edge by the text's display width (ASCII narrow, everything
-/// else wide — enough for the updated-time strings this positions).
+/// the rect's right edge by the text's display width.
 fn right_aligned_run(
     to_cell: &impl Fn(u32, u32) -> (u16, u16),
     rect: SidebarRect,
     text: String,
     fg: Rgb,
 ) -> Option<SidebarTextRun> {
-    if rect.w == 0 || rect.h == 0 || text.is_empty() {
+    let text = elide_end(&text, text_columns(to_cell, rect));
+    if text.is_empty() {
         return None;
     }
     let (left_col, row) = to_cell(rect.x, rect.y);
     let (right_col, _) = to_cell(rect.x + rect.w, rect.y);
-    let width: u16 = text
-        .chars()
-        .map(|c| if c.is_ascii() { 1u16 } else { 2 })
-        .sum();
-    let col = right_col.saturating_sub(width).max(left_col);
+    let col = right_col.saturating_sub(width(&text) as u16).max(left_col);
     Some(SidebarTextRun {
         col,
         row,
@@ -459,11 +446,112 @@ fn right_aligned_run(
     })
 }
 
-/// Emit one card's text runs (status indicator, project icon, bold name with the
-/// right-aligned updated-time, the meta row `process · ⎇ branch · cwd`, and
-/// the configured preview rows) through `to_cell`. Shared by the flat backdrop
-/// (window coords) and each card overlay (card-local coords) so both agree on
-/// layout. `renaming` carries the live rename buffer when this card's
+/// Keep actionable state and automatic approval visible before spending the
+/// remaining columns on the process name.
+fn agent_meta(card: &SessionCard, lines: &CardLines, cols: usize) -> Vec<(String, Rgb)> {
+    let (mut badge, badge_fg) = if lines.remote_unsupported {
+        ("PROCESS N/A".to_string(), chrome().dim_fg)
+    } else {
+        process_badge(card.agent.kind, &lines.process, card.is_running())
+    };
+    let (mut status, status_fg) = if let Some(report) = &card.agent_status {
+        use noa_grid::AgentState;
+        let fg = match report.state {
+            AgentState::Running => chrome().dot_blue,
+            AgentState::Finished => chrome().dot_green,
+            _ => chrome().dot_red,
+        };
+        (report.state.label().to_string(), fg)
+    } else if card.attention {
+        (ATTENTION_LABEL.to_string(), chrome().dot_red)
+    } else {
+        (String::new(), chrome().dim_fg)
+    };
+    let (auto, auto_fg) = if lines.remote_unsupported {
+        ("AUTO N/A", chrome().dim_fg)
+    } else if card.auto_approve_enabled {
+        ("AUTO ON", chrome().accent)
+    } else {
+        ("", chrome().dim_fg)
+    };
+    let total = |badge: &str, status: &str, gap: usize| {
+        width(badge)
+            + width(status)
+            + width(auto)
+            + gap * (usize::from(!status.is_empty()) + usize::from(!auto.is_empty()))
+    };
+    if total(&badge, &status, 3) > cols {
+        if let Some(report) = &card.agent_status {
+            use noa_grid::AgentState;
+            status = match report.state {
+                AgentState::Permission => "approval",
+                AgentState::Input => "reply",
+                AgentState::Finished => "ended",
+                _ => report.state.label(),
+            }
+            .to_string();
+        }
+        if !lines.remote_unsupported && card.agent.kind == AgentKind::ClaudeCode {
+            badge = "✳ Claude".to_string();
+        }
+    }
+    let gap = if total(&badge, &status, 3) <= cols {
+        " · "
+    } else {
+        " "
+    };
+    let mut remaining = cols;
+    let auto = elide_end(auto, remaining);
+    remaining =
+        remaining.saturating_sub(width(&auto) + if auto.is_empty() { 0 } else { width(gap) });
+    let status = elide_end(&status, remaining);
+    remaining =
+        remaining.saturating_sub(width(&status) + if status.is_empty() { 0 } else { width(gap) });
+    let badge = elide_end(&badge, remaining);
+    let mut spans = Vec::new();
+    for (text, fg) in [(badge, badge_fg), (status, status_fg), (auto, auto_fg)] {
+        if text.is_empty() {
+            continue;
+        }
+        if !spans.is_empty() {
+            spans.push((gap.to_string(), chrome().dim_fg));
+        }
+        spans.push((text, fg));
+    }
+    spans
+}
+
+/// Give branch and working directory their own row, retaining the recognizable
+/// beginning and useful tail of each path when space is limited.
+fn project_context(lines: &CardLines, cols: usize) -> String {
+    let branch = if lines.branch.is_empty() {
+        String::new()
+    } else {
+        format!("⎇ {}", lines.branch)
+    };
+    if branch.is_empty() {
+        return elide_middle(&lines.cwd, cols);
+    }
+    if lines.cwd.is_empty() {
+        return elide_middle(&branch, cols);
+    }
+    if cols < 7 {
+        return elide_middle(&lines.cwd, cols);
+    }
+    let available = cols - 3;
+    let branch_cols =
+        width(&branch).min((available / 2).max(available.saturating_sub(width(&lines.cwd))));
+    let cwd_cols = available - branch_cols;
+    let branch = if branch_cols > 2 {
+        format!("⎇ {}", elide_middle(&lines.branch, branch_cols - 2))
+    } else {
+        elide_end(&branch, branch_cols)
+    };
+    format!("{branch} · {}", elide_middle(&lines.cwd, cwd_cols))
+}
+
+/// Emit identity, status, project context, and the configured preview rows.
+/// `renaming` carries the live rename buffer when this card's
 /// inline rename is open — it replaces the name run with the buffer + caret in
 /// the accent color. `menu_hint` surfaces the `…` glyph over its (always-live)
 /// hit region — on for the hovered card and while the card's menu is open.
@@ -495,30 +583,38 @@ fn emit_card_text(
         icon_color(card.icon),
         false,
     ));
+    let title = SidebarRect::new(
+        rects.name_line.x,
+        rects.name_line.y,
+        rects.updated.right().saturating_sub(rects.name_line.x),
+        rects.menu_button.h,
+    );
+    let title_cols = text_columns(to_cell, title);
+    let time_cols = width(&lines.updated);
+    // Keep a useful name before reserving a timestamp. Inline rename uses the
+    // whole title area so the insertion point remains visible.
+    let show_time = renaming.is_none()
+        && time_cols > 0
+        && title_cols >= time_cols + 1 + width(&lines.name).min(12);
+    let name_cols = title_cols.saturating_sub(if show_time { time_cols + 1 } else { 0 });
     let (name_text, name_fg) = match renaming {
-        // Inline rename (FR-7): the buffer plus a caret, in the accent color.
-        Some(buffer) => (format!("{buffer}▏"), chrome().accent),
-        None => (lines.name.clone(), chrome().fg),
+        Some(buffer) => (
+            elide_start(&format!("{buffer}▏"), name_cols),
+            chrome().accent,
+        ),
+        None => (elide_end(&lines.name, name_cols), chrome().fg),
     };
-    out.extend(window_run(
-        to_cell,
-        rects.name_line,
-        name_text,
-        name_fg,
-        true,
-    ));
-    // Updated-time, right-aligned on the name row. Emitted after the name so
-    // an overlong name's overflow cells are overwritten by the time, not the
-    // other way around.
-    out.extend(right_aligned_run(
-        to_cell,
-        rects.updated,
-        lines.updated.clone(),
-        chrome().dim_fg,
-    ));
+    out.extend(window_run(to_cell, title, name_text, name_fg, true));
+    if show_time {
+        out.extend(right_aligned_run(
+            to_cell,
+            title,
+            lines.updated.clone(),
+            chrome().dim_fg,
+        ));
+    }
     // The `…` menu affordance (its hit region is always live; the glyph shows
-    // on hover / while its menu is open). Emitted after the name/time for the
-    // same overflow-overwrite reason.
+    // on hover / while its menu is open).
     if menu_hint {
         out.extend(window_run(
             to_cell,
@@ -529,69 +625,20 @@ fn emit_card_text(
         ));
     }
 
-    // Meta row: a recognized AI agent gets its brand glyph/color/name (busy or
-    // idle); any other process shows green `✳` while running, dim `❯` while
-    // idle. The git branch and the dim cwd follow on the same row. A pending
-    // interaction request (FR-16) overrides the badge with the attention color
-    // and appends an accurate notification label. The indicator and label stay
-    // steady; arrival is emphasized once by the card background/ring.
-    if rects.meta.w > 0 && rects.meta.h > 0 {
-        let (badge, badge_fg) = if lines.remote_unsupported {
-            ("PROCESS N/A".to_string(), chrome().dim_fg)
-        } else {
-            process_badge(card.agent.kind, &lines.process, card.busy)
-        };
-        let (badge, badge_fg) = if let Some(status) = &card.agent_status {
-            let detail = if status.detail.is_empty() {
-                String::new()
-            } else {
-                format!(" · {}", status.detail)
-            };
-            let fg = if status.state.needs_attention() {
-                chrome().dot_red
-            } else {
-                badge_fg
-            };
-            (format!("{badge} · {}{detail}", status.state.label()), fg)
-        } else if card.attention {
-            (format!("{badge} · {ATTENTION_LABEL}"), chrome().dot_red)
-        } else {
-            (badge, badge_fg)
-        };
-        let mut text = String::new();
-        let run_fg = if lines.remote_unsupported {
-            text.push_str("AUTO N/A");
-            text.push_str(&sgr_fg(chrome().dim_fg));
-            text.push_str(" · ");
-            text.push_str(&badge);
-            chrome().dim_fg
-        } else if card.auto_approve_enabled {
-            text.push_str("AUTO ON");
-            text.push_str(&sgr_fg(chrome().dim_fg));
-            text.push_str(" · ");
-            text.push_str(&sgr_fg(badge_fg));
-            text.push_str(&badge);
-            chrome().accent
-        } else {
-            text.push_str(&badge);
-            badge_fg
-        };
-        // The dim suffix (branch + cwd) is recolored inline; the run fg colors
-        // the badge portion.
-        if !lines.branch.is_empty() {
-            text.push_str(&sgr_fg(chrome().dim_fg));
-            text.push_str(&format!(" · ⎇ {}", lines.branch));
-        }
-        if !lines.cwd.is_empty() {
-            text.push_str(&sgr_fg(chrome().dim_fg));
-            text.push_str(&format!(" · {}", lines.cwd));
-        }
-        out.extend(window_run(to_cell, rects.meta, text, run_fg, false));
-    }
+    let meta = agent_meta(card, lines, text_columns(to_cell, rects.meta));
+    let spans: Vec<_> = meta.iter().map(|(text, fg)| (text.as_str(), *fg)).collect();
+    out.extend(colored_run(to_cell, rects.meta, &spans));
+    out.extend(window_run(
+        to_cell,
+        rects.context,
+        project_context(lines, text_columns(to_cell, rects.context)),
+        chrome().dim_fg,
+        false,
+    ));
 
-    // The first preview row carries the auto-approve audit summary when
-    // present; remaining rows show last-output preview in their original ANSI
-    // colors. Rows the card has no preview line for stay blank.
+    // Pending interaction details take priority over a previous approval. All
+    // summaries share the configured preview budget; the remaining rows retain
+    // the newest output, with its original foreground colors.
     let audit = card.auto_approve_audit.back().map(|entry| {
         format!(
             "AUTO APPROVED {} · {} {}",
@@ -600,34 +647,37 @@ fn emit_card_text(
             entry.prompt
         )
     });
-    let mut preview_index = 0;
+    let detail = card
+        .agent_status
+        .as_ref()
+        .filter(|report| !report.detail.is_empty())
+        .map(|report| (report.detail.as_str(), report.state.needs_attention()));
+    let mut summaries = Vec::new();
+    if let Some((text, true)) = detail {
+        summaries.push((text, chrome().dot_red));
+    }
+    if let Some(text) = audit.as_deref() {
+        summaries.push((text, chrome().accent));
+    }
+    if let Some((text, false)) = detail {
+        summaries.push((text, chrome().dim_fg));
+    }
+    let output_rows = rects.preview.len().saturating_sub(summaries.len());
+    let mut preview_index = card.preview.len().saturating_sub(output_rows);
     for (row_index, rect) in rects.preview.iter().enumerate() {
-        if row_index == 0
-            && let Some(audit) = audit.as_ref()
-        {
-            out.extend(window_run(
-                to_cell,
-                *rect,
-                audit.clone(),
-                chrome().accent,
-                false,
-            ));
+        if let Some(&(text, fg)) = summaries.get(row_index) {
+            out.extend(window_run(to_cell, *rect, text.to_string(), fg, false));
             continue;
         }
         let Some(line) = card.preview.get(preview_index) else {
             continue;
         };
         preview_index += 1;
-        let mut text = String::new();
-        for span in line {
-            text.push_str(&sgr_fg(resolve_preview_color(span.fg, palette)));
-            text.push_str(&span.text);
-        }
-        let fg = line
-            .first()
-            .map(|span| resolve_preview_color(span.fg, palette))
-            .unwrap_or(chrome().dim_fg);
-        out.extend(window_run(to_cell, *rect, text, fg, false));
+        let spans: Vec<_> = line
+            .iter()
+            .map(|span| (span.text.as_str(), resolve_preview_color(span.fg, palette)))
+            .collect();
+        out.extend(colored_run(to_cell, *rect, &spans));
     }
 }
 
@@ -644,23 +694,29 @@ fn mark_float_card(lines: &mut CardLines, is_float: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_store::{PreviewSpan, SessionStore, WallClock};
+    use crate::session_store::{AutoApproveAuditEntry, PreviewSpan, SessionStore, WallClock};
     use noa_core::Color;
 
     #[test]
-    fn top_clipped_progress_card_uses_overlay() {
-        assert!(sidebar_card_uses_overlay(false, true, true));
+    fn full_card_samples_the_whole_texture() {
+        assert_eq!(card_source_uv(&card_rects(), 140), [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]
-    fn partial_card_without_a_visible_progress_edge_stays_on_the_band() {
-        assert!(!sidebar_card_uses_overlay(false, true, false));
-        assert!(!sidebar_card_uses_overlay(false, false, true));
+    fn partial_cards_sample_the_correct_top_or_bottom_slice() {
+        let mut rects = card_rects();
+        rects.bounds.h = 70;
+        assert_eq!(card_source_uv(&rects, 140), [0.0, 0.0, 1.0, 0.5]);
+        rects.clipped_top = 70;
+        assert_eq!(card_source_uv(&rects, 140), [0.0, 0.5, 1.0, 0.5]);
     }
 
     #[test]
-    fn full_card_always_uses_overlay() {
-        assert!(sidebar_card_uses_overlay(true, false, false));
+    fn short_viewport_keeps_the_middle_slice_without_squashing_content() {
+        let mut rects = card_rects();
+        rects.clipped_top = 35;
+        rects.bounds.h = 35;
+        assert_eq!(card_source_uv(&rects, 140), [0.0, 0.25, 1.0, 0.25]);
     }
 
     fn wall(hour: u32, minute: u32) -> WallClock {
@@ -897,8 +953,13 @@ mod tests {
     }
 
     #[test]
-    fn sgr_fg_emits_truecolor_escape() {
-        assert_eq!(sgr_fg(Rgb::new(10, 20, 30)), "\x1b[38;2;10;20;30m");
+    fn colored_prefix_emits_truecolor_without_spending_text_columns() {
+        let color = Rgb::new(10, 20, 30);
+        let text = colored_prefix(&[("color", color)], 5);
+        assert!(text.contains("\x1b[38;2;10;20;30m"));
+        let term = rendered_terminal(&text);
+        assert_eq!(term.active().cursor.x, 5);
+        assert_eq!(term.active().grid[0].cells[0].fg, Color::Rgb(color));
     }
 
     fn store_card(busy: bool, process: &str) -> SessionCard {
@@ -921,6 +982,258 @@ mod tests {
             process: Some(process.to_string()),
         });
         store.get(&id).unwrap().clone()
+    }
+
+    fn waiting_card() -> SessionCard {
+        let mut card = store_card(true, "claude");
+        card.name_override =
+            Some("検索結果の視認性を改善 👩🏽‍💻 1\u{20e3} cafe\u{301} long session title".to_string());
+        card.cwd = "/Users/dev/projects/a-very-long-working-directory/Noa".to_string();
+        card.branch = Some("feature/agent-sidebar-visibility-日本語のブランチ".to_string());
+        card.auto_approve_enabled = true;
+        card.agent_status = Some(noa_grid::AgentStatus {
+            state: noa_grid::AgentState::Permission,
+            detail: "Review permission for cargo test --workspace 日本語の詳細".to_string(),
+            blocked: Some(noa_grid::AgentBlock::Permission),
+            app: Some("claude-code".to_string()),
+        });
+        card.agent_status_at = Some(wall(10, 1));
+        card.auto_approve_audit.push_back(AutoApproveAuditEntry {
+            at: wall(10, 0),
+            agent: "Claude Code".to_string(),
+            prompt: "previous command".to_string(),
+        });
+        card.preview = (0..20)
+            .map(|index| {
+                vec![
+                    PreviewSpan {
+                        text: format!("output {index}: "),
+                        fg: Color::Rgb(Rgb::new(40, 120, 210)),
+                    },
+                    PreviewSpan {
+                        text: "日本語 👩🏽‍💻 1\u{20e3} cafe\u{301} passed".to_string(),
+                        fg: Color::Rgb(Rgb::new(90, 180, 110)),
+                    },
+                ]
+            })
+            .collect();
+        card
+    }
+
+    // Use the same VT/grid engine as the renderer, independently of the text
+    // fitting helper: emoji clusters, keycaps and SGR must consume real cells.
+    fn rendered_terminal(text: &str) -> Terminal {
+        let mut term = Terminal::new(GridSize {
+            cols: 1024,
+            rows: 1,
+        });
+        let mut stream = Stream::new();
+        stream.feed(b"\x1b[?7l", &mut term);
+        stream.feed(text.as_bytes(), &mut term);
+        term
+    }
+
+    fn rendered_width(text: &str) -> usize {
+        usize::from(rendered_terminal(text).active().cursor.x)
+    }
+
+    fn assert_runs_fit_without_overlap(runs: &[SidebarTextRun], grid: GridSize) {
+        let mut occupied = HashSet::new();
+        for run in runs {
+            let end = usize::from(run.col) + rendered_width(&run.text);
+            assert!(run.row < grid.rows, "row outside {grid:?}: {run:?}");
+            assert!(
+                end <= usize::from(grid.cols),
+                "text outside {grid:?}: {run:?}"
+            );
+            for col in usize::from(run.col)..end {
+                assert!(
+                    occupied.insert((col, run.row)),
+                    "overlapping cell ({col}, {}) in {grid:?}: {run:?}",
+                    run.row
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn real_font_metrics_keep_all_card_runs_inside_distinct_cells() {
+        let card = waiting_card();
+        let lines = card_lines(&card, wall(10, 3), Some("/Users/dev"), None);
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let rename = "長い日本語の名前 👩🏽‍💻 1\u{20e3} cafe\u{301} 編集中";
+        for dpr in [1.0, 1.5, 2.0] {
+            for font_size in [8.0, 11.5, 20.0] {
+                let font = FontGrid::new(
+                    crate::app::helpers::sidebar_font_pixel_size(font_size, dpr),
+                    Default::default(),
+                )
+                .expect("sidebar system font");
+                let font_metrics = font.metrics();
+                let scale = dpr as f32 * font_size / SIDEBAR_FONT_POINT_SIZE;
+                for preview_lines in [0, 1, 5, 20] {
+                    let metrics = SidebarMetrics::new_with_preview_lines(scale, preview_lines)
+                        .with_cell_height(font_metrics.cell_h);
+                    for width in [200, 360, 600] {
+                        let card_w = (f64::from(width) * dpr).round() as u32;
+                        let rects = metrics.card_local_rects(card_rects().id, card_w);
+                        let grid = grid_size_for_pane_rect(
+                            PaneRectApp::new(0, 0, card_w, metrics.card_h),
+                            font_metrics,
+                            GridPadding::ZERO,
+                        );
+                        let to_cell = |x, y| {
+                            px_to_cell(
+                                x,
+                                y,
+                                0.0,
+                                0.0,
+                                font_metrics.cell_w,
+                                font_metrics.cell_h,
+                                grid,
+                            )
+                        };
+                        for renaming in [None, Some(rename)] {
+                            let mut out = Vec::new();
+                            emit_card_text(
+                                &mut out, &rects, &card, &lines, &to_cell, &palette, renaming, true,
+                            );
+                            assert_runs_fit_without_overlap(&out, grid);
+                            let title = out.iter().find(|run| run.bold).expect("visible title");
+                            if renaming.is_some() {
+                                assert!(title.text.ends_with('▏'), "{title:?}");
+                            }
+                            assert!(out.iter().any(|run| run.text == "⋯"));
+                            let meta_row = to_cell(rects.meta.x, rects.meta.y).1;
+                            let context_row = to_cell(rects.context.x, rects.context.y).1;
+                            assert_ne!(meta_row, context_row);
+                            assert!(out.iter().any(|run| run.row == meta_row));
+                            assert!(out.iter().any(|run| run.row == context_row));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn actionable_status_and_auto_approval_survive_narrow_metadata_rows() {
+        let card = waiting_card();
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        for cols in [25, 34, 48, 80] {
+            let spans = agent_meta(&card, &lines, cols);
+            let plain: String = spans.iter().map(|(text, _)| text.as_str()).collect();
+            let spans: Vec<_> = spans
+                .iter()
+                .map(|(text, color)| (text.as_str(), *color))
+                .collect();
+            let colored = colored_prefix(&spans, cols);
+            assert!(plain.contains("approval"), "{cols}: {plain}");
+            assert!(plain.contains("AUTO ON"), "{cols}: {plain}");
+            assert!(rendered_width(&colored) <= cols, "{cols}: {plain}");
+        }
+    }
+
+    #[test]
+    fn context_preserves_branch_identity_and_the_working_directory_tail() {
+        let card = waiting_card();
+        let lines = card_lines(&card, wall(10, 3), Some("/Users/dev"), None);
+        for cols in [25, 34, 48, 80] {
+            let context = project_context(&lines, cols);
+            assert!(context.starts_with("⎇ "), "{context}");
+            assert!(context.ends_with("/Noa"), "{context}");
+            assert!(rendered_width(&context) <= cols, "{cols}: {context}");
+        }
+    }
+
+    #[test]
+    fn narrow_titles_reclaim_unused_timestamp_columns() {
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+        for busy in [false, true] {
+            let mut card = store_card(busy, "cargo");
+            card.name_override = Some("a long descriptive session name".to_string());
+            let lines = card_lines(&card, wall(10, 3), None, None);
+            let metrics = SidebarMetrics::new(1.0).with_cell_height(20.0);
+            let rects = metrics.card_local_rects(card_rects().id, 200);
+            let mut out = Vec::new();
+            emit_card_text(
+                &mut out, &rects, &card, &lines, &to_cell, &palette, None, true,
+            );
+            let title = out.iter().find(|run| run.bold).expect("title");
+            assert!(rendered_width(&title.text) > text_columns(&to_cell, rects.name_line));
+            assert!(
+                out.iter()
+                    .all(|run| lines.updated.is_empty() || run.text != lines.updated)
+            );
+            assert_runs_fit_without_overlap(
+                &out,
+                GridSize {
+                    cols: 20,
+                    rows: 100,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn one_preview_row_prioritizes_pending_details_over_previous_approval() {
+        let card = waiting_card();
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+        let rects = card_rects();
+        let mut out = Vec::new();
+        emit_card_text(
+            &mut out, &rects, &card, &lines, &to_cell, &palette, None, false,
+        );
+        let preview_row = to_cell(rects.preview[0].x, rects.preview[0].y).1;
+        let detail = out
+            .iter()
+            .find(|run| run.row == preview_row)
+            .expect("pending detail");
+        assert!(detail.text.starts_with("Review permission"));
+        assert_eq!(detail.fg, chrome().dot_red);
+        assert!(out.iter().all(|run| !run.text.contains("AUTO APPROVED")));
+    }
+
+    #[test]
+    fn two_preview_rows_keep_pending_details_and_latest_output_colors() {
+        let mut card = waiting_card();
+        card.auto_approve_audit.clear();
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+        let mut rects = card_rects();
+        rects.bounds.h = 160;
+        rects.preview.push(SidebarRect::new(10, 120, 340, 20));
+        let mut out = Vec::new();
+        emit_card_text(
+            &mut out, &rects, &card, &lines, &to_cell, &palette, None, false,
+        );
+        let detail_row = to_cell(rects.preview[0].x, rects.preview[0].y).1;
+        let output_row = to_cell(rects.preview[1].x, rects.preview[1].y).1;
+        let detail = out
+            .iter()
+            .find(|run| run.row == detail_row)
+            .expect("pending detail");
+        assert!(detail.text.starts_with("Review permission"));
+        let output = out
+            .iter()
+            .find(|run| run.row == output_row)
+            .expect("latest output");
+        assert!(output.text.contains("output 19:"), "{}", output.text);
+        assert!(!output.text.contains("output 18:"));
+        let term = rendered_terminal(&output.text);
+        assert_eq!(
+            term.active().grid[0].cells[0].fg,
+            Color::Rgb(Rgb::new(40, 120, 210))
+        );
+        assert_eq!(
+            term.active().grid[0].cells[11].fg,
+            Color::Rgb(Rgb::new(90, 180, 110))
+        );
+        assert_runs_fit_without_overlap(&out, GridSize { cols: 36, rows: 8 });
     }
 
     #[test]
@@ -964,14 +1277,16 @@ mod tests {
     fn card_rects() -> CardRects {
         CardRects {
             id: SessionCardId::new(SessionWindowId(1), PaneId::new(0)),
-            bounds: SidebarRect::new(0, 0, 200, 120),
+            bounds: SidebarRect::new(0, 0, 360, 140),
+            clipped_top: 0,
             icon: SidebarRect::new(10, 0, 20, 20),
-            name_line: SidebarRect::new(30, 0, 120, 20),
-            meta: SidebarRect::new(10, 40, 180, 20),
-            preview: vec![SidebarRect::new(10, 60, 180, 20)],
-            updated: SidebarRect::new(120, 0, 60, 20),
+            name_line: SidebarRect::new(30, 0, 220, 20),
+            meta: SidebarRect::new(10, 40, 340, 20),
+            context: SidebarRect::new(10, 60, 340, 20),
+            preview: vec![SidebarRect::new(10, 100, 340, 20)],
+            updated: SidebarRect::new(260, 0, 60, 20),
             dot: SidebarRect::new(0, 0, 10, 20),
-            menu_button: SidebarRect::new(180, 0, 20, 20),
+            menu_button: SidebarRect::new(330, 0, 20, 20),
         }
     }
 

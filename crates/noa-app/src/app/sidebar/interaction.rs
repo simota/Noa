@@ -41,18 +41,11 @@ impl App {
         let mut dismissed_menu: Option<SessionCardId> = None;
         if let Some(open) = self.windows.get(&window_id).and_then(|s| s.sidebar_menu) {
             if let Some(anchor) = self.card_menu_anchor(window_id, open) {
-                let popup = metrics.card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), inset);
-                // Mirror the draw-side guard (`sidebar_draw_model` skips a popup
-                // whose `bottom() > height`): a popup that would spill past the
-                // window bottom is never rendered, so a click in its invisible
-                // region must not fire an item — fall through to dismiss instead.
-                let height = self
-                    .windows
-                    .get(&window_id)
-                    .map_or(0, |s| s.window.inner_size().height);
-                if popup.bottom() <= height
-                    && let Some(item) = metrics.card_menu_hit_test(popup, point)
-                {
+                let bounds = self.sidebar_layout_bounds(window_id, inset);
+                let popup = metrics.card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), bounds);
+                // The draw model uses this same bounded rect. If the band is
+                // too short for all items, it is empty and cannot receive a hit.
+                if let Some(item) = metrics.card_menu_hit_test(popup, point) {
                     self.close_sidebar_menu(window_id);
                     self.activate_card_menu_item(event_loop, window_id, open, item);
                     return true;

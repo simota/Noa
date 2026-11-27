@@ -44,11 +44,6 @@ pub const SIDEBAR_CARD_GUTTER: u32 = 0;
 /// lets each row span the whole sidebar band for a seamless flat list.
 pub const SIDEBAR_CARD_MARGIN_X: u32 = 0;
 
-/// Max characters of a cwd shown on the meta row before middle truncation.
-/// The cwd shares the row with the process badge and branch, so it is kept
-/// tighter than when it owned a full row.
-const CWD_MAX_CHARS: usize = 24;
-
 // Card interior metrics (all compile-time; see `card_rects`/`card_lines`).
 const CARD_PAD: u32 = 12;
 /// Extra left inset for the terminal-output preview rows, on top of `CARD_PAD`.
@@ -67,34 +62,35 @@ const CARD_NAME_H: u32 = 18;
 const CARD_UPDATED_W: u32 = 78;
 
 // Card interior row baselines (top-relative): the name row (dot, icon, name,
-// right-aligned updated-time, `…`), the meta row (process badge + branch + cwd
-// on one line), then a configured number of last-output preview lines. All
+// right-aligned updated-time, `…`), the agent/status row, the working-context
+// row (branch + cwd), then a configured number of last-output preview lines. All
 // rows are always reserved for the configured card height and left blank when
 // a field is absent.
-const CARD_NAME_Y: u32 = 10;
-const CARD_META_Y: u32 = 30;
-/// The preview block starts a full blank cell row below the meta row (the
-/// sidebar cell is ~15 logical px, so a 34px offset from `CARD_META_Y`
-/// guarantees the gap survives the pixel→cell rounding at any DPR). Without
-/// it the preview rows land adjacent to the meta row and stop reading as a
-/// separate last-output block. Kept phase-aligned with
-/// `CARD_PREVIEW_LINE_STEP` (a multiple of 16) so the preview rows also stay
-/// on *contiguous* cell rows across cell heights.
-const CARD_PREVIEW_START_Y: u32 = 64;
+const CARD_NAME_Y: u32 = 8;
+const CARD_META_Y: u32 = 28;
+const CARD_CONTEXT_Y: u32 = 44;
+/// Separate output from the metadata while keeping the default five-row card
+/// close to its previous height. Preview rows retain a regular cell-sized step.
+const CARD_PREVIEW_START_Y: u32 = 72;
 const CARD_PREVIEW_LINE_STEP: u32 = 16;
-const CARD_BOTTOM_PAD: u32 = 18;
+const CARD_BOTTOM_PAD: u32 = 12;
 
 fn card_height_for_preview_lines(preview_lines: usize) -> u32 {
     let preview_lines = u32::try_from(preview_lines).unwrap_or(u32::MAX);
+    if preview_lines == 0 {
+        return CARD_CONTEXT_Y + CARD_LINE_H + CARD_BOTTOM_PAD;
+    }
     CARD_PREVIEW_START_Y
-        .saturating_add(preview_lines.saturating_mul(CARD_PREVIEW_LINE_STEP))
+        .saturating_add((preview_lines - 1).saturating_mul(CARD_PREVIEW_LINE_STEP))
+        .saturating_add(CARD_LINE_H)
         .saturating_add(CARD_BOTTOM_PAD)
 }
 
 /// Height of one session card at the default preview-line count.
 #[cfg(test)]
 pub const SIDEBAR_CARD_H: u32 = CARD_PREVIEW_START_Y
-    + DEFAULT_SIDEBAR_PREVIEW_LINES as u32 * CARD_PREVIEW_LINE_STEP
+    + (DEFAULT_SIDEBAR_PREVIEW_LINES as u32 - 1) * CARD_PREVIEW_LINE_STEP
+    + CARD_LINE_H
     + CARD_BOTTOM_PAD;
 
 /// Vertical stride from one default-height card's top to the next.
@@ -131,11 +127,16 @@ pub struct SidebarBands {
 pub struct CardRects {
     pub id: SessionCardId,
     pub bounds: SidebarRect,
+    /// Pixels clipped from the full card's top. The texture sampler needs this
+    /// independently of `bounds.h` when both ends lie outside a short viewport.
+    pub clipped_top: u32,
     pub icon: SidebarRect,
     pub name_line: SidebarRect,
-    /// The meta row: running process (branded for known agents), the git
-    /// branch, and the dim `~`-abbreviated cwd, on one line.
+    /// The meta row: running process (branded for known agents), agent state,
+    /// and the auto-approve indicator.
     pub meta: SidebarRect,
+    /// The working-context row: git branch and `~`-abbreviated cwd.
+    pub context: SidebarRect,
     /// Last-output preview rows (original ANSI colors, dim fallback), sized
     /// from `sidebar-preview-lines`.
     pub preview: Vec<SidebarRect>,
@@ -167,6 +168,10 @@ pub struct SidebarLayout {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SidebarMetrics {
     scale: f32,
+    /// Actual font cell height, when a renderer is available. Font line metrics
+    /// differ across platforms, so scaled design-space baselines alone can put
+    /// two metadata lines on the same terminal row.
+    cell_h: Option<f32>,
     /// Number of last-output preview rows each card reserves.
     pub preview_lines: usize,
     /// Header band height (scaled).
@@ -209,6 +214,7 @@ impl SidebarMetrics {
         let card_gutter = s(SIDEBAR_CARD_GUTTER);
         Self {
             scale,
+            cell_h: None,
             preview_lines,
             header_h: s(SIDEBAR_HEADER_H),
             toolbar_h: s(SIDEBAR_TOOLBAR_H),
@@ -224,6 +230,54 @@ impl SidebarMetrics {
     /// Scale a design-space length to physical px for this DPR.
     fn s(&self, v: u32) -> u32 {
         ((v as f32) * self.scale).round() as u32
+    }
+
+    /// Snap card rows to the sidebar font's real cell grid. Keep one blank row
+    /// between working context and output; a zero-preview card ends directly
+    /// after context. Layout, texture sizing and hit-testing share these rows.
+    pub fn with_cell_height(mut self, cell_h: f32) -> Self {
+        if !cell_h.is_finite() || cell_h <= 0.0 {
+            return self;
+        }
+        self.cell_h = Some(cell_h.max(1.0));
+        let last_y = if self.preview_lines == 0 {
+            self.card_row_y(2, CARD_CONTEXT_Y)
+        } else {
+            self.preview_row_y(self.preview_lines - 1)
+        };
+        self.card_h = last_y
+            .saturating_add(self.card_line_h())
+            .saturating_add(self.s(CARD_BOTTOM_PAD));
+        self.card_stride = self.card_h.saturating_add(self.card_gutter);
+        self
+    }
+
+    fn card_row_y(&self, row_offset: u32, design_y: u32) -> u32 {
+        match self.cell_h {
+            Some(cell_h) => {
+                let name_row = (self.s(CARD_NAME_Y) as f32 / cell_h).round();
+                ((name_row + row_offset as f32) * cell_h).round() as u32
+            }
+            None => self.s(design_y),
+        }
+    }
+
+    fn preview_row_y(&self, index: usize) -> u32 {
+        let index = u32::try_from(index).unwrap_or(u32::MAX);
+        self.card_row_y(
+            index.saturating_add(4),
+            CARD_PREVIEW_START_Y.saturating_add(index.saturating_mul(CARD_PREVIEW_LINE_STEP)),
+        )
+    }
+
+    fn card_line_h(&self) -> u32 {
+        self.cell_h
+            .map_or_else(|| self.s(CARD_LINE_H), |cell_h| cell_h.ceil() as u32)
+    }
+
+    fn card_name_h(&self) -> u32 {
+        self.cell_h
+            .map_or_else(|| self.s(CARD_NAME_H), |cell_h| cell_h.ceil() as u32)
     }
 
     /// Carve `bounds` into the header / toolbar / viewport bands. Each band
@@ -309,9 +363,9 @@ impl SidebarMetrics {
 
     /// One card's sub-rects in its own texture space (origin at the card's
     /// top-left, width `card_w`), unclipped. The per-card overlay renderer draws
-    /// each card into its own texture and positions text with these, matching
-    /// the window-space rects [`layout`](Self::layout) emits for the flat
-    /// backdrop.
+    /// each card into its own texture and positions text with these. The
+    /// window-space rects from [`layout`](Self::layout) determine its visible
+    /// slice and interactive regions.
     pub fn card_local_rects(&self, id: SessionCardId, card_w: u32) -> CardRects {
         let vp = SidebarRect::new(0, 0, card_w, self.card_h);
         self.card_rects_at(id, 0, card_w as i64, 0, vp)
@@ -336,7 +390,7 @@ impl SidebarMetrics {
 
     /// The interior of one card whose left edge is `lx` and width `w` (window
     /// space), clipped to `vp`. Every interior offset scales with the DPR so
-    /// the card's rows (name / cwd / meta / configured preview rows / updated)
+    /// the card's rows (name / meta / context / configured preview rows / updated)
     /// fit its scaled height on a Retina display.
     fn card_rects_at(
         &self,
@@ -350,8 +404,8 @@ impl SidebarMetrics {
         let dot_d = self.s(CARD_DOT_D) as i64;
         let icon_w = self.s(CARD_ICON_W) as i64;
         let card_menu_w = self.s(CARD_MENU_W) as i64;
-        let line_h = self.s(CARD_LINE_H) as i64;
-        let name_h = self.s(CARD_NAME_H) as i64;
+        let line_h = self.card_line_h() as i64;
+        let name_h = self.card_name_h() as i64;
         let gap6 = self.s(6) as i64;
 
         // Name row, left to right: status dot, project icon, display name,
@@ -367,39 +421,34 @@ impl SidebarMetrics {
         let name_w = updated_x - name_x - gap6;
 
         let body_w = w - 2 * pad;
-        let row = |y: u32| iclip(lx + pad, top + self.s(y) as i64, body_w, line_h, vp);
+        let row = |y: u32| iclip(lx + pad, top + y as i64, body_w, line_h, vp);
         // Preview rows carry an extra left inset so raw terminal output sits a
         // touch inboard of the dot-anchored rows above (mockup parity).
         let preview_inset = self.s(CARD_PREVIEW_INSET) as i64;
         let preview_row = |y: u32| {
             iclip(
                 lx + pad + preview_inset,
-                top + self.s(y) as i64,
+                top + y as i64,
                 body_w - preview_inset,
                 line_h,
                 vp,
             )
         };
 
-        let name_y = top + self.s(CARD_NAME_Y) as i64;
+        let name_y = top + self.card_row_y(0, CARD_NAME_Y) as i64;
 
         let preview = (0..self.preview_lines)
-            .map(|index| {
-                preview_row(
-                    CARD_PREVIEW_START_Y
-                        + u32::try_from(index)
-                            .unwrap_or(u32::MAX)
-                            .saturating_mul(CARD_PREVIEW_LINE_STEP),
-                )
-            })
+            .map(|index| preview_row(self.preview_row_y(index)))
             .collect();
 
         CardRects {
             id,
             bounds: iclip(lx, top, w, self.card_h as i64, vp),
+            clipped_top: (vp.y as i64 - top).clamp(0, self.card_h as i64) as u32,
             icon: iclip(icon_x, name_y, icon_w, name_h, vp),
             name_line: iclip(name_x, name_y, name_w, name_h, vp),
-            meta: row(CARD_META_Y),
+            meta: row(self.card_row_y(1, CARD_META_Y)),
+            context: row(self.card_row_y(2, CARD_CONTEXT_Y)),
             preview,
             updated: iclip(updated_x, name_y, updated_w, name_h, vp),
             // The dot rect shares the name row's y (not a centered sub-rect):
@@ -459,9 +508,9 @@ impl SidebarMetrics {
                 .saturating_sub(self.s(CARD_MENU_W));
         let menu = SidebarRect::new(
             menu_x,
-            card_top + self.s(6),
+            card_top + self.card_row_y(0, CARD_NAME_Y),
             self.s(CARD_MENU_W),
-            self.s(CARD_NAME_H),
+            self.card_name_h(),
         );
         if menu.contains(Point::new(cx, cy)) {
             return Some(SidebarHit::CardMenu(id));
@@ -515,22 +564,34 @@ impl SidebarMetrics {
         Some(clamped as u32)
     }
 
-    /// The popup rect for a card's `…` menu, anchored just below its menu button
-    /// (`anchor` = the card's `menu_button` rect) and right-aligned to it,
-    /// clamped so it never spills past the sidebar's right edge (`sidebar_w`).
+    /// Place a card's `…` menu below its button, or above it near the sidebar's
+    /// bottom edge. Clamp to the usable band so the popup also avoids a native
+    /// titlebar. If all items cannot fit, return an empty rect: an invisible
+    /// action must never remain clickable.
     pub fn card_menu_popup_rect(
         &self,
         anchor: SidebarRect,
         item_count: usize,
-        sidebar_w: u32,
+        bounds: SidebarRect,
     ) -> SidebarRect {
-        let w = self.menu_w.min(sidebar_w);
-        let h = self.menu_item_h.saturating_mul(item_count as u32);
+        let w = self.menu_w.min(bounds.w);
+        let h = self
+            .menu_item_h
+            .saturating_mul(u32::try_from(item_count).unwrap_or(u32::MAX));
+        if w == 0 || h == 0 || h > bounds.h || anchor.w == 0 || anchor.h == 0 {
+            return SidebarRect::new(bounds.x, bounds.y, 0, 0);
+        }
         let x = anchor
             .right()
             .saturating_sub(w)
-            .min(sidebar_w.saturating_sub(w));
-        SidebarRect::new(x, anchor.bottom(), w, h)
+            .clamp(bounds.x, bounds.right() - w);
+        let preferred_y = if anchor.bottom().saturating_add(h) <= bounds.bottom() {
+            anchor.bottom()
+        } else {
+            anchor.y.saturating_sub(h)
+        };
+        let y = preferred_y.clamp(bounds.y, bounds.bottom() - h);
+        SidebarRect::new(x, y, w, h)
     }
 
     /// The rect of item `index` within a popup laid out by
@@ -618,24 +679,23 @@ pub enum SidebarHit {
 /// `Instant::now()`) so the relative-time line is pure and testable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CardLines {
-    /// `<icon glyph> <display name>` — the per-card rename override shadows
+    /// Display name — the project icon has its own rect. The per-card rename shadows
     /// everything; a manual tab title shadows the shell-driven name. A
     /// shell-driven name is normalized (prompt-like titles fall back to the
-    /// cwd's tail segment; a ` | <branch>` suffix duplicating the meta row's
+    /// cwd's tail segment; a ` | <branch>` suffix duplicating the context row's
     /// branch is stripped).
     pub name: String,
-    /// The cwd shown dim at the end of the meta row: `~`-abbreviated and
-    /// middle-truncated so both the path root and the most-specific tail
-    /// segment stay visible.
+    /// The cwd shown dim on the context row, with the home directory abbreviated
+    /// to `~`. The renderer fits it to the actual available cell width.
     pub cwd: String,
-    /// The branch shown on the meta row after the process; empty when the
+    /// The branch shown on the context row; empty when the
     /// session has no branch.
     pub branch: String,
     /// The process shown on the meta row: the tty's foreground process name, or
-    /// a shell state fallback (`running` / `idle`) where detection is
-    /// unavailable. The caller styles it by the card's `busy` flag.
+    /// an activity-state fallback (`running` / `idle`) where detection is
+    /// unavailable. Explicit agent reports take precedence over shell activity.
     pub process: String,
-    /// Relative updated-time (`3分前` / `昨日 23:47` / …). Empty for a busy
+    /// Relative updated-time (`3m ago` / `Yday 23:47` / …). Empty for a running
     /// card: "updated just now" is a tautology while output is flowing, so
     /// only idle cards carry the age.
     pub updated: String,
@@ -665,22 +725,22 @@ pub fn card_lines(
         (None, Some(title)) => title.to_string(),
         (None, None) => normalize_shell_name(&card.name, &card.cwd, card.branch.as_deref()),
     };
-    let cwd = format_cwd(&card.cwd, home, CWD_MAX_CHARS);
+    let cwd = format_cwd(&card.cwd, home, usize::MAX);
     let branch = card.branch.clone().unwrap_or_default();
     // The detected foreground process name; when unavailable (non-macOS, or not
-    // yet polled) fall back to the shell state so the row is never blank.
+    // yet polled) fall back to reported activity so the row is never blank.
     let process = card.process.clone().unwrap_or_else(|| {
-        if card.busy {
+        if card.is_running() {
             "running".to_string()
         } else {
             "idle".to_string()
         }
     });
-    // A busy card's age is always "now"; showing it is noise. Idle cards keep
+    // A running card's age is always "now"; showing it is noise. Idle cards keep
     // the relative time (how long since this session last did anything).
     let updated = if card.agent_needs_attention() {
         format_relative_time(now, card.agent_status_at.unwrap_or(card.updated_at))
-    } else if card.busy {
+    } else if card.is_running() {
         String::new()
     } else {
         format_relative_time(now, card.updated_at)
@@ -703,7 +763,7 @@ pub fn card_lines(
 ///   ugly; it falls back to the cwd's tail segment (usually the repo name).
 /// - A ` | <branch>` suffix that duplicates the card's own branch (some
 ///   prompts title `repo | branch`) is stripped — the branch already shows on
-///   the meta row.
+///   the context row.
 fn normalize_shell_name(name: &str, cwd: &str, branch: Option<&str>) -> String {
     if is_prompt_like_name(name)
         && let Some(tail) = cwd_tail(cwd)
@@ -942,11 +1002,9 @@ mod tests {
         assert_eq!(lines.name, "build");
         assert!(!icon_glyph(IconKind::Rust).is_empty());
 
-        // The cwd is middle-truncated (ellipsis) keeping the identifying tail
-        // segment; the branch rides the meta row alongside it.
-        assert!(lines.cwd.contains('…'));
-        assert!(lines.cwd.ends_with("very-long-project"));
-        assert!(lines.cwd.chars().count() <= CWD_MAX_CHARS);
+        // Keep the full path here: the renderer knows how many cells remain
+        // beside the branch and truncates only as much as that width requires.
+        assert_eq!(lines.cwd, card.cwd);
         assert_eq!(lines.branch, "main");
 
         // updated-time matches the pure PR1 formatter.
@@ -960,8 +1018,32 @@ mod tests {
         assert_eq!(lines.process, "cargo");
     }
 
+    #[test]
+    fn card_lines_use_agent_activity_and_preserve_attention_age() {
+        use noa_grid::AgentState;
+        for (state, busy, process, updated) in [
+            (AgentState::Running, false, "running", ""),
+            (AgentState::Finished, true, "idle", "5m ago"),
+            (AgentState::Permission, true, "idle", "2m ago"),
+        ] {
+            let mut card = sample_card("agent", "/repo", None);
+            card.process = None;
+            card.busy = busy;
+            card.agent_status = Some(noa_grid::AgentStatus {
+                state,
+                detail: String::new(),
+                blocked: None,
+                app: None,
+            });
+            card.agent_status_at = Some(wall(10, 3));
+            let lines = card_lines(&card, wall(10, 5), None, None);
+            assert_eq!(lines.process, process, "{state:?}");
+            assert_eq!(lines.updated, updated, "{state:?}");
+        }
+    }
+
     // Shell-driven names normalize: a prompt-like default title falls back to
-    // the cwd's tail segment, and a ` | <branch>` suffix duplicating the meta
+    // the cwd's tail segment, and a ` | <branch>` suffix duplicating the context
     // row's branch is stripped. User-authored names stay verbatim.
     #[test]
     fn card_lines_normalize_shell_driven_names() {
@@ -974,7 +1056,7 @@ mod tests {
         assert_eq!(card_lines(&card, wall(10, 0), None, None).name, "noa");
 
         // `repo | branch` title → the branch suffix is stripped (the branch
-        // already rides the meta row) …
+        // already rides the context row) …
         let card = sample_card("noa | main", "/repo", Some("main"));
         assert_eq!(card_lines(&card, wall(10, 0), None, None).name, "noa");
         // … but only when it matches the card's own branch.
@@ -1022,6 +1104,18 @@ mod tests {
         let lines = card_lines(&card, wall(10, 0), None, None);
         assert_eq!(lines.cwd, "/repo");
         assert_eq!(lines.branch, "");
+    }
+
+    #[test]
+    fn card_lines_abbreviate_home_without_losing_context_before_layout() {
+        let cwd = "/Users/dev/repos/日本語の長いプロジェクト/feature-worktree";
+        let card = sample_card("worktree", cwd, Some("feature/sidebar"));
+        let lines = card_lines(&card, wall(10, 0), Some("/Users/dev"), None);
+        assert_eq!(
+            lines.cwd,
+            "~/repos/日本語の長いプロジェクト/feature-worktree"
+        );
+        assert_eq!(lines.branch, "feature/sidebar");
     }
 
     // tab-title REQ-TTL-11: a manual tab title shadows the shell-driven name
@@ -1166,22 +1260,32 @@ mod tests {
     #[test]
     fn card_menu_popup_layout_and_hit_test() {
         let anchor = SidebarRect::new(300, 40, CARD_MENU_W_ANCHOR, 20);
-        let popup = m1().card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), 360);
+        let bounds = SidebarRect::new(0, 0, 360, 380);
+        let popup = m1().card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), bounds);
 
         // Sits directly under the anchor and never spills past the sidebar edge.
         assert_eq!(popup.y, anchor.bottom());
         assert!(popup.right() <= 360);
         assert_eq!(popup.h, SIDEBAR_MENU_ITEM_H * CARD_MENU_ITEMS.len() as u32);
 
-        // A click on the first row resolves to Close (the only v1 item).
+        // The item order stays the same regardless of where the popup opens.
         let item0 = m1().card_menu_item_rect(popup, 0);
         let hit = m1().card_menu_hit_test(popup, Point::new(item0.x + 4, item0.y + 4));
         assert_eq!(hit, Some(CardMenuItem::Close));
         assert_eq!(card_menu_label(CardMenuItem::Close), "Close");
+        let item1 = m1().card_menu_item_rect(popup, 1);
+        assert_eq!(
+            m1().card_menu_hit_test(popup, Point::new(item1.x, item1.bottom() - 1)),
+            Some(CardMenuItem::Rename)
+        );
 
         // A click outside the popup is a dismiss (miss).
         assert_eq!(
             m1().card_menu_hit_test(popup, Point::new(popup.right() + 5, popup.y + 4)),
+            None
+        );
+        assert_eq!(
+            m1().card_menu_hit_test(popup, Point::new(popup.x, popup.bottom())),
             None
         );
     }
@@ -1189,20 +1293,60 @@ mod tests {
     // The anchor's own width (CARD_MENU_W) is private; alias it for the test.
     const CARD_MENU_W_ANCHOR: u32 = CARD_MENU_W;
 
-    // FR-7 clip guard: a `…` anchored near the sidebar's bottom edge produces a
-    // popup that spills past the window bottom. The draw path skips rendering it
-    // (`popup.bottom() > height`), and `handle_sidebar_press` mirrors that guard
-    // so a click in the invisible region can't fire an item.
     #[test]
-    fn card_menu_popup_can_overflow_the_sidebar_bottom() {
-        let sidebar_h = 380;
-        // Anchor flush with the bottom edge (as a bottom-most card's `…` would).
-        let anchor = SidebarRect::new(300, sidebar_h, CARD_MENU_W_ANCHOR, CARD_NAME_H);
-        let popup = m1().card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), 360);
-        assert!(
-            popup.bottom() > sidebar_h,
-            "a bottom-anchored popup overflows the window and is not drawn"
+    fn card_menu_popup_opens_above_a_bottom_anchor_and_keeps_both_items_clickable() {
+        for scale in [1.0, 1.5, 2.0] {
+            let metrics = SidebarMetrics::new(scale);
+            let bounds = SidebarRect::new(0, metrics.s(30), metrics.s(360), metrics.s(350));
+            let anchor = SidebarRect::new(
+                metrics.s(300),
+                bounds.bottom() - metrics.s(CARD_NAME_H),
+                metrics.s(CARD_MENU_W),
+                metrics.s(CARD_NAME_H),
+            );
+            let popup = metrics.card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), bounds);
+            assert_eq!(popup.bottom(), anchor.y);
+            assert!(popup.y >= bounds.y);
+            assert!(popup.right() <= bounds.right());
+            for (index, &item) in CARD_MENU_ITEMS.iter().enumerate() {
+                let row = metrics.card_menu_item_rect(popup, index);
+                for y in [row.y, row.bottom() - 1] {
+                    assert_eq!(
+                        metrics.card_menu_hit_test(popup, Point::new(row.x, y)),
+                        Some(item)
+                    );
+                }
+            }
+            assert_eq!(
+                metrics.card_menu_hit_test(popup, Point::new(popup.x, anchor.y)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn card_menu_popup_clamps_within_a_small_band_below_the_titlebar() {
+        let bounds = SidebarRect::new(16, 32, 100, 60);
+        let anchor = SidebarRect::new(82, 57, CARD_MENU_W, CARD_NAME_H);
+        let popup = m1().card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), bounds);
+        assert_eq!(popup, SidebarRect::new(16, 32, 100, 48));
+        assert_eq!(
+            m1().card_menu_hit_test(popup, Point::new(popup.x, popup.y - 1)),
+            None
         );
+
+        // Rendering only part of the menu would leave ambiguous click targets.
+        let too_short = SidebarRect::new(bounds.x, bounds.y, bounds.w, popup.h - 1);
+        let hidden = m1().card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), too_short);
+        assert_eq!((hidden.w, hidden.h), (0, 0));
+        assert_eq!(
+            m1().card_menu_hit_test(hidden, Point::new(hidden.x, hidden.y)),
+            None
+        );
+
+        let invisible_anchor = SidebarRect::new(anchor.x, anchor.y, 0, 0);
+        let hidden = m1().card_menu_popup_rect(invisible_anchor, CARD_MENU_ITEMS.len(), bounds);
+        assert_eq!((hidden.w, hidden.h), (0, 0));
     }
 
     // Drag-reorder drop math: the pointer snaps to the nearest card gap, and
@@ -1350,7 +1494,7 @@ mod tests {
 
     // FR-2 mockup parity: the name row carries, left to right, the status dot,
     // icon, name, right-aligned updated-time region, and the `…` hit region —
-    // all sharing one y — with the meta row and preview rows stacked below.
+    // all sharing one y — with the agent, context and preview rows below.
     #[test]
     fn card_rects_place_dot_left_and_updated_on_the_name_row() {
         let (bounds, ids) = six_id_bounds();
@@ -1369,11 +1513,11 @@ mod tests {
         assert_eq!(card.updated.y, card.name_line.y);
         assert!(card.updated.w > 0);
 
-        // Rows stack top to bottom: name, meta (process · branch · cwd), the
-        // configured preview rows.
-        assert!(card.name_line.y < card.meta.y);
+        // Identity, agent state, working context and output stay separate.
+        assert!(card.name_line.bottom() <= card.meta.y);
+        assert!(card.meta.bottom() <= card.context.y);
         assert_eq!(card.preview.len(), DEFAULT_SIDEBAR_PREVIEW_LINES);
-        let mut previous_y = card.meta.y;
+        let mut previous_y = card.context.y;
         for preview in &card.preview {
             assert!(previous_y < preview.y);
             previous_y = preview.y;
@@ -1417,8 +1561,157 @@ mod tests {
         assert_eq!(m5.card_local_rects(id, 320).preview.len(), 5);
     }
 
+    #[test]
+    fn compact_cards_end_after_context_and_full_cards_keep_all_preview_rows() {
+        for scale in [1.0, 1.5, 2.0] {
+            for width in [200, 360, 600] {
+                for preview_lines in [0, 1, 5, 20] {
+                    let metrics = SidebarMetrics::new_with_preview_lines(scale, preview_lines);
+                    let card = metrics.card_local_rects(card_id(1, 1), metrics.s(width));
+                    assert_eq!(card.clipped_top, 0);
+                    assert!(card.name_line.bottom() <= card.meta.y);
+                    assert!(card.meta.bottom() <= card.context.y);
+                    assert_eq!(card.context.h, metrics.s(CARD_LINE_H));
+                    assert!(card.context.right() <= card.bounds.right());
+                    let last_row = card.preview.last().unwrap_or(&card.context);
+                    assert_eq!(card.preview.len(), preview_lines);
+                    assert_eq!(last_row.h, metrics.s(CARD_LINE_H));
+                    let bottom_pad = card.bounds.bottom() - last_row.bottom();
+                    assert!(bottom_pad.abs_diff(metrics.s(CARD_BOTTOM_PAD)) <= 1);
+                    if preview_lines == 0 {
+                        assert!(card.bounds.h < metrics.s(CARD_PREVIEW_START_Y));
+                    } else {
+                        assert!(card.context.bottom() < card.preview[0].y);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn actual_font_cell_heights_keep_metadata_and_preview_on_distinct_rows() {
+        for cell_h in [12.0, 14.0, 15.0, 17.5, 18.0, 24.0, 36.0] {
+            for scale in [1.0, 2.0] {
+                for preview_lines in [0, 5, 20] {
+                    let metrics = SidebarMetrics::new_with_preview_lines(scale, preview_lines)
+                        .with_cell_height(cell_h);
+                    let card = metrics.card_local_rects(card_id(1, 1), metrics.s(360));
+                    let cell_row = |rect: SidebarRect| (rect.y as f32 / cell_h).round() as u32;
+                    let name_row = cell_row(card.name_line);
+                    assert_eq!(cell_row(card.dot), name_row);
+                    assert_eq!(cell_row(card.icon), name_row);
+                    assert_eq!(cell_row(card.updated), name_row);
+                    assert_eq!(cell_row(card.menu_button), name_row);
+                    assert_eq!(cell_row(card.meta), name_row + 1);
+                    assert_eq!(cell_row(card.context), name_row + 2);
+                    assert_eq!(card.context.h, cell_h.ceil() as u32);
+                    for (index, preview) in card.preview.iter().enumerate() {
+                        assert_eq!(cell_row(*preview), name_row + 4 + index as u32);
+                        assert_eq!(preview.h, cell_h.ceil() as u32);
+                        assert!(preview.bottom() <= card.bounds.bottom());
+                    }
+                    let last_row = card.preview.last().unwrap_or(&card.context);
+                    assert_eq!(
+                        card.bounds.bottom() - last_row.bottom(),
+                        metrics.s(CARD_BOTTOM_PAD)
+                    );
+                    // The texture's floor-sized grid must contain the last row,
+                    // including a fractional font height rounded to pixels.
+                    assert!((metrics.card_h as f32 / cell_h).floor() as u32 > cell_row(*last_row));
+                    assert_eq!(metrics.card_stride, metrics.card_h + metrics.card_gutter);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn actual_font_menu_rows_match_the_click_target() {
+        for cell_h in [12.0, 14.0, 15.0, 18.0, 24.0, 36.0] {
+            let metrics = SidebarMetrics::new(1.0).with_cell_height(cell_h);
+            let ids = vec![card_id(1, 1)];
+            let bounds = SidebarRect::new(0, 0, 360, metrics.toolbar_h + metrics.card_h);
+            let layout = metrics.layout(bounds, &ids, 0);
+            let menu = layout.cards[0].menu_button;
+            assert_eq!(menu.h, cell_h.ceil() as u32);
+            for y in [menu.y, menu.bottom() - 1] {
+                assert_eq!(
+                    metrics.hit_test(bounds, &ids, 0, Point::new(menu.x, y)),
+                    Some(SidebarHit::CardMenu(ids[0]))
+                );
+            }
+            assert_eq!(
+                metrics.hit_test(bounds, &ids, 0, Point::new(menu.x, menu.bottom())),
+                Some(SidebarHit::Card(ids[0]))
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_font_cell_heights_keep_the_design_layout() {
+        let metrics = SidebarMetrics::new(1.0);
+        for cell_h in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(metrics.with_cell_height(cell_h), metrics);
+        }
+    }
+
+    #[test]
+    fn clipped_top_preserves_the_visible_slice_when_both_card_ends_are_hidden() {
+        for scale in [1.0, 1.5, 2.0] {
+            let metrics = SidebarMetrics::new(scale);
+            let ids = vec![card_id(1, 1), card_id(1, 2)];
+            let viewport_h = metrics.s(50);
+            let bounds = SidebarRect::new(0, 0, metrics.s(200), metrics.toolbar_h + viewport_h);
+            let scroll = metrics.s(32);
+            let layout = metrics.layout(bounds, &ids, scroll);
+            let card = &layout.cards[0];
+            assert_eq!(layout.cards.len(), 1);
+            assert_eq!(card.bounds, layout.viewport);
+            assert_eq!(card.clipped_top, scroll);
+            assert_eq!(card.bounds.h, viewport_h);
+            assert!(card.clipped_top + card.bounds.h < metrics.card_h);
+            assert_eq!(card.context.h, metrics.s(CARD_LINE_H));
+            assert_eq!(
+                card.context.y,
+                layout.viewport.y + metrics.s(CARD_CONTEXT_Y) - scroll
+            );
+
+            let at_top = metrics.layout(bounds, &ids, 0);
+            assert_eq!(at_top.cards[0].clipped_top, 0);
+            let at_bottom = metrics.layout(bounds, &ids, u32::MAX);
+            assert_eq!(at_bottom.cards[0].id, ids[1]);
+            assert_eq!(
+                at_bottom.cards[0].clipped_top + at_bottom.cards[0].bounds.h,
+                metrics.card_h
+            );
+        }
+    }
+
+    #[test]
+    fn menu_hit_target_matches_its_visible_top_and_bottom_edges() {
+        for scale in [1.0, 1.5, 2.0] {
+            let metrics = SidebarMetrics::new(scale);
+            let ids = vec![card_id(1, 1)];
+            let bounds = SidebarRect::new(0, 0, metrics.s(360), metrics.toolbar_h + metrics.card_h);
+            let layout = metrics.layout(bounds, &ids, 0);
+            let menu = layout.cards[0].menu_button;
+            let x = menu.x + menu.w / 2;
+            for y in [menu.y, menu.bottom() - 1] {
+                assert_eq!(
+                    metrics.hit_test(bounds, &ids, 0, Point::new(x, y)),
+                    Some(SidebarHit::CardMenu(ids[0]))
+                );
+            }
+            for y in [menu.y - 1, menu.bottom()] {
+                assert_eq!(
+                    metrics.hit_test(bounds, &ids, 0, Point::new(x, y)),
+                    Some(SidebarHit::Card(ids[0]))
+                );
+            }
+        }
+    }
+
     // At scale 2.0 the bands, card height, and every interior row double, so a
-    // Retina card keeps all rows (name / meta / preview rows) inside
+    // Retina card keeps all rows (name / meta / context / preview rows) inside
     // its doubled height instead of clipping — and hit-test maps correctly
     // against the scaled geometry.
     #[test]
@@ -1446,9 +1739,10 @@ mod tests {
         assert_eq!(card.bounds.h, m2.card_h);
         assert!(card.dot.x < card.icon.x && card.icon.x < card.name_line.x);
         assert_eq!(card.updated.y, card.name_line.y);
-        assert!(card.name_line.y < card.meta.y);
+        assert!(card.name_line.bottom() <= card.meta.y);
+        assert!(card.meta.bottom() <= card.context.y);
         assert_eq!(card.preview.len(), DEFAULT_SIDEBAR_PREVIEW_LINES);
-        let mut previous_y = card.meta.y;
+        let mut previous_y = card.context.y;
         for preview in &card.preview {
             assert!(previous_y < preview.y);
             previous_y = preview.y;

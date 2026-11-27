@@ -43,6 +43,7 @@ pub struct Snapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Start {
+        origin: Option<review::task_links::OriginHint>,
         auto: Option<review::auto_assign::AutoRecord>,
         request: String,
         target: Box<Target>,
@@ -321,6 +322,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
             }
             (
                 Command::Start {
+                    origin,
                     auto,
                     request,
                     target,
@@ -336,6 +338,7 @@ fn run_commands(commands: Receiver<(u64, Command)>, outlets: Outlets) {
                     continue;
                 };
                 runner::Start::New(Box::new(runner::NewReview {
+                    origin,
                     auto,
                     request,
                     target: *target,

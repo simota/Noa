@@ -141,7 +141,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
             flex_direction: FlexDirection::Column,
             flex_shrink: 0.0,
             gap: gap(12.0),
-            padding: LayoutRect::length(24.0),
+            padding: LayoutRect::length(crate::appearance::space(24.0)),
             size: LayoutSize {
                 width: length(560.0),
                 height: auto(),
@@ -155,7 +155,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     tree.insert(
         Some(card),
         Label::new("新しいディスカッション")
-            .font_size(17.0)
+            .font_size(crate::appearance::font(17.0))
             .weight(600),
     );
     tree.insert(
@@ -164,7 +164,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
             "司会の Noa が議題をパネリストに渡し、毎ラウンド全員に同じ状況ブリーフを届けて要約します。\
              エージェントはそれぞれ Noa のペインで動きます。",
         )
-        .font_size(12.0)
+        .font_size(crate::appearance::font(12.0))
         .color(Role::Muted)
         .wrap(true),
     );
@@ -183,12 +183,15 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Label::new(
             "エージェントはここで起動し、コードを読んで議論します。返答ファイルは .noa/discussions に書かれます（git には載りません）。",
         )
-        .font_size(11.0)
+        .font_size(crate::appearance::font(11.0))
         .color(Role::Muted)
         .wrap(true),
     );
 
-    let rounds = tree.insert(Some(card), Container::column().gap(6.0));
+    let rounds = tree.insert(
+        Some(card),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
     caption(tree, rounds, "ラウンド数の上限");
     let max_rounds = tree.insert(
         Some(rounds),
@@ -204,10 +207,15 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     );
     // Until the check for installed agents is done, every kind is offered.
     let available = AgentKind::ALL.to_vec();
-    let left = tree.insert(Some(card), Container::column().gap(6.0));
+    let left = tree.insert(
+        Some(card),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
     let header = tree.insert(
         Some(left),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     caption(
         tree,
@@ -217,11 +225,15 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     spacer(tree, header);
     let auto_controls = tree.insert(
         Some(header),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     let moderator_row = tree.insert(
         Some(left),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     let moderator_host = tree.insert(Some(moderator_row), Container::row());
     let moderator = tree.insert(
@@ -230,20 +242,28 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     );
     let moderator_setup = insert_setup(tree, moderator_row, AgentKind::ALL[0]);
 
-    let panel_col = tree.insert(Some(card), Container::column().gap(6.0));
+    let panel_col = tree.insert(
+        Some(card),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
     caption(
         tree,
         panel_col,
         format!("パネリスト（1〜{MAX_PANEL}体）・エージェント・モデル・エフォート"),
     );
-    let panel_list = tree.insert(Some(panel_col), Container::column().gap(6.0));
+    let panel_list = tree.insert(
+        Some(panel_col),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
     let panel = default_panel()
         .iter()
         .map(|choice| insert_row(tree, panel_list, choice, &available))
         .collect();
     let panel_foot = tree.insert(
         Some(panel_col),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     let add_row = tree.insert(
         Some(panel_foot),
@@ -252,13 +272,15 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     tree.insert(
         Some(panel_foot),
         Label::new("同じエージェントの2体目以降は claude-2, claude-3 … として参加します")
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .color(Role::Muted),
     );
 
     let foot = tree.insert(
         Some(card),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     let note = tree.insert(Some(foot), Container::column().grow(1.0));
     let start_button = tree.insert(
@@ -360,7 +382,7 @@ fn history_row(
             flex_direction: FlexDirection::Column,
             flex_shrink: 0.0,
             gap: gap(4.0),
-            padding: LayoutRect::length(8.0),
+            padding: LayoutRect::length(crate::appearance::space(8.0)),
             size: LayoutSize {
                 width: percent(1.0),
                 height: auto(),
@@ -376,7 +398,7 @@ fn history_row(
             tree.insert(
                 Some(row),
                 Label::new(summary.id.to_string())
-                    .font_size(12.5)
+                    .font_size(crate::appearance::font(12.5))
                     .weight(600)
                     .truncation(Truncation::Tail),
             );
@@ -387,13 +409,15 @@ fn history_row(
     tree.insert(
         Some(row),
         Label::new(outline.topic.lines().next().unwrap_or_default().to_owned())
-            .font_size(12.5)
+            .font_size(crate::appearance::font(12.5))
             .weight(600)
             .truncation(Truncation::Tail),
     );
     let line = tree.insert(
         Some(row),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     let (state, tone) = if outline.closed {
         ("終了", Tone::Neutral)
@@ -479,7 +503,9 @@ const DEFAULT_EFFORT: &str = "既定のエフォート";
 fn insert_setup(tree: &mut UiTree, parent: WidgetId, kind: AgentKind) -> SetupParts {
     let host = tree.insert(
         Some(parent),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     let (model, effort) = insert_setup_controls(tree, host, kind);
     SetupParts {
@@ -533,7 +559,9 @@ fn insert_row(
 ) -> PanelRow {
     let host = tree.insert(
         Some(list),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     let kind = tree.insert(Some(host), kind_menu(available, choice.kind));
     let setup = insert_setup(tree, host, choice.kind);

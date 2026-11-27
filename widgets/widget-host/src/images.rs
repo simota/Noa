@@ -340,12 +340,12 @@ pub fn insert(
                 .background(Role::SurfaceAlt)
                 .border(1.0, Role::Separator)
                 .radius(radius)
-                .padding(6.0),
+                .padding(crate::appearance::space(6.0)),
             );
             tree.insert(
                 Some(placeholder),
                 Label::new(alt)
-                    .font_size(11.0)
+                    .font_size(crate::appearance::font(11.0))
                     .color(Role::Muted)
                     .align(TextAlign::Center)
                     .max_lines(4),

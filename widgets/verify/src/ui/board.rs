@@ -108,11 +108,15 @@ impl Verify {
         };
         let column = self.tree.insert(
             Some(self.header_host),
-            Container::column().gap(6.0).padding(10.0),
+            Container::column()
+                .gap(crate::appearance::space(6.0))
+                .padding(crate::appearance::space(10.0)),
         );
         let row = self.tree.insert(
             Some(column),
-            Container::row().align_items(AlignItems::CENTER).gap(8.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(8.0)),
         );
         let title = self.tree.insert(
             Some(row),
@@ -129,7 +133,7 @@ impl Verify {
         self.tree.insert(
             Some(title),
             Label::new(session.manifest.label.clone())
-                .font_size(14.0)
+                .font_size(crate::appearance::font(14.0))
                 .weight(600)
                 .truncation(Truncation::Tail),
         );
@@ -170,7 +174,7 @@ impl Verify {
                 self.tree.insert(
                     Some(row),
                     Label::new(detail)
-                        .font_size(11.0)
+                        .font_size(crate::appearance::font(11.0))
                         .color(Role::Muted)
                         .truncation(Truncation::Tail),
                 );

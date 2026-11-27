@@ -525,14 +525,17 @@ fn text_line(tree: &mut UiTree, parent: WidgetId, text: &str, lines: u32) -> Wid
     tree.insert(
         Some(parent),
         Label::new(one_line(text))
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .wrap(true)
             .max_lines(lines),
     )
 }
 
 fn time_label(tree: &mut UiTree, parent: WidgetId, text: &str) -> WidgetId {
-    tree.insert(Some(parent), Label::new(text).font_size(12.0))
+    tree.insert(
+        Some(parent),
+        Label::new(text).font_size(crate::appearance::font(12.0)),
+    )
 }
 
 /// A drawer label that time changes, updated in place by [`refresh`]
@@ -652,12 +655,17 @@ pub(super) fn build(
     // `KIND_FLOOR`; only then the label.
     let head = tree.insert(
         Some(scroll),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     let (symbol, color) = mark(worker);
     tree.insert(
         Some(head),
-        Label::new(symbol).font_size(16.0).weight(700).color(color),
+        Label::new(symbol)
+            .font_size(crate::appearance::font(16.0))
+            .weight(700)
+            .color(color),
     );
     let slot = tree.insert(
         Some(head),
@@ -673,7 +681,7 @@ pub(super) fn build(
     tree.insert(
         Some(slot),
         Label::new(one_line(&worker.label))
-            .font_size(16.0)
+            .font_size(crate::appearance::font(16.0))
             .weight(700)
             .truncation(Truncation::Tail),
     );
@@ -693,7 +701,7 @@ pub(super) fn build(
         Container::wrapping_row(8.0, 2.0).align_items(AlignItems::CENTER),
     );
     let status = worker.status();
-    let mut title = Label::new(status.title()).font_size(14.0);
+    let mut title = Label::new(status.title()).font_size(crate::appearance::font(14.0));
     title = match status_color(status) {
         Some(color) => title.weight(700).color(color),
         None => title.color(Role::Muted),
@@ -703,7 +711,7 @@ pub(super) fn build(
     let qualifier = tree.insert(
         Some(status_row),
         Label::new(qualifiers.as_str())
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .color(Role::Muted),
     );
     tree.set_hidden(qualifier, qualifiers.is_empty());
@@ -755,7 +763,9 @@ pub(super) fn build(
     } else {
         let row = tree.insert(
             Some(actions),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(6.0)),
         );
         let field = tree.insert(
             Some(row),
@@ -789,7 +799,10 @@ pub(super) fn build(
     };
     // Open or closed, a worker with a known cwd has a worktree to look at.
     let diff = (!worker.cwd.is_empty()).then(|| {
-        let row = tree.insert(Some(results), Container::row().gap(6.0));
+        let row = tree.insert(
+            Some(results),
+            Container::row().gap(crate::appearance::space(6.0)),
+        );
         small_button(tree, row, DIFF, false)
     });
 
@@ -859,7 +872,9 @@ pub(super) fn build(
         let (text, shown) = phase_text(worker, phase);
         let row = tree.insert(
             Some(times),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(6.0)),
         );
         tree.insert(
             Some(row),
@@ -879,7 +894,9 @@ pub(super) fn build(
     let close_ended = close_ended.map(|(count, armed)| {
         let row = tree.insert(
             Some(root),
-            Container::row().align_items(AlignItems::CENTER).gap(8.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(8.0)),
         );
         spacer(tree, row);
         let label = if armed {
@@ -946,7 +963,9 @@ fn screen_tail(
     );
     let tail_head = tree.insert(
         Some(tail),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     caption(tree, tail_head, "画面の末尾");
     spacer(tree, tail_head);
@@ -983,7 +1002,7 @@ fn screen_tail(
             tree.insert(
                 Some(screen),
                 Label::new(one_line(line))
-                    .font_size(11.0)
+                    .font_size(crate::appearance::font(11.0))
                     .font_family("monospace")
                     .truncation(Truncation::Tail),
             );
@@ -1010,7 +1029,7 @@ fn result_section(
                 Container::new(Style {
                     flex_direction: noa_gpui_core::style::FlexDirection::Column,
                     gap: gap(2.0),
-                    padding: LayoutRect::length(8.0),
+                    padding: LayoutRect::length(crate::appearance::space(8.0)),
                     ..Default::default()
                 })
                 .background(Role::Background)
@@ -1020,7 +1039,7 @@ fn result_section(
                 tree.insert(
                     Some(body),
                     Label::new(one_line(line))
-                        .font_size(11.0)
+                        .font_size(crate::appearance::font(11.0))
                         .font_family("monospace")
                         .wrap(true),
                 );
@@ -1033,7 +1052,10 @@ fn result_section(
             }
         }
     }
-    let row = tree.insert(Some(column), Container::row().gap(6.0));
+    let row = tree.insert(
+        Some(column),
+        Container::row().gap(crate::appearance::space(6.0)),
+    );
     let label = if preview.is_some() {
         "隠す"
     } else {

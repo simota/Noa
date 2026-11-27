@@ -18,8 +18,8 @@ pub(super) const BLUE: Color = Color::hex(0x0a84ff);
 
 pub(super) fn gap(px: f32) -> LayoutSize<LengthPercentage> {
     LayoutSize {
-        width: length(px),
-        height: length(px),
+        width: length(crate::appearance::space(px)),
+        height: length(crate::appearance::space(px)),
     }
 }
 
@@ -84,7 +84,9 @@ pub(super) fn fixed_width(width: f32) -> Style {
 pub(super) fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) -> WidgetId {
     tree.insert(
         Some(parent),
-        Label::new(text).font_size(11.0).color(Role::Muted),
+        Label::new(text)
+            .font_size(crate::appearance::font(11.0))
+            .color(Role::Muted),
     )
 }
 

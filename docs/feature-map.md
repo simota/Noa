@@ -55,3 +55,17 @@ related packages for a change on its own; these are for a tighter loop.
 | Repository widget native host and fixture previews | `widgets/widget-host/src/`, `skills/noa-widgets/`, `skills/noa-widget-creator/` | inline, `widgets/widget-host/src/screen/text_input_tests.rs` (typing, IME, submit keys, limits), `widgets/widget-host/tests/` | `cargo test --manifest-path widgets/widget-host/Cargo.toml --locked` |
 | Scaffold widget | `widgets/scaffold/src/` (`scan/` is the Rust port of the checker's rules), `crates/noa-app/src/helper_program.rs` (`SCAFFOLD`) | `widgets/scaffold/tests/` (`registration_parity.rs` reads the checker's fixtures), inline | `cargo test --locked --offline` in `widgets/scaffold` |
 | Scaffold widget | `widgets/scaffold/src/setup.rs` (project inventory), `registry.rs` (asset registration), `handoff/setup.rs` (recoverable setup tasks), `ui/` (overview, previews, search), `scan/` (registration checker), `crates/noa-app/src/helper_program.rs` (`SCAFFOLD`); guide: `docs/SCAFFOLD.md` | inline setup/registry/handoff/backend/UI tests; `widgets/scaffold/tests/` (`registration_parity.rs` reads the unchanged checker fixtures, plus no-exec and snapshot tests) | `cargo test --manifest-path widgets/scaffold/Cargo.toml --locked --offline` |
+
+## Widget usability
+
+| Behavior | Implementation | Focused verification |
+| --- | --- | --- |
+| Shared appearance, font scale and density | `widgets/shared/appearance.rs`, each widget's startup and native screen | Shared `appearance::tests` in widget binary tests; all widget `cargo check --all-targets` |
+| Japanese purpose discovery and display-settings launch | `crates/noa-app/src/command_palette.rs`, `commands/command.rs`, `app/commands.rs` | `cargo test -p noa-app widget_discovery_tests` |
+| Explicit Tasks → Review/Verify handoff | Three identical `task_links.rs` copies; Review/Verify CLI, start form and live runner | `task_handoff_args_tests`; `explicit_handoff_does_not_switch_to_a_newer_run_of_the_same_commit` |
+| Review compact panes and preserved draft | `widgets/review/src/ui/layout.rs`, `ui/start.rs` | `compact_layout_reuses_panes_and_preserves_the_search_draft` |
+| Planned/actual calendar and compact Tasks | `widgets/tasks/src/ui/views.rs`, `ui/dates.rs`, `ui/mod.rs` | Inline and UI tests in Tasks |
+| Workflow assignment presets and Tasks results | `widgets/workflow/src/model.rs`, `runner.rs`, `tasks.rs`; `widgets/tasks/src/workflow_links.rs` | Workflow library tests, Tasks handoff/result tests |
+| Repository widget processing lifecycle | `crates/noa-ipc/src/widget.rs`, `crates/noa-app/src/widget/mod.rs`, `widgets/widget-host/src/screen.rs` | Widget operation, recovery and host status tests |
+| Catalog fault isolation and fixture previews | `crates/noa-widget/src/discovery.rs`, `widgets/widget-host/src/catalog.rs` | `cargo test -p noa-widget`; widget-host catalog/image tests |
+| Verify native evidence previews | `widgets/verify/src/thumbnail.rs`, `native_preview.rs`, `ui/images.rs`, `ui/evidence.rs` | Decoder/hash/bounds tests, image-cache tests, native-preview CLI and layout tests |

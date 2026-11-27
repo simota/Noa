@@ -50,6 +50,47 @@ The command palette's **Repository Widgets…** entry (`widget-host.open`) opens
 the current worktree's catalog and previews. On macOS it also appears in the
 View menu. The catalog works with `server-enable = false`.
 
+The catalog keeps valid definitions visible when another package is malformed.
+Each rejected package has its own path and diagnostic. **再読み込み** (Cmd+R or
+Ctrl+R) rescans after edits; a symlinked or unreadable registry, or a scan over
+the registry size limit, still fails as a whole. `widget list` returns the same
+per-package `diagnostics` beside its valid `definitions`.
+
+**プレビューとフィクスチャ** opens an offline preview with **前の例 / 次の例**
+controls for initial data and the package's sorted `fixtures/*.json` files.
+At most 32 fixture files are read, each at most 128 KiB and validated against
+the widget's data schema. Invalid examples are reported without hiding valid
+ones. Paths are opened relative to the worktree and package directory
+descriptors; fixture symlinks and nonregular files are rejected.
+
+Catalog previews start the same installed helper in a separate process. This
+gives every preview its own renderer setup and uploads the verified images,
+including assets added since the last scan. The helper is the running Noa
+widget-host executable, never a command supplied by a package. Reload the
+catalog and reopen the preview to inspect a changed manifest or image; switching
+fixtures inside an existing preview keeps its pinned definition and images.
+
+Rows wrap into additional lines when their children do not fit. Text inputs
+take the available container width, including in a 480-pixel window. Resizing
+does not replace the input, caret, selection or IME composition. Keyboard focus
+on a button is also retained by its manifest node ID during a data update.
+An update that resolves to exactly the existing view reuses the widget tree.
+
+The host includes a normal regression test with a 1,000-row table. It checks
+focus preservation and reuse of an unchanged resolved view, and prints
+separate timings for model/tree updates and CPU preparation (layout, text and
+display-list assembly), with tree update counters:
+
+```sh
+cargo test --manifest-path widgets/widget-host/Cargo.toml \
+  thousand_row_updates -- --nocapture
+```
+
+The timings are diagnostics from a single run, not a benchmark guarantee or
+a GPU/frame-rate measurement. Changed tables still rebuild their resolved
+body; further row-level updates or virtualization need representative
+measurements before choosing an implementation.
+
 ## Share a definition
 
 Put one package in `.noa-widgets/<id>/`:
@@ -235,8 +276,9 @@ sha256 content digest, so changing one image byte changes the definition.
 Manifests without `assets` keep exactly their previous digest. Inline
 definitions (`open --definition-file`) have no package directory, so a
 manifest with `assets` is rejected there; commit the package and open it by
-ID. The palette catalogue's preview windows show the `alt` text in place of
-images; `widget preview` and live instances draw them.
+ID. Catalog previews, `widget preview` and live instances use the same asset
+validation, image decoding and rendering path. An undecodable image uses its
+`alt` text in every mode.
 
 ### Actions
 
@@ -312,6 +354,61 @@ and `hasMore`. The default page size is 32 (maximum 64). `--wait` polls for up
 to 300 seconds and returns immediately on an event or stopped instance.
 This API does not wake or resume a sleeping agent automatically.
 
+### Report processing separately from receipt
+
+An accepted button event is **受付済み・応答待ち** (accepted, awaiting a response),
+not completed work. The host shows the latest operation, a collapsible recent
+history, the last data-update time and the owning pane when one was supplied.
+Neither a queue acknowledgement nor an unrelated `set` changes processing
+state. The host does not infer a stalled or failed job from elapsed time.
+
+Servers advertise `repoWidgetOperationsV1` when they accept `noa.widget.report`.
+The registered event consumer reports the exact `eventId` obtained from
+`events`, using a separate operation version and request ID:
+
+```sh
+# The new event starts at operation version 1.
+Noa +ctl widget report "$instance" --consumer test-run-42 \
+  --event "$event_id" --expected-version 1 --state running \
+  --message 'Running the failed tests' --request-id test-run-42-started
+
+# After recording the actual outcome and deduplicating its external effects:
+Noa +ctl widget report "$instance" --consumer test-run-42 \
+  --event "$event_id" --expected-version 2 --state completed \
+  --message 'The rerun finished; inspect the updated results' \
+  --request-id test-run-42-completed
+```
+
+| State | Meaning |
+| --- | --- |
+| `accepted` | The service recorded the event; the consumer has not reported processing. Producers cannot assign this state. |
+| `running` | The consumer reports that processing is in progress. |
+| `waiting` | The consumer reports a wait and can explain the required response in `message`. |
+| `completed` | The consumer reports that this operation finished. This is not independent verification of its result. |
+| `failed` | The consumer reports a final failure. |
+
+Each accepted report increments the operation's `version`. A stale
+`expectedVersion`, a different consumer or an event not yet delivered is
+rejected. `completed` and `failed` are terminal; repeating the original report
+with its identical request ID and payload returns its original result. A new
+request cannot overwrite a final outcome. If transport or durability is
+uncertain, retry only that same request, as for `set`.
+
+`widget get` includes all retained `operations` in sequence order. Each record
+contains `eventId`, `seq`, `actionId`, the original UI `actionRequestId` when
+known, `version`, `state`, `message`, and recorded Unix-millisecond timestamps.
+The host displays the 32 most recent operations and the count of all operations
+without a final outcome. Messages are limited to 1,024 UTF-8 bytes. History
+shares the instance's existing lifetime request and 1 MiB storage limits;
+there is no silent eviction of operation or retry records.
+
+Reports remain available after queue acknowledgement and application restart.
+The same registered consumer can record a final outcome on a stopped instance;
+doing so never relaunches a host or agent. Older stored queues migrate as
+`accepted` with unknown timestamps, and already-acknowledged legacy events are
+not reconstructed. Existing definitions and producers continue to work; a
+producer that does not report processing remains visibly unconfirmed.
+
 ### Close, recover and clean up
 
 ```sh
@@ -333,6 +430,9 @@ idempotent by instance ID and does not need `--request-id`. Forgetting also
 removes its deduplication history: an old `open` request ID is no longer
 reserved and must not be reused as a retry afterward. There is no automatic
 expiry that silently discards unacknowledged events.
+Explicit forgetting also removes operation history, including operations
+without a final outcome. Record or export needed results before cleanup;
+acknowledgement alone did not establish that those operations completed.
 
 ## Storage and process boundaries
 
@@ -358,7 +458,7 @@ close and reopen to use the new definition.
 
 Public `noa.widget.*` calls retain the existing **trusted-controller**
 noa-server model. `list`, `describe` and `get` need `read`; `open`, `set`,
-`events`, `ack`, `close` and `forget` need `control`. Read scope can therefore
+`events`, `ack`, `report`, `close` and `forget` need `control`. Read scope can therefore
 read widget data, and control scope can operate other instances. Repo paths,
 pane IDs and consumer IDs are not per-repository access control. Do not
 describe this release as a sandbox for untrusted controller clients.

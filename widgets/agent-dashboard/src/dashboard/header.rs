@@ -109,7 +109,9 @@ pub(super) fn header(
     );
     let title = tree.insert(
         Some(bar),
-        Label::new("NOA / AGENTS").font_size(16.0).weight(700),
+        Label::new("NOA / AGENTS")
+            .font_size(crate::appearance::font(16.0))
+            .weight(700),
     );
 
     let dot = tree.insert(
@@ -134,7 +136,7 @@ pub(super) fn header(
     let status = tree.insert(
         Some(status_slot),
         Label::new(health::initial_status(feed))
-            .font_size(STATUS_FONT_SIZE)
+            .font_size(crate::appearance::font(STATUS_FONT_SIZE))
             .truncation(Truncation::Tail),
     );
     let health = HealthParts { dot, status };
@@ -150,7 +152,7 @@ pub(super) fn header(
     let match_count = tree.insert(
         Some(bar),
         Label::new(match_text(workers, filter))
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .color(Role::Muted),
     );
     tree.set_hidden(match_count, !filter.active());
@@ -198,7 +200,11 @@ pub(super) fn fit(
         .map_or("", Label::text);
     let status = widths
         .status
-        .of(text, status_text, TextStyle::new(STATUS_FONT_SIZE))
+        .of(
+            text,
+            status_text,
+            TextStyle::new(crate::appearance::font(STATUS_FONT_SIZE)),
+        )
         .clamp(STATUS_MIN_WIDTH, STATUS_MAX_WIDTH);
 
     // What never goes: the status slot at its whole text's width (capped),

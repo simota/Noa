@@ -112,7 +112,14 @@ Choose **不足を整える作業指示を確認** (Review instructions for miss
 preparation). The preview contains the current evidence, the next steps for
 each missing or unknown area, acceptance conditions, and reporting
 instructions. Choose **この内容でタスクを作成** (Create this task) to save it,
-then open **View → Tasks** to continue.
+then choose **作成したタスクを開く** (Open the created task) to continue in Tasks
+with that project's task already selected. Registration candidates offer the
+same button after their handoff. **View → Tasks** remains available from Noa.
+
+Opening the task selects its detail in Tasks; it does not start an agent.
+If the helper cannot be found or the task file was removed, Scaffold shows
+the reason and keeps the handoff record, so retrying does not create another
+task.
 
 The task is a local Markdown file at `.noa/tasks/t-<millis>.md` (with a suffix
 if a name is already taken). Creating it does not start an agent. The task

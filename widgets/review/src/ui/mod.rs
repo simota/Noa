@@ -12,6 +12,7 @@ mod board;
 mod cards;
 mod composer;
 mod fix;
+mod layout;
 mod matrix;
 mod progress;
 mod report;
@@ -391,10 +392,7 @@ pub(crate) use start::Form as StartForm;
 const LEFT_WIDTH: f32 = 280.0;
 const RIGHT_WIDTH: f32 = 340.0;
 const CENTER_MIN: f32 = 520.0;
-pub(crate) const MIN_WINDOW: (f64, f64) = (
-    (LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH + 2.0 * noa_gpui_core::widgets::DIVIDER) as f64,
-    600.0,
-);
+pub(crate) const MIN_WINDOW: (f64, f64) = (720.0, 600.0);
 
 /// The shortest time between two looks at a stored review on screen (its
 /// log and its lock). The look is taken when the window wakes: on input,
@@ -416,6 +414,7 @@ pub enum Action {
     /// Continues a stored, unfinished review.
     ResumePast(PathBuf),
     ShowTab(CenterTab),
+    CompactPane(usize),
     ToggleSeverity(Severity),
     ToggleLens(String),
     ToggleStatus(FindingStatus),
@@ -565,6 +564,7 @@ pub struct Review {
     /// The session's store directory.
     session_dir: Option<PathBuf>,
     origin: Option<Origin>,
+    start_origin: Option<task_links::OriginHint>,
     /// Where the review's Board Timeline posts stand.
     timeline: Status,
     tab: CenterTab,
@@ -619,6 +619,16 @@ pub struct Review {
     auto: auto::Auto,
     start: start::Parts,
     board: WidgetId,
+    split: WidgetId,
+    navigation: WidgetId,
+    navigation_buttons: [WidgetId; 3],
+    pane_roots: [WidgetId; 3],
+    compact: bool,
+    compact_pane: usize,
+    applied_pane: Option<usize>,
+    wide_sizes: (f32, f32),
+    viewport_width: f32,
+    layout_focus: Option<WidgetId>,
     left_host: WidgetId,
     header_host: WidgetId,
     progress_host: WidgetId,
@@ -709,6 +719,25 @@ impl Review {
     /// Puts `dir` in the start view's repository, root and working
     /// directory fields (`--repo`: the focused pane's directory, so a
     /// review of where the person works needs no path typed).
+    /// Prefill a task's immutable diff; opening the form starts no agents.
+    pub fn with_handoff(
+        mut self,
+        base: Option<&str>,
+        revision: Option<&str>,
+        origin: Option<task_links::OriginHint>,
+    ) -> Self {
+        if let (Some(base), Some(revision)) = (base, revision) {
+            let mut form = start::read(&self.tree, &self.start);
+            form.base = base.into();
+            form.head = revision.into();
+            let mut text = TextStore::new(Default::default());
+            start::fill(&mut self.tree, &mut self.start, &form, &mut text);
+            self.start_origin = origin;
+            self.rebuild(&mut text);
+        }
+        self
+    }
+
     pub fn with_place(mut self, dir: &Path) -> Self {
         let mut text = TextStore::new(Default::default());
         let place = dir.display().to_string();
@@ -730,6 +759,7 @@ impl Review {
             self.tab = tab;
         }
         if finding.is_some() {
+            self.compact_pane = 2;
             self.selected = finding;
         }
         let mut text = TextStore::new(Default::default());
@@ -739,7 +769,7 @@ impl Review {
 
     fn build(source: Source, link: Link, session: Option<Arc<Session>>) -> Self {
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::dark());
+        crate::appearance::install(&mut tree, Theme::dark());
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -752,7 +782,24 @@ impl Review {
         let body = tree.insert(Some(root), Container::new(fill()));
         let start = start::insert(&mut tree, body);
         let auto = auto::Auto::new(&mut tree, start.auto_host);
-        let board = tree.insert(Some(body), Container::new(fill()));
+        let board = tree.insert(
+            Some(body),
+            Container::new(Style {
+                flex_direction: FlexDirection::Column,
+                ..fill()
+            }),
+        );
+        let navigation = tree.insert(
+            Some(board),
+            Container::wrapping_row(6.0, 4.0).padding(crate::appearance::space(8.0)),
+        );
+        let navigation_buttons = ["対象・パネル", "指摘・結果", "選択の詳細"].map(|name| {
+            tree.insert(
+                Some(navigation),
+                Button::new(name).control_size(ControlSize::Small),
+            )
+        });
+        tree.set_hidden(navigation, true);
         let split = tree.insert(
             Some(board),
             SplitView::horizontal()
@@ -799,6 +846,7 @@ impl Review {
             reply_root: None,
             session_dir: None,
             origin: None,
+            start_origin: None,
             timeline: Status::Idle,
             tab: CenterTab::Findings,
             filters: Filters::default(),
@@ -828,6 +876,16 @@ impl Review {
             auto,
             start,
             board,
+            split,
+            navigation,
+            navigation_buttons,
+            pane_roots: [left_host, center_col, right_host],
+            compact: false,
+            compact_pane: 1,
+            applied_pane: None,
+            wide_sizes: (LEFT_WIDTH, RIGHT_WIDTH),
+            viewport_width: LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH + 12.0,
+            layout_focus: None,
             left_host,
             header_host,
             progress_host,
@@ -897,8 +955,27 @@ impl Review {
     }
 
     fn rebuild_widgets(&mut self, text: &mut TextStore) {
+        self.tree
+            .set_hidden(self.start.handoff, self.start_origin.is_none());
+        if let Some(origin) = &self.start_origin {
+            let short = |value: &str| value.chars().take(12).collect::<String>();
+            let label = format!(
+                "元タスク {} · {}\n比較元 {} → この版 {}",
+                origin.task,
+                origin.run,
+                short(&origin.base),
+                short(&origin.commit)
+            );
+            self.tree
+                .update::<Label, _>(self.start.handoff, |view, cx| view.set_text(cx, label));
+        }
+
         self.built = Some(self.built_key());
         self.actions.clear();
+        for (index, button) in self.navigation_buttons.into_iter().enumerate() {
+            self.actions.push((button, Action::CompactPane(index)));
+        }
+        self.adapt_layout(self.viewport_width);
         let started = self.session.is_some();
         self.tree.set_hidden(self.start.root, started);
         self.tree.set_hidden(self.board, !started);
@@ -1064,8 +1141,8 @@ impl Review {
             Some(self.header_host),
             Container::row()
                 .align_items(AlignItems::CENTER)
-                .gap(8.0)
-                .padding(10.0),
+                .gap(crate::appearance::space(8.0))
+                .padding(crate::appearance::space(10.0)),
         );
         let title = self.tree.insert(
             Some(row),
@@ -1082,7 +1159,7 @@ impl Review {
         self.tree.insert(
             Some(title),
             Label::new(session.manifest.label.clone())
-                .font_size(15.0)
+                .font_size(crate::appearance::font(15.0))
                 .weight(600)
                 .truncation(noa_gpui_core::widgets::Truncation::Tail),
         );
@@ -1136,8 +1213,12 @@ impl Review {
             if !matches!(self.timeline, Status::Published { .. })
                 && let Some(detail) = self.timeline.detail()
             {
-                self.tree
-                    .insert(Some(row), Label::new(detail).font_size(12.0).wrap(true));
+                self.tree.insert(
+                    Some(row),
+                    Label::new(detail)
+                        .font_size(crate::appearance::font(12.0))
+                        .wrap(true),
+                );
             }
             // A running review's runner sends what is pending; a stored one
             // has none, so 再試行 is what sends it.
@@ -1919,6 +2000,7 @@ impl Review {
                     text,
                 );
                 self.send_cmd(Command::Start {
+                    origin: self.start_origin.clone(),
                     auto,
                     request: form.request,
                     target: Box::new(target),
@@ -1953,7 +2035,12 @@ impl Review {
                 },
                 Err(_) => self.send_cmd(Command::Resume { dir }),
             },
+            Action::CompactPane(index) => {
+                self.compact_pane = index.min(2);
+                self.adapt_layout(self.viewport_width);
+            }
             Action::ShowTab(tab) => {
+                self.compact_pane = 1;
                 self.tab = tab;
                 self.rebuild(text);
             }
@@ -1986,6 +2073,7 @@ impl Review {
                 self.refilter(text);
             }
             Action::FilterReviewer(part) => {
+                self.compact_pane = 1;
                 self.filters.reviewer = part;
                 self.tab = CenterTab::Findings;
                 self.refilter(text);
@@ -1993,7 +2081,9 @@ impl Review {
             // Closes the search only where it shows; from another tab, or
             // closed, it opens on the findings tab with its words kept.
             Action::ToggleSearch => {
-                if self.search_open && self.tab == CenterTab::Findings {
+                let shown = !self.compact || self.compact_pane == 1;
+                self.compact_pane = 1;
+                if self.search_open && self.tab == CenterTab::Findings && shown {
                     self.search_open = false;
                     self.filters.query.clear();
                     self.refilter(text);
@@ -2002,9 +2092,11 @@ impl Review {
                     self.tab = CenterTab::Findings;
                     self.refilter(text);
                     self.tree.set_focus(Some(self.search));
+                    self.layout_focus = Some(self.search);
                 }
             }
             Action::FilterFile(path) => {
+                self.compact_pane = 1;
                 self.filters.path = path;
                 self.tab = CenterTab::Findings;
                 self.refilter(text);
@@ -2017,6 +2109,7 @@ impl Review {
                 self.rebuild(text);
             }
             Action::ShowCell(lens, severity) => {
+                self.compact_pane = 1;
                 self.filters = Filters {
                     lenses: [lens].into_iter().collect(),
                     severities: severity.into_iter().collect(),
@@ -2026,6 +2119,7 @@ impl Review {
                 self.refilter(text);
             }
             Action::SelectFinding(id) => {
+                self.compact_pane = if id.is_some() { 2 } else { 1 };
                 self.selected = id;
                 self.rebuild(text);
             }
@@ -2102,6 +2196,7 @@ impl Review {
                 );
             }
             Action::NewReview => {
+                self.start_origin = None;
                 self.leave();
                 let form = start::Form::for_kinds(self.start.kinds());
                 start::fill(&mut self.tree, &mut self.start, &form, text);
@@ -2168,6 +2263,7 @@ impl Review {
                         Err(why) => return self.toast(why),
                     },
                 };
+                self.start_origin = None;
                 self.auto.reset();
                 let form = start::Form::from_session(&session);
                 if self.session.is_some() {
@@ -2233,6 +2329,19 @@ impl Review {
 }
 
 impl Screen for Review {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
+    fn prepare(&mut self, viewport: noa_gpui_scene::Size, text: &mut TextStore) -> bool {
+        self.adapt_layout(viewport.width);
+        let changed = self.tree.prepare(viewport, text).is_some();
+        if let Some(id) = self.layout_focus.take() {
+            self.tree.set_focus(Some(id));
+            return self.tree.prepare(viewport, text).is_some() || changed;
+        }
+        changed
+    }
+
     fn tree(&self) -> &UiTree {
         &self.tree
     }
@@ -2489,13 +2598,20 @@ pub(super) fn heading(tree: &mut UiTree, parent: WidgetId, text: &str) {
             ..Default::default()
         }),
     );
-    tree.insert(Some(bar), Label::new(text).font_size(14.0).weight(600));
+    tree.insert(
+        Some(bar),
+        Label::new(text)
+            .font_size(crate::appearance::font(14.0))
+            .weight(600),
+    );
 }
 
 pub(super) fn caption(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>) {
     tree.insert(
         Some(parent),
-        Label::new(text.into()).font_size(11.0).color(Role::Muted),
+        Label::new(text.into())
+            .font_size(crate::appearance::font(11.0))
+            .color(Role::Muted),
     );
 }
 
@@ -2503,7 +2619,7 @@ pub(super) fn note(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>)
     tree.insert(
         Some(parent),
         Label::new(text.into())
-            .font_size(11.5)
+            .font_size(crate::appearance::font(11.5))
             .color(Role::Muted)
             .wrap(true),
     );
@@ -2513,7 +2629,7 @@ pub(super) fn body(tree: &mut UiTree, parent: WidgetId, text: impl Into<String>)
     tree.insert(
         Some(parent),
         Label::new(text.into())
-            .font_size(14.0)
+            .font_size(crate::appearance::font(14.0))
             .wrap(true)
             .selectable(true),
     );
@@ -2577,8 +2693,8 @@ pub(super) fn card(tree: &mut UiTree, parent: WidgetId, accent: bool) -> WidgetI
     tree.insert(
         Some(parent),
         Container::column()
-            .gap(6.0)
-            .padding(10.0)
+            .gap(crate::appearance::space(6.0))
+            .padding(crate::appearance::space(10.0))
             .background(Role::Background)
             .border(
                 1.0,

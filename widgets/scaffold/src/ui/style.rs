@@ -18,8 +18,8 @@ pub const RESOLVED_OPACITY: f32 = 0.9;
 
 pub fn gap(px: f32) -> LayoutSize<LengthPercentage> {
     LayoutSize {
-        width: length(px),
-        height: length(px),
+        width: length(crate::appearance::space(px)),
+        height: length(crate::appearance::space(px)),
     }
 }
 

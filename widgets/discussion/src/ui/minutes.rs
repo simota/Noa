@@ -35,17 +35,20 @@ pub(super) fn insert(
         MinuteSection::OpenQuestions,
     ] {
         let items = session.minutes.section(section);
-        let block = tree.insert(Some(list), Container::column().gap(6.0));
+        let block = tree.insert(
+            Some(list),
+            Container::column().gap(crate::appearance::space(6.0)),
+        );
         let title = tree.insert(
             Some(block),
             Container::row()
                 .align_items(noa_gpui_core::style::AlignItems::CENTER)
-                .gap(6.0),
+                .gap(crate::appearance::space(6.0)),
         );
         tree.insert(
             Some(title),
             Label::new(section_title(section))
-                .font_size(13.0)
+                .font_size(crate::appearance::font(13.0))
                 .weight(600),
         );
         caption(tree, title, items.len().to_string());
@@ -73,7 +76,7 @@ pub(super) fn insert(
             tree.insert(
                 Some(entry),
                 Label::new(item.text.clone())
-                    .font_size(14.0)
+                    .font_size(crate::appearance::font(14.0))
                     .wrap(true)
                     .selectable(true),
             );

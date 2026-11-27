@@ -58,7 +58,7 @@ pub(super) fn build(
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(10.0),
-            padding: LayoutRect::length(12.0),
+            padding: LayoutRect::length(crate::appearance::space(12.0)),
             ..fill_remaining()
         })
         .background(Role::Surface)
@@ -69,11 +69,15 @@ pub(super) fn build(
     // Top toolbar: axis switcher + legend + hint.
     let toolbar = tree.insert(
         Some(shell),
-        Container::row().align_items(AlignItems::CENTER).gap(12.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(12.0)),
     );
     tree.insert(
         Some(toolbar),
-        Label::new("マップ表示").font_size(13.0).weight(700),
+        Label::new("マップ表示")
+            .font_size(crate::appearance::font(13.0))
+            .weight(700),
     );
     let selected_idx = MapAxis::ALL.iter().position(|a| *a == axis).unwrap_or(0);
     let axis_control = tree.insert(
@@ -90,7 +94,7 @@ pub(super) fn build(
         ScrollView::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(16.0),
-            padding: LayoutRect::length(6.0),
+            padding: LayoutRect::length(crate::appearance::space(6.0)),
             ..fill_remaining()
         }),
     );
@@ -279,17 +283,22 @@ fn root_hub(tree: &mut UiTree, row: WidgetId, info: HubInfo<'_>) -> WidgetId {
     );
     let head = tree.insert(
         Some(hub),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     tree.insert(
         Some(head),
-        Label::new(symbol).font_size(13.0).weight(700).color(color),
+        Label::new(symbol)
+            .font_size(crate::appearance::font(13.0))
+            .weight(700)
+            .color(color),
     );
     let slot = tree.insert(Some(head), Container::new(fill_remaining()));
     tree.insert(
         Some(slot),
         Label::new(title)
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .weight(700)
             .truncation(Truncation::Tail),
     );
@@ -336,7 +345,10 @@ fn connect_rich(
         })
         .background(Role::Outline),
     );
-    let col = tree.insert(Some(row), Container::column().gap(8.0));
+    let col = tree.insert(
+        Some(row),
+        Container::column().gap(crate::appearance::space(8.0)),
+    );
     for child in children {
         let child_row = tree.insert(Some(col), Container::row().align_items(AlignItems::CENTER));
         edge(tree, child_row, 12.0);
@@ -364,7 +376,10 @@ fn connect_flat_list(tree: &mut UiTree, row: WidgetId, members: &[&Worker], reg:
         })
         .background(Role::Outline),
     );
-    let col = tree.insert(Some(row), Container::column().gap(8.0));
+    let col = tree.insert(
+        Some(row),
+        Container::column().gap(crate::appearance::space(8.0)),
+    );
     for worker in members {
         let child_row = tree.insert(Some(col), Container::row().align_items(AlignItems::CENTER));
         edge(tree, child_row, 12.0);
@@ -405,15 +420,20 @@ fn rich_node(tree: &mut UiTree, row: WidgetId, worker: &Worker, muted: bool, reg
 
     let head = tree.insert(
         Some(node),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     tree.insert(
         Some(head),
-        Label::new(symbol).font_size(12.0).weight(700).color(color),
+        Label::new(symbol)
+            .font_size(crate::appearance::font(12.0))
+            .weight(700)
+            .color(color),
     );
     let slot = tree.insert(Some(head), Container::new(fill_remaining()));
     let title = Label::new(one_line(&worker.label))
-        .font_size(12.0)
+        .font_size(crate::appearance::font(12.0))
         .weight(700)
         .truncation(Truncation::Tail);
     tree.insert(
@@ -450,7 +470,7 @@ fn rich_node(tree: &mut UiTree, row: WidgetId, worker: &Worker, muted: bool, reg
         tree.insert(
             Some(node),
             Label::new(one_line(&worker.task))
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .color(Role::Muted)
                 .truncation(Truncation::Tail),
         );

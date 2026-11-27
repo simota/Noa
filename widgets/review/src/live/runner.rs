@@ -498,18 +498,90 @@ impl<C: Connect, K: Clock> Runner<C, K> {
         wake: Rc<dyn Fn()>,
     ) -> Result<Self, String> {
         let now = clock.now();
+        // Reject a stale or edited handoff before reserving a session or
+        // touching its snapshot. The captured target is checked again below.
+        if let Start::New(new) = &start
+            && let Some(hint) = &new.origin
+        {
+            let root = config
+                .tasks_root
+                .as_deref()
+                .ok_or("タスクの保存先が見つかりません")?;
+            if new.target.base.as_deref() != Some(hint.base.as_str()) {
+                return Err(
+                    "元タスクの比較元が変更されています。Tasksから開き直してください".into(),
+                );
+            }
+            let head = match &new.target.head {
+                review::model::types::Head::Ref(sha) => Some(sha.clone()),
+                _ => None,
+            };
+            task_links::match_explicit(
+                root,
+                hint,
+                &task_links::Target {
+                    toplevel: new
+                        .target
+                        .path
+                        .clone()
+                        .ok_or("タスクの対象はGitリポジトリが必要です")?,
+                    head_ref: None,
+                    head_sha: head,
+                },
+            )?;
+        }
+        let requested_origin = match &start {
+            Start::New(new) => new.origin.clone(),
+            _ => None,
+        };
         let resumed = matches!(start, Start::Resume { .. } | Start::Extend { .. });
         let (engine, store) = match start {
             Start::New(new) => new_review(*new, config.engine, now)?,
             Start::Resume { dir } => open_log(dir, None, config.engine, now)?,
             Start::Extend { dir, by } => open_log(dir, Some(by), config.engine, now)?,
         };
-        let (origin, link_error) = match config.tasks_root {
-            Some(root) => match session_origin(&root, engine.session(), resumed, now) {
-                Ok(origin) => (origin, None),
-                Err(error) => (None, Some(error)),
-            },
-            None => (None, None),
+        let (origin, link_error) = if let Some(hint) = requested_origin {
+            let root = config
+                .tasks_root
+                .as_deref()
+                .ok_or("タスクの保存先が見つかりません")?;
+            let manifest = &engine.session().manifest;
+            if manifest.base_sha.as_deref() != Some(hint.base.as_str()) || manifest.uncommitted {
+                return Err("キャプチャした比較元が元タスクと一致しません".into());
+            }
+            let target = task_links::Target {
+                toplevel: manifest
+                    .repo
+                    .clone()
+                    .ok_or("タスクの対象はGitリポジトリが必要です")?,
+                head_ref: manifest.head_ref.clone(),
+                head_sha: manifest.head_sha.clone(),
+            };
+            (
+                task_links::link_explicit(
+                    root,
+                    &hint,
+                    &target,
+                    SessionKind::Review,
+                    engine.session().id.as_str(),
+                    now,
+                )
+                .map_err(|error| {
+                    format!(
+                        "{error}。エージェントは未起動です。保存されたセッション: {}",
+                        store.dir().display()
+                    )
+                })?,
+                None,
+            )
+        } else {
+            match config.tasks_root {
+                Some(root) => match session_origin(&root, engine.session(), resumed, now) {
+                    Ok(origin) => (origin, None),
+                    Err(error) => (None, Some(error)),
+                },
+                None => (None, None),
+            }
         };
         let mut runner = Self {
             engine,
@@ -1657,6 +1729,7 @@ fn workdir_of(target: &Target) -> Result<Option<PathBuf>, String> {
 /// What a new review starts from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewReview {
+    pub origin: Option<task_links::OriginHint>,
     pub auto: Option<review::auto_assign::AutoRecord>,
     pub request: String,
     pub target: Target,
@@ -1673,6 +1746,7 @@ pub struct NewReview {
 /// behind when the capture or the setup is refused.
 fn new_review(new: NewReview, config: Config, now: Millis) -> Result<(Engine, Store), String> {
     let NewReview {
+        origin: _,
         auto,
         request,
         target,
@@ -2492,6 +2566,7 @@ mod tests {
         max_rounds: RoundNo,
     ) -> Start {
         Start::New(Box::new(NewReview {
+            origin: None,
             auto: None,
             request: "Review the migration plan".into(),
             target,
@@ -3574,6 +3649,7 @@ mod tests {
         let empty = root.join("empty");
         fs::create_dir_all(&empty).unwrap();
         let new = NewReview {
+            origin: None,
             auto: None,
             request: "r".into(),
             target: Target {

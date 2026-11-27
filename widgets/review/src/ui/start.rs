@@ -35,6 +35,9 @@ const FIELD_WIDTH: f32 = 612.0;
 
 pub(super) struct Parts {
     pub(super) root: WidgetId,
+    pub(super) handoff: WidgetId,
+    cards: WidgetId,
+    stacked: bool,
     pub(super) kind: WidgetId,
     git: WidgetId,
     files: WidgetId,
@@ -611,8 +614,16 @@ fn insert_past_card(tree: &mut UiTree, parent: WidgetId) -> WidgetId {
 }
 
 fn section(tree: &mut UiTree, parent: WidgetId, title: &str) -> WidgetId {
-    let col = tree.insert(Some(parent), Container::column().gap(6.0));
-    tree.insert(Some(col), Label::new(title).font_size(13.0).weight(600));
+    let col = tree.insert(
+        Some(parent),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
+    tree.insert(
+        Some(col),
+        Label::new(title)
+            .font_size(crate::appearance::font(13.0))
+            .weight(600),
+    );
     col
 }
 
@@ -669,9 +680,19 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         }),
     );
     let card = tree.insert(Some(cards), card_container());
+    let handoff = tree.insert(
+        Some(card),
+        Label::new("")
+            .font_size(crate::appearance::font(12.0))
+            .color(Role::Muted)
+            .wrap(true),
+    );
+    tree.set_hidden(handoff, true);
     tree.insert(
         Some(card),
-        Label::new("新しいレビュー").font_size(17.0).weight(600),
+        Label::new("新しいレビュー")
+            .font_size(crate::appearance::font(17.0))
+            .weight(600),
     );
     tree.insert(
         Some(card),
@@ -679,7 +700,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
             "観点の違うレビュアーが同じ対象を独立にレビューし、次のラウンドで互いの指摘を\
              検証します。リードが毎ラウンド指摘を統合し、最終ラウンドで総合判定とレポートを出します。",
         )
-        .font_size(12.0)
+        .font_size(crate::appearance::font(12.0))
         .color(Role::Muted)
         .wrap(true),
     );
@@ -693,21 +714,33 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         )
         .with_selected(&[0]),
     );
-    let git = tree.insert(Some(target), Container::column().gap(6.0));
+    let git = tree.insert(
+        Some(target),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
     let repo = field(
         tree,
         git,
         "リポジトリ（作業ツリー内のパス）",
         "例: ~/repos/my-app",
     );
-    let refs = tree.insert(Some(git), Container::row().gap(12.0));
-    let base_col = tree.insert(Some(refs), Container::column().gap(6.0));
+    let refs = tree.insert(
+        Some(git),
+        Container::row().gap(crate::appearance::space(12.0)),
+    );
+    let base_col = tree.insert(
+        Some(refs),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
     caption(tree, base_col, "比較元");
     let base = tree.insert(
         Some(base_col),
         TextField::new("自動（origin の既定ブランチ）", 300.0),
     );
-    let head_col = tree.insert(Some(refs), Container::column().gap(6.0));
+    let head_col = tree.insert(
+        Some(refs),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
     caption(tree, head_col, "比較先");
     let head = tree.insert(
         Some(head_col),
@@ -719,7 +752,10 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         TextArea::new("例: crates/noa-app\ndocs/release notes.md").min_lines(2),
     );
 
-    let files = tree.insert(Some(target), Container::column().gap(6.0));
+    let files = tree.insert(
+        Some(target),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
     let root_dir = field(
         tree,
         files,
@@ -729,7 +765,10 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     caption(tree, files, "パス（任意・1行に1つ。空欄でフォルダ全体）");
     let paths = tree.insert(Some(files), TextArea::new("src/\nCargo.toml").min_lines(2));
 
-    let document = tree.insert(Some(target), Container::column().gap(6.0));
+    let document = tree.insert(
+        Some(target),
+        Container::column().gap(crate::appearance::space(6.0)),
+    );
     caption(tree, document, "文書（貼り付け）");
     let text = tree.insert(
         Some(document),
@@ -758,7 +797,7 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         Label::new(
             "開始時に対象をスナップショットとして保存し、全員が同じ内容をレビューします（作業ディレクトリ内の .noa/reviews/ に置かれ、git には載りません）。",
         )
-        .font_size(11.0)
+        .font_size(crate::appearance::font(11.0))
         .color(Role::Muted)
         .wrap(true),
     );
@@ -771,10 +810,15 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     );
 
     let lead_col = section(tree, card, "リード（取りまとめ役）");
-    let auto_host = tree.insert(Some(lead_col), Container::row().gap(8.0));
+    let auto_host = tree.insert(
+        Some(lead_col),
+        Container::row().gap(crate::appearance::space(8.0)),
+    );
     let lead_row = tree.insert(
         Some(lead_col),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     // Nothing is known of what is installed yet: every kind is offered
     // until the check reports ([`apply_kinds`]).
@@ -788,7 +832,10 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         card,
         &format!("レビュアー（{MIN_PANEL}〜{MAX_PANEL}体）・観点"),
     );
-    let panel_list = tree.insert(Some(panel_col), Container::column().gap(8.0));
+    let panel_list = tree.insert(
+        Some(panel_col),
+        Container::column().gap(crate::appearance::space(8.0)),
+    );
     let panel = Form::for_kinds(&kinds)
         .panel
         .iter()
@@ -796,7 +843,9 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
         .collect();
     let panel_foot = tree.insert(
         Some(panel_col),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     let add_row = tree.insert(
         Some(panel_foot),
@@ -805,14 +854,16 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     tree.insert(
         Some(panel_foot),
         Label::new("同じエージェントの2体目以降は claude-2 … として参加します")
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .color(Role::Muted),
     );
 
     let rounds_col = section(tree, card, "ラウンド上限");
     let rounds_row = tree.insert(
         Some(rounds_col),
-        Container::row().align_items(AlignItems::CENTER).gap(10.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(10.0)),
     );
     let max_rounds = tree.insert(
         Some(rounds_row),
@@ -826,7 +877,9 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
 
     let foot = tree.insert(
         Some(card),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     let notes = tree.insert(Some(foot), Container::column().grow(1.0));
     let note = tree.insert(Some(notes), Container::column());
@@ -838,6 +891,9 @@ pub(super) fn insert(tree: &mut UiTree, parent: WidgetId) -> Parts {
     let past = insert_past_card(tree, cards);
     let mut parts = Parts {
         root,
+        handoff,
+        cards,
+        stacked: false,
         kind,
         git,
         files,
@@ -934,7 +990,9 @@ const DEFAULT_EFFORT: &str = "既定のエフォート";
 fn insert_setup(tree: &mut UiTree, parent: WidgetId, kind: AgentKind) -> SetupParts {
     let host = tree.insert(
         Some(parent),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     let (model, effort) = insert_setup_controls(tree, host, kind);
     SetupParts {
@@ -1008,14 +1066,16 @@ fn insert_row(
     let host = tree.insert(
         Some(list),
         Container::column()
-            .gap(6.0)
-            .padding(8.0)
+            .gap(crate::appearance::space(6.0))
+            .padding(crate::appearance::space(8.0))
             .background(Role::SurfaceAlt)
             .radius(6.0),
     );
     let top = tree.insert(
         Some(host),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     let kind = insert_kind_menu(tree, top, kinds, choice.agent.kind);
     let setup = insert_setup(tree, top, choice.agent.kind);
@@ -1027,7 +1087,9 @@ fn insert_row(
     );
     let bottom = tree.insert(
         Some(host),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     caption(tree, bottom, "観点");
     let (lens_index, custom_text) = match &choice.lens {
@@ -1285,12 +1347,16 @@ pub(super) fn show_refusal(tree: &mut UiTree, parts: &Parts, why: &str, text: &m
     clear_children(tree, parts.note, text);
     let row = tree.insert(
         Some(parts.note),
-        Container::row().align_items(AlignItems::START).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::START)
+            .gap(crate::appearance::space(6.0)),
     );
     tag(tree, row, "開始できません", Tone::Critical);
     tree.insert(
         Some(row),
-        Label::new(why.to_owned()).font_size(11.5).wrap(true),
+        Label::new(why.to_owned())
+            .font_size(crate::appearance::font(11.5))
+            .wrap(true),
     );
 }
 
@@ -1382,7 +1448,9 @@ pub(super) fn rebuild_past(
     for listed in past {
         let row = tree.insert(
             Some(parts.past),
-            Container::row().align_items(AlignItems::CENTER).gap(10.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(10.0)),
         );
         let info = tree.insert(
             Some(row),
@@ -1404,7 +1472,7 @@ pub(super) fn rebuild_past(
                 tree.insert(
                     Some(info),
                     Label::new(dir_name(&listed.dir))
-                        .font_size(12.5)
+                        .font_size(crate::appearance::font(12.5))
                         .weight(600),
                 );
                 super::note(tree, info, format!("読めません: {why}"));
@@ -1414,7 +1482,7 @@ pub(super) fn rebuild_past(
         tree.insert(
             Some(info),
             Label::new(summary.label.clone())
-                .font_size(12.5)
+                .font_size(crate::appearance::font(12.5))
                 .weight(600)
                 .wrap(true),
         );
@@ -1448,7 +1516,10 @@ pub(super) fn rebuild_past(
         );
         caption(tree, tags, age(now, summary.created_at));
 
-        let buttons = tree.insert(Some(row), Container::row().gap(6.0));
+        let buttons = tree.insert(
+            Some(row),
+            Container::row().gap(crate::appearance::space(6.0)),
+        );
         let dir: PathBuf = listed.dir.clone();
         let open = if !summary.closed && !summary.busy {
             let resume = tree.insert(Some(buttons), small("再開").default_button(true));
@@ -1476,7 +1547,9 @@ pub(super) fn rebuild_past(
     if total > past.len() {
         let more = tree.insert(
             Some(parts.past),
-            Container::row().align_items(AlignItems::CENTER).gap(10.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(10.0)),
         );
         caption(
             tree,
@@ -1628,5 +1701,23 @@ mod tests {
             ..Form::default()
         };
         assert!(relative.target().unwrap_err().contains("絶対パス"));
+    }
+}
+
+/// Reflow the existing form and history without replacing text inputs.
+pub(super) fn adapt(tree: &mut UiTree, parts: &mut Parts, width: f32) {
+    use noa_gpui_core::Widget;
+    let stacked = width < 1100.0;
+    if stacked == parts.stacked {
+        return;
+    }
+    parts.stacked = stacked;
+    if let Some(mut style) = tree.get::<Container>(parts.cards).map(Widget::style) {
+        style.flex_direction = if stacked {
+            FlexDirection::Column
+        } else {
+            FlexDirection::Row
+        };
+        tree.update::<Container, _>(parts.cards, |cards, cx| cards.set_style(cx, style));
     }
 }

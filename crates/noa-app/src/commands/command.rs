@@ -129,6 +129,8 @@ pub enum AppCommand {
     OpenWorkflow,
     /// Browse and preview this worktree's declarative widgets.
     OpenWidgetHost,
+    /// Open the shared appearance, text-size and density preferences.
+    OpenWidgetSettings,
     /// Start the agent usage window (`widgets/agent-usage`), the limits and
     /// log statistics of the coding agents, as a program of its own beside
     /// Noa.
@@ -320,6 +322,7 @@ impl AppCommand {
     pub(crate) const OPEN_TASKS_MENU_ID: &'static str = "noa.view.open-tasks";
     pub(crate) const OPEN_SCAFFOLD_MENU_ID: &'static str = "noa.view.open-scaffold";
     pub(crate) const OPEN_WORKFLOW_MENU_ID: &'static str = "noa.view.open-workflow";
+    pub(crate) const OPEN_WIDGET_SETTINGS_MENU_ID: &'static str = "noa.view.widget-settings";
     pub(crate) const OPEN_WIDGET_HOST_MENU_ID: &'static str = "noa.view.open-widget-host";
     pub(crate) const OPEN_AGENT_USAGE_MENU_ID: &'static str = "noa.view.open-agent-usage";
     pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
@@ -414,6 +417,7 @@ impl AppCommand {
             AppCommand::OpenScaffold => Self::OPEN_SCAFFOLD_MENU_ID,
             AppCommand::OpenWorkflow => Self::OPEN_WORKFLOW_MENU_ID,
             AppCommand::OpenWidgetHost => Self::OPEN_WIDGET_HOST_MENU_ID,
+            AppCommand::OpenWidgetSettings => Self::OPEN_WIDGET_SETTINGS_MENU_ID,
             AppCommand::OpenAgentUsage => Self::OPEN_AGENT_USAGE_MENU_ID,
         }
     }
@@ -496,6 +500,7 @@ impl AppCommand {
             Self::OPEN_SCAFFOLD_MENU_ID => Some(Self::OpenScaffold),
             Self::OPEN_WORKFLOW_MENU_ID => Some(Self::OpenWorkflow),
             Self::OPEN_WIDGET_HOST_MENU_ID => Some(Self::OpenWidgetHost),
+            Self::OPEN_WIDGET_SETTINGS_MENU_ID => Some(Self::OpenWidgetSettings),
             Self::OPEN_AGENT_USAGE_MENU_ID => Some(Self::OpenAgentUsage),
             Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
@@ -632,6 +637,7 @@ impl AppCommand {
             Self::OpenScaffold => "scaffold.open",
             Self::OpenWorkflow => "workflow.open",
             Self::OpenWidgetHost => "widget-host.open",
+            Self::OpenWidgetSettings => "widget-settings.open",
             Self::OpenAgentUsage => "agent-usage.open",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
@@ -737,6 +743,7 @@ impl AppCommand {
             "scaffold.open" => Some(Self::OpenScaffold),
             "workflow.open" => Some(Self::OpenWorkflow),
             "widget-host.open" => Some(Self::OpenWidgetHost),
+            "widget-settings.open" => Some(Self::OpenWidgetSettings),
             "agent-usage.open" => Some(Self::OpenAgentUsage),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),

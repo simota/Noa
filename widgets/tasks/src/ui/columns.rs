@@ -62,7 +62,9 @@ pub(super) fn build(
         let head = tree.insert(Some(id), Container::new(style::row(8.0)));
         tree.insert(
             Some(head),
-            Label::new(column.label()).font_size(13.0).weight(700),
+            Label::new(column.label())
+                .font_size(crate::appearance::font(13.0))
+                .weight(700),
         );
         tree.insert(
             Some(head),
@@ -136,21 +138,28 @@ fn insert_card(
         Tag::new(task.r#ref.badge()).tone(style::source_tone(source)),
     );
     if let Some(run) = card.last {
-        tree.insert(
+        let age_label = tree.insert(
             Some(top),
             Label::new(format!(
                 "{} · {}",
                 run.run.agent.command(),
                 age(now, run.run.started)
             ))
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .color(Role::Muted),
+        );
+        style::remember_age(
+            tree,
+            age_label,
+            run.run.started,
+            &format!("{} · ", run.run.agent.command()),
+            "",
         );
     }
     tree.insert(
         Some(pressed),
         Label::new(task.title.clone())
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .wrap(true)
             .max_lines(3),
     );
@@ -164,7 +173,7 @@ fn insert_card(
         tree.insert(
             Some(pressed),
             Label::new(problem.clone())
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .wrap(true)
                 .color(PROBLEM),
         );

@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::adapters::{Adapters, Observation, fs, git};
 use crate::engine::{Effect, Engine, Input};
-use crate::model::{NodeKind, NodeState, Run, SCHEMA_VERSION, WorkflowDefinition};
+use crate::model::{AgentPreset, NodeKind, NodeState, Run, SCHEMA_VERSION, WorkflowDefinition};
 use crate::store::{Store, StoredWorkflow};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +29,9 @@ pub struct View {
     pub notice: Option<String>,
     /// False while another process owns this repository's runner lease.
     pub can_control: bool,
+    /// A Tasks handoff observes saved runs until an explicit Start or Resume.
+    pub deferred: bool,
+    pub presets: Vec<AgentPreset>,
 }
 
 #[derive(Clone, Debug)]
@@ -39,7 +42,9 @@ pub enum Intent {
     },
     Start {
         objective: String,
+        origin_task: Option<crate::tasks::TaskOrigin>,
     },
+    SavePreset(AgentPreset),
     Pause,
     Resume,
     Cancel,
@@ -86,20 +91,32 @@ impl Channel {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let repository = git::repository(&repository)?;
-        let state = noa_config::session_state_path().ok_or("Noaの保存先が見つかりません")?;
-        let data = state
-            .parent()
-            .ok_or("Noaの保存先が不正です")?
-            .join("workflows");
-        fs::plain_dirs(&data)?;
-        let data = std::fs::canonicalize(data).map_err(|e| e.to_string())?;
-        let key = fs::hash(repository.as_os_str().as_encoded_bytes());
-        Self::open_in(repository, data.join(key), wake)
+        let root = data_root(&repository)?;
+        Self::open_in(repository, root, wake)
+    }
+
+    /// Fill a Tasks handoff without recovering or scheduling an older run.
+    pub fn open_deferred(
+        repository: PathBuf,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        let repository = git::repository(&repository)?;
+        let root = data_root(&repository)?;
+        Self::open_in_mode(repository, root, true, wake)
     }
 
     pub fn open_in(
         repository: PathBuf,
         root: PathBuf,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        Self::open_in_mode(repository, root, false, wake)
+    }
+
+    fn open_in_mode(
+        repository: PathBuf,
+        root: PathBuf,
+        deferred: bool,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let repository = git::repository(&repository)?;
@@ -128,6 +145,7 @@ impl Channel {
             },
         };
         let engine = restore_stored(&stored, &repository)?;
+        let presets = read_presets(&root)?;
         let adapters = Adapters::new(repository.clone(), root.join("runs"))?;
         let (commands, receive) = mpsc::channel();
         let views = Arc::new(Mutex::new(None));
@@ -148,6 +166,8 @@ impl Channel {
             notice: lease.is_none().then(|| OBSERVER_NOTICE.to_owned()),
             persistence_failed: false,
             lease,
+            presets,
+            deferred,
         };
         worker.publish();
         let thread = std::thread::Builder::new()
@@ -228,6 +248,52 @@ struct Worker {
     notice: Option<String>,
     persistence_failed: bool,
     lease: Option<fs::Lease>,
+    presets: Vec<AgentPreset>,
+    deferred: bool,
+}
+
+fn data_root(repository: &std::path::Path) -> Result<PathBuf, String> {
+    let state = noa_config::session_state_path().ok_or("Noaの保存先が見つかりません")?;
+    let data = state
+        .parent()
+        .ok_or("Noaの保存先が不正です")?
+        .join("workflows");
+    Ok(data.join(fs::hash(repository.as_os_str().as_encoded_bytes())))
+}
+
+fn read_presets(root: &std::path::Path) -> Result<Vec<AgentPreset>, String> {
+    let presets: Vec<AgentPreset> =
+        fs::read_json(&root.join("agent-presets.json"))?.unwrap_or_default();
+    if presets.len() > 32 {
+        return Err("担当構成は32件以内にしてください".into());
+    }
+    for preset in &presets {
+        preset.validate()?;
+    }
+    Ok(presets)
+}
+
+/// Opens a frozen run for inspection, without starting a runner or connecting
+/// to Noa. References exported to Tasks always point to this durable snapshot.
+pub fn read_run(repository: &std::path::Path, id: &str) -> Result<Run, String> {
+    if !crate::model::valid_id(id) {
+        return Err("実行IDが不正です".into());
+    }
+    let repository = git::repository(repository)?;
+    let bytes = fs::read(
+        &data_root(&repository)?
+            .join("runs")
+            .join(id)
+            .join("run.json"),
+        32 * 1024 * 1024,
+    )?
+    .ok_or("指定されたWorkflow実行が見つかりません")?;
+    let run: Run = serde_json::from_slice(&bytes).map_err(|e| format!("実行を読めません: {e}"))?;
+    if run.repository != repository || run.id != id {
+        return Err("実行とリポジトリが一致しません".into());
+    }
+    crate::engine::validate_run(&run).map_err(|e| e.to_string())?;
+    Ok(run)
 }
 
 const OBSERVER_NOTICE: &str =
@@ -254,7 +320,7 @@ fn restore_stored(
 
 impl Worker {
     fn has_autonomous_work(&self) -> bool {
-        if self.persistence_failed || self.lease.is_none() {
+        if self.deferred || self.persistence_failed || self.lease.is_none() {
             return false;
         }
         let Some(run) = self.engine.as_ref().map(Engine::run) else {
@@ -296,6 +362,8 @@ impl Worker {
             connection,
             notice: self.notice.clone(),
             can_control: self.lease.is_some() && !self.persistence_failed,
+            deferred: self.deferred,
+            presets: self.presets.clone(),
         };
         if let Ok(mut latest) = self.views.lock() {
             *latest = Some(view);
@@ -312,6 +380,18 @@ impl Worker {
             Ok(stored) => {
                 self.stored = stored;
                 self.engine = Some(engine);
+                // Derived references follow the committed state. Their failure
+                // does not turn a persisted dispatch into an ambiguous retry.
+                if let Some(run) = self.engine.as_ref().map(Engine::run) {
+                    let projection =
+                        fs::write_json(&self.root.join("runs").join(&run.id).join("run.json"), run)
+                            .and_then(|()| crate::tasks::publish(run));
+                    if let Err(error) = projection {
+                        self.notice = Some(format!(
+                            "実行は保存済みですが関連成果を更新できません: {error}"
+                        ));
+                    }
+                }
                 Ok(())
             }
             Err(error) => {
@@ -403,6 +483,9 @@ impl Worker {
     }
 
     fn effects(&mut self, effects: Vec<Effect>) -> Result<(), String> {
+        if self.deferred && !effects.is_empty() {
+            return Err("Tasksから開いた保存済み実行は、明示的に再開するまで操作できません".into());
+        }
         let mut queue: VecDeque<Effect> = effects.into();
         let mut count = 0;
         while let Some(effect) = queue.pop_front() {
@@ -453,6 +536,10 @@ impl Worker {
     }
 
     fn recover(&mut self) {
+        if self.deferred {
+            self.publish();
+            return;
+        }
         let active: Vec<_> = self
             .engine
             .as_ref()
@@ -492,6 +579,9 @@ impl Worker {
                 self.notice = Some(error);
                 self.publish();
             }
+            return;
+        }
+        if self.deferred {
             return;
         }
         if self.persistence_failed {
@@ -552,6 +642,20 @@ impl Worker {
         if self.persistence_failed {
             return Err("保存先を復旧してウィンドウを開き直してください".into());
         }
+        if self.deferred
+            && !matches!(
+                intent,
+                Intent::Save { .. }
+                    | Intent::SavePreset(_)
+                    | Intent::Start { .. }
+                    | Intent::Resume
+                    | Intent::Refresh
+            )
+        {
+            return Err("保存済み実行への操作は「以前の実行を再開」後に行ってください".into());
+        }
+        let start_deferred = self.deferred && matches!(intent, Intent::Start { .. });
+        let resume_deferred = self.deferred && matches!(intent, Intent::Resume);
         let now = now();
         let input = match intent {
             Intent::Save {
@@ -571,7 +675,29 @@ impl Worker {
                     .map_err(|e| e.to_string())?;
                 return Ok(());
             }
-            Intent::Start { objective } => {
+            Intent::SavePreset(preset) => {
+                preset.validate()?;
+                let mut next = self.presets.clone();
+                if let Some(previous) = next.iter_mut().find(|p| p.name == preset.name) {
+                    *previous = preset;
+                } else {
+                    next.push(preset);
+                }
+                if next.len() > 32 {
+                    return Err("担当構成は32件まで保存できます".into());
+                }
+                fs::write_json(&self.root.join("agent-presets.json"), &next)?;
+                self.presets = next;
+                self.notice = Some("担当構成を保存しました".into());
+                return Ok(());
+            }
+            Intent::Start {
+                objective,
+                origin_task,
+            } => {
+                if let Some(origin) = &origin_task {
+                    origin.validate(&self.repository, &objective)?;
+                }
                 if self
                     .engine
                     .as_ref()
@@ -592,15 +718,22 @@ impl Worker {
                 let base = git::head(&self.repository)?;
                 let target = git::snapshot(&self.repository, &base)?;
                 let id = format!("run-{now}-{}", self.stored.version);
+                let definition = crate::adapters::ipc::freeze_assignments(
+                    self.stored.definition.clone(),
+                    crate::adapters::ipc::detect_agent,
+                )?;
                 let engine = Engine::new(
                     id,
-                    self.stored.definition.clone(),
+                    definition,
                     self.repository.clone(),
                     objective,
                     target,
                     now,
                 )
                 .map_err(|e| e.to_string())?;
+                let mut run = engine.into_run();
+                run.origin_task = origin_task;
+                let engine = Engine::restore(run).map_err(|e| e.to_string())?;
                 self.save_engine(engine)?;
                 Input::Start { now }
             }
@@ -650,13 +783,26 @@ impl Worker {
                     .answer(&run.id, &node_id, node.attempt, &answer);
             }
             Intent::Refresh => {
+                if self.deferred {
+                    self.publish();
+                    return Ok(());
+                }
                 self.adapters.reconnect()?;
                 self.poll_active();
                 return Ok(());
             }
         };
         let effects = self.apply(input)?;
-        self.effects(effects)
+        // A rejected Start/Resume leaves the handoff suspended. Persist the
+        // explicit transition before permitting any effects or timer ticks.
+        if start_deferred || resume_deferred {
+            self.deferred = false;
+        }
+        self.effects(effects)?;
+        if resume_deferred {
+            self.recover();
+        }
+        Ok(())
     }
 
     /// Read-only snapshots use atomic replacement and checksum validation;
@@ -678,12 +824,16 @@ impl Worker {
                     .map_err(|e| e.to_string())?,
             };
             let engine = restore_stored(&stored, &self.repository)?;
+            // The old owner may have saved presets after this observer opened.
+            // Reload under the lease before its first save can replace the file.
+            self.presets = read_presets(&self.root)?;
             self.stored = stored;
             self.engine = engine;
             self.lease = Some(lease);
             self.notice = Some("保存済みの状態から操作を引き継ぎました".into());
             self.recover();
         } else {
+            self.presets = read_presets(&self.root)?;
             self.notice = Some(OBSERVER_NOTICE.to_owned());
             self.publish();
         }
@@ -721,6 +871,155 @@ mod tests {
         (directory, repository, path.join("state"))
     }
 
+    fn saved_attempt(
+        repository: &std::path::Path,
+        root: &std::path::Path,
+        retry: bool,
+        expired: bool,
+    ) -> StoredWorkflow {
+        let started = now().saturating_sub(10_000);
+        let mut definition = WorkflowDefinition::standard();
+        if expired {
+            definition.limits.max_duration_ms = 5_000;
+        }
+        let head = git::head(repository).unwrap();
+        let mut engine = Engine::new(
+            "run-before-handoff".into(),
+            definition.clone(),
+            repository.to_owned(),
+            "The previous task".into(),
+            git::snapshot(repository, &head).unwrap(),
+            started,
+        )
+        .unwrap();
+        engine.handle(Input::Start { now: started }).unwrap();
+        if retry {
+            engine
+                .handle(Input::Failed {
+                    node_id: "task".into(),
+                    attempt: 1,
+                    message: "temporary".into(),
+                    retryable: true,
+                    now: started,
+                })
+                .unwrap();
+            assert!(
+                engine.run().nodes["task"]
+                    .retry_at
+                    .is_some_and(|at| at < now())
+            );
+        }
+        Store::open(root.to_owned())
+            .unwrap()
+            .save(0, &definition, Some(engine.run()))
+            .unwrap()
+    }
+
+    #[test]
+    fn deferred_handoffs_do_not_recover_tick_or_resume_after_a_rejected_start() {
+        for retry in [false, true] {
+            let (_directory, repository, root) = repository();
+            let before = saved_attempt(&repository, &root, retry, true);
+            let channel = Channel::open_in_mode(repository, root.clone(), true, || {}).unwrap();
+            assert!(channel.poll().unwrap().deferred);
+            // Exercise the timer as well as refresh, refused operations, and close.
+            std::thread::sleep(Duration::from_millis(1_100));
+            channel
+                .act(Intent::Start {
+                    objective: String::new(),
+                    origin_task: None,
+                })
+                .unwrap();
+            channel.act(Intent::Resume).unwrap(); // The saved duration limit has expired.
+            channel
+                .act(Intent::Retry {
+                    node_id: "task".into(),
+                })
+                .unwrap();
+            channel.act(Intent::Refresh).unwrap();
+            channel.clone().finish_autonomous().unwrap();
+            let view = channel.poll().unwrap();
+            assert!(view.deferred);
+            let after = Store::open(root).unwrap().load().unwrap().unwrap();
+            assert_eq!(after.version, before.version);
+            assert_eq!(
+                after.run, before.run,
+                "opening a task must not advance the old run"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deferred_observer_stays_suspended_after_taking_the_lease() {
+        let (_directory, repository, root) = repository();
+        let before = saved_attempt(&repository, &root, false, false);
+        let lease = fs::Lease::try_acquire(&root.join("runner.lock"))
+            .unwrap()
+            .unwrap();
+        let channel = Channel::open_in_mode(repository.clone(), root.clone(), true, || {}).unwrap();
+        assert!(!channel.poll().unwrap().can_control);
+        drop(lease);
+        channel.act(Intent::Refresh).unwrap();
+        channel.clone().finish_autonomous().unwrap();
+        let view = channel.poll().unwrap();
+        assert!(view.can_control && view.deferred);
+        assert_eq!(
+            Store::open(root.clone())
+                .unwrap()
+                .load()
+                .unwrap()
+                .unwrap()
+                .run,
+            before.run
+        );
+        drop(channel);
+
+        // The ordinary Workflow entry point retains its existing recovery behavior.
+        let ordinary = Channel::open_in(repository, root.clone(), || {}).unwrap();
+        ordinary.finish_autonomous().unwrap();
+        let after = Store::open(root).unwrap().load().unwrap().unwrap();
+        assert!(after.version > before.version);
+        assert_ne!(after.run, before.run);
+    }
+
+    #[test]
+    fn only_a_successful_explicit_start_or_resume_releases_a_handoff() {
+        let (_directory, repository, root) = self::repository();
+        let channel = Channel::open_in_mode(repository, root.clone(), true, || {}).unwrap();
+        let initial = channel.poll().unwrap();
+        let mut definition = initial.definition;
+        definition.limits.max_cost_microusd = Some(1);
+        definition.limits.allow_unknown_cost = false;
+        for node in &mut definition.nodes {
+            if node.kind.uses_agent() {
+                node.agent.provider = "codex".into();
+            }
+        }
+        channel
+            .act(Intent::Save {
+                definition,
+                expected_version: initial.version,
+            })
+            .unwrap();
+        channel
+            .act(Intent::Start {
+                objective: "The explicitly started task".into(),
+                origin_task: None,
+            })
+            .unwrap();
+        channel.clone().finish_autonomous().unwrap();
+        let view = channel.poll().unwrap();
+        assert!(!view.deferred);
+        assert_eq!(view.run.unwrap().state, NodeState::Waiting); // The real budget gate stops dispatch.
+
+        let (_directory, repository, root) = self::repository();
+        saved_attempt(&repository, &root, false, false);
+        let channel = Channel::open_in_mode(repository, root, true, || {}).unwrap();
+        channel.act(Intent::Resume).unwrap();
+        channel.clone().finish_autonomous().unwrap();
+        assert!(!channel.poll().unwrap().deferred);
+    }
+
     #[test]
     fn detaching_drains_a_just_queued_start_before_deciding_to_exit() {
         let (_directory, repository, root) = repository();
@@ -731,6 +1030,11 @@ mod tests {
         // stop at its real budget gate without connecting to an agent.
         definition.limits.max_cost_microusd = Some(1_000_000);
         definition.limits.allow_unknown_cost = false;
+        for node in &mut definition.nodes {
+            if node.kind.uses_agent() {
+                node.agent.provider = "codex".into();
+            }
+        }
         assert!(definition.validate().is_empty());
         channel
             .act(Intent::Save {
@@ -741,6 +1045,7 @@ mod tests {
         channel
             .act(Intent::Start {
                 objective: "queued immediately before closing".into(),
+                origin_task: None,
             })
             .unwrap();
         channel.finish_autonomous().unwrap();
@@ -779,6 +1084,8 @@ mod tests {
         assert!(!observer.poll().unwrap().can_control);
         let mut definition = initial.definition;
         definition.name = "saved by owner before detaching".into();
+        let first_preset = AgentPreset::from_definition("Owner preset".into(), &definition);
+        owner.act(Intent::SavePreset(first_preset.clone())).unwrap();
         owner
             .act(Intent::Save {
                 definition: definition.clone(),
@@ -798,6 +1105,7 @@ mod tests {
             }
         };
         assert_eq!(promoted.definition.name, definition.name);
+        assert_eq!(promoted.presets, vec![first_preset.clone()]);
         assert!(promoted.version > initial.version);
         let mut taken_over = promoted.definition;
         taken_over.name = "saved after ownership transfer".into();
@@ -807,7 +1115,15 @@ mod tests {
                 expected_version: promoted.version,
             })
             .unwrap();
+        let second_preset = AgentPreset::from_definition("Observer preset".into(), &taken_over);
+        observer
+            .act(Intent::SavePreset(second_preset.clone()))
+            .unwrap();
         observer.finish_autonomous().unwrap();
+        assert_eq!(
+            read_presets(&root).unwrap(),
+            vec![first_preset, second_preset]
+        );
         let persisted = Store::open(root).unwrap().load().unwrap().unwrap();
         assert_eq!(persisted.definition.name, taken_over.name);
     }

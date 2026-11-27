@@ -1,3 +1,6 @@
+#[path = "../../shared/appearance.rs"]
+mod appearance;
+
 mod git;
 mod live;
 mod model;
@@ -139,6 +142,9 @@ fn render_snapshot(
 }
 
 fn main() -> Result<(), String> {
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let mut snapshot_path = None;
     let mut demo = false;
     let mut composer = false;

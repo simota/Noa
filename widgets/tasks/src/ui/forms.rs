@@ -158,7 +158,7 @@ impl Form {
         tree.insert(
             Some(column),
             Label::new(self.heading.clone())
-                .font_size(15.0)
+                .font_size(crate::appearance::font(15.0))
                 .weight(700)
                 .wrap(true),
         );
@@ -166,7 +166,9 @@ impl Form {
         let muted = |tree: &mut UiTree, text: &str| {
             tree.insert(
                 Some(column),
-                Label::new(text).font_size(12.0).color(Role::Muted),
+                Label::new(text)
+                    .font_size(crate::appearance::font(12.0))
+                    .color(Role::Muted),
             );
         };
         let mut fields = None;

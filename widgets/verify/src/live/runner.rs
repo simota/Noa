@@ -105,6 +105,7 @@ pub enum Start {
 /// What a new verification starts from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewVerification {
+    pub origin: Option<task_links::OriginHint>,
     pub request: String,
     pub target: Target,
     pub isolation: Isolation,
@@ -653,6 +654,37 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             timeline,
         } = config;
         let now = clock.now();
+        // Reject a stale or edited handoff before reserving a session or
+        // touching its snapshot. The captured target is checked again below.
+        if let Start::New(new) = &start
+            && let Some(hint) = &new.origin
+        {
+            let root = tasks_root
+                .as_deref()
+                .ok_or("タスクの保存先が見つかりません")?;
+            if new.target.base.as_deref() != Some(hint.base.as_str()) {
+                return Err(
+                    "元タスクの比較元が変更されています。Tasksから開き直してください".into(),
+                );
+            }
+            let head = match &new.target.head {
+                verify::model::types::Head::Ref(sha) => Some(sha.clone()),
+                _ => None,
+            };
+            task_links::match_explicit(
+                root,
+                hint,
+                &task_links::Target {
+                    toplevel: new.target.repo.clone(),
+                    head_ref: None,
+                    head_sha: head,
+                },
+            )?;
+        }
+        let requested_origin = match &start {
+            Start::New(new) => new.origin.clone(),
+            _ => None,
+        };
         let resumed = matches!(start, Start::Resume { .. } | Start::Extend { .. });
         let (engine, store) = match start {
             Start::New(new) => new_verification(*new, config, now)?,
@@ -665,18 +697,46 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             BTreeSet::new()
         };
         let session = engine.session();
-        let (origin, outcome, link_failed) = match &tasks_root {
-            None => (None, None, None),
-            Some(root) if resumed => (
-                task_links::find_origin(root, SessionKind::Verify, session.id.as_str()),
+        let (origin, outcome, link_failed) = if let Some(hint) = requested_origin {
+            let root = tasks_root
+                .as_deref()
+                .ok_or("タスクの保存先が見つかりません")?;
+            if session.manifest.base_sha.as_deref() != Some(hint.base.as_str()) {
+                return Err("キャプチャした比較元が元タスクと一致しません".into());
+            }
+            let (target, _) = link_target(session);
+            (
+                task_links::link_explicit(
+                    root,
+                    &hint,
+                    &target,
+                    SessionKind::Verify,
+                    session.id.as_str(),
+                    now,
+                )
+                .map_err(|error| {
+                    format!(
+                        "{error}。エージェントは未起動です。保存されたセッション: {}",
+                        store.dir().display()
+                    )
+                })?,
+                Some((None, false)),
                 None,
-                None,
-            ),
-            // Linked as running: only a change is recorded after.
-            Some(root) => match link_new(root, session, now) {
-                Ok(origin) => (origin, Some((None, false)), None),
-                Err(e) => (None, None, Some(e)),
-            },
+            )
+        } else {
+            match &tasks_root {
+                None => (None, None, None),
+                Some(root) if resumed => (
+                    task_links::find_origin(root, SessionKind::Verify, session.id.as_str()),
+                    None,
+                    None,
+                ),
+                // Linked as running: only a change is recorded after.
+                Some(root) => match link_new(root, session, now) {
+                    Ok(origin) => (origin, Some((None, false)), None),
+                    Err(e) => (None, None, Some(e)),
+                },
+            }
         };
         let mut runner = Self {
             engine,
@@ -3019,6 +3079,7 @@ fn new_verification(
     now: Millis,
 ) -> Result<(Engine, Store), String> {
     let NewVerification {
+        origin: _,
         request,
         target,
         isolation,
@@ -3669,6 +3730,7 @@ pub(crate) mod tests {
 
     fn new_start(root: &Path, target: Target, isolation: Isolation, confirm: bool) -> Start {
         Start::New(Box::new(NewVerification {
+            origin: None,
             request: "Verify the library".into(),
             target,
             isolation,
@@ -5453,6 +5515,7 @@ pub(crate) mod tests {
         target.base = Some("main".into());
         target.head = Head::Ref("main".into());
         let new = NewVerification {
+            origin: None,
             request: "r".into(),
             target,
             isolation: Isolation::Worktree,

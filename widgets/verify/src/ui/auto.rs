@@ -321,7 +321,9 @@ impl Auto {
             let menu = tree.insert(Some(host), planner_menu(&planners));
             let status = tree.insert(
                 Some(host),
-                Label::new("").font_size(11.0).color(Role::Muted),
+                Label::new("")
+                    .font_size(crate::appearance::font(11.0))
+                    .color(Role::Muted),
             );
             let cancel = tree.insert(
                 Some(host),
@@ -372,15 +374,22 @@ impl Auto {
                 id
             }
             None => {
-                let id = tree.insert(Some(note), Container::column().gap(3.0));
+                let id = tree.insert(
+                    Some(note),
+                    Container::column().gap(crate::appearance::space(3.0)),
+                );
                 self.note = Some(id);
                 id
             }
         };
         for line in &lines {
             let label = match line {
-                Line::Heading(text) => Label::new(text.clone()).font_size(12.0).weight(600),
-                Line::Text(text) => Label::new(text.clone()).font_size(11.5).color(Role::Muted),
+                Line::Heading(text) => Label::new(text.clone())
+                    .font_size(crate::appearance::font(12.0))
+                    .weight(600),
+                Line::Text(text) => Label::new(text.clone())
+                    .font_size(crate::appearance::font(11.5))
+                    .color(Role::Muted),
             };
             tree.insert(Some(host), label.wrap(true));
         }

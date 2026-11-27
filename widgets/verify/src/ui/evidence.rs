@@ -1,9 +1,9 @@
 //! The 証跡 tab: every evidence item, filtered by who gave it (a verifier
 //! or あなた), round, kind, criterion and re-run outcome, shown as 一覧 or
 //! as ギャラリー (media only, grouped by criterion). Media are shown as
-//! placeholder cards (L1-5a): 開く hands the stored copy to the system
-//! viewer or player. 画像を比較 opens a self-contained browser page; the
-//! native window still draws no picture and writes no thumbnail.
+//! verified native thumbnails for PNG/JPEG/WebP, with a full image inspector.
+//! 開く hands the stored copy to the system viewer or player. 画像を比較
+//! keeps the self-contained browser comparison available for all image types.
 //! Also the two parts that stay built across rebuilds: the read-only log
 //! view (開く on a command's log) and the 証跡を追加 form.
 
@@ -298,8 +298,16 @@ pub(super) fn rerun_details(tree: &mut UiTree, parent: WidgetId, item: &Evidence
     let (Some(text), Some(rerun)) = (rerun_text(item), item.rerun.as_ref()) else {
         return;
     };
-    let column = tree.insert(Some(parent), Container::column().gap(3.0).grow(1.0));
-    let line = tree.insert(Some(column), Container::wrapping_row(6.0, 4.0));
+    let column = tree.insert(
+        Some(parent),
+        Container::column()
+            .gap(crate::appearance::space(3.0))
+            .grow(1.0),
+    );
+    let line = tree.insert(
+        Some(column),
+        Container::wrapping_row(crate::appearance::space(6.0), crate::appearance::space(4.0)),
+    );
     tag(tree, line, text, rerun_tone(item));
     let log = match rerun {
         Rerun::Matched { log, .. }
@@ -373,8 +381,8 @@ fn filter_bar(
     let bar = tree.insert(
         Some(list),
         Container::column()
-            .gap(4.0)
-            .padding(8.0)
+            .gap(crate::appearance::space(4.0))
+            .padding(crate::appearance::space(8.0))
             .background(Role::SurfaceAlt)
             .radius(8.0),
     );
@@ -470,6 +478,7 @@ pub(super) fn insert(
     gallery: bool,
     can_attach: bool,
     preview: &super::preview::Offer,
+    images: &super::images::Cache,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let list = scroll_column(tree, host, 8.0);
@@ -486,11 +495,14 @@ pub(super) fn insert(
         },
     );
     if let Some(focus) = focus {
-        let top = tree.insert(Some(list), Container::wrapping_row(6.0, 4.0));
+        let top = tree.insert(
+            Some(list),
+            Container::wrapping_row(crate::appearance::space(6.0), crate::appearance::space(4.0)),
+        );
         tree.insert(
             Some(top),
             Label::new(focus.title.clone())
-                .font_size(13.0)
+                .font_size(crate::appearance::font(13.0))
                 .weight(600)
                 .wrap(true),
         );
@@ -507,7 +519,8 @@ pub(super) fn insert(
     }
     let top = tree.insert(
         Some(list),
-        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+        Container::wrapping_row(crate::appearance::space(6.0), crate::appearance::space(4.0))
+            .align_items(AlignItems::CENTER),
     );
     for (label, to_gallery) in [("一覧", false), ("ギャラリー", true)] {
         let id = tree.insert(
@@ -589,7 +602,12 @@ pub(super) fn insert(
         return;
     }
     if gallery {
-        gallery_groups(tree, list, session, &shown, actions);
+        note(
+            tree,
+            list,
+            "PNG・JPEG・WebP を縮小表示します。自動読込は先頭 16 枚まで。条件を絞ると対象を切り替えられます。",
+        );
+        gallery_groups(tree, list, session, &shown, images, actions);
     } else {
         for item in shown {
             row(tree, list, item, actions);
@@ -603,19 +621,22 @@ fn row(tree: &mut UiTree, list: WidgetId, item: &Evidence, actions: &mut Vec<(Wi
     let c = tree.insert(
         Some(list),
         Container::column()
-            .gap(4.0)
-            .padding(10.0)
+            .gap(crate::appearance::space(4.0))
+            .padding(crate::appearance::space(10.0))
             .background(Role::Surface)
             .border(1.0, Role::Separator)
             .radius(8.0),
     );
     let top = tree.insert(
         Some(c),
-        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+        Container::wrapping_row(crate::appearance::space(6.0), crate::appearance::space(4.0))
+            .align_items(AlignItems::CENTER),
     );
     tree.insert(
         Some(top),
-        Label::new(item.key.to_string()).font_size(12.0).weight(700),
+        Label::new(item.key.to_string())
+            .font_size(crate::appearance::font(12.0))
+            .weight(700),
     );
     let kind = Kind::of(item);
     let format = item.media().map(Media::name);
@@ -637,7 +658,7 @@ fn row(tree: &mut UiTree, list: WidgetId, item: &Evidence, actions: &mut Vec<(Wi
             tree.insert(
                 Some(c),
                 Label::new(format!("$ {cmd}"))
-                    .font_size(12.0)
+                    .font_size(crate::appearance::font(12.0))
                     .wrap(true)
                     .max_lines(3)
                     .truncation(Truncation::Tail)
@@ -645,7 +666,11 @@ fn row(tree: &mut UiTree, list: WidgetId, item: &Evidence, actions: &mut Vec<(Wi
             );
             let facts = tree.insert(
                 Some(c),
-                Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+                Container::wrapping_row(
+                    crate::appearance::space(6.0),
+                    crate::appearance::space(4.0),
+                )
+                .align_items(AlignItems::CENTER),
             );
             caption(tree, facts, format!("cwd {cwd} · 終了コード {exit}"));
             rerun_details(tree, c, item);
@@ -656,7 +681,7 @@ fn row(tree: &mut UiTree, list: WidgetId, item: &Evidence, actions: &mut Vec<(Wi
             tree.insert(
                 Some(c),
                 Label::new(path.clone())
-                    .font_size(12.0)
+                    .font_size(crate::appearance::font(12.0))
                     .truncation(Truncation::Tail),
             );
             if let Some(cap) = cap {
@@ -666,12 +691,18 @@ fn row(tree: &mut UiTree, list: WidgetId, item: &Evidence, actions: &mut Vec<(Wi
         EvidenceBody::Observation { text } => {
             let line = tree.insert(
                 Some(c),
-                Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+                Container::wrapping_row(
+                    crate::appearance::space(6.0),
+                    crate::appearance::space(4.0),
+                )
+                .align_items(AlignItems::CENTER),
             );
             tag(tree, line, "未裏付け", Tone::Warning);
             tree.insert(
                 Some(line),
-                Label::new(text.clone()).font_size(12.0).wrap(true),
+                Label::new(text.clone())
+                    .font_size(crate::appearance::font(12.0))
+                    .wrap(true),
             );
         }
     }
@@ -691,7 +722,8 @@ pub(super) fn stored_line(
     }
     let line = tree.insert(
         Some(parent),
-        Container::wrapping_row(6.0, 4.0).align_items(AlignItems::CENTER),
+        Container::wrapping_row(crate::appearance::space(6.0), crate::appearance::space(4.0))
+            .align_items(AlignItems::CENTER),
     );
     let Some(stored) = &item.stored else {
         caption(
@@ -731,6 +763,7 @@ fn gallery_groups(
     list: WidgetId,
     session: &Session,
     shown: &[&Evidence],
+    images: &super::images::Cache,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let mut placed = vec![false; shown.len()];
@@ -747,14 +780,17 @@ fn gallery_groups(
         tree.insert(
             Some(list),
             Label::new(format!("{} {}", c.id, c.statement))
-                .font_size(12.5)
+                .font_size(crate::appearance::font(12.5))
                 .weight(600)
                 .truncation(Truncation::Tail),
         );
-        let strip = tree.insert(Some(list), Container::wrapping_row(8.0, 8.0));
+        let strip = tree.insert(
+            Some(list),
+            Container::wrapping_row(crate::appearance::space(8.0), crate::appearance::space(8.0)),
+        );
         for (i, item) in items {
             placed[i] = true;
-            media_card(tree, strip, item, actions);
+            media_card(tree, strip, item, images, actions);
         }
     }
     let rest: Vec<&Evidence> = shown
@@ -767,27 +803,29 @@ fn gallery_groups(
         tree.insert(
             Some(list),
             Label::new("基準に紐づかない証跡（不具合の根拠など）")
-                .font_size(12.5)
+                .font_size(crate::appearance::font(12.5))
                 .weight(600),
         );
-        let strip = tree.insert(Some(list), Container::wrapping_row(8.0, 8.0));
+        let strip = tree.insert(
+            Some(list),
+            Container::wrapping_row(crate::appearance::space(8.0), crate::appearance::space(8.0)),
+        );
         for item in rest {
-            media_card(tree, strip, item, actions);
+            media_card(tree, strip, item, images, actions);
         }
     }
 }
 
-/// The width of a placeholder card.
+/// The width of a media card.
 pub(super) const CARD: f32 = 188.0;
 
-/// A media item's placeholder card (L1-5a): kind, format, size, caption,
-/// who gave it and in which round, and for a video ▶ and its marks. No
-/// picture: the box where one would go only names the kind and format,
-/// and a click on it opens the stored copy.
+/// A media card with a bounded, verified thumbnail when it is available.
+/// Unsupported formats, videos and failed decodes retain their labeled fallback.
 pub(super) fn media_card(
     tree: &mut UiTree,
     parent: WidgetId,
     item: &Evidence,
+    images: &super::images::Cache,
     actions: &mut Vec<(WidgetId, Action)>,
 ) {
     let Some(media) = item.media() else {
@@ -796,8 +834,8 @@ pub(super) fn media_card(
     let card = tree.insert(
         Some(parent),
         Container::column()
-            .gap(4.0)
-            .padding(8.0)
+            .gap(crate::appearance::space(4.0))
+            .padding(crate::appearance::space(8.0))
             .width(CARD)
             .background(Role::Surface)
             .border(1.0, Role::Separator)
@@ -823,7 +861,14 @@ pub(super) fn media_card(
         ))
         .radius(6.0),
     );
-    actions.push((press, Action::OpenEvidence(item.key.clone())));
+    actions.push((
+        press,
+        if images.ready(&item.key) {
+            Action::PreviewImage(item.key.clone())
+        } else {
+            Action::OpenEvidence(item.key.clone())
+        },
+    ));
     let preview = tree.insert(
         Some(press),
         Container::new(Style {
@@ -833,6 +878,10 @@ pub(super) fn media_card(
             flex_grow: 1.0,
             size: LayoutSize {
                 width: percent(1.0),
+                height: auto(),
+            },
+            min_size: LayoutSize {
+                width: length(0.0),
                 height: length(64.0),
             },
             gap: super::gap(2.0),
@@ -841,23 +890,25 @@ pub(super) fn media_card(
         .background(Role::SurfaceAlt)
         .radius(6.0),
     );
-    tree.insert(
-        Some(preview),
-        Label::new(if media.is_video() { "▶" } else { "▣" })
-            .font_size(18.0)
-            .color(Role::Muted),
-    );
-    tree.insert(
-        Some(preview),
-        Label::new(format!("{} · {}", media.label(), media.name()))
-            .font_size(11.5)
-            .weight(600),
-    );
+    if !images.insert(tree, preview, item) {
+        tree.insert(
+            Some(preview),
+            Label::new(if media.is_video() { "▶" } else { "▣" })
+                .font_size(crate::appearance::font(18.0))
+                .color(Role::Muted),
+        );
+        tree.insert(
+            Some(preview),
+            Label::new(format!("{} · {}", media.label(), media.name()))
+                .font_size(crate::appearance::font(11.5))
+                .weight(600),
+        );
+    }
     if !caption_text.is_empty() {
         tree.insert(
             Some(card),
             Label::new(caption_text)
-                .font_size(11.5)
+                .font_size(crate::appearance::font(11.5))
                 .wrap(true)
                 .max_lines(3)
                 .truncation(Truncation::Tail),
@@ -865,7 +916,8 @@ pub(super) fn media_card(
     }
     let who = tree.insert(
         Some(card),
-        Container::wrapping_row(4.0, 2.0).align_items(AlignItems::CENTER),
+        Container::wrapping_row(crate::appearance::space(4.0), crate::appearance::space(2.0))
+            .align_items(AlignItems::CENTER),
     );
     if item.key.is_user() {
         tag(tree, who, "あなた", Tone::Accent);
@@ -881,15 +933,25 @@ pub(super) fn media_card(
             tree.insert(
                 Some(card),
                 Label::new(format!("▶ {} {}", mark_time(mark.t_ms), mark.note))
-                    .font_size(11.0)
+                    .font_size(crate::appearance::font(11.0))
                     .color(Role::Muted)
                     .wrap(true),
             );
         }
     }
     if item.stored.is_some() {
-        let buttons = tree.insert(Some(card), Container::wrapping_row(4.0, 4.0));
+        let buttons = tree.insert(
+            Some(card),
+            Container::wrapping_row(crate::appearance::space(4.0), crate::appearance::space(4.0)),
+        );
         open_buttons(tree, buttons, item, actions);
+        if images.ready(&item.key) {
+            let zoom = tree.insert(
+                Some(buttons),
+                Button::new("拡大プレビュー").control_size(ControlSize::Small),
+            );
+            actions.push((zoom, Action::PreviewImage(item.key.clone())));
+        }
     }
 }
 
@@ -918,12 +980,14 @@ pub(super) fn insert_log(tree: &mut UiTree, parent: WidgetId) -> LogParts {
     );
     let head = tree.insert(
         Some(root),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     let title = tree.insert(
         Some(head),
         Label::new("")
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(600)
             .truncation(Truncation::Tail),
     );
@@ -934,11 +998,18 @@ pub(super) fn insert_log(tree: &mut UiTree, parent: WidgetId) -> LogParts {
     );
     let bar = tree.insert(
         Some(root),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     let search = tree.insert(Some(bar), TextField::new("ログを検索", 300.0));
     tree.set_accessible_label(search, "ログを検索");
-    let found = tree.insert(Some(bar), Label::new("").font_size(11.0).color(Role::Muted));
+    let found = tree.insert(
+        Some(bar),
+        Label::new("")
+            .font_size(crate::appearance::font(11.0))
+            .color(Role::Muted),
+    );
     let host = tree.insert(Some(root), Container::new(fill()));
     let view = tree.insert(
         Some(host),
@@ -1019,8 +1090,8 @@ pub(super) fn insert_attach(tree: &mut UiTree, parent: WidgetId) -> AttachParts 
     let root = tree.insert(
         Some(parent),
         Container::column()
-            .gap(6.0)
-            .padding(10.0)
+            .gap(crate::appearance::space(6.0))
+            .padding(crate::appearance::space(10.0))
             .background(Role::Background)
             .border(1.0, Role::Accent)
             .radius(8.0),
@@ -1028,13 +1099,16 @@ pub(super) fn insert_attach(tree: &mut UiTree, parent: WidgetId) -> AttachParts 
     let title = tree.insert(
         Some(root),
         Label::new("証跡を追加")
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(600)
             .wrap(true),
     );
     let kind = tree.insert(
         Some(root),
-        Label::new("").font_size(11.0).color(Role::Muted).wrap(true),
+        Label::new("")
+            .font_size(crate::appearance::font(11.0))
+            .color(Role::Muted)
+            .wrap(true),
     );
     caption(tree, root, format!("説明（必須・{MAX_CAPTION}文字まで）"));
     let caption_area = tree.insert(
@@ -1048,23 +1122,31 @@ pub(super) fn insert_attach(tree: &mut UiTree, parent: WidgetId) -> AttachParts 
         Label::new(format!(
             "見どころ（動画のみ・任意・1行に「mm:ss 説明」・{MAX_MARKS}個まで）"
         ))
-        .font_size(11.0)
+        .font_size(crate::appearance::font(11.0))
         .color(Role::Muted),
     );
     let marks = tree.insert(
         Some(root),
         TextArea::new("00:04 ⌘T を押す\n00:06.5 新しいタブが $HOME を表示").min_lines(2),
     );
-    let error = tree.insert(Some(root), Label::new("").font_size(11.5).wrap(true));
+    let error = tree.insert(
+        Some(root),
+        Label::new("")
+            .font_size(crate::appearance::font(11.5))
+            .wrap(true),
+    );
     let closed = tree.insert(
         Some(root),
         Label::new(ATTACH_CLOSED)
-            .font_size(11.5)
+            .font_size(crate::appearance::font(11.5))
             .color(Role::Muted)
             .wrap(true),
     );
     tree.set_hidden(closed, true);
-    let buttons = tree.insert(Some(root), Container::row().gap(6.0));
+    let buttons = tree.insert(
+        Some(root),
+        Container::row().gap(crate::appearance::space(6.0)),
+    );
     let submit = tree.insert(
         Some(buttons),
         Button::new("追加").control_size(ControlSize::Small),

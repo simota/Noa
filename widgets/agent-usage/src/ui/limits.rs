@@ -93,13 +93,13 @@ pub fn build(tree: &mut UiTree, parent: WidgetId, input: &Input) {
     tree.insert(
         Some(summary_row),
         Label::new("最初に上限に達する枠")
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .color(Role::Muted),
     );
     tree.insert(
         Some(summary_row),
         Label::new(summary_text(&answered, now, input.tz))
-            .font_size(14.0)
+            .font_size(crate::appearance::font(14.0))
             .weight(600),
     );
 
@@ -170,7 +170,9 @@ fn card_head(
     );
     tree.insert(
         Some(header),
-        Label::new(agent.display()).font_size(15.0).weight(700),
+        Label::new(agent.display())
+            .font_size(crate::appearance::font(15.0))
+            .weight(700),
     );
     (card, header)
 }
@@ -183,7 +185,9 @@ fn fetching_card(tree: &mut UiTree, parent: WidgetId, agent: Agent) -> WidgetId 
     style::spacer(tree, header);
     tree.insert(
         Some(header),
-        Label::new(FETCHING).font_size(11.0).color(Role::Muted),
+        Label::new(FETCHING)
+            .font_size(crate::appearance::font(11.0))
+            .color(Role::Muted),
     );
     card
 }
@@ -241,7 +245,9 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
     if let Some(age) = age {
         tree.insert(
             Some(header),
-            Label::new(age).font_size(11.0).color(Role::Muted),
+            Label::new(age)
+                .font_size(crate::appearance::font(11.0))
+                .color(Role::Muted),
         );
     }
     let has_rows = !s.windows.is_empty() || !s.buckets.is_empty() || s.spend.is_some();
@@ -254,7 +260,7 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
         tree.insert(
             Some(card),
             Label::new(reason.clone())
-                .font_size(11.5)
+                .font_size(crate::appearance::font(11.5))
                 .color(reason_color)
                 .wrap(true),
         );
@@ -263,7 +269,7 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
         tree.insert(
             Some(card),
             Label::new(setup_hint(s.agent))
-                .font_size(11.5)
+                .font_size(crate::appearance::font(11.5))
                 .color(Role::Muted)
                 .wrap(true),
         );
@@ -357,7 +363,7 @@ fn card(tree: &mut UiTree, parent: WidgetId, s: &UsageSource, now: Unix, tz: &dy
             tree.insert(
                 Some(card),
                 Label::new(note.clone())
-                    .font_size(11.0)
+                    .font_size(crate::appearance::font(11.0))
                     .color(Role::Muted)
                     .wrap(true),
             );
@@ -385,7 +391,7 @@ fn gauge_row(
         },
     );
     let name = Label::new(label.to_owned())
-        .font_size(ROW_FONT)
+        .font_size(crate::appearance::font(ROW_FONT))
         .color(if indent > 0.0 {
             Role::Muted
         } else {
@@ -416,7 +422,7 @@ fn gauge_row(
         PERCENT_W,
         true,
         Label::new(format::percent(used))
-            .font_size(ROW_FONT)
+            .font_size(crate::appearance::font(ROW_FONT))
             .weight(600),
     );
     cell(
@@ -425,7 +431,7 @@ fn gauge_row(
         RESET_W,
         true,
         Label::new(reset.to_owned())
-            .font_size(11.5)
+            .font_size(crate::appearance::font(11.5))
             .color(Role::Muted),
     );
 }
@@ -466,7 +472,10 @@ fn sub_line(
     };
     tree.insert(
         Some(host),
-        Label::new(text).font_size(11.0).color(color).wrap(true),
+        Label::new(text)
+            .font_size(crate::appearance::font(11.0))
+            .color(color)
+            .wrap(true),
     );
 }
 

@@ -285,7 +285,10 @@ impl Auto {
         );
         let caption = tree.insert(
             Some(row),
-            Label::new("").font_size(12.0).color(Role::Muted).wrap(true),
+            Label::new("")
+                .font_size(crate::appearance::font(12.0))
+                .color(Role::Muted)
+                .wrap(true),
         );
         let stop = tree.insert(
             Some(row),
@@ -293,13 +296,19 @@ impl Auto {
         );
         let note = tree.insert(
             Some(column),
-            Label::new("").font_size(12.0).wrap(true).selectable(true),
+            Label::new("")
+                .font_size(crate::appearance::font(12.0))
+                .wrap(true)
+                .selectable(true),
         );
         // Below the note: a failed re-run's cause reads above the block of
         // the fill it left in place.
         let block = tree.insert(
             Some(column),
-            Label::new("").font_size(12.0).wrap(true).selectable(true),
+            Label::new("")
+                .font_size(crate::appearance::font(12.0))
+                .wrap(true)
+                .selectable(true),
         );
         self.ids = Some(Ids {
             menu,

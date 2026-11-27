@@ -11,14 +11,14 @@ use std::path::PathBuf;
 
 use noa_gpui_core::style::{AlignItems, FlexDirection, Size as LayoutSize, length};
 use noa_gpui_core::widgets::{
-    Button, ButtonClicked, Container, ControlSize, Label, ScrollView, TextArea, TextChanged,
-    TextField, TextView,
+    Button, ButtonClicked, Container, ControlSize, Label, PopUpButton, ScrollView,
+    SelectionChanged, TextArea, TextChanged, TextField, TextView,
 };
 use noa_gpui_core::{Event, Key, Message, PointerButton, Role, Style, UiTree, WidgetId};
 use noa_gpui_platform::Screen;
 use noa_gpui_scene::{Point, Rect, Size};
 use noa_gpui_text::TextStore;
-use workflow::model::{NodeKind, NodeState, WorkflowDefinition};
+use workflow::model::{AgentChoice, AgentPreset, NodeKind, NodeState, WorkflowDefinition};
 use workflow::runner::{Channel, Connection, Intent, View};
 
 use editor::Editor;
@@ -34,6 +34,7 @@ enum Tab {
 enum Action {
     Tab(Tab),
     Select(String),
+    SavedRun,
     Settings,
     Add(NodeKind),
     Palette,
@@ -66,6 +67,9 @@ enum Action {
     Evidence(PathBuf, String, String),
     PreviewText(String, String),
     ClosePreview,
+    SavePreset,
+    ApplyPreset(usize),
+    OpenTask,
 }
 
 #[derive(Clone)]
@@ -80,6 +84,10 @@ enum Field {
     Repairs,
     Cost,
     Objective,
+    Provider,
+    Model,
+    Effort,
+    PresetName,
     Answer(String),
 }
 
@@ -95,6 +103,7 @@ struct Form {
     parallel: String,
     repairs: String,
     cost: String,
+    agent: AgentChoice,
     dirty: bool,
 }
 
@@ -117,6 +126,8 @@ pub(crate) struct WorkflowScreen {
     inspector: Option<WidgetId>,
     actions: Vec<(WidgetId, Action)>,
     fields: Vec<(WidgetId, Field)>,
+    origin_task: Option<workflow::tasks::TaskOrigin>,
+    preset_name: String,
     save_button: WidgetId,
     start_button: WidgetId,
     editor: Editor,
@@ -126,6 +137,7 @@ pub(crate) struct WorkflowScreen {
     tab: Tab,
     selected_run: Option<String>,
     preparing_run: bool,
+    start_pending: bool,
     objective: String,
     answers: BTreeMap<String, String>,
     form: Form,
@@ -162,6 +174,39 @@ fn clipped(value: &str, count: usize) -> String {
 }
 
 impl WorkflowScreen {
+    pub fn with_task(mut self, origin: workflow::tasks::TaskOrigin, objective: String) -> Self {
+        self.origin_task = Some(origin);
+        self.objective = objective;
+        self.preparing_run = true;
+        self.selected_run = None;
+        self.start_pending = false;
+        self.tab = Tab::Run;
+        self.detail_only = true;
+        self
+    }
+
+    pub fn saved(run: workflow::model::Run) -> Self {
+        let mut screen = Self::new(
+            View {
+                repository: run.repository.clone(),
+                definition: run.definition.clone(),
+                version: 0,
+                run: Some(run),
+                connection: Connection::Disconnected("保存済みの実行を閲覧中".into()),
+                notice: Some(
+                    "保存済みの実行です。エージェントの起動や結果の再利用は行いません。".into(),
+                ),
+                can_control: false,
+                deferred: false,
+                presets: Vec::new(),
+            },
+            None,
+            false,
+        );
+        screen.tab = Tab::Run;
+        screen.preparing_run = false;
+        screen
+    }
     pub fn demo(kind: &str) -> Self {
         let run = match kind {
             "approval" => Some(workflow::engine::demo_waiting(now())),
@@ -179,6 +224,8 @@ impl WorkflowScreen {
             connection: Connection::Connected,
             notice: None,
             can_control: true,
+            deferred: false,
+            presets: Vec::new(),
         };
         let mut screen = Self::new(view, None, true);
         if kind != "editor" {
@@ -204,6 +251,8 @@ impl WorkflowScreen {
             connection: Connection::Connecting,
             notice: None,
             can_control: false,
+            deferred: false,
+            presets: Vec::new(),
         });
         Self::new(view, Some(channel), false)
     }
@@ -218,6 +267,8 @@ impl WorkflowScreen {
                 connection: Connection::Disconnected(error.clone()),
                 notice: Some(error),
                 can_control: false,
+                deferred: false,
+                presets: Vec::new(),
             },
             None,
             false,
@@ -226,7 +277,7 @@ impl WorkflowScreen {
 
     fn new(view: View, channel: Option<Channel>, demo: bool) -> Self {
         let mut tree = UiTree::new();
-        tree.set_theme(style::theme());
+        crate::appearance::install(&mut tree, style::theme());
         let root = tree.insert(
             None,
             Container::new(style::root()).background(Role::Background),
@@ -234,24 +285,33 @@ impl WorkflowScreen {
         let top = tree.insert(
             Some(root),
             Container::wrapping_row(20.0, 10.0)
-                .padding(20.0)
+                .padding(crate::appearance::space(20.0))
                 .align_items(AlignItems::CENTER),
         );
-        let title = tree.insert(Some(top), Container::column().grow(1.0).gap(5.0));
+        let title = tree.insert(
+            Some(top),
+            Container::column()
+                .grow(1.0)
+                .gap(crate::appearance::space(5.0)),
+        );
         tree.insert(
             Some(title),
             Label::new("N O A   /   D E V E L O P M E N T")
-                .font_size(10.0)
+                .font_size(crate::appearance::font(10.0))
                 .weight(600)
                 .color(Role::Muted),
         );
         let header = tree.insert(
             Some(title),
-            Label::new("Workflow").font_size(26.0).weight(650),
+            Label::new("Workflow")
+                .font_size(crate::appearance::font(26.0))
+                .weight(650),
         );
         let buttons = tree.insert(
             Some(top),
-            Container::row().gap(8.0).align_items(AlignItems::CENTER),
+            Container::row()
+                .gap(crate::appearance::space(8.0))
+                .align_items(AlignItems::CENTER),
         );
         let save_button = tree.insert(Some(buttons), Button::new("保存"));
         let validate = tree.insert(Some(buttons), Button::new("検証"));
@@ -259,28 +319,35 @@ impl WorkflowScreen {
         let nav = tree.insert(
             Some(root),
             Container::wrapping_row(8.0, 6.0)
-                .padding(12.0)
+                .padding(crate::appearance::space(12.0))
                 .background(Role::Surface),
         );
         let build = tree.insert(Some(nav), Button::new("構築").selected(true));
         let run = tree.insert(Some(nav), Button::new("実行"));
         let history = tree.insert(Some(nav), Button::new("履歴"));
-        let status = tree.insert(Some(nav), Label::new("").font_size(12.0).color(Role::Muted));
+        let status = tree.insert(
+            Some(nav),
+            Label::new("")
+                .font_size(crate::appearance::font(12.0))
+                .color(Role::Muted),
+        );
         let palette = tree.insert(
             Some(root),
             Container::wrapping_row(8.0, 8.0)
-                .padding(12.0)
+                .padding(crate::appearance::space(12.0))
                 .background(Role::SurfaceAlt),
         );
         let body = tree.insert(Some(root), Container::new(style::column()));
         let bottom = tree.insert(
             Some(root),
-            Container::row().padding(10.0).background(Role::Surface),
+            Container::row()
+                .padding(crate::appearance::space(10.0))
+                .background(Role::Surface),
         );
         let footer = tree.insert(
             Some(bottom),
             Label::new("")
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .color(Role::Muted)
                 .wrap(true)
                 .max_lines(3),
@@ -316,6 +383,8 @@ impl WorkflowScreen {
             inspector: None,
             actions,
             fields: Vec::new(),
+            origin_task: None,
+            preset_name: String::new(),
             save_button,
             start_button,
             editor,
@@ -325,6 +394,7 @@ impl WorkflowScreen {
             tab: Tab::Build,
             selected_run: None,
             preparing_run,
+            start_pending: false,
             objective: String::new(),
             answers: BTreeMap::new(),
             form: Form::default(),
@@ -353,7 +423,7 @@ impl WorkflowScreen {
         self.tree.insert(
             Some(parent),
             Label::new(text)
-                .font_size(size)
+                .font_size(crate::appearance::font(size))
                 .color(if muted { Role::Muted } else { Role::Text })
                 .wrap(true),
         )
@@ -370,7 +440,7 @@ impl WorkflowScreen {
         self.tree.insert(
             Some(parent),
             Label::new(title)
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .weight(650)
                 .color(Role::Muted),
         );
@@ -483,6 +553,8 @@ impl WorkflowScreen {
             "表示サンプル"
         } else if !self.view.can_control && self.channel.is_some() {
             "監視中 · 実行サービスの操作権を待機"
+        } else if self.view.deferred {
+            "開始待ち · 保存済み実行は自動再開しません"
         } else {
             match self.view.connection {
                 Connection::Connected => "Noa 接続済み",
@@ -490,11 +562,14 @@ impl WorkflowScreen {
                 Connection::Disconnected(_) => "Noa 未接続",
             }
         };
-        let state = self
-            .view
-            .run
-            .as_ref()
-            .map_or("実行なし", |r| r.state.label());
+        let state = if self.preparing_run {
+            "新しい実行の準備"
+        } else {
+            self.view
+                .run
+                .as_ref()
+                .map_or("実行なし", |r| r.state.label())
+        };
         let line = format!("{repo}   /   {connection}   /   {state}");
         self.tree
             .update::<Label, _>(self.status, |label, cx| label.set_text(cx, line));
@@ -563,12 +638,21 @@ impl WorkflowScreen {
                     !self.demo
                         && self.channel.is_some()
                         && self.view.can_control
+                        && self.can_start_run()
+                        && !self.start_pending
                         && !changed
                         && !self.editor.conflict
                         && self.editor.definition.validate().is_empty(),
                 ),
+                Action::SavePreset => self.tree.set_enabled(
+                    *id,
+                    self.demo || (self.channel.is_some() && self.view.can_control),
+                ),
+                Action::Resume => self.tree.set_enabled(
+                    *id,
+                    !self.demo && self.channel.is_some() && self.view.can_control,
+                ),
                 Action::Pause
-                | Action::Resume
                 | Action::Cancel
                 | Action::ConfirmCancel
                 | Action::Approve(..)
@@ -578,7 +662,10 @@ impl WorkflowScreen {
                 | Action::Focus(_)
                 | Action::Answer(_) => self.tree.set_enabled(
                     *id,
-                    !self.demo && self.channel.is_some() && self.view.can_control,
+                    !self.demo
+                        && self.channel.is_some()
+                        && self.view.can_control
+                        && !self.view.deferred,
                 ),
                 _ => {}
             }
@@ -596,15 +683,15 @@ impl WorkflowScreen {
             let bar = self.tree.insert(
                 Some(self.body),
                 Container::row()
-                    .padding(16.0)
-                    .gap(16.0)
+                    .padding(crate::appearance::space(16.0))
+                    .gap(crate::appearance::space(16.0))
                     .align_items(AlignItems::CENTER),
             );
             self.button(bar, "← ワークフローへ戻る", Action::ClosePreview);
             self.label(bar, title, 17.0, false);
             let pane = self.tree.insert(
                 Some(self.body),
-                Container::new(style::column()).padding(20.0),
+                Container::new(style::column()).padding(crate::appearance::space(20.0)),
             );
             self.label(
                 pane,
@@ -624,9 +711,12 @@ impl WorkflowScreen {
             return;
         }
         if self.channel.is_none() && !self.demo {
-            let content = self
-                .tree
-                .insert(Some(self.body), Container::column().padding(32.0).gap(16.0));
+            let content = self.tree.insert(
+                Some(self.body),
+                Container::column()
+                    .padding(crate::appearance::space(32.0))
+                    .gap(crate::appearance::space(16.0)),
+            );
             self.label(content, "ワークフローを開けませんでした", 24.0, false);
             self.label(
                 content,
@@ -648,7 +738,7 @@ impl WorkflowScreen {
         }
         let toolbar = self.tree.insert(
             Some(self.body),
-            Container::wrapping_row(6.0, 6.0).padding(10.0),
+            Container::wrapping_row(6.0, 6.0).padding(crate::appearance::space(10.0)),
         );
         if self.tab == Tab::Build {
             self.button(toolbar, "＋ 工程", Action::Palette);
@@ -660,12 +750,21 @@ impl WorkflowScreen {
             self.button(toolbar, "再接続", Action::Refresh);
             if let Some(run) = &self.view.run {
                 let state = run.state;
-                if matches!(state, NodeState::Paused) && run.limit_reason.is_none() {
+                if self.view.deferred {
+                    if !self.preparing_run
+                        && !run.cancel_requested
+                        && !matches!(state, NodeState::Succeeded | NodeState::Canceled)
+                    {
+                        self.button(toolbar, "以前の実行を再開", Action::Resume);
+                    }
+                } else if matches!(state, NodeState::Paused) && run.limit_reason.is_none() {
                     self.button(toolbar, "再開", Action::Resume);
                 } else if matches!(state, NodeState::Running | NodeState::Waiting) {
                     self.button(toolbar, "一時停止", Action::Pause);
                 }
-                if !matches!(state, NodeState::Succeeded | NodeState::Canceled) {
+                if !self.view.deferred
+                    && !matches!(state, NodeState::Succeeded | NodeState::Canceled)
+                {
                     self.button(toolbar, "停止", Action::Cancel);
                 }
             }
@@ -739,9 +838,12 @@ impl WorkflowScreen {
                 .tree
                 .insert(Some(pane), ScrollView::new(style::fill()).vertical(true));
             self.tree.set_autosave_name(scroll, "workflow/inspector");
-            let content = self
-                .tree
-                .insert(Some(scroll), Container::column().padding(18.0).gap(10.0));
+            let content = self.tree.insert(
+                Some(scroll),
+                Container::column()
+                    .padding(crate::appearance::space(18.0))
+                    .gap(crate::appearance::space(10.0)),
+            );
             self.inspector = Some(content);
             self.build_inspector(text);
         }
@@ -765,7 +867,7 @@ impl WorkflowScreen {
                 .map(|(_, a)| a.clone())
         });
         self.clear(host, text);
-        let definition = if self.tab == Tab::Build {
+        let definition = if self.tab == Tab::Build || self.preparing_run {
             &self.editor.definition
         } else {
             self.view
@@ -778,7 +880,7 @@ impl WorkflowScreen {
         } else {
             self.selected_run.as_deref()
         };
-        let run = if self.tab == Tab::Build {
+        let run = if self.tab == Tab::Build || self.preparing_run {
             None
         } else {
             self.view.run.as_ref()
@@ -835,10 +937,47 @@ impl WorkflowScreen {
                     instruction: node.instruction.clone(),
                     timeout: (node.timeout_ms / 60_000).to_string(),
                     retries: node.max_retries.to_string(),
+                    agent: node.agent.clone(),
                     ..Default::default()
                 };
             }
             self.input(host, "名前", self.form.title.clone(), Field::Title);
+            if node.kind.uses_agent() {
+                self.label(host, "担当エージェント", 11.0, true);
+                let selected = AgentChoice::PROVIDERS
+                    .iter()
+                    .position(|p| *p == self.form.agent.provider)
+                    .unwrap_or(0);
+                let provider = self.tree.insert(
+                    Some(host),
+                    PopUpButton::new(AgentChoice::PROVIDERS).selected_index(selected),
+                );
+                self.tree.set_accessible_label(provider, "担当エージェント");
+                self.fields.push((provider, Field::Provider));
+                self.input(
+                    host,
+                    "モデル（空欄はCLIの既定）",
+                    self.form.agent.model.clone().unwrap_or_default(),
+                    Field::Model,
+                );
+                self.label(host, "推論の強さ（effort）", 11.0, true);
+                let levels = AgentChoice::efforts(&self.form.agent.provider);
+                let selected = self
+                    .form
+                    .agent
+                    .effort
+                    .as_deref()
+                    .and_then(|value| levels.iter().position(|v| *v == value))
+                    .map_or(0, |i| i + 1);
+                let effort = self.tree.insert(
+                    Some(host),
+                    PopUpButton::new(std::iter::once("CLIの既定").chain(levels.iter().copied()))
+                        .selected_index(selected),
+                );
+                self.tree.set_accessible_label(effort, "推論の強さ");
+                self.fields.push((effort, Field::Effort));
+                self.label(host, "autoは開始時に一度だけ検出します。開始後の担当・モデル・effortは再試行でも固定されます。", 11.0, true);
+            }
             self.area(
                 host,
                 "工程への指示",
@@ -952,6 +1091,22 @@ impl WorkflowScreen {
             self.label(host,"費用が取得できないエージェントでは上限を保証できません。上限を設定すると、費用不明の状態では開始を保留します。",11.0,true);
             self.button(host, "設定を適用", Action::Apply);
             self.section(host, "VALIDATION / 検証結果");
+            self.section(host, "担当構成のプリセット");
+            self.input(
+                host,
+                "構成名（同じ名前で更新）",
+                self.preset_name.clone(),
+                Field::PresetName,
+            );
+            self.button(host, "現在の担当構成を保存", Action::SavePreset);
+            for (index, preset) in self.view.presets.clone().iter().enumerate() {
+                self.button(
+                    host,
+                    format!("読み込む · {}", preset.name),
+                    Action::ApplyPreset(index),
+                );
+            }
+            self.label(host, "計画・実装・レビュー・検証の担当設定だけを保存します。読み込み後はフローを保存して適用してください。", 11.0, true);
             let issues = self.editor.definition.validate();
             if issues.is_empty() {
                 self.label(host, "✓ 接続と実行条件を確認済み", 12.0, false);
@@ -980,6 +1135,14 @@ impl WorkflowScreen {
         }
     }
 
+    fn can_start_run(&self) -> bool {
+        self.view.run.as_ref().is_none_or(|r| {
+            !r.nodes.values().any(|n| n.state.active())
+                && r.state != NodeState::Running
+                && (r.state != NodeState::Paused || r.limit_reason.is_some())
+        })
+    }
+
     fn build_run_inspector(&mut self, host: WidgetId) {
         if self.confirm_cancel {
             self.section(host, "STOP / 停止の確認");
@@ -990,14 +1153,19 @@ impl WorkflowScreen {
             return;
         }
         let run = self.view.run.clone();
-        let can_start = run.as_ref().is_none_or(|r| {
-            !r.nodes.values().any(|n| n.state.active())
-                && !matches!(r.state, NodeState::Running)
-                && (r.state != NodeState::Paused || r.limit_reason.is_some())
-        });
-        if can_start && (self.preparing_run || run.is_none()) {
+        let can_start = self.can_start_run();
+        if self.preparing_run || run.is_none() {
             self.section(host, "START / 新しい実行");
             self.label(host, "目的から始める", 21.0, false);
+            if let Some(origin) = self.origin_task.clone() {
+                self.label(
+                    host,
+                    format!("元タスク: {} · {}", origin.task, origin.title),
+                    13.0,
+                    false,
+                );
+                self.button(host, "Tasksで元タスクを開く", Action::OpenTask);
+            }
             self.label(host,"独立した作業領域で計画・実装・レビュー・検証を進めます。変更を確認してからPR作成を承認できます。",12.0,true);
             self.area(
                 host,
@@ -1011,12 +1179,35 @@ impl WorkflowScreen {
                 start,
                 !self.demo
                     && self.channel.is_some()
+                    && can_start
+                    && !self.start_pending
                     && !self.editor.dirty()
                     && !self.form.dirty
                     && self.editor.definition.validate().is_empty(),
             );
             if self.editor.dirty() || self.form.dirty {
                 self.label(host, "先に編集内容を保存してください。", 12.0, true);
+            }
+            if let Some(previous) = &run {
+                self.section(host, "PREVIOUS RUN / 以前の実行");
+                self.label(
+                    host,
+                    format!("{} · {}", previous.id, previous.state.label()),
+                    12.0,
+                    false,
+                );
+                self.label(host, clipped(&previous.objective, 240), 11.0, true);
+                self.label(
+                    host,
+                    if can_start {
+                        "上のタスクは未開始です。新しい実行を開始すると、以前の実行は履歴に残ります。"
+                    } else {
+                        "上のタスクは未開始です。以前の実行に動作中・判断待ちの工程があるため、新しい実行は開始できません。"
+                    },
+                    11.0,
+                    true,
+                );
+                self.button(host, "以前の実行を表示", Action::SavedRun);
             }
             if let Connection::Disconnected(message) = &self.view.connection {
                 self.label(host, message.clone(), 11.0, true);
@@ -1027,6 +1218,36 @@ impl WorkflowScreen {
             return;
         };
         self.section(host, "RUN / 固定された実行");
+        if self.view.deferred {
+            self.label(host, "保存済みの実行を閲覧しています。このウィンドウからは自動再開しません。「以前の実行を再開」を押すと、この保存済みの工程が動作します。", 12.0, true);
+        }
+        if self.origin_task.is_some() {
+            self.button(
+                host,
+                "引継ぎタスクの開始フォームへ",
+                Action::Select(String::new()),
+            );
+        }
+        if let Some(origin) = &run.origin_task {
+            self.label(
+                host,
+                format!("元タスク: {} · {}", origin.task, origin.title),
+                12.0,
+                false,
+            );
+            self.button(host, "Tasksで元タスクを開く", Action::OpenTask);
+        }
+        self.label(host, "結果の出所: Workflow の構造化エージェント報告。Review/Verify ウィジェットのセッションとは別の実行です。", 11.0, true);
+        for node in &run.definition.nodes {
+            if node.kind.uses_agent() {
+                self.label(
+                    host,
+                    format!("{}: {}", node.title, node.agent.label()),
+                    11.0,
+                    true,
+                );
+            }
+        }
         self.label(
             host,
             format!("{}  {}", style::state_symbol(run.state), run.state.label()),
@@ -1282,9 +1503,12 @@ impl WorkflowScreen {
             Some(self.body),
             ScrollView::new(style::fill()).vertical(true),
         );
-        let content = self
-            .tree
-            .insert(Some(scroll), Container::column().padding(24.0).gap(12.0));
+        let content = self.tree.insert(
+            Some(scroll),
+            Container::column()
+                .padding(crate::appearance::space(24.0))
+                .gap(crate::appearance::space(12.0)),
+        );
         self.section(content, "TIMELINE / この実行の記録");
         let Some(run) = self.view.run.clone() else {
             self.label(
@@ -1311,8 +1535,8 @@ impl WorkflowScreen {
             let row = self.tree.insert(
                 Some(content),
                 Container::column()
-                    .padding(14.0)
-                    .gap(6.0)
+                    .padding(crate::appearance::space(14.0))
+                    .gap(crate::appearance::space(6.0))
                     .background(Role::Surface)
                     .radius(8.0),
             );
@@ -1375,12 +1599,15 @@ impl WorkflowScreen {
                 return Err("工程名は1〜100文字で指定してください".into());
             }
             let instruction = self.form.instruction.clone();
+            let agent = self.form.agent.clone();
+            agent.validate()?;
             self.editor.change(|d| {
                 if let Some(node) = d.nodes.iter_mut().find(|n| n.id == id) {
                     node.title = title;
                     node.instruction = instruction;
                     node.timeout_ms = minutes * 60_000;
                     node.max_retries = retries;
+                    node.agent = agent;
                 }
             });
         } else {
@@ -1477,13 +1704,76 @@ impl WorkflowScreen {
         }
         self.notice.clear();
         match action {
+            Action::SavePreset => {
+                let preset = AgentPreset::from_definition(
+                    self.preset_name.trim().to_owned(),
+                    &self.editor.definition,
+                );
+                preset.validate()?;
+                if self.demo {
+                    if let Some(existing) =
+                        self.view.presets.iter_mut().find(|p| p.name == preset.name)
+                    {
+                        *existing = preset;
+                    } else {
+                        self.view.presets.push(preset);
+                    }
+                    self.notice = "サンプル内で担当構成を保存しました".into();
+                    self.build_inspector(text);
+                } else {
+                    self.send(Intent::SavePreset(preset))?;
+                }
+            }
+            Action::ApplyPreset(index) => {
+                let preset = self
+                    .view
+                    .presets
+                    .get(index)
+                    .cloned()
+                    .ok_or("担当構成が見つかりません")?;
+                preset.validate()?;
+                let mut next = self.editor.definition.clone();
+                preset.apply(&mut next)?;
+                self.editor.change(|definition| *definition = next);
+                self.form = Form::default();
+                self.build_body(text);
+                self.notice = format!(
+                    "{} を読み込みました。保存後の新しい実行に適用されます。",
+                    preset.name
+                );
+            }
+            Action::OpenTask => {
+                let origin = if self.preparing_run {
+                    self.origin_task.as_ref()
+                } else {
+                    self.view.run.as_ref().and_then(|r| r.origin_task.as_ref())
+                }
+                .ok_or("元タスクの参照がありません")?;
+                if self.demo {
+                    self.notice = "サンプルではTasksを起動しません".into();
+                } else {
+                    workflow::tasks::open_origin(origin)?;
+                }
+            }
             Action::Tab(tab) => {
                 self.evidence_preview = None;
                 self.tab = tab;
                 self.confirm_cancel = false;
                 self.build_body(text);
             }
+            Action::SavedRun => {
+                self.preparing_run = false;
+                self.selected_run = None;
+                self.tab = Tab::Run;
+                self.build_body(text);
+            }
             Action::Select(id) => {
+                if self.tab == Tab::Run && self.preparing_run && !id.is_empty() {
+                    self.tab = Tab::Build;
+                    self.editor.selected = Some(id);
+                    self.build_body(text);
+                    return Ok(());
+                }
                 if self.tab == Tab::Build {
                     self.editor.selected = Some(id);
                 } else {
@@ -1630,6 +1920,9 @@ impl WorkflowScreen {
                 };
             }
             Action::Start => {
+                if self.start_pending || !self.can_start_run() {
+                    return Err("以前の実行を確認するか、開始の確定を待ってください".into());
+                }
                 if self.editor.dirty() {
                     return Err("実行する前に編集内容を保存してください".into());
                 }
@@ -1637,10 +1930,14 @@ impl WorkflowScreen {
                     return Err("達成したいことと完了条件を入力してください".into());
                 }
                 self.send(Intent::Start {
-                    objective: self.objective.trim().to_string(),
+                    objective: self.objective.clone(),
+                    origin_task: self.origin_task.clone().map(|mut origin| {
+                        origin.objective_digest =
+                            workflow::model::digest_bytes(self.objective.as_bytes());
+                        origin
+                    }),
                 })?;
-                self.selected_run = None;
-                self.preparing_run = false;
+                self.start_pending = true;
             }
             Action::Pause => self.send(Intent::Pause)?,
             Action::Resume => self.send(Intent::Resume)?,
@@ -1722,7 +2019,17 @@ impl WorkflowScreen {
         } else if self.notice.starts_with("操作を受け付けました") {
             self.notice.clear();
         }
-        let changed = self.view.run != view.run;
+        let changed = self.view.run != view.run || self.view.deferred != view.deferred;
+        if self.start_pending {
+            if view.run.as_ref().map(|run| &run.id) != self.view.run.as_ref().map(|run| &run.id) {
+                self.start_pending = false;
+                self.preparing_run = false;
+                self.selected_run = None;
+            } else if view.notice.is_some() {
+                // A rejected start keeps the task objective visible for correction.
+                self.start_pending = false;
+            }
+        }
         self.view = view;
         let mut adopted = self.editor.definition.clone();
         adopted.revision = before.revision;
@@ -1910,6 +2217,9 @@ impl WorkflowScreen {
 }
 
 impl Screen for WorkflowScreen {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
     fn tree(&self) -> &UiTree {
         &self.tree
     }
@@ -2017,7 +2327,42 @@ impl Screen for WorkflowScreen {
         }
     }
     fn handle(&mut self, message: Message, text: &mut TextStore) {
-        if message.downcast_ref::<TextChanged>().is_some() {
+        if message.downcast_ref::<SelectionChanged>().is_some() {
+            if let Some(field) = self
+                .fields
+                .iter()
+                .find(|(id, _)| *id == message.source)
+                .map(|(_, f)| f.clone())
+            {
+                let selected = self
+                    .tree
+                    .get::<PopUpButton>(message.source)
+                    .map_or(0, PopUpButton::selected);
+                match field {
+                    Field::Provider => {
+                        self.form.agent = AgentChoice {
+                            provider: AgentChoice::PROVIDERS
+                                .get(selected)
+                                .unwrap_or(&"auto")
+                                .to_string(),
+                            model: None,
+                            effort: None,
+                        };
+                        self.form.dirty = true;
+                        self.build_inspector(text);
+                    }
+                    Field::Effort => {
+                        self.form.agent.effort = selected
+                            .checked_sub(1)
+                            .and_then(|i| AgentChoice::efforts(&self.form.agent.provider).get(i))
+                            .map(|s| s.to_string());
+                        self.form.dirty = true;
+                    }
+                    _ => {}
+                }
+                self.status();
+            }
+        } else if message.downcast_ref::<TextChanged>().is_some() {
             if let Some(field) = self
                 .fields
                 .iter()
@@ -2035,6 +2380,13 @@ impl Screen for WorkflowScreen {
                     })
                     .unwrap_or_default();
                 match field {
+                    Field::Model => {
+                        self.form.agent.model =
+                            (!value.trim().is_empty()).then(|| value.trim().to_owned());
+                        self.form.dirty = true;
+                    }
+                    Field::PresetName => self.preset_name = value,
+                    Field::Provider | Field::Effort => {}
                     Field::Objective => self.objective = value,
                     Field::Answer(node_id) => {
                         self.answers.insert(node_id, value);

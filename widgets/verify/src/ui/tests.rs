@@ -4324,3 +4324,17 @@ fn auto_resuming_a_past_verification_while_deciding_stops_the_planner() {
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_dir_all(repo);
 }
+
+#[test]
+fn refilling_a_past_session_clears_an_unrelated_task_handoff() {
+    let mut screen = Verify::demo();
+    screen.start_origin = Some(task_links::OriginHint {
+        base: "b".repeat(40),
+        repo: PathBuf::from("/unrelated"),
+        task: "t-other".into(),
+        run: "run-other".into(),
+        commit: "a".repeat(40),
+    });
+    act(&mut screen, Action::VerifyAgain(None));
+    assert!(screen.start_origin.is_none());
+}

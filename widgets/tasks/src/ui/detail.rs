@@ -72,7 +72,7 @@ pub(super) fn insert(
     tree.insert(
         Some(pane),
         Label::new(task.title.clone())
-            .font_size(15.0)
+            .font_size(crate::appearance::font(15.0))
             .weight(700)
             .wrap(true),
     );
@@ -86,7 +86,7 @@ pub(super) fn insert(
         tree.insert(
             Some(pane),
             Label::new(problem.clone())
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .wrap(true)
                 .color(PROBLEM),
         );
@@ -115,6 +115,14 @@ pub(super) fn insert(
                 isolation: Isolation::Worktree,
                 auto: None,
             },
+        );
+    }
+    if task.problem.is_none() {
+        button(
+            tree,
+            buttons,
+            "Workflow で進める",
+            Intent::OpenWorkflow(task.r#ref.clone()),
         );
     }
     match &task.r#ref {
@@ -177,11 +185,18 @@ pub(super) fn insert(
             text(tree, pane, &detail.body, "（本文はありません）");
             heading(tree, pane, &format!("コメント {}", detail.comments.len()));
             for comment in &detail.comments {
-                tree.insert(
+                let age_label = tree.insert(
                     Some(pane),
                     Label::new(format!("{} · {}", comment.author, age(now, comment.at)))
-                        .font_size(11.0)
+                        .font_size(crate::appearance::font(11.0))
                         .color(Role::Muted),
+                );
+                style::remember_age(
+                    tree,
+                    age_label,
+                    comment.at,
+                    &format!("{} · ", comment.author),
+                    "",
                 );
                 text(tree, pane, &comment.body, "");
             }
@@ -190,7 +205,7 @@ pub(super) fn insert(
             tree.insert(
                 Some(pane),
                 Label::new(format!("本文を読めません: {}", failure.reason()))
-                    .font_size(12.0)
+                    .font_size(crate::appearance::font(12.0))
                     .wrap(true)
                     .color(PROBLEM),
             );
@@ -298,6 +313,44 @@ fn insert_related(
         })
         .collect();
     groups.push(("変更", Tone::Neutral, lines));
+    let workflow_lines = related
+        .workflows
+        .iter()
+        .map(|run| {
+            let mut buttons = vec![(
+                "実行を開く",
+                Intent::OpenWorkflowRun {
+                    task: task.clone(),
+                    run: run.run_id.clone(),
+                },
+            )];
+            if let Some(url) = &run.pr_url
+                && url.starts_with("https://github.com/")
+            {
+                buttons.push(("PR を開く", Intent::OpenUrl(url.clone())));
+            }
+            let state = match run.state.as_str() {
+                "pending" => "未開始",
+                "running" => "実行中",
+                "waiting" => "判断待ち",
+                "uncertain" => "結果確認中",
+                "succeeded" => "完了",
+                "failed" => "問題あり",
+                "paused" => "一時停止",
+                "canceled" => "中断",
+                other => other,
+            };
+            let target = run.target_digest.as_deref().unwrap_or("不明");
+            Line {
+                text: format!(
+                    "{} · {} · {}\n{}\n実行時の対象 ID: {} · 定義 ID: {}\nWorkflow 内のエージェント報告",
+                    run.run_id, run.title, state, run.summary, target, run.definition_digest
+                ),
+                buttons,
+            }
+        })
+        .collect();
+    groups.push(("Workflow", Tone::Neutral, workflow_lines));
 
     for (kind, tag, tone) in [
         (SessionKind::Review, "レビュー", Tone::Warning),
@@ -335,7 +388,22 @@ fn insert_related(
         if let Some(no) = current
             && !related.registered(kind)
         {
-            lines.push(Line::plain(format!("{tag} v{no} 未登録")));
+            let version = related.current().expect("current version exists");
+            lines.push(Line {
+                text: format!("{tag} v{no} 未登録"),
+                buttons: vec![(
+                    match kind {
+                        SessionKind::Review => "この版をレビュー",
+                        SessionKind::Verify => "この版を検証",
+                    },
+                    Intent::CheckVersion {
+                        task: task.clone(),
+                        kind,
+                        run: version.run.clone(),
+                        commit: version.commit.clone(),
+                    },
+                )],
+            });
         }
         groups.push((tag, tone, lines));
     }
@@ -397,7 +465,9 @@ fn insert_related(
         for line in lines {
             tree.insert(
                 Some(items),
-                Label::new(line.text).font_size(12.0).wrap(true),
+                Label::new(line.text)
+                    .font_size(crate::appearance::font(12.0))
+                    .wrap(true),
             );
             if line.buttons.is_empty() {
                 continue;
@@ -454,7 +524,7 @@ fn insert_run(
         .border(1.0, Role::Separator)
         .radius(8.0),
     );
-    tree.insert(
+    let age_label = tree.insert(
         Some(frame),
         Label::new(format!(
             "{} · {} · {}",
@@ -462,8 +532,15 @@ fn insert_run(
             age(now, run.started),
             liveness(&view.liveness)
         ))
-        .font_size(12.0)
+        .font_size(crate::appearance::font(12.0))
         .weight(600),
+    );
+    style::remember_age(
+        tree,
+        age_label,
+        run.started,
+        &format!("{} · ", run.agent.command()),
+        &format!(" · {}", liveness(&view.liveness)),
     );
     let place = match &run.branch {
         Some(branch) => format!("{branch} · {}", run.workdir.display()),
@@ -472,7 +549,7 @@ fn insert_run(
     tree.insert(
         Some(frame),
         Label::new(place)
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .wrap(true)
             .color(Role::Muted),
     );
@@ -543,17 +620,21 @@ fn insert_share(
         Some((label, status)) => {
             tree.insert(
                 Some(row),
-                Label::new(label).font_size(11.0).color(if status.failed() {
-                    Role::Text
-                } else {
-                    Role::Muted
-                }),
+                Label::new(label)
+                    .font_size(crate::appearance::font(11.0))
+                    .color(if status.failed() {
+                        Role::Text
+                    } else {
+                        Role::Muted
+                    }),
             );
             // Why it failed or waits, or the post the server stored.
             if let Some(detail) = status.detail() {
                 tree.insert(
                     Some(row),
-                    Label::new(detail).font_size(11.0).color(Role::Muted),
+                    Label::new(detail)
+                        .font_size(crate::appearance::font(11.0))
+                        .color(Role::Muted),
                 );
             }
             if !matches!(status, Status::Published { .. }) {
@@ -602,7 +683,7 @@ fn heading(tree: &mut UiTree, parent: WidgetId, text: &str) {
     tree.insert(
         Some(parent),
         Label::new(text)
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .weight(700)
             .color(Role::Muted),
     );
@@ -612,7 +693,7 @@ fn muted(tree: &mut UiTree, parent: WidgetId, text: &str) {
     tree.insert(
         Some(parent),
         Label::new(text)
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .wrap(true)
             .color(Role::Muted),
     );
@@ -629,7 +710,10 @@ fn text(tree: &mut UiTree, parent: WidgetId, body: &str, empty: &str) {
     }
     tree.insert(
         Some(parent),
-        Label::new(body).font_size(12.0).wrap(true).selectable(true),
+        Label::new(body)
+            .font_size(crate::appearance::font(12.0))
+            .wrap(true)
+            .selectable(true),
     );
 }
 

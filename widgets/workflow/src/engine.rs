@@ -198,6 +198,7 @@ impl Engine {
                 definition_digest,
                 repository,
                 objective,
+                origin_task: None,
                 target,
                 state: NodeState::Pending,
                 nodes,
@@ -1196,6 +1197,11 @@ impl Engine {
 }
 
 pub fn validate_run(run: &Run) -> Result<(), EngineError> {
+    if let Some(origin) = &run.origin_task {
+        origin
+            .validate(&run.repository, &run.objective)
+            .map_err(EngineError)?;
+    }
     if run.schema_version != SCHEMA_VERSION
         || !valid_id(&run.id)
         || !run.repository.is_absolute()

@@ -82,7 +82,7 @@ pub(super) fn insert(
     tree.insert(
         Some(target),
         Label::new(m.label.clone())
-            .font_size(12.5)
+            .font_size(crate::appearance::font(12.5))
             .weight(600)
             .wrap(true),
     );
@@ -123,14 +123,18 @@ pub(super) fn insert(
         );
         tree.insert(
             Some(top),
-            Label::new(part.id.to_string()).font_size(13.0).weight(600),
+            Label::new(part.id.to_string())
+                .font_size(crate::appearance::font(13.0))
+                .weight(600),
         );
         if let Some(strategy) = &part.strategy {
             tag(tree, top, strategy.label(), Tone::Accent);
         }
         let line = tree.insert(
             Some(c),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(6.0)),
         );
         caption(tree, line, setup_line(part));
         spacer(tree, line);
@@ -154,7 +158,7 @@ pub(super) fn insert(
             tree.insert(
                 Some(c),
                 Label::new(summary)
-                    .font_size(11.5)
+                    .font_size(crate::appearance::font(11.5))
                     .wrap(true)
                     .max_lines(3)
                     .truncation(Truncation::Tail),
@@ -191,12 +195,21 @@ pub(super) fn insert(
     let judge = card(tree, list, false);
     let top = tree.insert(
         Some(judge),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
-    tree.insert(Some(top), Label::new("判定役").font_size(13.0).weight(600));
+    tree.insert(
+        Some(top),
+        Label::new("判定役")
+            .font_size(crate::appearance::font(13.0))
+            .weight(600),
+    );
     let line = tree.insert(
         Some(judge),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     caption(tree, line, setup_line(&session.judge));
     spacer(tree, line);

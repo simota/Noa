@@ -180,7 +180,7 @@ fn render(
     Ok(html)
 }
 
-fn checked_image(
+pub(crate) fn checked_image(
     reply_base: &Path,
     reply_dir: &Path,
     item: &Evidence,

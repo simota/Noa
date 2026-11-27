@@ -2,9 +2,12 @@
 //! capture, worktree, evidence, re-run, model, engine and store (`lib.rs`),
 //! fed by the live layer.
 
+#[path = "../../shared/appearance.rs"]
+mod appearance;
 mod demo;
 mod installed;
 mod live;
+mod native_preview;
 /// The live session runner (`src/live/`): `ipc` is the Noa port and its
 /// `noa-ipc` implementation, `runner` drives one verification against it,
 /// `fix` starts an agent on fixing a verification's failed criteria and
@@ -31,6 +34,7 @@ use crate::ui::{CenterTab, Verify};
 const USAGE: &str = "usage: verify [--demo | --demo-start | --demo-held | --demo-criteria | \
                      --session=DIR | --repo=DIR] \
                      [--tab=criteria|evidence|gallery|defects|report] [--criterion=ID] \
+                     [--base=SHA --revision=SHA] [--origin-repo=DIR --origin-task=ID --origin-run=ID] \
                      [--snapshot=FILE.png [--size=WxH]]\n  \
                      the live verification by default; \
                      --repo puts DIR (absolute) in the start view's repository field \
@@ -142,9 +146,26 @@ struct Args {
     session: Option<PathBuf>,
     /// What the start view's repository field holds.
     repo: Option<PathBuf>,
+    base: Option<String>,
+    revision: Option<String>,
+    origin_repo: Option<PathBuf>,
+    origin_task: Option<String>,
+    origin_run: Option<String>,
     tab: Option<CenterTab>,
     criterion: Option<String>,
     help: bool,
+}
+
+impl Args {
+    fn origin(&self) -> Option<verify::task_links::OriginHint> {
+        Some(verify::task_links::OriginHint {
+            repo: self.origin_repo.clone()?,
+            base: self.base.clone()?,
+            task: self.origin_task.clone()?,
+            run: self.origin_run.clone()?,
+            commit: self.revision.clone()?,
+        })
+    }
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
@@ -165,6 +186,16 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                 return Err(format!("--repo needs an absolute path\n{USAGE}"));
             }
             out.repo = Some(dir);
+        } else if let Some(value) = arg.strip_prefix("--base=") {
+            out.base = Some(value.into());
+        } else if let Some(value) = arg.strip_prefix("--revision=") {
+            out.revision = Some(value.into());
+        } else if let Some(value) = arg.strip_prefix("--origin-repo=") {
+            out.origin_repo = Some(PathBuf::from(value));
+        } else if let Some(value) = arg.strip_prefix("--origin-task=") {
+            out.origin_task = Some(value.into());
+        } else if let Some(value) = arg.strip_prefix("--origin-run=") {
+            out.origin_run = Some(value.into());
         } else if let Some(tab) = arg.strip_prefix("--tab=") {
             out.tab =
                 Some(CenterTab::parse(tab).ok_or_else(|| format!("unknown tab {tab:?}\n{USAGE}"))?);
@@ -205,6 +236,24 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
              --demo-held, --demo-criteria or --session\n{USAGE}"
         ));
     }
+    let target = out.base.is_some() || out.revision.is_some();
+    let origin = out.origin_repo.is_some() || out.origin_task.is_some() || out.origin_run.is_some();
+    let sha = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|v| matches!(v.len(), 40 | 64) && v.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    if target && (out.repo.is_none() || sources > 0 || !sha(&out.base) || !sha(&out.revision)) {
+        return Err("--base and --revision require full commit IDs and a live --repo".into());
+    }
+    if origin
+        && (!target
+            || !out.origin_repo.as_ref().is_some_and(|p| p.is_absolute())
+            || !out.origin_task.as_ref().is_some_and(|s| !s.is_empty())
+            || !out.origin_run.as_ref().is_some_and(|s| !s.is_empty()))
+    {
+        return Err("a task handoff requires --origin-repo, --origin-task, --origin-run, --base and --revision".into());
+    }
     Ok(out)
 }
 
@@ -224,6 +273,12 @@ fn live_screen(
 }
 
 fn main() -> Result<(), String> {
+    if native_preview::run_if_requested()? {
+        return Ok(());
+    }
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let args = parse_args(std::env::args().skip(1))?;
     if args.help {
         println!("{USAGE}");
@@ -255,7 +310,13 @@ fn main() -> Result<(), String> {
             Some(repo) => screen.with_place(repo),
             None => screen,
         };
-        let mut screen = screen.with_view(tab, criterion);
+        let mut screen = screen
+            .with_handoff(
+                args.base.as_deref(),
+                args.revision.as_deref(),
+                args.origin(),
+            )
+            .with_view(tab, criterion);
         render_snapshot(path, &mut screen, size)?;
         println!("wrote {}", path.display());
         return Ok(());
@@ -277,7 +338,15 @@ fn main() -> Result<(), String> {
             let installed = installed::spawn(move || waker.wake());
             live_screen(&args, channel, installed)
         };
-        Box::new(screen.with_view(tab, criterion.clone()))
+        Box::new(
+            screen
+                .with_handoff(
+                    args.base.as_deref(),
+                    args.revision.as_deref(),
+                    args.origin(),
+                )
+                .with_view(tab, criterion.clone()),
+        )
     })
     .run()
     .map_err(|e| e.to_string())
@@ -429,5 +498,42 @@ mod tests {
         ] {
             assert!(args(&["--repo=/r", source]).is_err(), "{source}");
         }
+    }
+}
+
+#[cfg(test)]
+mod task_handoff_args_tests {
+    use super::*;
+    fn handoff() -> Vec<String> {
+        vec![
+            "--repo=/tmp/repo".into(),
+            format!("--base={}", "a".repeat(40)),
+            format!("--revision={}", "b".repeat(40)),
+            "--origin-repo=/tmp/repo".into(),
+            "--origin-task=#12".into(),
+            "--origin-run=run-5".into(),
+        ]
+    }
+    #[test]
+    fn immutable_target_and_origin_are_parsed_together() {
+        let args = parse_args(handoff()).unwrap();
+        let origin = args.origin().unwrap();
+        assert_eq!(origin.task, "#12");
+        assert_eq!(origin.run, "run-5");
+        assert_eq!(origin.commit, "b".repeat(40));
+    }
+    #[test]
+    fn incomplete_or_mutable_handoffs_are_rejected() {
+        for missing in 0..6 {
+            let mut args = handoff();
+            args.remove(missing);
+            assert!(parse_args(args).is_err(), "missing {missing}");
+        }
+        let mut args = handoff();
+        args[2] = "--revision=HEAD".into();
+        assert!(parse_args(args).is_err());
+        let mut args = handoff();
+        args.push("--demo".into());
+        assert!(parse_args(args).is_err());
     }
 }

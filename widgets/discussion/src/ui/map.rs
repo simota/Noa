@@ -91,7 +91,7 @@ fn card(tree: &mut UiTree, parent: WidgetId, accent: bool) -> WidgetId {
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(4.0),
-            padding: LayoutRect::length(8.0),
+            padding: LayoutRect::length(crate::appearance::space(8.0)),
             ..fill()
         })
         .background(Role::SurfaceAlt)
@@ -158,7 +158,7 @@ pub(super) fn insert(
                 tree.insert(
                     Some(body),
                     Label::new(session.topic.clone())
-                        .font_size(12.5)
+                        .font_size(crate::appearance::font(12.5))
                         .weight(600)
                         .wrap(true)
                         .max_lines(3),
@@ -178,7 +178,7 @@ pub(super) fn insert(
                         "ラウンド {}{limit} · {state}",
                         session.rounds.len()
                     ))
-                    .font_size(11.0)
+                    .font_size(crate::appearance::font(11.0))
                     .color(Role::Muted),
                 );
                 outer
@@ -197,21 +197,23 @@ pub(super) fn insert(
                 let body = card(tree, outer, issue.state == IssueState::Contested);
                 let head = tree.insert(
                     Some(body),
-                    Container::row().align_items(AlignItems::START).gap(6.0),
+                    Container::row()
+                        .align_items(AlignItems::START)
+                        .gap(crate::appearance::space(6.0)),
                 );
                 let (state, tone) = state_tag(issue.state);
                 tag(tree, head, state, tone);
                 tree.insert(
                     Some(head),
                     Label::new(format!("{} {}", issue.id, issue.title))
-                        .font_size(12.0)
+                        .font_size(crate::appearance::font(12.0))
                         .wrap(true)
                         .max_lines(2),
                 );
                 tree.insert(
                     Some(body),
                     Label::new(trail(&issue.history))
-                        .font_size(10.5)
+                        .font_size(crate::appearance::font(10.5))
                         .color(Role::Muted)
                         .truncation(Truncation::Tail),
                 );
@@ -227,13 +229,15 @@ pub(super) fn insert(
                 let body = card(tree, outer, false);
                 let row = tree.insert(
                     Some(body),
-                    Container::row().align_items(AlignItems::START).gap(6.0),
+                    Container::row()
+                        .align_items(AlignItems::START)
+                        .gap(crate::appearance::space(6.0)),
                 );
                 tag(tree, row, section_title(*section), Tone::Neutral);
                 tree.insert(
                     Some(row),
                     Label::new(text.clone())
-                        .font_size(11.0)
+                        .font_size(crate::appearance::font(11.0))
                         .wrap(true)
                         .max_lines(2),
                 );
@@ -251,6 +255,9 @@ struct MapImage {
 }
 
 impl Screen for MapImage {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
     fn tree(&self) -> &UiTree {
         &self.tree
     }
@@ -273,7 +280,7 @@ const IMAGE_SCALE: f32 = 2.0;
 pub(super) fn save_png(session: &Session, path: &Path) -> Result<(u32, u32), String> {
     let map = layout(session);
     let mut tree = UiTree::new();
-    tree.set_theme(Theme::dark());
+    crate::appearance::install(&mut tree, Theme::dark());
     let root = tree.insert(
         None,
         Container::new(Style {

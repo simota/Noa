@@ -1,21 +1,25 @@
 //! The other ways to see the same tasks: リスト (one row per task),
 //! タイムライン (the last two weeks: each task's runs as bars from start to
 //! end, and when it was closed) and カレンダー (a month: what started and
-//! what was closed each day). Every row or item is pressed as a card is:
+//! what was closed or is due each day). Every row or item is pressed as a card is:
 //! its id goes with the task in [`Built::rows`], and a press opens the
-//! detail. Dates are only ones that happened (see [`super::dates`]).
+//! detail. Due dates remain separate from actual activity (see [`super::dates`]).
 
 use noa_gpui_core::style::{
     Dimension, FlexDirection, Position, Rect as LayoutRect, Size as LayoutSize, auto, length,
     percent,
 };
-use noa_gpui_core::widgets::{Button, Container, ControlSize, Label, Pressable, ScrollView, Tag};
+use noa_gpui_core::widgets::{
+    Button, Container, ControlSize, Label, Pressable, ScrollView, SegmentMode, SegmentedControl,
+    Tag,
+};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 use noa_gpui_scene::Color;
 
 use tasks::model::types::{AgentState, Liveness, Millis, ResultFact, RunView, Task, TaskRef};
+use tasks::workspace::Workspace;
 
-use super::columns::{Card, age};
+use super::columns::Card;
 use super::dates::{self, Happened};
 use super::style::{self, gap};
 
@@ -29,6 +33,37 @@ const DONE: Color = Color::hex(0x30d158);
 const REVIEW: Color = Color::hex(0xff9f0a);
 const RUNNING: Color = Color::hex(0x0a84ff);
 const ENDED: Color = Color::hex(0x8e8e93);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum CalendarMode {
+    Planned,
+    Actual,
+    #[default]
+    Both,
+}
+impl CalendarMode {
+    pub const ALL: [Self; 3] = [Self::Planned, Self::Actual, Self::Both];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Planned => "予定",
+            Self::Actual => "実績",
+            Self::Both => "両方",
+        }
+    }
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Actual => "actual",
+            Self::Both => "both",
+        }
+    }
+    pub fn from_word(word: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|m| m.word() == word)
+            .unwrap_or_default()
+    }
+}
 
 /// How the tasks are laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -85,6 +120,8 @@ pub(super) struct Built {
     pub rows: Vec<(WidgetId, TaskRef)>,
     /// The calendar's month buttons (previous, this month, next).
     pub months: Option<[WidgetId; 3]>,
+    pub calendar_mode: Option<WidgetId>,
+    pub days: Vec<(WidgetId, Millis)>,
 }
 
 fn scroll(tree: &mut UiTree, host: WidgetId, gap_px: f32) -> WidgetId {
@@ -170,7 +207,9 @@ fn title(tree: &mut UiTree, parent: WidgetId, task: &Task, size: f32) {
     let host = tree.insert(Some(parent), Container::new(grow()));
     tree.insert(
         Some(host),
-        Label::new(task.title.clone()).font_size(size).max_lines(1),
+        Label::new(task.title.clone())
+            .font_size(crate::appearance::font(size))
+            .max_lines(1),
     );
 }
 
@@ -280,7 +319,7 @@ pub(super) fn timeline(
             tree.insert(
                 Some(at),
                 Label::new(dates::month_day(*day))
-                    .font_size(10.0)
+                    .font_size(crate::appearance::font(10.0))
                     .color(Role::Muted),
             );
         }
@@ -365,14 +404,16 @@ pub(super) fn timeline(
         scroll,
         rows,
         months: None,
+        calendar_mode: None,
+        days: Vec::new(),
     }
 }
 
 const WEEKDAYS: [&str; 7] = ["日", "月", "火", "水", "木", "金", "土"];
 
 /// カレンダー: the month `month` months from this one, six weeks from
-/// Sunday; each day lists the runs started (▶ agent) and the tasks closed
-/// (✓) on it, at most [`DAY_ITEMS`] and 「+N 件」. Today is marked.
+/// Sunday; deadlines and actual activity can be shown separately or together.
+/// Days show at most [`DAY_ITEMS`], with a control to open the whole day's list.
 pub(super) fn calendar(
     tree: &mut UiTree,
     host: WidgetId,
@@ -380,19 +421,60 @@ pub(super) fn calendar(
     runs: &[RunView],
     month: i32,
     now: Millis,
+    workspace: &Workspace,
+    mode: CalendarMode,
+    expanded: Option<Millis>,
 ) -> Built {
     let (year, m) = dates::month_from(now, month);
     let grid = dates::month_grid(year, m);
-    let happened = dates::happened(tasks, runs, grid[0], dates::next_midnight(grid[41]));
+    let mut happened = if mode == CalendarMode::Planned {
+        Vec::new()
+    } else {
+        dates::happened(tasks, runs, grid[0], dates::next_midnight(grid[41]))
+    };
+    let mut undated = Vec::new();
+    if mode != CalendarMode::Actual {
+        for task in tasks {
+            let meta = workspace.meta(&task.r#ref);
+            let last = runs
+                .iter()
+                .filter(|r| r.run.task == task.r#ref)
+                .max_by_key(|r| r.run.started);
+            if let Some(item) = dates::deadline(task, last, &meta, now) {
+                happened.push(item);
+            } else if !tasks::workspace::effective_workflow(task, last, &meta).is_finished() {
+                undated.push(*task);
+            }
+        }
+    }
+    happened.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.task().cmp(b.1.task())));
 
-    let head = tree.insert(Some(host), Container::new(style::row(8.0)));
+    let head = tree.insert(
+        Some(host),
+        Container::new(Style {
+            flex_wrap: noa_gpui_core::style::FlexWrap::Wrap,
+            ..style::row(8.0)
+        }),
+    );
     tree.insert(
         Some(head),
         Label::new(format!("{year}年{m}月"))
-            .font_size(15.0)
+            .font_size(crate::appearance::font(15.0))
             .weight(700),
     );
     style::spacer(tree, head);
+    let mode_control = tree.insert(
+        Some(head),
+        SegmentedControl::new(
+            CalendarMode::ALL.map(CalendarMode::label),
+            SegmentMode::SelectOne,
+        )
+        .control_size(ControlSize::Small)
+        .with_selected(&[CalendarMode::ALL
+            .iter()
+            .position(|m| *m == mode)
+            .unwrap_or(2)]),
+    );
     let prev = tree.insert(
         Some(head),
         Button::new("◀ 前の月 ([)").control_size(ControlSize::Small),
@@ -411,18 +493,46 @@ pub(super) fn calendar(
         let cell = tree.insert(Some(names), Container::new(grow()));
         tree.insert(
             Some(cell),
-            Label::new(name).font_size(11.0).color(Role::Muted),
+            Label::new(name)
+                .font_size(crate::appearance::font(11.0))
+                .color(Role::Muted),
         );
     }
 
     let scroll = scroll(tree, host, 6.0);
     let mut rows = Vec::new();
+    let mut days = Vec::new();
     let title_of = |r: &TaskRef| {
         tasks
             .iter()
             .find(|t| &t.r#ref == r)
             .map_or_else(|| r.badge(), |t| t.title.clone())
     };
+    if let Some(day) = expanded.filter(|d| grid.contains(d)) {
+        tree.insert(
+            Some(scroll),
+            Label::new(format!("{} のすべての予定・実績", dates::month_day(day)))
+                .font_size(crate::appearance::font(13.0))
+                .weight(700),
+        );
+        for (_, item) in happened
+            .iter()
+            .filter(|(at, _)| (day..dates::next_midnight(day)).contains(at))
+        {
+            let prefix = match item {
+                Happened::Due { overdue: true, .. } => "期限超過",
+                Happened::Due { .. } => "期限",
+                Happened::RunStarted { .. } => "実行",
+                Happened::Closed { .. } => "完了",
+            };
+            let button = tree.insert(
+                Some(scroll),
+                Button::new(format!("{prefix} · {}", title_of(item.task())))
+                    .control_size(ControlSize::Small),
+            );
+            rows.push((button, item.task().clone()));
+        }
+    }
     for week in grid.chunks(7) {
         let line = tree.insert(
             Some(scroll),
@@ -440,7 +550,7 @@ pub(super) fn calendar(
                 Container::new(Style {
                     flex_direction: FlexDirection::Column,
                     gap: gap(3.0),
-                    padding: LayoutRect::length(6.0),
+                    padding: LayoutRect::length(crate::appearance::space(6.0)),
                     min_size: LayoutSize {
                         width: length(0.0),
                         height: length(92.0),
@@ -463,7 +573,7 @@ pub(super) fn calendar(
             tree.insert(
                 Some(cell),
                 Label::new(dates::day_of(day).day.to_string())
-                    .font_size(11.0)
+                    .font_size(crate::appearance::font(11.0))
                     .weight(if today { 700 } else { 400 })
                     .color(if in_month { Role::Text } else { Role::Muted }),
             );
@@ -475,6 +585,18 @@ pub(super) fn calendar(
                 let (mark, color) = match item {
                     Happened::RunStarted { agent, .. } => (format!("▶ {agent}"), RUNNING),
                     Happened::Closed { .. } => ("✓".to_owned(), DONE),
+                    Happened::Due { overdue, .. } => (
+                        if *overdue {
+                            "期限超過".to_owned()
+                        } else {
+                            "期限".to_owned()
+                        },
+                        if *overdue {
+                            Color::hex(0xff453a)
+                        } else {
+                            REVIEW
+                        },
+                    ),
                 };
                 let pressed = tree.insert(
                     Some(cell),
@@ -488,30 +610,52 @@ pub(super) fn calendar(
                     .label(title_of(item.task()))
                     .radius(4.0),
                 );
-                tree.insert(Some(pressed), Label::new(mark).font_size(10.0).color(color));
+                tree.insert(
+                    Some(pressed),
+                    Label::new(mark)
+                        .font_size(crate::appearance::font(10.0))
+                        .color(color),
+                );
                 let host = tree.insert(Some(pressed), Container::new(grow()));
                 tree.insert(
                     Some(host),
                     Label::new(title_of(item.task()))
-                        .font_size(11.0)
+                        .font_size(crate::appearance::font(11.0))
                         .max_lines(1),
                 );
                 rows.push((pressed, item.task().clone()));
             }
             if items.len() > DAY_ITEMS {
-                tree.insert(
+                let more = tree.insert(
                     Some(cell),
-                    Label::new(format!("+{} 件", items.len() - DAY_ITEMS))
-                        .font_size(10.0)
-                        .color(Role::Muted),
+                    Button::new(format!("+{} 件を表示", items.len() - DAY_ITEMS))
+                        .control_size(ControlSize::Small),
                 );
+                days.push((more, day));
             }
+        }
+    }
+    if !undated.is_empty() {
+        tree.insert(
+            Some(scroll),
+            Label::new(format!("期限なし · {} 件", undated.len()))
+                .font_size(crate::appearance::font(13.0))
+                .weight(700),
+        );
+        for task in undated {
+            let button = tree.insert(
+                Some(scroll),
+                Button::new(&task.title).control_size(ControlSize::Small),
+            );
+            rows.push((button, task.r#ref.clone()));
         }
     }
     Built {
         scroll,
         rows,
         months: Some([prev, this, next]),
+        calendar_mode: Some(mode_control),
+        days,
     }
 }
 

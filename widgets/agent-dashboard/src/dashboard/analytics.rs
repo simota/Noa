@@ -245,7 +245,7 @@ fn surface_card(tree: &mut UiTree, parent: WidgetId, extra: Style) -> WidgetId {
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(8.0),
-            padding: LayoutRect::length(14.0),
+            padding: LayoutRect::length(crate::appearance::space(14.0)),
             ..extra
         })
         .background(Role::Surface)
@@ -265,7 +265,9 @@ fn kpi_card(
     let card = surface_card(tree, parent, fill_remaining());
     let head = tree.insert(
         Some(card),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     tree.insert(
         Some(head),
@@ -278,12 +280,15 @@ fn kpi_card(
     caption(tree, head, title);
     tree.insert(
         Some(card),
-        Label::new(value).font_size(24.0).weight(700).color(accent),
+        Label::new(value)
+            .font_size(crate::appearance::font(24.0))
+            .weight(700)
+            .color(accent),
     );
     tree.insert(
         Some(card),
         Label::new(subtitle)
-            .font_size(11.0)
+            .font_size(crate::appearance::font(11.0))
             .color(Role::Muted)
             .truncation(Truncation::Tail),
     );
@@ -294,7 +299,7 @@ fn phase_breakdown_card(tree: &mut UiTree, parent: WidgetId, metrics: &FleetMetr
     tree.insert(
         Some(card),
         Label::new("フェーズ別 時間内訳（フリート合算）")
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(700),
     );
     let track = tree.insert(
@@ -345,7 +350,9 @@ fn phase_breakdown_card(tree: &mut UiTree, parent: WidgetId, metrics: &FleetMetr
         };
         let item = tree.insert(
             Some(legend),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(6.0)),
         );
         tree.insert(
             Some(item),
@@ -362,7 +369,7 @@ fn phase_breakdown_card(tree: &mut UiTree, parent: WidgetId, metrics: &FleetMetr
                 phase.title(),
                 minutes_text(mins)
             ))
-            .font_size(12.0),
+            .font_size(crate::appearance::font(12.0)),
         );
     }
 }
@@ -376,12 +383,14 @@ fn throughput_card(
     let card = surface_card(tree, parent, fill_remaining());
     let head = tree.insert(
         Some(card),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     tree.insert(
         Some(head),
         Label::new("フリート全体 出力推移")
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(700),
     );
     spacer(tree, head);
@@ -405,7 +414,7 @@ fn agent_comparison_card(tree: &mut UiTree, parent: WidgetId, workers: &[&Worker
     tree.insert(
         Some(card),
         Label::new("エージェント・モデル別 内訳")
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(700),
     );
     let mut by_key: BTreeMap<String, (usize, usize, usize, f64, f64)> = BTreeMap::new();
@@ -432,16 +441,21 @@ fn agent_comparison_card(tree: &mut UiTree, parent: WidgetId, workers: &[&Worker
         .fold(0.0_f64, f64::max)
         .max(1.0);
     for (name, (count, done, err, total_min, wait_min)) in by_key {
-        let row = tree.insert(Some(card), Container::column().gap(4.0));
+        let row = tree.insert(
+            Some(card),
+            Container::column().gap(crate::appearance::space(4.0)),
+        );
         let top = tree.insert(
             Some(row),
-            Container::row().align_items(AlignItems::CENTER).gap(8.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(8.0)),
         );
         let name_slot = tree.insert(Some(top), Container::new(fill_remaining()));
         tree.insert(
             Some(name_slot),
             Label::new(name)
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(600)
                 .truncation(Truncation::Tail),
         );
@@ -516,12 +530,14 @@ fn bottleneck_card(tree: &mut UiTree, parent: WidgetId, workers: &[&Worker], reg
     let card = surface_card(tree, parent, fill_remaining());
     let head = tree.insert(
         Some(card),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     tree.insert(
         Some(head),
         Label::new("人待ち・停滞ランキング（クリックで選択）")
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(700),
     );
 
@@ -565,13 +581,16 @@ fn bottleneck_card(tree: &mut UiTree, parent: WidgetId, workers: &[&Worker], reg
             .push((row, worker.pane, Mark::Node { normal: color }));
         tree.insert(
             Some(row),
-            Label::new(symbol).font_size(12.0).weight(700).color(color),
+            Label::new(symbol)
+                .font_size(crate::appearance::font(12.0))
+                .weight(700)
+                .color(color),
         );
         let name_slot = tree.insert(Some(row), Container::new(fill_remaining()));
         tree.insert(
             Some(name_slot),
             Label::new(one_line(&worker.label))
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(600)
                 .truncation(Truncation::Tail),
         );
@@ -589,7 +608,7 @@ fn bottleneck_card(tree: &mut UiTree, parent: WidgetId, workers: &[&Worker], reg
         tree.insert(
             Some(row),
             Label::new(format!("人待ち {}", minutes_text(waited)))
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(600)
                 .color(wait_color),
         );

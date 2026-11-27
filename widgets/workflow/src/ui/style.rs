@@ -21,8 +21,8 @@ pub(super) fn column() -> Style {
     Style {
         flex_direction: FlexDirection::Column,
         gap: LayoutSize {
-            width: length(8.0),
-            height: length(8.0),
+            width: length(crate::appearance::space(8.0)),
+            height: length(crate::appearance::space(8.0)),
         },
         ..fill()
     }

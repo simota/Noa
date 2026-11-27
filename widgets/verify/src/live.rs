@@ -61,6 +61,7 @@ pub struct Attachment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Start {
+        origin: Option<verify::task_links::OriginHint>,
         request: String,
         /// Holds the spec file asked for (`Target::spec`).
         target: Box<Target>,
@@ -489,6 +490,7 @@ impl Dispatch {
             }
             (
                 Command::Start {
+                    origin,
                     request,
                     target,
                     isolation,
@@ -511,6 +513,7 @@ impl Dispatch {
                     return;
                 };
                 runner::Start::New(Box::new(runner::NewVerification {
+                    origin,
                     request,
                     target: *target,
                     isolation,

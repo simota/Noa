@@ -137,6 +137,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::OpenScaffold => "Open Scaffold",
         AppCommand::OpenWorkflow => "Open Workflow",
         AppCommand::OpenWidgetHost => "Repository Widgets…",
+        AppCommand::OpenWidgetSettings => "Widget Appearance Settings…",
         AppCommand::OpenAgentUsage => "Open Agent Usage",
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
@@ -271,37 +272,40 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::ToggleAutoApprove => "Toggle agent CLI auto approval for the current tab.",
         AppCommand::ToggleEmber => "Show or hide Ember, the pane list in the menu bar.",
         AppCommand::OpenAgentDashboard => {
-            "Show the agents working in Noa in a window of their own."
+            "エージェント 状況 進捗 ダッシュボード. Show the agents working in Noa in a window of their own."
         }
         AppCommand::OpenRepoBrowser => {
-            "Review each worktree's changed files and diffs next to its panes, in a window of their own."
+            "リポジトリ ブランチ 作業ツリー 変更. Review each worktree's changed files and diffs next to its panes, in a window of their own."
         }
         AppCommand::OpenDiscussion => {
-            "Hold a moderated discussion between agents running in Noa's panes, in a window of its own."
+            "議論 相談 ディスカッション. Hold a moderated discussion between agents running in Noa's panes, in a window of its own."
         }
         AppCommand::OpenCompetition => {
-            "Run a blind multi-agent competition with periodic peer reveals and artifact comparison, in a window of its own."
+            "比較 コンペ コンペティション. Run a blind multi-agent competition with periodic peer reveals and artifact comparison, in a window of its own."
         }
         AppCommand::OpenReview => {
-            "Run a thorough multi-agent review of a diff, files or a document with blind reviews, cross-examination and a consolidated report, in a window of its own."
+            "レビュー コードレビュー 指摘. Run a thorough multi-agent review of a diff, files or a document with blind reviews, cross-examination and a consolidated report, in a window of its own."
         }
         AppCommand::OpenVerify => {
-            "Verify a change against acceptance criteria with several agents running checks in isolated worktrees, recorded evidence and a verdict, in a window of its own."
+            "検証 動作確認 証跡. Verify a change against acceptance criteria with several agents running checks in isolated worktrees, recorded evidence and a verdict, in a window of its own."
         }
         AppCommand::OpenTasks => {
-            "Show the repository's local tasks and GitHub issues in one task list and run coding agents on them, in a window of its own."
+            "タスク 仕事 期限 課題. Show the repository's local tasks and GitHub issues in one task list and run coding agents on them, in a window of its own."
         }
         AppCommand::OpenScaffold => {
-            "Show the repository's development assets (checkers, runbooks, rules) and the registration gaps found in it, and hand a gap to an agent as a task, in a window of its own."
+            "準備 開発環境 足場 整備. Show the repository's development assets (checkers, runbooks, rules) and the registration gaps found in it, and hand a gap to an agent as a task, in a window of its own."
         }
         AppCommand::OpenWorkflow => {
-            "Workflow editor: build and inspect a development cycle as connected steps, with execution states, verification and approval, in a window of its own."
+            "ワークフロー 開発フロー 工程. Workflow editor: build and inspect a development cycle as connected steps, with execution states, verification and approval, in a window of its own."
         }
         AppCommand::OpenAgentUsage => {
-            "Show Claude Code, Codex and Antigravity usage limits and statistics in a window of its own."
+            "使用量 利用量 制限 残量. Show Claude Code, Codex and Antigravity usage limits and statistics in a window of its own."
+        }
+        AppCommand::OpenWidgetSettings => {
+            "ウィジェット 表示設定 外観 テーマ 文字サイズ 密度. Choose system, light or dark appearance, text size and density for widgets."
         }
         AppCommand::OpenWidgetHost => {
-            "Browse and preview the current worktree's shared widget definitions in a window of their own."
+            "ウィジェット カタログ プレビュー. Browse and preview the current worktree's shared widget definitions in a window of their own."
         }
         AppCommand::OpenThemePicker => "Choose a color theme.",
         AppCommand::ToggleProcessMonitor => "Show the processes running in each terminal.",
@@ -410,6 +414,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::OpenScaffold,
         AppCommand::OpenWorkflow,
         AppCommand::OpenWidgetHost,
+        AppCommand::OpenWidgetSettings,
         AppCommand::OpenAgentUsage,
         AppCommand::SetTabTitle,
         AppCommand::CloseTab,
@@ -718,6 +723,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::OpenScaffold
         | AppCommand::OpenWorkflow
         | AppCommand::OpenWidgetHost
+        | AppCommand::OpenWidgetSettings
         | AppCommand::OpenAgentUsage => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
@@ -1092,6 +1098,7 @@ mod tests {
             AppCommand::OpenScaffold,
             AppCommand::OpenWorkflow,
             AppCommand::OpenWidgetHost,
+            AppCommand::OpenWidgetSettings,
             AppCommand::OpenAgentUsage,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
@@ -1605,5 +1612,38 @@ mod tests {
         assert_eq!(entries, default_palette_entries());
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].contains("csi:0m"), "{diagnostics:?}");
+    }
+}
+
+#[cfg(test)]
+mod widget_discovery_tests {
+    use super::*;
+    #[test]
+    fn purposes_find_widgets_in_japanese() {
+        for (query, expected) in [
+            ("準備", AppCommand::OpenScaffold),
+            ("タスク", AppCommand::OpenTasks),
+            ("レビュー", AppCommand::OpenReview),
+            ("検証", AppCommand::OpenVerify),
+            ("使用量", AppCommand::OpenAgentUsage),
+            ("ワークフロー", AppCommand::OpenWorkflow),
+            ("表示設定", AppCommand::OpenWidgetSettings),
+        ] {
+            assert!(
+                command_palette_matches(&default_palette_entries(), query)
+                    .iter()
+                    .any(|m| m.command == expected),
+                "{query}"
+            );
+        }
+    }
+    #[test]
+    fn widget_settings_is_addressable() {
+        let command = AppCommand::OpenWidgetSettings;
+        assert_eq!(
+            AppCommand::from_action_name(&command.action_name()),
+            Some(command)
+        );
+        assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
     }
 }

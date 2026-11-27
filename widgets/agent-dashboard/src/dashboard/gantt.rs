@@ -147,7 +147,7 @@ pub(super) fn build(
         Container::new(Style {
             flex_direction: FlexDirection::Column,
             gap: gap(10.0),
-            padding: LayoutRect::length(12.0),
+            padding: LayoutRect::length(crate::appearance::space(12.0)),
             ..fill_remaining()
         })
         .background(Role::Surface)
@@ -161,12 +161,14 @@ pub(super) fn build(
     // Top toolbar: scale control + legend + span text.
     let toolbar = tree.insert(
         Some(shell),
-        Container::row().align_items(AlignItems::CENTER).gap(12.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(12.0)),
     );
     tree.insert(
         Some(toolbar),
         Label::new("タイムライン・並列度")
-            .font_size(13.0)
+            .font_size(crate::appearance::font(13.0))
             .weight(700),
     );
     let selected_idx = TimeScale::ALL.iter().position(|s| *s == scale).unwrap_or(0);
@@ -179,7 +181,9 @@ pub(super) fn build(
     for phase in Phase::LEGEND {
         let item = tree.insert(
             Some(toolbar),
-            Container::row().align_items(AlignItems::CENTER).gap(4.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(4.0)),
         );
         tree.insert(
             Some(item),
@@ -277,7 +281,9 @@ fn concurrency_card(
     );
     let head = tree.insert(
         Some(card),
-        Container::row().align_items(AlignItems::CENTER).gap(8.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(8.0)),
     );
     tree.insert(
         Some(head),
@@ -291,7 +297,10 @@ fn concurrency_card(
     spacer(tree, head);
     tree.insert(
         Some(head),
-        Label::new(peak).font_size(12.0).weight(700).color(color),
+        Label::new(peak)
+            .font_size(crate::appearance::font(12.0))
+            .weight(700)
+            .color(color),
     );
     tree.insert(
         Some(card),
@@ -327,13 +336,16 @@ fn gantt_row(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f64, reg
 
     tree.insert(
         Some(row),
-        Label::new(symbol).font_size(12.0).weight(700).color(color),
+        Label::new(symbol)
+            .font_size(crate::appearance::font(12.0))
+            .weight(700)
+            .color(color),
     );
     let name_col = tree.insert(Some(row), Container::row().width(120.0));
     tree.insert(
         Some(name_col),
         Label::new(one_line(&worker.label))
-            .font_size(12.0)
+            .font_size(crate::appearance::font(12.0))
             .weight(600)
             .truncation(Truncation::Tail),
     );
@@ -386,14 +398,14 @@ fn gantt_row(tree: &mut UiTree, lanes: WidgetId, worker: &Worker, span: f64, reg
         Container::row()
             .width(116.0)
             .justify_content(JustifyContent::END)
-            .gap(6.0),
+            .gap(crate::appearance::space(6.0)),
     );
     caption(tree, stats, minutes_text(worker.total_minutes()));
     if waited > 0.0 {
         tree.insert(
             Some(stats),
             Label::new(format!("待 {}", minutes_text(waited)))
-                .font_size(11.0)
+                .font_size(crate::appearance::font(11.0))
                 .weight(600)
                 .color(ORANGE),
         );

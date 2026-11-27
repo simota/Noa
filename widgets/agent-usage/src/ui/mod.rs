@@ -265,7 +265,7 @@ impl AgentUsage {
     /// `store` is where the view is saved (`None`: never read or written).
     pub fn new(feed: Box<dyn Feed>, clock: Clock, prefs: Prefs, store: Option<PrefsStore>) -> Self {
         let mut tree = UiTree::new();
-        tree.set_theme(Theme::for_appearance(Appearance::Dark));
+        crate::appearance::install(&mut tree, Theme::for_appearance(Appearance::Dark));
         let root = tree.insert(
             None,
             Container::new(Style {
@@ -290,7 +290,9 @@ impl AgentUsage {
         );
         tree.insert(
             Some(header),
-            Label::new("エージェント使用量").font_size(15.0).weight(700),
+            Label::new("エージェント使用量")
+                .font_size(crate::appearance::font(15.0))
+                .weight(700),
         );
         let tabs = tree.insert(
             Some(header),
@@ -312,7 +314,9 @@ impl AgentUsage {
         style::spacer(&mut tree, header);
         let status = tree.insert(
             Some(header),
-            Label::new("").font_size(11.0).color(Role::Muted),
+            Label::new("")
+                .font_size(crate::appearance::font(11.0))
+                .color(Role::Muted),
         );
         let refresh = tree.insert(Some(header), Button::new("更新 (R)"));
         tree.insert(
@@ -625,6 +629,9 @@ fn clear(tree: &mut UiTree, parent: WidgetId, text: &mut TextStore) {
 }
 
 impl Screen for AgentUsage {
+    fn set_system_appearance(&mut self, appearance: noa_gpui_core::Appearance) {
+        crate::appearance::system(&mut self.tree, appearance);
+    }
     fn tree(&self) -> &UiTree {
         &self.tree
     }

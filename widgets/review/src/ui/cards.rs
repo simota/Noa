@@ -28,7 +28,9 @@ pub(super) fn insert(
     let target = card(tree, list, false);
     let head = tree.insert(
         Some(target),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     tag(tree, head, session.target.kind.label(), Tone::Neutral);
     if !m.omitted.is_empty() {
@@ -42,7 +44,7 @@ pub(super) fn insert(
     tree.insert(
         Some(target),
         Label::new(m.label.clone())
-            .font_size(12.5)
+            .font_size(crate::appearance::font(12.5))
             .weight(600)
             .wrap(true),
     );
@@ -71,18 +73,24 @@ pub(super) fn insert(
         let c = card(tree, list, selected);
         let top = tree.insert(
             Some(c),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(6.0)),
         );
         tree.insert(
             Some(top),
-            Label::new(part.id.to_string()).font_size(13.0).weight(600),
+            Label::new(part.id.to_string())
+                .font_size(crate::appearance::font(13.0))
+                .weight(600),
         );
         if let Some(lens) = &part.lens {
             tag(tree, top, lens.label(), Tone::Accent);
         }
         let line = tree.insert(
             Some(c),
-            Container::row().align_items(AlignItems::CENTER).gap(6.0),
+            Container::row()
+                .align_items(AlignItems::CENTER)
+                .gap(crate::appearance::space(6.0)),
         );
         caption(tree, line, setup_line(part));
         spacer(tree, line);
@@ -102,13 +110,13 @@ pub(super) fn insert(
             tree.insert(
                 Some(c),
                 Label::new(summary)
-                    .font_size(11.5)
+                    .font_size(crate::appearance::font(11.5))
                     .wrap(true)
                     .max_lines(3)
                     .truncation(Truncation::Tail),
             );
         }
-        let buttons = tree.insert(Some(c), Container::row().gap(6.0));
+        let buttons = tree.insert(Some(c), Container::row().gap(crate::appearance::space(6.0)));
         let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
         let filter = tree.insert(
             Some(buttons),
@@ -131,12 +139,21 @@ pub(super) fn insert(
     let lead = card(tree, list, false);
     let top = tree.insert(
         Some(lead),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
-    tree.insert(Some(top), Label::new("リード").font_size(13.0).weight(600));
+    tree.insert(
+        Some(top),
+        Label::new("リード")
+            .font_size(crate::appearance::font(13.0))
+            .weight(600),
+    );
     let line = tree.insert(
         Some(lead),
-        Container::row().align_items(AlignItems::CENTER).gap(6.0),
+        Container::row()
+            .align_items(AlignItems::CENTER)
+            .gap(crate::appearance::space(6.0)),
     );
     caption(tree, line, setup_line(&session.lead));
     spacer(tree, line);

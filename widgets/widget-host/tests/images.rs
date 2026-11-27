@@ -135,3 +135,45 @@ fn a_symlinked_asset_is_refused_before_drawing() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("symbolic link"));
     assert!(!output.exists());
 }
+
+#[test]
+fn catalog_previews_upload_the_current_package_images_each_time() {
+    let repo = tempfile::tempdir().unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .arg(repo.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let registry = repo.path().join(".noa-widgets");
+    let red = [230, 30, 40];
+    let blue = [20, 90, 230];
+    let manifest = package(&registry, &solid_png(8, 8, red), "square");
+    let output = repo.path().join("catalog-preview.png");
+    let render = || {
+        let result = Command::new(env!("CARGO_BIN_EXE_widget-host"))
+            .arg(format!("--repo={}", repo.path().display()))
+            .arg("--preview-id=pictures")
+            .arg(format!("--snapshot={}", output.display()))
+            .arg("--size=480x720")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::read(&output).unwrap()
+    };
+    assert!(count_close(&render(), red) > 100_000);
+    std::fs::write(
+        manifest.parent().unwrap().join("assets/swatch.png"),
+        solid_png(8, 8, blue),
+    )
+    .unwrap();
+    let next = render();
+    assert!(count_close(&next, blue) > 100_000);
+    assert_eq!(count_close(&next, red), 0);
+}

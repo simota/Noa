@@ -1,6 +1,9 @@
 //! The competition widget's binary: the noa-gpui window over the library's
 //! model, engine, store and comparison viewer, fed by the live layer.
 
+#[path = "../../shared/appearance.rs"]
+mod appearance;
+
 mod demo;
 mod installed;
 mod live;
@@ -153,6 +156,9 @@ fn run_check(entry: &std::path::Path, out: Option<PathBuf>) -> Result<(), String
 }
 
 fn main() -> Result<(), String> {
+    if appearance::run_if_requested()? {
+        return Ok(());
+    }
     let mut snapshot_path = None;
     let mut demo = false;
     let mut size = DEFAULT_SIZE;

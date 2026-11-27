@@ -122,6 +122,7 @@ impl Tasks {
     /// CLI layout overrides the saved view; a new workspace starts as a list.
     pub fn initialize_layout(&mut self, explicit: Option<Layout>, text: &mut TextStore) {
         let preferences = self.planning.workspace.data().preferences.clone();
+        self.calendar_mode = super::views::CalendarMode::from_word(&preferences.calendar_mode);
         self.filter.text = preferences.query;
         self.filter.source = preferences.source.as_deref().and_then(source_from_word);
         self.filter.label = preferences.label;
@@ -390,8 +391,7 @@ impl Tasks {
             &entries,
             &self.planning.section,
         );
-        self.tree
-            .set_hidden(self.planning.nav_host, self.planning.sidebar_hidden);
+        self.apply_responsive();
         clear(&mut self.tree, self.planning.toolbar_host, text);
         self.planning.toolbar_actions.clear();
         self.planning.bulk_status = None;
@@ -405,14 +405,14 @@ impl Tasks {
         self.tree.insert(
             Some(host),
             Label::new(format!("{label} · {} 件", visible.len()))
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .weight(700),
         );
         if !self.planning.checked.is_empty() {
             self.tree.insert(
                 Some(host),
                 Label::new(format!("{} 件を選択", self.planning.checked.len()))
-                    .font_size(12.0)
+                    .font_size(crate::appearance::font(12.0))
                     .color(Role::Accent),
             );
             self.planning.bulk_status = Some(
@@ -501,6 +501,7 @@ impl Tasks {
             sort: self.planning.sort,
             source: self.filter.source.map(|s| source_word(s).into()),
             label: self.filter.label.clone(),
+            calendar_mode: self.calendar_mode.word().into(),
         };
         match self.planning.workspace.set_preferences(preferences) {
             Ok(_) => self.planning.preferences_dirty = false,
@@ -528,6 +529,8 @@ impl Tasks {
     }
 
     fn navigate(&mut self, section: &str, text: &mut TextStore) {
+        self.narrow_sidebar_open = false;
+        self.detail = None;
         self.planning.section = section.into();
         self.planning.checked.clear();
         self.filter.text.clear();
@@ -565,6 +568,7 @@ impl Tasks {
         let Some(task) = self.task(&r).cloned() else {
             return;
         };
+        self.narrow_sidebar_open = false;
         self.form = None;
         self.planning.save_form = None;
         self.detail = Some(r.clone());
@@ -593,18 +597,21 @@ impl Tasks {
     }
 
     fn open_save_view(&mut self, text: &mut TextStore) {
+        self.narrow_sidebar_open = false;
         self.form = None;
         self.planning.property_form = None;
         clear(&mut self.tree, self.form_host, text);
         let host = self.form_host;
         self.tree.insert(
             Some(host),
-            Label::new("現在のビューを保存").font_size(16.0).weight(700),
+            Label::new("現在のビューを保存")
+                .font_size(crate::appearance::font(16.0))
+                .weight(700),
         );
         self.tree.insert(
             Some(host),
             Label::new("検索・取得元・ラベル・表示形式・並び順を保存します。")
-                .font_size(12.0)
+                .font_size(crate::appearance::font(12.0))
                 .wrap(true)
                 .color(Role::Muted),
         );
@@ -1064,8 +1071,7 @@ impl Tasks {
                 self.rebuild(text);
             }
             Command::ToggleSidebar => {
-                self.planning.sidebar_hidden = !self.planning.sidebar_hidden;
-                self.rebuild(text);
+                self.toggle_sidebar();
             }
             Command::Help => {
                 self.own_notice = Some("⌘/Ctrl K: 操作検索 · C/N: 新規 · J/K: 移動 · S: 状態 · P: 優先度 · E: 属性 · Space: 複数選択 · X: 実行 · R: 再取得 · ⌘/Ctrl Z: 取り消し · 検索 state: priority: label: project: agent: -語句".into());

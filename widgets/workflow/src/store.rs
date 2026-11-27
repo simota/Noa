@@ -304,6 +304,8 @@ impl Store {
             && old.id == new.id
             && (old.definition_digest != new.definition_digest
                 || old.repository != new.repository
+                || old.origin_task != new.origin_task
+                || old.objective != new.objective
                 || new.seq < old.seq)
         {
             return Err(StoreError::Invalid(

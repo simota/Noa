@@ -135,6 +135,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::OpenVerify => "Open Verify",
         AppCommand::OpenTasks => "Open Tasks",
         AppCommand::OpenScaffold => "Open Scaffold",
+        AppCommand::OpenWidgetHost => "Repository Widgets…",
         AppCommand::OpenAgentUsage => "Open Agent Usage",
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
@@ -295,6 +296,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::OpenAgentUsage => {
             "Show Claude Code, Codex and Antigravity usage limits and statistics in a window of its own."
         }
+        AppCommand::OpenWidgetHost => {
+            "Browse and preview the current worktree's shared widget definitions in a window of their own."
+        }
         AppCommand::OpenThemePicker => "Choose a color theme.",
         AppCommand::ToggleProcessMonitor => "Show the processes running in each terminal.",
         AppCommand::NextNotification => "Go to the next session with an unread notification.",
@@ -400,6 +404,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::OpenVerify,
         AppCommand::OpenTasks,
         AppCommand::OpenScaffold,
+        AppCommand::OpenWidgetHost,
         AppCommand::OpenAgentUsage,
         AppCommand::SetTabTitle,
         AppCommand::CloseTab,
@@ -706,6 +711,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::OpenVerify
         | AppCommand::OpenTasks
         | AppCommand::OpenScaffold
+        | AppCommand::OpenWidgetHost
         | AppCommand::OpenAgentUsage => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
@@ -1078,6 +1084,7 @@ mod tests {
             AppCommand::OpenVerify,
             AppCommand::OpenTasks,
             AppCommand::OpenScaffold,
+            AppCommand::OpenWidgetHost,
             AppCommand::OpenAgentUsage,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));

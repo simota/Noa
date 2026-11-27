@@ -501,6 +501,8 @@ pub struct App {
     /// `server-enable` is true and the loopback bind succeeded. Dropping it
     /// stops the accept loop; kept alive for the app's lifetime otherwise.
     ipc_server: Option<noa_ipc::ServerHandle>,
+    /// Kept across listener reloads: one writer and one set of native hosts.
+    widget_service: Option<crate::widget::WidgetHandle>,
     /// The single `Broadcaster` for the app's lifetime (independent of any
     /// one `ipc_server` instance): panes wire their `IpcOutputTap` to a
     /// clone of this, so a config-reload server restart (which drops and
@@ -973,6 +975,7 @@ impl App {
             applescript_snapshot_sig: 0,
             applescript_snapshot_at: None,
             ipc_server: None,
+            widget_service: None,
             ipc_broadcaster: noa_ipc::Broadcaster::new(),
             ipc_shared: Arc::new(Mutex::new(crate::ipc_bridge::IpcShared::default())),
             ipc_pending: Arc::new(Mutex::new(HashMap::new())),

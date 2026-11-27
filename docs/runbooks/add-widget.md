@@ -1,5 +1,12 @@
 # Adding or changing a widget
 
+For a repository-specific view made from existing components, use a declarative
+`.noa-widgets/<id>/widget.json` package instead; see
+[Repository widgets](../REPOSITORY_WIDGETS.md) and the `noa-widget-creator`
+skill. These packages use the already registered `widget-host` and need none
+of the application registration steps below. This runbook covers native
+helper crates, including changes to the generic host itself.
+
 Target: a crate under `widgets/` (its own workspace, outside the root one) that Noa starts as a window of its own. A widget is registered in about fifteen places. `scripts/check-widget-registration.py` reads them and reports every one that disagrees with `dev/scaffold/registry.json`; `scripts/verify.sh` runs it every time. Spec: `docs/specs/scaffold-widget.md` (I1 the registry, I2 the output, I3 the rules).
 
 The checker reads files only. It checks that the registrations agree; it does not check what a built artifact contains, and it does not check the tests (point 13) or the docs (point 17): those are on you.

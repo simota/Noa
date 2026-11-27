@@ -14,6 +14,7 @@ noa-pty.workspace = true
 noa-theme.workspace = true
 noa-config.workspace = true
 noa-ipc.workspace = true
+noa-widget.workspace = true
 
 winit.workspace = true
 wgpu.workspace = true

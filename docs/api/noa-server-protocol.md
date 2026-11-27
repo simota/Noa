@@ -200,6 +200,41 @@ result: `{"subscriptionId":"1"}`
 
 params: `{"subscriptionId":"1"}` / result: `{"ok":true}`
 
+### Repository widgets (capability `repoWidgetsV1`)
+
+The capability is advertised only when the repository widget service is
+available. All widget params are objects, use camelCase, and reject unknown
+fields. `repo` is an absolute path to the intended worktree. Widget revisions
+and event sequences are unsigned JSON integers; `ownerPaneId` uses the normal
+wire ID string representation.
+
+| Method | Scope | Params |
+| --- | --- | --- |
+| `noa.widget.list` | read | `repo` |
+| `noa.widget.describe` | read | `repo`, `id` |
+| `noa.widget.open` | control | `repo`, exactly one of `id` or `definition`, `requestId`; optional `data`, `ownerPaneId` |
+| `noa.widget.get` | read | `instanceId` |
+| `noa.widget.set` | control | `instanceId`, `data`, `expectedRevision`, `requestId` |
+| `noa.widget.events` | control | `instanceId`, `consumerId`; optional `afterSeq` (0), `limit` (32, at most 64) |
+| `noa.widget.ack` | control | `instanceId`, `consumerId`, `throughSeq`, `requestId` |
+| `noa.widget.close` | control | `instanceId`, `requestId` |
+| `noa.widget.forget` | control | `instanceId` |
+
+These calls run on the widget service's single writer, outside the UI thread.
+Mutations have a four-second service wait; an uncertain result must be retried
+with the identical request ID and params. Request IDs deduplicate successful
+mutations; reusing one for different params is a conflict. `set` replaces the
+complete data after schema validation and a revision comparison. `events`
+claims one consumer and retains events until cumulative acknowledgment.
+`forget` is idempotent by instance ID and removes only stopped instances with
+no pending events, including their retry history.
+
+The native host uses a separate inherited pipe tied to one instance; it never
+authenticates with the public control token. The public methods keep the
+existing trusted-controller scope model, not per-repository authorization.
+The manifest contract, response fields, lifecycle, durable event processing,
+limits and CLI examples are in [Repository widgets](../REPOSITORY_WIDGETS.md).
+
 ### Mutation execution semantics
 
 `sendText` / `focusPane` / `newTab` / `split` / `closePane` / `resizePane` execute via a round trip to the UI thread, and return `-32009` (outcome unknown) if they time out after 2 seconds. **The operation may still execute later, even after the timeout (at-least-once).** Blindly retrying on a failure response can result in double execution.
@@ -311,9 +346,11 @@ Changes to `agent.seq`, `process`, and `exit` are pushed in `noa.stateChanged` w
 | `-32006` | protocolVersion major mismatch |
 | `-32007` | attach conflict (the pane already has a reserved or active attach) |
 | `-32008` | attach handshake failure |
-| `-32009` | outcome unknown: a request handed to the UI thread got no result within 2 seconds; it may still execute |
+| `-32009` | outcome unknown: a UI request got no result within 2 seconds, a widget service request within 4 seconds, or a widget state was published but directory sync failed; the operation may have taken effect |
 | `-32010` | not ready: `noa.sendText` with `requirePasteMode` to a pane that has not enabled bracketed paste, or with `refuseShell` to a pane whose foreground process is a plain shell; nothing was written |
 | `-32011` | limit reached: a spawn over its `maxChildren` |
+| `-32019` | widget conflict: stale revision, changed request payload, another consumer, or incompatible lifecycle |
+| `-32020` | widget instance or owner pane not found |
 
 WebSocket close codes: `1008` (an `Origin` that is not allowed, or an attach handshake failure), `1009` (a frame or message over the size limit), `1013` (the connection limit).
 

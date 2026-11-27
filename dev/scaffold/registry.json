@@ -54,6 +54,12 @@
         "macos"
       ],
       "reason": "Linux 配布は未判断（追加時に scripts/package-linux.sh に入らず、理由の記録がない）。docs/specs/scaffold-widget.md Q1 で判断する。"
+    },
+    "widget-host": {
+      "ships": [
+        "linux",
+        "macos"
+      ]
     }
   },
   "assets": [

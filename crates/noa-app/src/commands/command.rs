@@ -124,6 +124,8 @@ pub enum AppCommand {
     /// development assets and registration gaps, as a program of its own
     /// beside Noa.
     OpenScaffold,
+    /// Browse and preview this worktree's declarative widgets.
+    OpenWidgetHost,
     /// Start the agent usage window (`widgets/agent-usage`), the limits and
     /// log statistics of the coding agents, as a program of its own beside
     /// Noa.
@@ -314,6 +316,7 @@ impl AppCommand {
     pub(crate) const OPEN_VERIFY_MENU_ID: &'static str = "noa.view.open-verify";
     pub(crate) const OPEN_TASKS_MENU_ID: &'static str = "noa.view.open-tasks";
     pub(crate) const OPEN_SCAFFOLD_MENU_ID: &'static str = "noa.view.open-scaffold";
+    pub(crate) const OPEN_WIDGET_HOST_MENU_ID: &'static str = "noa.view.open-widget-host";
     pub(crate) const OPEN_AGENT_USAGE_MENU_ID: &'static str = "noa.view.open-agent-usage";
     pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
 
@@ -405,6 +408,7 @@ impl AppCommand {
             AppCommand::OpenVerify => Self::OPEN_VERIFY_MENU_ID,
             AppCommand::OpenTasks => Self::OPEN_TASKS_MENU_ID,
             AppCommand::OpenScaffold => Self::OPEN_SCAFFOLD_MENU_ID,
+            AppCommand::OpenWidgetHost => Self::OPEN_WIDGET_HOST_MENU_ID,
             AppCommand::OpenAgentUsage => Self::OPEN_AGENT_USAGE_MENU_ID,
         }
     }
@@ -485,6 +489,7 @@ impl AppCommand {
             Self::OPEN_VERIFY_MENU_ID => Some(Self::OpenVerify),
             Self::OPEN_TASKS_MENU_ID => Some(Self::OpenTasks),
             Self::OPEN_SCAFFOLD_MENU_ID => Some(Self::OpenScaffold),
+            Self::OPEN_WIDGET_HOST_MENU_ID => Some(Self::OpenWidgetHost),
             Self::OPEN_AGENT_USAGE_MENU_ID => Some(Self::OpenAgentUsage),
             Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
@@ -619,6 +624,7 @@ impl AppCommand {
             Self::OpenVerify => "verify.open",
             Self::OpenTasks => "tasks.open",
             Self::OpenScaffold => "scaffold.open",
+            Self::OpenWidgetHost => "widget-host.open",
             Self::OpenAgentUsage => "agent-usage.open",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
@@ -722,6 +728,7 @@ impl AppCommand {
             "verify.open" => Some(Self::OpenVerify),
             "tasks.open" => Some(Self::OpenTasks),
             "scaffold.open" => Some(Self::OpenScaffold),
+            "widget-host.open" => Some(Self::OpenWidgetHost),
             "agent-usage.open" => Some(Self::OpenAgentUsage),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),

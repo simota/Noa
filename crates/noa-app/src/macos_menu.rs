@@ -418,6 +418,12 @@ impl MacosMenu {
                 &MenuItem::with_id(AppCommand::OpenTasks.menu_id(), "Tasks", true, None),
                 &MenuItem::with_id(AppCommand::OpenScaffold.menu_id(), "Scaffold", true, None),
                 &MenuItem::with_id(
+                    AppCommand::OpenWidgetHost.menu_id(),
+                    "Repository Widgets…",
+                    true,
+                    None,
+                ),
+                &MenuItem::with_id(
                     AppCommand::OpenAgentUsage.menu_id(),
                     "Agent Usage",
                     true,

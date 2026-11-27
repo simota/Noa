@@ -105,6 +105,7 @@ mod theme;
 mod theme_favorites;
 mod theme_settings;
 mod timeline;
+mod widget;
 
 pub use app::AppConfig;
 pub use cli::{CliAction, Invocation, parse_invocation, run_action, unknown_action_message};

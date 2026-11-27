@@ -16,6 +16,7 @@ fixture-based parity regression harness in `tests/parity`.
 - `crates/noa-render`: `wgpu` renderer, shaders, snapshots, and theme mapping.
 - `crates/noa-pty`: PTY spawning plus reader/writer threads.
 - `crates/noa-ipc`: JSON-RPC-over-WebSocket control server (`noa-server`).
+- `crates/noa-widget`: repository widget manifests, validation and read-only discovery.
 - `crates/noa-app`: `winit` app loop, input, IO thread, and UI integration.
 - `assets/`: app icon, AppleScript dictionary, entitlements, and images.
 - `scripts/`: macOS bundle, Linux package, and release scripts, theme and icon
@@ -62,8 +63,11 @@ when no GPU adapter is available.
   `--full --part widgets`); clippy (`-D warnings`) and desktop-file validation run only
   on Linux, as before. It also builds `widgets/agent-dashboard`,
   `widgets/repo-browser`, `widgets/discussion`, `widgets/competition`,
-  `widgets/review`, `widgets/verify`, `widgets/tasks`, `widgets/agent-usage` and `widgets/scaffold`, crates outside the workspace, with their tests; the tests run only on macOS (some expect the
-  widths of macOS's system fonts), except `widgets/tasks`', `widgets/agent-usage`'s and `widgets/scaffold`'s, which run on Linux too. `scripts/verify.sh` runs the same check when
+  `widgets/review`, `widgets/verify`, `widgets/tasks`, `widgets/agent-usage`,
+  `widgets/scaffold` and `widgets/widget-host`, crates outside the workspace,
+  with their tests; the tests run only on macOS (some expect the
+  widths of macOS's system fonts), except `widgets/tasks`', `widgets/agent-usage`'s,
+  `widgets/scaffold`'s and `widgets/widget-host`'s, which run on Linux too. `scripts/verify.sh` runs the same check when
   a change reaches one of these crates or the Noa crates it uses by path.
 - `scripts/check-widget-registration.py` runs in every `scripts/verify.sh`: it
   reads the places a widget is registered and fails when one disagrees with

@@ -15,6 +15,7 @@ mod result;
 mod retry;
 mod run_attr;
 mod timeline;
+mod widget;
 mod worktree;
 
 use std::collections::HashMap;
@@ -251,6 +252,8 @@ Commands:
   board --open [--split right|down | --tab]
                                 Open a board on this pane's workers next to it
                                 (an open one is printed with \"existing\":true).
+  widget --help                 Repository widget definitions, previews and live instances.
+
   timeline context [--pane PANE] | boards [--limit N]
          | post [--board B] [--run R] [--request-id ID]
                 (--file F | --from-result PATH --title T --summary S
@@ -333,6 +336,8 @@ pub(crate) enum Command {
     /// `timeline SUBCOMMAND ...`: a board's timeline
     /// (`docs/specs/board-timeline.md` AC-2).
     Timeline(timeline::TimelineCommand),
+    /// Repository-scoped declarative widgets and offline previews.
+    Widget(widget::WidgetCommand),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -555,6 +560,9 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
     let (name, rest) = args.split_first().ok_or("missing command")?;
     if name == "timeline" {
         return timeline::parse(rest).map(Command::Timeline);
+    }
+    if name == "widget" {
+        return widget::parse(rest).map(Command::Widget);
     }
     let mut rest = Args::new(rest);
     let command = match name.as_str() {
@@ -1355,6 +1363,17 @@ pub(crate) fn run(args: &[String]) -> i32 {
     };
     if let Command::Report { state, detail } = &command {
         return write_report(state, detail);
+    }
+    if let Command::Widget(widget) = &command
+        && widget.is_local()
+    {
+        return match widget::execute_local(widget.clone()) {
+            Ok(code) => code,
+            Err(failure) => {
+                eprintln!("Noa +ctl widget: {}", failure.message);
+                failure.code
+            }
+        };
     }
     // A spawn that cannot start the worker it describes fails before it
     // reaches Noa, which would otherwise fall back to another directory or
@@ -2169,6 +2188,15 @@ impl Session {
             } => return self.result(pane, max_bytes, path),
             Command::Timeline(command) => {
                 return timeline::execute(&mut self.client, self.own, command);
+            }
+            Command::Widget(command) => {
+                let own = if command.needs_own_pane() && std::env::var_os(SURFACE_ID_ENV).is_some()
+                {
+                    Some(self.require_own()?)
+                } else {
+                    self.own
+                };
+                return widget::execute(&mut self.client, own, command);
             }
             Command::Report { .. } => unreachable!("handled before connecting"),
         }

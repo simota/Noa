@@ -1,0 +1,4 @@
+interface:
+  display_name: "Noa Widget Creator"
+  short_description: "Create and verify shareable Noa widget manifests"
+  default_prompt: "Use $noa-widget-creator to create a repository widget with validated fixtures and previews."

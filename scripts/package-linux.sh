@@ -52,6 +52,7 @@ WIDGETS=(
   "competition:Noa Competition"
   "review:Noa Review"
   "agent-usage:Noa Agent Usage"
+  "widget-host:Noa Widget Host"
 )
 build_widgets() {
   for widget in "${WIDGETS[@]}"; do

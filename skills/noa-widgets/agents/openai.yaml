@@ -1,0 +1,4 @@
+interface:
+  display_name: "Noa Widgets"
+  short_description: "Operate repository widgets and their event streams"
+  default_prompt: "Use $noa-widgets to display repository results and handle widget actions."

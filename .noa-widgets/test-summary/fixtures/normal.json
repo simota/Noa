@@ -1,0 +1,8 @@
+{
+  "summary": "28件のテストが完了しました。27件成功、1件失敗です。失敗したテストの結果を確認してください。",
+  "passed": 27,
+  "failed": 1,
+  "failures": [
+    {"id": "grid-cursor-wrap", "name": "grid::cursor_wrap_preserves_wide_character"}
+  ]
+}

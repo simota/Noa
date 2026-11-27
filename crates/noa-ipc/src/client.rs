@@ -316,6 +316,18 @@ impl Client {
         self.has_capability(crate::protocol::CAPABILITY_BOARD_TIMELINE_V1)
     }
 
+    pub fn supports_repo_widgets(&self) -> bool {
+        self.has_capability(crate::widget::CAPABILITY_REPO_WIDGETS_V1)
+    }
+
+    /// One typed repository widget call. A mutation must be retried with
+    /// the same request id after an ambiguous transport failure.
+    pub fn widget(&mut self, call: &crate::widget::WidgetCall) -> Result<Value, ClientError> {
+        call.validate()
+            .map_err(|err| ClientError::InvalidInput(err.to_string()))?;
+        self.request(call.method(), call.params())
+    }
+
     /// `noa.timeline.context`.
     pub fn timeline_context(
         &mut self,

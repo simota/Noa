@@ -76,6 +76,12 @@ pub(crate) const SCAFFOLD: HelperProgram = HelperProgram {
     crate_name: "scaffold",
 };
 
+pub(crate) const WIDGET_HOST: HelperProgram = HelperProgram {
+    title: "Repository Widgets",
+    bundled: "Noa Widget Host",
+    crate_name: "widget-host",
+};
+
 pub(crate) const AGENT_USAGE: HelperProgram = HelperProgram {
     title: "Agent Usage",
     bundled: "Noa Agent Usage",
@@ -92,7 +98,8 @@ pub(crate) fn launch_args(helper: HelperProgram, focused_cwd: Option<&str>) -> V
             if (helper.crate_name == REVIEW.crate_name
                 || helper.crate_name == VERIFY.crate_name
                 || helper.crate_name == TASKS.crate_name
-                || helper.crate_name == SCAFFOLD.crate_name)
+                || helper.crate_name == SCAFFOLD.crate_name
+                || helper.crate_name == WIDGET_HOST.crate_name)
                 && Path::new(cwd).is_absolute() =>
         {
             vec![format!("--repo={cwd}")]
@@ -104,6 +111,32 @@ pub(crate) fn launch_args(helper: HelperProgram, focused_cwd: Option<&str>) -> V
 /// How much of the program's stderr is kept to say why it exited.
 const STDERR_TAIL: usize = 4096;
 
+/// Locate the trusted, installed host. Repository manifests never supply an
+/// executable path. A shared Cargo target directory is also supported while
+/// developing the CLI and host together.
+pub(crate) fn program_path(helper: HelperProgram) -> Result<PathBuf, String> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let helpers = exe_dir.as_deref().and_then(helpers_dir);
+    locate(helper, helpers.as_deref(), &dev_build_dirs(helper))
+        .or_else(|| {
+            if cfg!(debug_assertions) && helper.crate_name == WIDGET_HOST.crate_name {
+                exe_dir
+                    .map(|dir| dir.join(helper.crate_name))
+                    .filter(|path| path.is_file())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            format!(
+                "{} is not installed (build widgets/{})",
+                helper.title, helper.crate_name
+            )
+        })
+}
+
 /// Start `helper` as found by [`locate`]. `Err` says why it could not be
 /// started; `on_failure` is called (on another thread) with why it exited, if
 /// it ends unsuccessfully.
@@ -113,23 +146,9 @@ pub(crate) fn open(
     on_failure: impl FnOnce(String) + Send + 'static,
 ) -> Result<(), String> {
     let HelperProgram {
-        title,
-        bundled,
-        crate_name,
+        title, crate_name, ..
     } = helper;
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    let helpers = exe_dir.as_deref().and_then(helpers_dir);
-    let Some(program) = locate(helper, helpers.as_deref(), &dev_build_dirs(helper)) else {
-        let message = format!("{title} is not installed (build widgets/{crate_name})");
-        log::error!(
-            "{crate_name}: no {bundled:?} in Noa.app's Helpers or {crate_name} in \
-             widgets/{crate_name}/target \
-             (build it with `cargo build --manifest-path widgets/{crate_name}/Cargo.toml`)"
-        );
-        return Err(message);
-    };
+    let program = program_path(helper)?;
     let mut command = Command::new(&program);
     command
         .args(args)
@@ -305,6 +324,7 @@ mod tests {
             AGENT_USAGE,
             TASKS,
             SCAFFOLD,
+            WIDGET_HOST,
         ] {
             let dirs = dev_build_dirs(helper);
             assert_eq!(dirs.len(), 2);
@@ -520,7 +540,7 @@ mod tests {
 
     #[test]
     fn ac28_only_the_review_the_verify_and_the_tasks_are_given_the_focused_panes_directory() {
-        for helper in [REVIEW, VERIFY, TASKS, SCAFFOLD] {
+        for helper in [REVIEW, VERIFY, TASKS, SCAFFOLD, WIDGET_HOST] {
             assert_eq!(
                 launch_args(helper, Some("/Users/me/src/noa")),
                 ["--repo=/Users/me/src/noa"],

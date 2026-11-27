@@ -59,6 +59,7 @@ Put one package in `.noa-widgets/<id>/`:
 | `widget.json` | Required definition, schema, initial data and view |
 | `README.md` | What the widget means and how the agent handles its actions |
 | `fixtures/*.json` | Example data for validation and visual review |
+| `assets/*` | Images the manifest declares in `assets` (PNG, JPEG or WebP) |
 
 The directory name must match the manifest's `id`. IDs use lowercase ASCII
 letters, digits and single hyphens, start with a letter, and are at most 64
@@ -83,8 +84,8 @@ package is a separate agent file edit and Git commit.
 
 The complete working example is
 [test-summary/widget.json](../.noa-widgets/test-summary/widget.json).
-The top-level fields are listed below; `actions` may be omitted when empty.
-All other fields are required.
+The top-level fields are listed below; `actions` may be omitted when empty
+and `assets` when the widget has no images. All other fields are required.
 
 | Field | Contract |
 | --- | --- |
@@ -96,6 +97,7 @@ All other fields are required.
 | `initialData` | Complete initial data, validated against the schema and view |
 | `view` | One root component with unique node IDs |
 | `actions` | Array of uniquely named `agent-event` declarations; may be empty |
+| `assets` | Optional map of asset ID to `{"path": "assets/<file>"}`; see [Packaged images](#packaged-images) |
 
 Unknown fields, duplicate JSON object keys, unknown components/action kinds,
 unsupported schema keywords and future API versions are errors. `widget
@@ -139,6 +141,7 @@ set `gap` to `none`, `xs`, `sm`, `md` or `lg`.
 | `list` | Object-array `items`, `itemKey` pointer and row-relative `textPointer` |
 | `button` | `label`, declared `action`, optional object `payload` (default `{}`), `inputs` and `clearInputs` |
 | `text-input` | Optional `label`, literal `placeholder`, `multiline`, `maxLength` and `submit` |
+| `image` | Asset ID `src`, string `alt`, optional `size` or `width`/`height`, optional `shape` |
 
 Tones are `default`, `muted`, `success`, `warning` and `error` where supported.
 Table/list keys must exist and be unique in the supplied rows. Keep row IDs
@@ -184,6 +187,53 @@ conversion, is in progress. Before sending, the host checks the input's
 the 16 KiB limit; a failure sends nothing and the footer says why. Typed text
 is kept across live data updates. The service validates the final payload as
 for any other event.
+
+### Packaged images
+
+A widget shows only images committed in its own package. Declare each one
+under `assets` and reference it by ID; there are no URLs, `data:` URIs,
+arbitrary paths or network fetches.
+
+```json
+"assets": {
+  "logo": {"path": "assets/logo.png"},
+  "hero": {"path": "assets/hero.jpg"}
+},
+"view": {"type": "image", "id": "logo", "src": "logo", "alt": "Project logo", "size": "sm"}
+```
+
+Asset IDs follow the package ID rules. A path is relative to
+`.noa-widgets/<id>/` and lies below its `assets/` directory (at most three
+names deep). It cannot be absolute or contain `.`/`..`, hidden names or
+backslashes. Every path component must be a real directory or a regular
+file, never a symbolic link. The format is detected from the file's magic
+bytes, not its extension: PNG, JPEG (baseline or progressive) or still WebP.
+`widget validate` checks that each file exists and meets the format, size and
+dimension limits, and lists the assets it read.
+
+| Image field | Contract |
+| --- | --- |
+| `src` | Required. A declared asset ID, or a binding to a string schema whose `enum` lists only declared asset IDs |
+| `alt` | Required bindable string (a literal has 1–500 characters); read by assistive technology and shown when the image cannot be drawn |
+| `size` | `sm` (48), `md` (96, default) or `lg` (192 logical pixels), a square box |
+| `width`, `height` | Explicit box in logical pixels, both together, integers 1–1024; not combined with `size` |
+| `shape` | `square` (default) or `circle` |
+
+The picture keeps its aspect ratio inside the box (fit, centered). A circle
+is the centered square of the picture with a round mask; the toolkit has no
+rounded clip, so the host bakes the mask into the uploaded pixels. If a
+picture cannot be decoded, its `alt` text fills a box of the same size, so the
+layout does not change. A data update can switch a bound `src` to another
+declared asset; data cannot add images.
+
+Assets are part of the pinned definition. A manifest with assets has a
+definition digest that covers the canonical manifest and every asset's
+sha256 content digest, so changing one image byte changes the definition.
+Manifests without `assets` keep exactly their previous digest. Inline
+definitions (`open --definition-file`) have no package directory, so a
+manifest with `assets` is rejected there; commit the package and open it by
+ID. The palette catalogue's preview windows show the `alt` text in place of
+images; `widget preview` and live instances draw them.
 
 ### Actions
 
@@ -295,7 +345,12 @@ Each managed `widget-host` gets one private stdin/stdout JSON-lines channel.
 It cannot name another instance, receive the global control token, or select
 an executable. The service starts only Noa's registered helper. The host
 pins the definition digest and accepts nondecreasing snapshots for that
-instance. Editing a repository manifest does not alter an existing instance;
+instance. A managed host is never given a filesystem path: when an instance
+opens, the service reads and verifies the package's assets and sends their
+bytes over the same pipe, in base64 chunks before the first snapshot. The
+host checks each asset against its content digest and the snapshot's
+definition digest. Asset bytes are not stored in the instance state, which
+keeps only their digests; a restored instance does not reopen a window. Editing a repository manifest does not alter an existing instance;
 close and reopen to use the new definition.
 
 Public `noa.widget.*` calls retain the existing **trusted-controller**
@@ -319,6 +374,8 @@ describe this release as a sandbox for untrusted controller clients.
 | Pending events per instance / serialized event queue | 128 / 256 KiB |
 | Mutation retry ledger / action retry ledger | 1,024 each while open |
 | Persisted state per instance / private pipe line | 1 MiB / 256 KiB |
+| Assets per package / bytes per asset / asset bytes per package | 16 / 512 KiB / 2 MiB |
+| Asset dimensions / explicit image box | 2,048 × 2,048 px / 1,024 × 1,024 logical px |
 
 An event queue at capacity rejects new clicks; consuming and acknowledging
 events frees it. Retry ledgers are not silently evicted. At their lifetime

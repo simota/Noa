@@ -291,6 +291,17 @@ pub enum HostMessage {
         manifest: Value,
         data: Value,
     },
+    /// One chunk of a packaged image, sent only before the initial snapshot.
+    /// The host reassembles chunks `0..count` in order, checks the bytes
+    /// against `digest`, and the snapshot's definition digest pins the set.
+    Asset {
+        id: String,
+        digest: String,
+        index: u32,
+        count: u32,
+        /// Standard base64 (RFC 4648, padded) of this chunk's bytes.
+        data: String,
+    },
     ActionResult {
         request_id: String,
         ok: bool,
@@ -318,6 +329,79 @@ pub enum HostRequest {
         payload: Value,
     },
     Closed,
+}
+
+/// Raw bytes per asset frame: 4/3 base64 expansion plus the JSON envelope
+/// stays well under [`MAX_BRIDGE_LINE_BYTES`].
+pub const ASSET_CHUNK_BYTES: usize = 96 * 1024;
+
+/// Split one verified asset into bridge frames. Assets never travel as
+/// filesystem paths: the host of a managed instance cannot open the package.
+pub fn asset_frames(id: &str, digest: &str, bytes: &[u8]) -> Vec<HostMessage> {
+    let chunks: Vec<&[u8]> = if bytes.is_empty() {
+        vec![&[]]
+    } else {
+        bytes.chunks(ASSET_CHUNK_BYTES).collect()
+    };
+    let count = chunks.len() as u32;
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| HostMessage::Asset {
+            id: id.to_owned(),
+            digest: digest.to_owned(),
+            index: index as u32,
+            count,
+            data: base64_encode(chunk),
+        })
+        .collect()
+}
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(BASE64[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Strict decoding: padded, no whitespace, no non-canonical trailing bits.
+pub fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return Err("base64 length must be a multiple of 4".into());
+    }
+    let value = |b: u8| BASE64.iter().position(|&c| c == b).map(|v| v as u32);
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let quads = bytes.len() / 4;
+    for (q, quad) in bytes.chunks(4).enumerate() {
+        let padding = quad.iter().rev().take_while(|&&b| b == b'=').count();
+        if padding > 2 || (padding > 0 && q + 1 != quads) {
+            return Err("invalid base64 padding".into());
+        }
+        let mut n = 0u32;
+        for &b in &quad[..4 - padding] {
+            n = n << 6 | value(b).ok_or("invalid base64 character")?;
+        }
+        n <<= 6 * padding as u32;
+        let decoded = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        if decoded[3 - padding..].iter().any(|&b| b != 0) {
+            return Err("non-canonical base64 padding bits".into());
+        }
+        out.extend_from_slice(&decoded[..3 - padding]);
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -435,6 +519,51 @@ mod tests {
         .unwrap();
         assert_eq!(call.scope(), Scope::Control);
         assert_eq!(call.params()["limit"], 32);
+    }
+
+    #[test]
+    fn base64_round_trips_and_rejects_noncanonical_input() {
+        for bytes in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar"] {
+            let text = base64_encode(bytes);
+            assert_eq!(base64_decode(&text).unwrap(), bytes);
+        }
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        let all: Vec<u8> = (0..=255).collect();
+        assert_eq!(base64_decode(&base64_encode(&all)).unwrap(), all);
+        for bad in ["Zm8", "Zm8==", "Zm=8", "Zm9=Zm8=", "Zm9 ", "Zn==", "Zm9-"] {
+            assert!(base64_decode(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn asset_frames_fit_the_bridge_line_limit_and_reassemble() {
+        let bytes: Vec<u8> = (0..(512 * 1024 + 7))
+            .map(|i| (i * 31 % 251) as u8)
+            .collect();
+        let frames = asset_frames("logo", "sha256:00", &bytes);
+        assert_eq!(frames.len(), 6);
+        let mut joined = Vec::new();
+        for (expected, frame) in frames.iter().enumerate() {
+            let line = serde_json::to_vec(frame).unwrap();
+            assert!(line.len() < MAX_BRIDGE_LINE_BYTES);
+            let HostMessage::Asset {
+                index, count, data, ..
+            } = serde_json::from_slice(&line).unwrap()
+            else {
+                panic!("asset frame expected");
+            };
+            assert_eq!((index as usize, count), (expected, 6));
+            joined.extend(base64_decode(&data).unwrap());
+        }
+        assert_eq!(joined, bytes);
+        assert!(
+            serde_json::from_value::<HostMessage>(json!({
+                "type":"asset","id":"logo","digest":"d","index":0,"count":1,"data":"",
+                "path":"/etc/passwd"
+            }))
+            .is_err()
+        );
     }
 
     #[test]

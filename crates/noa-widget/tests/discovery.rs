@@ -184,3 +184,44 @@ fn fifo_manifests_fail_without_waiting_for_a_writer() {
             .contains("regular file")
     );
 }
+
+#[test]
+fn packages_with_assets_are_loaded_and_pinned_by_their_bytes() {
+    let repo = Repository::new();
+    let package = repo.0.join(".noa-widgets/image-gallery");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.noa-widgets/image-gallery");
+    fs::create_dir_all(package.join("assets")).unwrap();
+    fs::copy(source.join("widget.json"), package.join("widget.json")).unwrap();
+    for name in ["logo.png", "landscape.jpg", "pattern.webp"] {
+        fs::copy(
+            source.join("assets").join(name),
+            package.join("assets").join(name),
+        )
+        .unwrap();
+    }
+    let first = load(&repo.0, "image-gallery").unwrap();
+    assert_eq!(first.assets.len(), 3);
+    assert_ne!(first.digest, first.manifest.digest());
+    assert_eq!(discover(&repo.0).unwrap()[0].digest, first.digest);
+    // Assets are never serialized with a described definition.
+    assert!(!serde_json::to_string(&first).unwrap().contains("\"bytes\""));
+    let logo = package.join("assets/logo.png");
+    let mut bytes = fs::read(&logo).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(&logo, bytes).unwrap();
+    assert_ne!(load(&repo.0, "image-gallery").unwrap().digest, first.digest);
+    fs::remove_file(&logo).unwrap();
+    assert!(
+        discover(&repo.0)
+            .unwrap_err()
+            .to_string()
+            .contains("logo.png")
+    );
+    std::os::unix::fs::symlink(source.join("assets/logo.png"), &logo).unwrap();
+    assert!(
+        load(&repo.0, "image-gallery")
+            .unwrap_err()
+            .to_string()
+            .contains("symbolic link")
+    );
+}

@@ -50,7 +50,14 @@ For a shared widget, create these tracked files under the target worktree:
 .noa-widgets/<id>/fixtures/empty.json
 .noa-widgets/<id>/fixtures/error.json
 .noa-widgets/<id>/fixtures/long.json
+.noa-widgets/<id>/assets/<image>      # only if the view shows images
 ```
+
+Images come only from the package: declare each under `assets` and show it
+with an `image` component (see [manifest.md](references/manifest.md#images)).
+Use small PNG, JPEG or WebP files you created or are allowed to commit; never
+a URL, `data:` URI, symlink or a path outside `assets/`. Give every image a
+meaningful `alt`. A one-off inline draft cannot carry images.
 
 Use `.noa-widgets/` for shared definitions. `.noa/` holds ignored local task
 and run state; do not put a shareable definition there. Do not edit another
@@ -82,7 +89,9 @@ for state in normal empty error long; do
 done
 ```
 
-Set `package` to the actual package or draft directory. Use `widget validate`
+Set `package` to the actual package or draft directory. Validate the
+package's own `widget.json` path (not stdin) when it declares `assets`: images
+are read from that directory. Use `widget validate`
 as the authoritative check: editor JSON Schema alone cannot establish pointer
 types, unique node/row IDs, action references or rendered-content limits.
 

@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
+use crate::assets::{self, Asset};
 use crate::{
     DEFINITIONS_DIR, MANIFEST_FILE, MAX_DEFINITIONS, MAX_MANIFEST_BYTES, Manifest, WidgetError,
     check_id, content_digest,
@@ -30,7 +31,13 @@ pub struct RepoContext {
 pub struct Definition {
     pub manifest: Manifest,
     pub path: PathBuf,
+    /// Definition digest: the manifest's own digest, or for a package with
+    /// assets, one that also covers every asset's bytes.
     pub digest: String,
+    /// Verified asset bytes, in id order. Never serialized: callers that
+    /// describe a definition expose the digest, not the images.
+    #[serde(skip)]
+    pub assets: Vec<Asset>,
 }
 
 pub fn repo_context(path: &Path) -> Result<RepoContext, WidgetError> {
@@ -121,15 +128,17 @@ fn read_definition(registry: &OwnedFd, path: &Path, id: &str) -> Result<Definiti
             manifest.id
         )));
     }
-    let digest = manifest.digest();
+    let assets = assets::load_at(&directory, &directory_path, &manifest)?;
+    let digest = assets::definition_digest(&manifest, &assets::digests(&assets))?;
     Ok(Definition {
         manifest,
         path,
         digest,
+        assets,
     })
 }
 
-fn at(path: &Path, error: impl std::fmt::Display) -> WidgetError {
+pub(crate) fn at(path: &Path, error: impl std::fmt::Display) -> WidgetError {
     WidgetError::new(format!("{}: {error}", path.display()))
 }
 
@@ -172,7 +181,7 @@ fn git_path(path: &Path, option: &str) -> Result<PathBuf, WidgetError> {
     fs::canonicalize(&result).map_err(|e| at(&result, e))
 }
 
-fn open_root(path: &Path) -> Result<OwnedFd, WidgetError> {
+pub(crate) fn open_root(path: &Path) -> Result<OwnedFd, WidgetError> {
     let file = File::options()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -193,7 +202,7 @@ fn c_name(name: &OsStr) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
 }
 
-fn open_directory(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
+pub(crate) fn open_directory(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
     let name = c_name(name)?;
     // SAFETY: parent owns a live directory descriptor; name is terminated.
     let fd = unsafe {
@@ -210,7 +219,7 @@ fn open_directory(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn open_file(parent: &OwnedFd, name: &OsStr) -> io::Result<File> {
+pub(crate) fn open_file(parent: &OwnedFd, name: &OsStr) -> io::Result<File> {
     let name = c_name(name)?;
     // NONBLOCK prevents a FIFO with no writer from hanging discovery. The
     // caller rejects every nonregular file before reading its contents.
@@ -229,7 +238,7 @@ fn open_file(parent: &OwnedFd, name: &OsStr) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn entry_mode(parent: &OwnedFd, name: &OsStr) -> io::Result<libc::mode_t> {
+pub(crate) fn entry_mode(parent: &OwnedFd, name: &OsStr) -> io::Result<libc::mode_t> {
     let name = c_name(name)?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: stat points to writable storage; parent and name are live.

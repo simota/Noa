@@ -2664,6 +2664,9 @@ mod tests {
             let workdir = root.join("workspace");
             fs::create_dir_all(&workdir).unwrap();
             new.target.workdir = Some(workdir.clone());
+            // macOS temporary paths can traverse /var -> /private/var;
+            // new reviews persist the canonical agent working directory.
+            let expected_workdir = fs::canonicalize(&workdir).unwrap();
             new.auto = auto.clone();
             let (engine, store) = new_review(*new, CONFIG, 5).unwrap();
             assert_eq!(engine.session().auto, auto);
@@ -2672,13 +2675,13 @@ mod tests {
             let line = fs::read_to_string(dir.join(store::EVENTS_FILE)).unwrap();
             let batch: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
             assert_eq!(batch[0]["event"], "created");
-            assert_eq!(batch[0]["workdir"], serde_json::json!(workdir));
+            assert_eq!(batch[0]["workdir"], serde_json::json!(expected_workdir));
             assert_eq!(
                 batch[0].get("auto").cloned(),
                 auto.as_ref().map(|a| serde_json::to_value(a).unwrap())
             );
             let loaded = store::read_session(&dir).unwrap();
-            assert_eq!(loaded.workdir, Some(workdir));
+            assert_eq!(loaded.workdir, Some(expected_workdir));
             assert_eq!(loaded.auto, auto);
             let resumed = Engine::resume(loaded, &dir, CONFIG);
             assert_eq!(resumed.session().auto, auto);

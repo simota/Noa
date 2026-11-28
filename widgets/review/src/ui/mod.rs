@@ -364,10 +364,11 @@ use noa_gpui_core::style::{
     AlignItems, FlexDirection, FlexWrap, LengthPercentage, Overflow, Point as LayoutPoint,
     Rect as LayoutRect, Size as LayoutSize, auto, length, percent,
 };
+use noa_gpui_core::styling::{Length, StylePatch};
 use noa_gpui_core::widgets::{
     Alert, AlertResponse, AlertStyle, Button, ButtonClicked, Container, ControlSize, Label,
-    MenuChosen, ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar, Tag, TextChanged,
-    TextField, Toast, Tone,
+    MenuChosen, STATUS_BAR_HEIGHT, ScrollView, SelectionChanged, SplitPane, SplitView, StatusBar,
+    Tag, TextChanged, TextField, Toast, Tone,
 };
 use noa_gpui_core::{Message as UiMessage, Role, Shortcut, Style, Theme, UiTree, WidgetId};
 use noa_gpui_platform::{FileDialogRequest, FileDialogResult, Screen};
@@ -838,6 +839,14 @@ impl Review {
         let right_host = tree.insert(Some(split), pane_column(Role::Surface));
         let tools_host = tree.insert(Some(root), strip_host());
         let status = StatusBar::insert(&mut tree, root);
+        // The bar's default fixed height is shorter than our small buttons.
+        // Grow with their text and leave room for keyboard focus rings.
+        let mut footer = StylePatch::default();
+        footer.height = Some(Length::Auto);
+        footer.min_height = Some(Length::Px(STATUS_BAR_HEIGHT));
+        footer.padding[0] = Some(Length::Px(4.0));
+        footer.padding[2] = Some(Length::Px(4.0));
+        tree.set_inline_style(status.bar, footer);
 
         let mut screen = Self {
             tree,

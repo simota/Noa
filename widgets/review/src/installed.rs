@@ -68,9 +68,13 @@ fn probe_script() -> String {
 }
 
 fn run(shell: &str, script: &str, timeout: Duration) -> Installed {
+    // Bash 3.2 can restore job control after startup even without a tty.
+    // Keep probe commands in the shell's group so `finish` also stops
+    // their background jobs; the login startup files still run normally.
+    let script = format!("set +m; {script}");
     let mut command = Command::new(shell);
     command
-        .args(["-l", "-i", "-c", script])
+        .args(["-l", "-i", "-c", &script])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .stdout(Stdio::piped());
@@ -295,37 +299,61 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn background_jobs_do_not_survive_a_finished_or_timed_out_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir =
             std::env::temp_dir().join(format!("review-installed-children-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // macOS's Bash 3.2 can leave monitor mode on after startup even
+        // without a terminal. Reproduce that state on Linux as well.
+        let monitor_shell = dir.join("monitor-shell");
+        std::fs::write(&monitor_shell, "#!/bin/bash\nset -m\neval \"$4\"\n").unwrap();
+        std::fs::set_permissions(&monitor_shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         let trigger = dir.join("continue");
-        for (name, tail, succeeds) in [
-            ("finished", "echo noa-agent:codex; exit 0", true),
-            ("timed-out", "sleep 30", false),
+        let waiting = format!(
+            "while [ ! -e '{}' ]; do sleep 0.02; done",
+            trigger.display()
+        );
+        let mut results = Vec::new();
+        for (shell_name, shell) in [
+            ("system", "/bin/sh"),
+            ("monitor", monitor_shell.to_str().unwrap()),
         ] {
-            let marker = dir.join(name);
-            let script = format!(
-                "(while [ ! -e '{}' ]; do sleep 0.02; done; printf survived > '{}') & {tail}",
-                trigger.display(),
-                marker.display()
-            );
-            let timeout = if succeeds {
-                Duration::from_secs(5)
-            } else {
-                Duration::from_millis(100)
-            };
-            let result = run("/bin/sh", &script, timeout);
+            for (name, tail, succeeds) in [
+                ("finished", "echo noa-agent:codex; exit 0", true),
+                ("timed-out", waiting.as_str(), false),
+            ] {
+                let marker = dir.join(format!("{shell_name}-{name}"));
+                let script = format!(
+                    "({waiting}; printf survived > '{}') & {tail}",
+                    marker.display()
+                );
+                let timeout = if succeeds {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(100)
+                };
+                results.push((marker, succeeds, run(shell, &script, timeout)));
+            }
+        }
+        // Release any escaped jobs before assertions, so a regression
+        // fails without leaving a background loop running after the test.
+        std::fs::write(trigger, "continue").unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        for (marker, succeeds, result) in results {
             if succeeds {
-                assert_eq!(result, Installed::Found(vec![AgentKind::Codex]));
+                assert_eq!(
+                    result,
+                    Installed::Found(vec![AgentKind::Codex]),
+                    "{}",
+                    marker.display()
+                );
             } else {
                 assert!(matches!(result, Installed::Unknown(_)), "{result:?}");
             }
+            assert!(!marker.exists(), "{} survived", marker.display());
         }
-        std::fs::write(trigger, "continue").unwrap();
-        std::thread::sleep(Duration::from_millis(600));
-        assert!(!dir.join("finished").exists());
-        assert!(!dir.join("timed-out").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its panel and round limit, and finding updates preserve a non-empty rationale.
 - Review prevents duplicate starts, reveals findings reached through links even
   when filters hide them, and shows cumulative file coverage consistently in the
-  matrix and report.
+  matrix and report. Footer controls and their keyboard focus rings stay inside
+  the window at compact sizes.
 - Workflow opens saved runs with their graph, history, and evidence in a
   read-only window. Narrow-window resizing keeps the inspector in bounds;
   invalid form input can be undone or replaced by a conflict reload, and

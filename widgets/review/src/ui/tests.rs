@@ -1019,6 +1019,42 @@ fn the_progress_strip_fits_the_smallest_window() {
     }
 }
 
+#[test]
+fn the_status_bar_contains_its_controls_and_their_focus_rings() {
+    for size in [SMALLEST, (1440.0, 900.0)] {
+        for (name, mut screen) in [("held", Review::demo_held()), ("finished", Review::demo())] {
+            let mut text = TextStore::new(Default::default());
+            for tools_open in [false, true] {
+                if tools_open {
+                    screen.handle_action(Action::ToggleSessionTools, &mut text);
+                }
+                screen.prepare(noa_gpui_scene::Size::new(size.0, size.1), &mut text);
+                let bar = screen.tree.parent(screen.status_trailing).unwrap();
+                let footer = screen.tree.window_rect(bar).unwrap();
+                assert!(footer.y >= 0.0 && footer.bottom() <= size.1 + 0.5);
+                for host in [screen.status_leading, screen.status_trailing] {
+                    for &id in screen.tree.children(host) {
+                        let rect = screen.tree.window_rect(id).unwrap();
+                        // A focused button paints its ring three pixels beyond
+                        // the control. Both must stay inside the bottom strip.
+                        let ring = if screen.tree.get::<Button>(id).is_some() {
+                            3.0
+                        } else {
+                            0.0
+                        };
+                        assert!(
+                            rect.y - ring >= footer.y - 0.5
+                                && rect.bottom() + ring <= footer.bottom() + 0.5,
+                            "{name} {size:?}, tools open: {tools_open}: \
+                             control {rect:?} with ring {ring} outside footer {footer:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn press(screen: &mut Review, key: noa_gpui_core::Key) {
     let mut text = TextStore::new(Default::default());
     noa_gpui_platform::Screen::dispatch(

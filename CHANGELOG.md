@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.22] - 2026-11-28
+
+Exact handoffs between task widgets, reported processing state for widget
+events, shared widget appearance settings, and safer control-client requests.
+
+### Added
+
+- Tasks can open Review or Verify prefilled for the exact recorded commit of
+  a task's run, and **Workflow で進める** hands the selected task to Workflow's
+  setup form; Workflow publishes bounded result summaries back to the task.
+  Scaffold can open the task it created, and the Tasks calendar separates
+  due-date plans from actual runs. See `docs/TASKS.md` and
+  `docs/WIDGET_USABILITY.md`. (#287)
+- Widget Appearance Settings (`widget-settings.open`, or any helper's
+  `--widget-settings`) saves appearance, text size and spacing shared by all
+  widgets. Tasks and Review support 720-pixel compact layouts, and the
+  command palette finds widgets by Japanese purpose words. (#287)
+- Repository widget consumers report the processing state of a button event
+  (`running`, `waiting`, `completed`, `failed`) with `Noa +ctl widget report`;
+  the host shows an accepted event as awaiting a response rather than done.
+  The catalog keeps valid definitions visible beside per-package
+  diagnostics, and previews step through the package's fixtures. See
+  `docs/REPOSITORY_WIDGETS.md`. (#287)
+- Verify shows bounded PNG/JPEG/WebP evidence thumbnails with a native image
+  window, checking stored bytes and digests before decoding. See
+  `docs/VERIFY.md`. (#287)
+
+### Fixed
+
+- The control server rejects a request envelope that is not a JSON object
+  with `-32600` and keeps the connection open. The Rust client refuses a
+  request over the 256 KiB frame limit before sending it and treats a missing
+  or false `ok` acknowledgement as a protocol error. (#286)
+- Workflow keeps a worker spawn that timed out with `-32009`
+  (`OutcomeUnknown`) uncertain instead of retryable, and a saved cancellation
+  stops a worker discovered later. (#286)
+
 ## [0.9.21] - 2026-11-27
 
 A native visual editor and runner for the development cycle, and typed text

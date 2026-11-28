@@ -248,6 +248,26 @@ fn shell_mark_recording_is_capped() {
     assert_eq!(t.shell_marks.len(), crate::terminal::SHELL_MARK_CAP);
 }
 
+/// Past the cap the *oldest* mark is the one evicted, and the survivors keep
+/// their recording order: the newest `SHELL_MARK_CAP` marks, oldest first.
+#[test]
+fn shell_mark_cap_evicts_oldest_first_and_keeps_order() {
+    let cap = crate::terminal::SHELL_MARK_CAP;
+    let extra = 50;
+    let mut t = Terminal::new(GridSize::new(20, 4));
+    let mut s = Stream::new();
+    for status in 0..(cap + extra) {
+        s.feed(format!("\x1b]133;D;{status}\x07").as_bytes(), &mut t);
+    }
+    let statuses: Vec<_> = t
+        .shell_marks
+        .iter()
+        .map(|mark| mark.exit_status.unwrap() as usize)
+        .collect();
+    let expected: Vec<_> = (extra..cap + extra).collect();
+    assert_eq!(statuses, expected);
+}
+
 #[test]
 fn osc8_malformed_payload_is_ignored_without_mutating_active_link() {
     let t = run(b"\x1b]8;;https://example.test\x07A\x1b]8;missing-separator\x07B");
@@ -1302,7 +1322,7 @@ fn osc133_marks_accept_options() {
 fn osc133_d_with_a_non_numeric_status_still_ends_the_command() {
     let t = run(b"\x1b]133;C\x07\x1b]133;D;err\x07");
     assert_eq!(
-        t.shell_marks.last().map(|mark| (mark.kind, mark.exit_status)),
+        t.shell_marks.back().map(|mark| (mark.kind, mark.exit_status)),
         Some((ShellIntegrationMarkKind::CommandEnd, None))
     );
 }

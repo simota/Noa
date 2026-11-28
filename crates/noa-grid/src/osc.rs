@@ -963,11 +963,17 @@ fn parse_i32_ascii(bytes: &[u8]) -> Option<i32> {
 }
 
 fn utf8_no_controls(bytes: &[u8]) -> Option<String> {
-    let s = String::from_utf8(bytes.to_vec()).ok()?;
-    if s.chars().any(char::is_control) {
+    // Validate and screen the borrowed bytes before allocating, so rejected
+    // payloads never copy. `char::is_control` is exactly the Cc category
+    // (U+0000-U+001F, U+007F-U+009F): an all-printable-ASCII payload (the
+    // common URI/title/path case) is decided bytewise, and anything else
+    // falls back to the per-char check.
+    let s = std::str::from_utf8(bytes).ok()?;
+    let printable_ascii = s.bytes().all(|b| (0x20..0x7f).contains(&b));
+    if !printable_ascii && s.chars().any(char::is_control) {
         None
     } else {
-        Some(s)
+        Some(s.to_owned())
     }
 }
 
@@ -1299,4 +1305,45 @@ fn push_rgb_report(pending_writes: &mut Vec<u8>, rgb: Rgb) {
         )
         .as_bytes(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utf8_no_controls;
+
+    /// The pre-allocation fast path must agree with the plain definition
+    /// (valid UTF-8 with no `char::is_control` scalar) on every input class:
+    /// printable ASCII, C0, DEL, C1 (U+0080-U+009F), other non-ASCII, and
+    /// invalid UTF-8.
+    #[test]
+    fn utf8_no_controls_matches_reference_definition() {
+        fn reference(bytes: &[u8]) -> Option<String> {
+            let s = String::from_utf8(bytes.to_vec()).ok()?;
+            (!s.chars().any(char::is_control)).then_some(s)
+        }
+        let cases: &[&[u8]] = &[
+            b"",
+            b"https://example.com/a?b=c#d",
+            b" ~",
+            b"tab\there",
+            b"nl\n",
+            b"esc\x1b",
+            b"del\x7f",
+            b"nul\x00",
+            "c1\u{85}".as_bytes(),
+            "c1\u{9f}".as_bytes(),
+            "a0\u{a0}".as_bytes(),
+            "日本語/パス".as_bytes(),
+            "emoji 👍".as_bytes(),
+            b"\xff",
+            b"ok\xc2",
+            b"\xc0\x80",
+        ];
+        for &case in cases {
+            assert_eq!(utf8_no_controls(case), reference(case), "{case:?}");
+        }
+        for b in 0..=0xffu8 {
+            assert_eq!(utf8_no_controls(&[b]), reference(&[b]), "{b:#x}");
+        }
+    }
 }

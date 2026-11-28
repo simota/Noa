@@ -1314,7 +1314,7 @@ fn clear_screen_and_scrollback_collapses_shell_marks_with_the_scrollback_erase()
         "the CommandStart mark sat on the cursor's own row and must survive the clear"
     );
     assert_eq!(
-        t.shell_marks.last().unwrap().point.y,
+        t.shell_marks.back().unwrap().point.y,
         t.primary.rows_evicted() + usize::from(t.primary.cursor.y),
         "the surviving mark must land exactly on the cursor's new row, not `old_sb_len` too high"
     );

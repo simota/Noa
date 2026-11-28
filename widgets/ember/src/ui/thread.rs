@@ -1,5 +1,5 @@
 use ember::model::{Role as MessageRole, Run, RunKind, RunStatus, Scope};
-use noa_gpui_core::style::{AlignItems, FlexDirection, Size as LayoutSize, length, percent};
+use noa_gpui_core::style::{AlignItems, FlexDirection, Size as LayoutSize, auto, length, percent};
 use noa_gpui_core::widgets::{Container, Label};
 use noa_gpui_core::{Role, Style, UiTree, WidgetId};
 
@@ -92,7 +92,7 @@ impl EmberScreen {
                         },
                         max_size: LayoutSize {
                             width: percent(0.82),
-                            ..Default::default()
+                            height: auto(),
                         },
                         ..Default::default()
                     })

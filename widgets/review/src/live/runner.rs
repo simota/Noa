@@ -2823,6 +2823,22 @@ mod tests {
         let relative = Path::new("target").join(root.file_name().unwrap());
         fs::create_dir_all(&relative).unwrap();
         fs::write(relative.join("review.txt"), "review this\n").unwrap();
+        // This relative fixture lives in the widget's ignored build
+        // directory. Give it its own Git boundary so Files capture can
+        // enumerate it without inheriting the repository's target/ ignore.
+        for args in [&["init", "-q"][..], &["add", "--force", "review.txt"][..]] {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&relative)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         let absolute = fs::canonicalize(&relative).unwrap();
         for kind in [TargetKind::Files, TargetKind::Document] {
             let mut target = document("review this\n");

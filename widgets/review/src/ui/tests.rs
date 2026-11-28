@@ -578,10 +578,27 @@ fn a_finding_link_keeps_keyboard_focus_in_the_visible_pane() {
         session.findings[1].merged_into = Some(into.clone());
         let (mut screen, _link) = live_with(session);
         screen.filters.statuses = [status_key(FindingStatus::Merged)].into_iter().collect();
-        act(&mut screen, Action::SelectFinding(Some(id)));
-        lay_out(&mut screen, size);
+        // Layout caches belong to the text store that made them; keep that
+        // store through dispatch, as a real window does.
+        let mut text = TextStore::new(Default::default());
+        screen.handle_action(Action::SelectFinding(Some(id)), &mut text);
+        noa_gpui_platform::Screen::prepare(
+            &mut screen,
+            noa_gpui_scene::Size::new(size.0, size.1),
+            &mut text,
+        );
+        let link = widget_for(&screen, &Action::RevealFinding(into.clone())).unwrap();
+        screen.tree.set_focus(Some(link));
+        noa_gpui_platform::Screen::dispatch(
+            &mut screen,
+            noa_gpui_core::Event::KeyDown {
+                key: noa_gpui_core::Key::Space,
+                modifiers: Default::default(),
+            },
+            &mut text,
+        );
         assert_eq!(
-            press_focused(&mut screen, &Action::RevealFinding(into.clone())),
+            screen.focused_action().map(|(action, _)| action),
             Some(Action::SelectFinding(None)),
         );
         assert_eq!(screen.shown_selection(), Some(into.as_str()));

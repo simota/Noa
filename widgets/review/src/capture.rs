@@ -916,6 +916,15 @@ fn push_unique(paths: &mut Vec<String>, path: String) {
     }
 }
 
+fn utf8_name(name: std::ffi::OsString) -> io::Result<String> {
+    name.into_string().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "UTF-8 ではないパスは取り込めません",
+        )
+    })
+}
+
 /// Lists the files under `rel` (below `root`), never following a link:
 /// links are listed in `links` instead. De-duplicate while collecting so
 /// overlapping selections cannot spend the cap before later files are read.
@@ -923,12 +932,7 @@ fn walk(root: &Path, rel: &Path, out: &mut Vec<String>, links: &mut Vec<String>)
     let mut entries = fs::read_dir(root.join(rel))?.collect::<io::Result<Vec<_>>>()?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
-        let name = entry.file_name().into_string().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "UTF-8 ではないパスは取り込めません",
-            )
-        })?;
+        let name = utf8_name(entry.file_name())?;
         if walk_skips(&name) {
             continue;
         }
@@ -2105,12 +2109,15 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         assert!(parse_raw(b":100644 100644 a b M\0bad-\xff\0").is_err());
         assert!(nul_fields(b"bad-\xff\0").is_err());
+        // APFS rejects this name before a directory entry can be created.
+        // Exercise the walk's exact conversion on the original bytes on
+        // every platform, without relying on the filesystem accepting them.
+        let invalid = std::ffi::OsString::from_vec(b"bad-\xff".to_vec());
+        let error = utf8_name(invalid).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("UTF-8"));
+        assert_eq!(utf8_name("bad-�".into()).unwrap(), "bad-�");
         let root = temp("non-utf8");
-        fs::write(
-            root.join(std::ffi::OsString::from_vec(b"bad-\xff".to_vec())),
-            "bytes\n",
-        )
-        .unwrap();
         fs::write(root.join("bad-�"), "different file\n").unwrap();
         let target = Target {
             kind: TargetKind::Files,
@@ -2122,7 +2129,13 @@ mod tests {
             workdir: None,
         };
         let dest = temp("non-utf8-dest").join("target");
-        assert!(capture(&target, &dest, 0).unwrap_err().contains("UTF-8"));
-        assert!(!dest.exists());
+        let manifest = capture(&target, &dest, 0).unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].path, "bad-�");
+        assert_eq!(
+            fs::read_to_string(dest.join(FILES_DIR).join("bad-�")).unwrap(),
+            "different file\n"
+        );
+        verify(&dest, &manifest).unwrap();
     }
 }

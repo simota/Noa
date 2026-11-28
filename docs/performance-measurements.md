@@ -407,3 +407,82 @@ GPU resource reuse is checked independently by
 preparations (one moved placement) create one uniform buffer/bind-group pair
 instead of three, with one unchanged texture upload. Actual GPU frame-time
 improvement and OS wake reduction for the redraw fix remain unmeasured.
+
+## OSC 133 mark cap, page style hashing, OSC string screening (2026-11-28)
+
+Scope: three `noa-grid` ingest-path changes, found by profiling
+`bench_vt_shapes` with callgrind. Baseline: `dcfb417` built in a detached
+worktree, same toolchain and release profile. Machine: 4-vCPU Linux cloud
+container (no `perf`; wall clock is noisy there, so callgrind instruction
+counts are the primary evidence and wall/CPU time the secondary).
+
+1. **Shell-mark cap eviction** (`Terminal::record_shell_mark`). Once 4096
+   OSC 133 marks were recorded, every new mark ran `Vec::retain` and then
+   `Vec::remove(0)`, shifting the whole 4096-entry buffer: 27.6% of all
+   instructions in `osc_links` were that `memmove`. `shell_marks` is now a
+   `VecDeque` (O(1) `pop_front`), and the prune pass first probes with a
+   read-only `any` so the usual nothing-to-prune case skips `retain`.
+   Eviction order and contents are unchanged: covered by the new
+   `shell_mark_cap_evicts_oldest_first_and_keeps_order`.
+2. **Scrollback `Style` hashing** (`scrollback.rs`). The derived `Hash`
+   fed SipHash five 4-byte writes; on style-diverse output the page style
+   intern misses its memo on nearly every cell, and SipHash's per-write cost
+   was 12.6% of `sgr_per_cell`. `Style` now hashes its fields as one 20-byte
+   write, which stays consistent with the derived `Eq`. The hasher is still
+   std's keyed SipHash, so HashDoS resistance is unchanged.
+3. **`utf8_no_controls`** (`osc.rs`, OSC 8 URIs/ids and similar payloads)
+   validates and screens the borrowed bytes before allocating, with an
+   all-printable-ASCII fast path. Results are identical to the old
+   definition: see `osc::tests::utf8_no_controls_matches_reference_definition`
+   (covers C0, DEL, C1, other non-ASCII, and invalid UTF-8).
+
+Instruction counts (`valgrind --tool=callgrind`, whole process including the
+bench's own input generation; `bench_vt_shapes 1 <section>`):
+
+| Section | Baseline Ir | After Ir | Change |
+| --- | ---: | ---: | ---: |
+| `osc_links` | 9,153,629,796 | 6,265,536,915 | -31.5% |
+| `sgr_per_cell` | 5,200,531,568 | 4,829,423,884 | -7.1% |
+| `tui_repaint` | 2,868,695,759 | 2,869,315,505 | +0.02% |
+| `scroll_region` | 3,465,847,486 | 3,465,847,350 | 0.00% |
+| `cjk_tui` | 4,558,576,607 | 4,558,590,850 | 0.00% |
+| `erase_edit` | 5,124,856,311 | 5,126,433,083 | +0.03% |
+| `combining` | 12,945,046,864 | 12,954,178,423 | +0.07% |
+| `feed_bench` 20 MiB unicode (3 runs each) | 2,974,793,117-743 | 2,940,072,913-1,695,902 | -1.2% |
+
+The sub-0.1% deltas on untouched sections come from background packer-thread
+scheduling (the baseline binary itself varies by about 0.05% between runs).
+
+Wall/CPU time (A/B alternating runs, medians):
+
+| Metric | Baseline | After | Change |
+| --- | ---: | ---: | ---: |
+| `osc_links` wall, 12 runs pinned to 1 core | 582.0 ms | 489.4 ms | -15.9% |
+| `osc_links` process CPU, 10 runs | 0.758 s | 0.670 s | -11.5% |
+| `sgr_per_cell` process CPU, 10 runs | 0.493 s | 0.470 s | -4.8% |
+| `sgr_per_cell` wall, 20 runs | 208.4 ms | 205.2 ms | within noise |
+| `tui_repaint` process CPU, 10 runs | 0.284 s | 0.285 s | within noise |
+
+`sgr_per_cell`'s saving is mostly on the scrollback packer thread, so it
+shows up as CPU time, not ingest wall time. Peak RSS matched within the
+run-to-run spread (the packer timing alone moves it by up to 20 MB on the
+same binary). Output digests matched for every `bench_vt_shapes`,
+`bench_history` and `bench_hover` section except `combining_read`, whose
+digest differs between runs of the baseline binary too.
+
+Candidates looked at and not changed:
+
+- `erase_display` fill (16% of `erase_edit`): already limited to each row's
+  occupancy watermark, and the remaining work is the erase itself.
+- Search over 138k history rows (`bench_history search_*`): dominated by row
+  materialization. No local win without a structural change.
+- Cmd+hover link detection (`bench_hover`, about 100-200 us/call on wrapped
+  JSON): rebuilds the line text on every call. Caching it across pointer
+  moves would need invalidation in `noa-app`, and the path only runs while
+  the link modifier is held.
+- OSC 8 dedupe still allocates the URI `String` before the registry lookup
+  (malloc/free is about 6% of `osc_links`). Avoiding that needs a
+  borrowed-key lookup that std's `HashMap` lacks.
+- Swapping SipHash for a faster unkeyed or weakly keyed hasher was rejected:
+  style and hyperlink keys come from program output, so it would weaken
+  HashDoS resistance.

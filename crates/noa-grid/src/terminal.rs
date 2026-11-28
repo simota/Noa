@@ -95,8 +95,11 @@ pub struct Terminal {
     /// Reverse lookup for [`Self::hyperlinks`] so repeated OSC 8 sequences
     /// with the same target dedupe in O(1) instead of a linear registry scan.
     hyperlink_index: HashMap<Hyperlink, usize>,
-    /// OSC 133 shell integration marks recorded at cursor positions.
-    pub shell_marks: Vec<ShellIntegrationMark>,
+    /// OSC 133 shell integration marks recorded at cursor positions, oldest
+    /// first. A deque so evicting the oldest mark at [`SHELL_MARK_CAP`] is
+    /// O(1) rather than a whole-buffer shift on every mark recorded once a
+    /// long-lived shell session has filled it.
+    pub shell_marks: VecDeque<ShellIntegrationMark>,
     /// Dynamic colors set through safe OSC 4/10/11/12 sequences.
     pub colors: TerminalColors,
     /// Policy for OSC 52 clipboard writes/queries.
@@ -254,7 +257,7 @@ impl Terminal {
             cwd: None,
             hyperlinks: Vec::new(),
             hyperlink_index: HashMap::new(),
-            shell_marks: Vec::new(),
+            shell_marks: VecDeque::new(),
             colors: TerminalColors::default(),
             osc52_policy: Osc52Policy::default(),
             title_report: false,
@@ -1077,7 +1080,7 @@ impl Terminal {
     /// an idle login shell as a running program.
     pub fn has_running_program(&self) -> bool {
         self.shell_marks
-            .last()
+            .back()
             .is_some_and(|mark| mark.kind == ShellIntegrationMarkKind::CommandStart)
     }
 
@@ -1172,12 +1175,21 @@ impl Terminal {
             rows_evicted + screen.scrollback_len() + screen.cursor.y as usize,
         );
         if self.shell_marks.len() >= SHELL_MARK_CAP {
-            self.shell_marks.retain(|mark| mark.point.y >= rows_evicted);
+            // Probe before pruning: once the buffer is full this runs on
+            // every recorded mark, and usually nothing is prunable, so a
+            // read-only scan beats `retain`'s per-element move bookkeeping.
+            if self
+                .shell_marks
+                .iter()
+                .any(|mark| mark.point.y < rows_evicted)
+            {
+                self.shell_marks.retain(|mark| mark.point.y >= rows_evicted);
+            }
             if self.shell_marks.len() >= SHELL_MARK_CAP {
-                self.shell_marks.remove(0);
+                self.shell_marks.pop_front();
             }
         }
-        self.shell_marks.push(ShellIntegrationMark {
+        self.shell_marks.push_back(ShellIntegrationMark {
             kind,
             point,
             exit_status,

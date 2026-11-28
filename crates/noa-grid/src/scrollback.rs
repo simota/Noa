@@ -172,7 +172,7 @@ const GRAPHEME_ENTRY_COST: usize = 32;
 /// Layout attributes (`WIDE` / `WIDE_SPACER`) live on [`PackedCell::flags`]
 /// instead, so a run of wide glyphs sharing one pen does not spawn a new
 /// style per cell.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Style {
     /// [`encode_color`] of the foreground.
     fg: u32,
@@ -186,6 +186,27 @@ struct Style {
     /// `WIDE` / `WIDE_SPACER`-stripped [`CellAttrs`] bits, plus
     /// [`Self::META_HAS_LINK`].
     meta: u32,
+}
+
+/// Hashes the five fields as one 20-byte block: equal styles have equal
+/// fields, so this agrees with the derived `Eq`. A derived `Hash` feeds the
+/// hasher five separate 4-byte writes, and with std's SipHash each write
+/// pays the hasher's per-call buffering; on style-diverse output (a new
+/// truecolor pen per cell) the intern lookup this feeds is taken for nearly
+/// every packed cell, and the per-call cost dominated it (measured).
+impl std::hash::Hash for Style {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let mut bytes = [0u8; 20];
+        for (dst, field) in
+            bytes
+                .chunks_exact_mut(4)
+                .zip([self.fg, self.bg, self.underline, self.link, self.meta])
+        {
+            dst.copy_from_slice(&field.to_ne_bytes());
+        }
+        state.write(&bytes);
+    }
 }
 
 impl Style {

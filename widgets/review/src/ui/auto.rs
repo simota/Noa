@@ -158,6 +158,10 @@ impl Review {
         let auto = &mut self.auto;
         let tree = &mut self.tree;
         let parts = &self.start;
+        tree.set_enabled(
+            parts.start_button,
+            self.detection.startable() && !self.starting,
+        );
         let had_focus = tree
             .focused()
             .is_some_and(|id| id == auto.menu || id == auto.cancel);

@@ -291,8 +291,8 @@ fn resolved(path: &Path) -> Option<PathBuf> {
 /// the one captured.
 pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
     check_home(session, dir)?;
-    for part in std::iter::once(&session.lead).chain(&session.reviewers) {
-        part.setup.check(part.kind)?;
+    if session.max_rounds == 0 {
+        return Err("ラウンド上限は1以上必要です".to_owned());
     }
     let choice = |p: &Participant| AgentChoice {
         kind: p.kind,
@@ -310,6 +310,7 @@ pub fn check_resumable(session: &Session, dir: &Path) -> Result<(), String> {
             },
         })
         .collect();
+    check_panel(&choice(&session.lead), &panel)?;
     let (lead, reviewers) = participants(&choice(&session.lead), &panel);
     let same =
         |a: &Participant, b: &Participant| a.id == b.id && a.role == b.role && a.lens == b.lens;
@@ -547,8 +548,8 @@ impl Engine {
                 }
             }
             Input::Sent { round, part, at } => {
-                self.waiting.remove(&part);
                 if self.open_brief(round, &part).is_some() {
+                    self.waiting.remove(&part);
                     self.commit(
                         &mut out,
                         vec![Event::BriefSent {
@@ -587,8 +588,12 @@ impl Engine {
                 at,
             } => {
                 if let Some(brief) = self.open_brief(round, &part).cloned() {
-                    self.mark_started(&mut out, round, &part, &brief, at)?;
-                    self.reject_reply(&mut out, round, &brief, digest, error)?;
+                    if brief.receipt.rejected_digest == Some(digest) {
+                        Self::watch(&mut out, round, &brief);
+                    } else {
+                        self.mark_started(&mut out, round, &part, &brief, at)?;
+                        self.reject_reply(&mut out, round, &brief, digest, error)?;
+                    }
                 }
                 self.advance(&mut out)?;
             }
@@ -987,8 +992,16 @@ impl Engine {
         let Some(brief) = self.open_brief(round, part).cloned() else {
             return Ok(());
         };
-        self.mark_started(out, round, part, &brief, at)?;
         let digest = store::digest(content);
+        // Clearing a rejected file can fail, or a restart can see it again
+        // before the correction was written. It is still the same reply,
+        // not another attempt. The runner consumes a watch on each read,
+        // so keep watching for changed bytes without spending a retry.
+        if brief.receipt.rejected_digest == Some(digest) {
+            Self::watch(out, round, &brief);
+            return Ok(());
+        }
+        self.mark_started(out, round, part, &brief, at)?;
         if self.is_lead(part) {
             match validate::parse_lead(content, &self.session, round) {
                 Ok(output) => {

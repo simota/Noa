@@ -98,7 +98,7 @@ pub(super) fn insert(
             Some(list),
             Button::new(format!("統合先 {into} を表示")).control_size(ControlSize::Small),
         );
-        actions.push((go, Action::SelectFinding(Some(into.clone()))));
+        actions.push((go, Action::RevealFinding(into.clone())));
     }
     let lead = card(tree, list, true);
     caption(tree, lead, "リードの判断");

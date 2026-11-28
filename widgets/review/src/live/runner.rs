@@ -456,6 +456,23 @@ struct WatchedReply {
     seen: Option<(Result<Vec<u8>, String>, Millis)>,
 }
 
+fn read_watched_reply(base: &Path, path: &Path) -> Option<Result<Vec<u8>, String>> {
+    match store::read_reply(base, path) {
+        Ok(Some(bytes)) => Some(Ok(bytes)),
+        Ok(None) => None,
+        Err(e) => Some(Err(e.to_string())),
+    }
+}
+
+/// The fingerprint the engine records, for both readable and unreadable
+/// replies. Delivery uses the same value to recognize rejected leftovers.
+fn reply_digest(read: &Result<Vec<u8>, String>) -> u64 {
+    match read {
+        Ok(bytes) => review::capture::digest_bytes(bytes),
+        Err(why) => review::capture::digest_bytes(why.as_bytes()),
+    }
+}
+
 struct Runner<C: Connect, K: Clock> {
     engine: Engine,
     store: Store,
@@ -683,7 +700,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
             match self.connector.connect() {
                 Ok(mut conn) => {
-                    backoff = BACKOFF_MIN;
+                    let connected_at = self.clock.now();
                     self.set_link(Link::Live);
                     match self.serve(&mut conn) {
                         Ok(()) => break,
@@ -692,13 +709,19 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                         }
                         Err(Fail::Fatal(why)) => return Err(why),
                     }
+                    // A successful handshake can be followed immediately by
+                    // a broken link or a refused state request. Only a link
+                    // that stayed up resets the retry delay.
+                    if self.clock.now().saturating_sub(connected_at) >= BACKOFF_MAX {
+                        backoff = BACKOFF_MIN;
+                    }
                 }
                 Err(why) => {
                     self.set_link(Link::Down(why));
-                    self.sleep_checking_actions(backoff)?;
-                    backoff = (backoff * 2).min(BACKOFF_MAX);
                 }
             }
+            self.sleep_checking_actions(backoff)?;
+            backoff = (backoff * 2).min(BACKOFF_MAX);
         }
         Ok(())
     }
@@ -1236,13 +1259,27 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 continue;
             }
             let now = self.clock.now();
-            // A reply already on disk is taken in (or turned down) once it
-            // settles; pasting the brief again would start a new turn.
-            if self
-                .watches
-                .iter()
-                .any(|w| w.round == round && w.part == self.sends[idx].part && w.path.exists())
-            {
+            // A new reply on disk is taken in once it settles. A reply
+            // already rejected may have survived a failed unlink, and
+            // must not prevent sending the correction that replaces it.
+            let part = &self.sends[idx].part;
+            let rejected = self
+                .engine
+                .session()
+                .round(round)
+                .and_then(|r| r.brief(part))
+                .and_then(|b| b.receipt.rejected_digest);
+            let base = self.engine.reply_base();
+            let pending_reply = self.watches.iter().any(|w| {
+                w.round == round
+                    && w.part == *part
+                    && match rejected {
+                        Some(digest) => read_watched_reply(&base, &w.path)
+                            .is_some_and(|read| digest != reply_digest(&read)),
+                        None => w.path.exists(),
+                    }
+            });
+            if pending_reply {
                 self.sends[idx].queued_at = now;
                 idx += 1;
                 continue;
@@ -1517,14 +1554,10 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             }
             // A read error that stays is turned down like a bad reply
             // (it counts against the retries), never waited on for ever.
-            let read = match store::read_reply(&base, &watch.path) {
-                Ok(Some(bytes)) => Ok(bytes),
-                Ok(None) => {
-                    watch.seen = None;
-                    idx += 1;
-                    continue;
-                }
-                Err(e) => Err(e.to_string()),
+            let Some(read) = read_watched_reply(&base, &watch.path) else {
+                watch.seen = None;
+                idx += 1;
+                continue;
             };
             match &watch.seen {
                 Some((prev, since)) if *prev == read => {
@@ -1539,6 +1572,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             idx += 1;
         }
         for (round, part, read) in ready {
+            let digest = reply_digest(&read);
             let input = match read.map(String::from_utf8) {
                 Ok(Ok(content)) => Input::ReplyFileWritten {
                     round,
@@ -1546,18 +1580,18 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     content,
                     at: now,
                 },
-                Ok(Err(e)) => Input::ReplyUnreadable {
+                Ok(Err(_)) => Input::ReplyUnreadable {
                     round,
                     part,
                     error: "返答が UTF-8 のテキストではありません".to_owned(),
-                    digest: review::capture::digest_bytes(e.as_bytes()),
+                    digest,
                     at: now,
                 },
                 Err(why) => Input::ReplyUnreadable {
                     round,
                     part,
                     error: format!("返答を読めません: {why}"),
-                    digest: review::capture::digest_bytes(why.as_bytes()),
+                    digest,
                     at: now,
                 },
             };
@@ -1701,7 +1735,7 @@ fn reserve(
 /// The directory the agents of a new review run in: the repository's top
 /// level (git), the root (files), or the document's working directory.
 fn workdir_of(target: &Target) -> Result<Option<PathBuf>, String> {
-    match target.kind {
+    let workdir = match target.kind {
         TargetKind::Git => {
             let path = target
                 .path
@@ -1723,7 +1757,14 @@ fn workdir_of(target: &Target) -> Result<Option<PathBuf>, String> {
             .workdir
             .clone()
             .filter(|dir| !dir.as_os_str().is_empty())),
-    }
+    }?;
+    // The agents start in this directory, and the log must keep pointing
+    // here when the widget is resumed from a different working directory.
+    workdir
+        .map(|dir| {
+            fs::canonicalize(&dir).map_err(|e| format!("{} を開けません: {e}", dir.display()))
+        })
+        .transpose()
 }
 
 /// What a new review starts from.
@@ -2248,6 +2289,9 @@ mod tests {
         rpc_changes: usize,
         rpc_paste_ready: usize,
         rpc_screen: usize,
+        connections: Vec<Millis>,
+        panes_error: Option<NoaError>,
+        stop_after_connections: Option<(usize, Sender<Action>)>,
     }
 
     /// A fake Noa and clock sharing one world.
@@ -2313,6 +2357,14 @@ mod tests {
         type Conn = Fake;
 
         fn connect(&mut self) -> Result<Fake, String> {
+            let mut w = self.0.borrow_mut();
+            let now = w.now;
+            w.connections.push(now);
+            if let Some((limit, actions)) = &w.stop_after_connections
+                && w.connections.len() >= *limit
+            {
+                let _ = actions.send(Action::Stop);
+            }
             Ok(self.clone())
         }
     }
@@ -2321,6 +2373,9 @@ mod tests {
         fn panes(&mut self) -> Result<Vec<PaneView>, NoaError> {
             let mut w = self.0.borrow_mut();
             w.rpc_panes += 1;
+            if let Some(error) = &w.panes_error {
+                return Err(error.clone());
+            }
             let mut views: Vec<PaneView> =
                 w.panes.iter().map(|(id, p)| Fake::view(*id, p)).collect();
             views.extend(w.boards.iter().map(|&id| PaneView {
@@ -2609,6 +2664,9 @@ mod tests {
             let workdir = root.join("workspace");
             fs::create_dir_all(&workdir).unwrap();
             new.target.workdir = Some(workdir.clone());
+            // macOS temporary paths can traverse /var -> /private/var;
+            // new reviews persist the canonical agent working directory.
+            let expected_workdir = fs::canonicalize(&workdir).unwrap();
             new.auto = auto.clone();
             let (engine, store) = new_review(*new, CONFIG, 5).unwrap();
             assert_eq!(engine.session().auto, auto);
@@ -2617,13 +2675,13 @@ mod tests {
             let line = fs::read_to_string(dir.join(store::EVENTS_FILE)).unwrap();
             let batch: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
             assert_eq!(batch[0]["event"], "created");
-            assert_eq!(batch[0]["workdir"], serde_json::json!(workdir));
+            assert_eq!(batch[0]["workdir"], serde_json::json!(expected_workdir));
             assert_eq!(
                 batch[0].get("auto").cloned(),
                 auto.as_ref().map(|a| serde_json::to_value(a).unwrap())
             );
             let loaded = store::read_session(&dir).unwrap();
-            assert_eq!(loaded.workdir, Some(workdir));
+            assert_eq!(loaded.workdir, Some(expected_workdir));
             assert_eq!(loaded.auto, auto);
             let resumed = Engine::resume(loaded, &dir, CONFIG);
             assert_eq!(resumed.session().auto, auto);
@@ -2637,6 +2695,31 @@ mod tests {
         let mut conn = fake.clone();
         assert!(runner.begin(&mut conn).is_ok());
         (runner, actions, updates)
+    }
+
+    #[test]
+    fn a_link_that_fails_after_connecting_backs_off_and_still_accepts_stop() {
+        let fake = fake();
+        let root = temp_root();
+        let (mut runner, actions, _) = open_wired(
+            &fake,
+            new_start(
+                &root,
+                vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+            ),
+        )
+        .unwrap();
+        {
+            let mut w = fake.0.borrow_mut();
+            w.panes_error = Some(NoaError::Link("connection closed after hello".into()));
+            w.stop_after_connections = Some((4, actions));
+        }
+        runner.run().unwrap();
+        assert_eq!(fake.0.borrow().connections, [1_000, 1_500, 2_500, 4_500]);
+        assert!(runner.stop);
+        assert_eq!(fake.0.borrow().spawned, 0);
+        drop(runner);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2734,6 +2817,59 @@ mod tests {
         step(runner, conn);
         fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
         step(runner, conn);
+    }
+
+    #[test]
+    fn relative_file_and_document_workdirs_keep_absolute_reply_paths() {
+        let fake = fake();
+        let root = temp_root();
+        let relative = Path::new("target").join(root.file_name().unwrap());
+        fs::create_dir_all(&relative).unwrap();
+        fs::write(relative.join("review.txt"), "review this\n").unwrap();
+        // This relative fixture lives in the widget's ignored build
+        // directory. Give it its own Git boundary so Files capture can
+        // enumerate it without inheriting the repository's target/ ignore.
+        for args in [&["init", "-q"][..], &["add", "--force", "review.txt"][..]] {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&relative)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let absolute = fs::canonicalize(&relative).unwrap();
+        for kind in [TargetKind::Files, TargetKind::Document] {
+            let mut target = document("review this\n");
+            target.kind = kind;
+            if kind == TargetKind::Files {
+                target.path = Some(relative.clone());
+                target.paths = vec!["review.txt".into()];
+            } else {
+                target.workdir = Some(relative.clone());
+            }
+            let (runner, _, _) = open_wired(
+                &fake,
+                new_start_on(
+                    &root,
+                    target,
+                    vec![AgentKind::Claude.into(), AgentKind::Codex.into()],
+                    1,
+                ),
+            )
+            .unwrap();
+            let session = store::read_session(runner.engine.dir()).unwrap();
+            assert_eq!(session.workdir.as_deref(), Some(absolute.as_path()));
+            assert!(runner.engine.reply_dir().starts_with(&absolute));
+            assert!(store::target_dir(&runner.engine.reply_dir()).is_dir());
+            assert!(review::engine::check_store_paths(&session, runner.engine.dir()).is_ok());
+        }
+        let _ = fs::remove_dir_all(relative);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3747,6 +3883,68 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_reply_left_on_disk_does_not_block_its_correction() {
+        for invalid in [Some(&b"invalid json"[..]), Some(&b"\xff\xfe"[..]), None] {
+            let fake = fake();
+            let root = temp_root();
+            let mut runner = rig(&fake, &root);
+            let mut conn = fake.clone();
+            step(&mut runner, &mut conn);
+            let pane = fake.pane_of(":claude");
+            fake.report(pane, "input", None);
+            step(&mut runner, &mut conn);
+            step(&mut runner, &mut conn);
+            let claude = PartId::new("claude");
+            let path = store::reply_path(&runner.engine.reply_dir(), 1, &claude);
+            match invalid {
+                Some(bytes) => fs::write(&path, bytes).unwrap(),
+                None => fs::create_dir(&path).unwrap(),
+            }
+            assert!(runner.poll_replies().is_ok());
+            fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+            assert!(runner.poll_replies().is_ok());
+            let receipt = |runner: &Runner<Fake, Fake>| {
+                runner
+                    .engine
+                    .session()
+                    .round(1)
+                    .unwrap()
+                    .brief(&claude)
+                    .unwrap()
+                    .receipt
+                    .clone()
+            };
+            assert_eq!(receipt(&runner).retries, 1);
+            // Recreate a cleared file as though its unlink failed; an
+            // unreadable directory cannot be unlinked in the first place.
+            if let Some(bytes) = invalid {
+                fs::write(&path, bytes).unwrap();
+            }
+            let pasted = fake.pasted(pane);
+            assert!(runner.deliver_sends(&mut conn).is_ok());
+            assert_eq!(fake.pasted(pane), pasted + 1, "the correction was held");
+            assert!(runner.poll_replies().is_ok());
+            fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+            assert!(runner.poll_replies().is_ok());
+            assert_eq!(
+                receipt(&runner).retries,
+                1,
+                "a leftover spent another retry"
+            );
+            if invalid.is_none() {
+                fs::remove_dir(&path).unwrap();
+            }
+            fs::write(&path, r#"{"summary":"Reviewed the target."}"#).unwrap();
+            assert!(runner.poll_replies().is_ok());
+            fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
+            assert!(runner.poll_replies().is_ok());
+            assert!(receipt(&runner).replied.is_some());
+            drop(runner);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn a_reply_that_is_not_utf8_is_turned_down_and_counts_against_the_retries() {
         let fake = fake();
         let root = temp_root();
@@ -3771,7 +3969,9 @@ mod tests {
                 .clone()
         };
         for n in 1..=CONFIG.max_retries + 1 {
-            fs::write(&path, b"{\"summary\": \"\xff\xfe\"}").unwrap();
+            let mut content = format!("{{\"summary\": \"attempt {n}: ").into_bytes();
+            content.extend_from_slice(b"\xff\xfe\"}");
+            fs::write(&path, content).unwrap();
             step(&mut runner, &mut conn);
             fake.0.borrow_mut().now += REPLY_STABLE_FOR + 1;
             step(&mut runner, &mut conn);

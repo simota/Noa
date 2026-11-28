@@ -1,23 +1,15 @@
 //! Link-safe file access. A review reads files an agent or a branch can
 //! shape (a snapshot source, a reply file, its own directories), so every
-//! path below a trusted base is walked component by component: a symbolic
-//! link anywhere on the way is refused, and the last component is opened
-//! with `O_NOFOLLOW`, so a link swapped in between the check and the open
-//! fails instead of being followed.
+//! path below a trusted base is opened component by component: a symbolic
+//! link anywhere on the way is refused, and files are accessed relative to
+//! the opened parent, so swapping its name for a link cannot redirect I/O.
 
 use std::ffi::{CString, OsStr};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Component, Path, PathBuf};
-
-/// `O_NOFOLLOW`: open fails on a symbolic link.
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW: i32 = 0x0100;
-#[cfg(target_os = "linux")]
-const O_NOFOLLOW: i32 = 0o400000;
+use std::path::{Component, Path};
 
 /// The error a link on the way gives.
 pub fn link_error(path: &Path) -> io::Error {
@@ -70,15 +62,32 @@ pub fn check_no_links(base: &Path, path: &Path) -> io::Result<()> {
 /// Opens `path` (under `base`) to read, refusing links on the way and at
 /// the end.
 pub fn open_read(base: &Path, path: &Path) -> io::Result<File> {
-    check_no_links(base, path)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(O_NOFOLLOW)
-        .open(path)?;
+    let name = path.file_name().ok_or_else(|| link_error(path))?;
+    let dir = open_dir(base, path.parent().unwrap_or(base), false)?;
+    open_read_at(&dir, name)
+}
+
+fn open_read_at(dir: &OwnedFd, name: &OsStr) -> io::Result<File> {
+    let name = c_name(name)?;
+    // O_NONBLOCK lets a FIFO be rejected by metadata without waiting for a
+    // writer. It does not change reads of regular files.
+    // SAFETY: `dir` is an open directory and `name` a C string.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just opened and nothing else owns it.
+    let file = unsafe { File::from_raw_fd(fd) };
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{} は通常のファイルではありません", path.display()),
+            format!("{} は通常のファイルではありません", name.to_string_lossy()),
         ));
     }
     Ok(file)
@@ -96,58 +105,83 @@ pub fn read_capped(file: File, cap: u64) -> io::Result<(Vec<u8>, bool)> {
 /// Creates the directories of `path` below `base` that do not exist yet,
 /// refusing any link on the way.
 pub fn create_dirs(base: &Path, path: &Path) -> io::Result<()> {
-    check_no_links(base, path)?;
-    let rest = path
-        .strip_prefix(base)
-        .map_err(|_| link_error(path))?
-        .to_path_buf();
-    let mut at = base.to_path_buf();
-    for part in rest.components() {
-        at.push(part);
-        match fs::create_dir(&at) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let meta = fs::symlink_metadata(&at)?;
-                if meta.file_type().is_symlink() || !meta.is_dir() {
-                    return Err(link_error(&at));
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
+    open_dir(base, path, true).map(drop)
 }
 
 /// Writes `bytes` to `path` (under `base`) whole: into a temporary file
 /// created exclusively beside it, then renamed over it. A link left where
 /// the temporary file or `path` would go is never written through.
 pub fn write_replace(base: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let name = path.file_name().ok_or_else(|| link_error(path))?;
+    let dir = open_dir(base, path.parent().unwrap_or(base), false)?;
+    write_replace_at(&dir, name, bytes)
+}
+
+fn write_replace_at(dir: &OwnedFd, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    let parent = path.parent().unwrap_or(base);
-    check_no_links(base, parent)?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp: PathBuf = parent.join(format!(
-        ".{name}.{}-{}.tmp",
+    let tmp = c_name(OsStr::new(&format!(
+        ".{}.{}-{}.tmp",
+        name.to_string_lossy(),
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(O_NOFOLLOW)
-        .open(&tmp)?;
+    )))?;
+    let name = c_name(name)?;
+    // SAFETY: `dir` is an open directory and `tmp` a C string.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            tmp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just opened and nothing else owns it.
+    let mut file = unsafe { File::from_raw_fd(fd) };
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
-    drop(file);
-    if let Err(e) = written.and_then(|()| fs::rename(&tmp, path)) {
-        let _ = fs::remove_file(&tmp);
+    let renamed = written.and_then(|()| {
+        // SAFETY: both names are C strings, relative to the same open directory.
+        if unsafe {
+            libc::renameat(
+                dir.as_raw_fd(),
+                tmp.as_ptr(),
+                dir.as_raw_fd(),
+                name.as_ptr(),
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    });
+    if let Err(e) = renamed {
+        let _ = remove_if_same_at(dir, OsStr::from_bytes(tmp.as_bytes()), &file);
         return Err(e);
     }
     Ok(())
+}
+
+/// Removes a file through its opened parent; a link at the filename is
+/// removed itself, never followed.
+pub fn remove_file(base: &Path, path: &Path) -> io::Result<()> {
+    let name = path.file_name().ok_or_else(|| link_error(path))?;
+    let dir = open_dir(base, path.parent().unwrap_or(base), false)?;
+    remove_file_at(&dir, name)
+}
+
+fn remove_file_at(dir: &OwnedFd, name: &OsStr) -> io::Result<()> {
+    let name = c_name(name)?;
+    // SAFETY: `dir` is an open directory and `name` a C string.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// `name` as a C string for the `*at` calls.
@@ -295,6 +329,7 @@ pub fn write_new(base: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
 
     fn temp(name: &str) -> PathBuf {
         let dir =
@@ -388,6 +423,46 @@ mod tests {
             &open_dir(&base, &base.join("a/deeper"), true).unwrap_err()
         ));
         assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn reads_replacements_and_removals_stay_in_the_opened_directory() {
+        let base = temp("io-swap");
+        let outside = temp("io-swap-outside");
+        fs::create_dir(base.join("a")).unwrap();
+        fs::write(base.join("a/f"), "inside").unwrap();
+        fs::write(outside.join("f"), "outside").unwrap();
+        let dir = open_dir(&base, &base.join("a"), false).unwrap();
+        fs::rename(base.join("a"), base.join("a-old")).unwrap();
+        symlink(&outside, base.join("a")).unwrap();
+
+        let mut text = String::new();
+        open_read_at(&dir, OsStr::new("f"))
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "inside");
+        write_replace_at(&dir, OsStr::new("f"), b"replaced").unwrap();
+        assert_eq!(
+            fs::read_to_string(base.join("a-old/f")).unwrap(),
+            "replaced"
+        );
+        remove_file_at(&dir, OsStr::new("f")).unwrap();
+        assert!(!base.join("a-old/f").exists());
+        assert_eq!(fs::read_to_string(outside.join("f")).unwrap(), "outside");
+    }
+
+    #[test]
+    fn named_pipes_are_rejected_without_waiting_for_a_writer() {
+        let base = temp("fifo");
+        let path = base.join("reply.json");
+        let name = c_name(path.as_os_str()).unwrap();
+        // SAFETY: `name` is a C string naming a new entry in the test directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let error = open_read(&base, &path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("通常のファイルではありません"));
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

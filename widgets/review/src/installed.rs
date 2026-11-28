@@ -5,7 +5,8 @@
 //! a bare `PATH`. So the check asks that same shell, not this process.
 
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,6 +23,9 @@ const POLL: Duration = Duration::from_millis(20);
 /// How long the output is waited for after the shell exited (a background
 /// job of an rc file may hold the pipe open).
 const DRAIN: Duration = Duration::from_millis(500);
+/// Shell startup output is untrusted in size; only three short markers
+/// are needed to answer the probe.
+const OUTPUT_MAX: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Installed {
@@ -64,54 +68,86 @@ fn probe_script() -> String {
 }
 
 fn run(shell: &str, script: &str, timeout: Duration) -> Installed {
-    let mut child = match Command::new(shell)
-        .args(["-l", "-i", "-c", script])
+    // Bash 3.2 can restore job control after startup even without a tty.
+    // Keep probe commands in the shell's group so `finish` also stops
+    // their background jobs; the login startup files still run normally.
+    let script = format!("set +m; {script}");
+    let mut command = Command::new(shell);
+    command
+        .args(["-l", "-i", "-c", &script])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .stdout(Stdio::piped())
-        .spawn()
-    {
+        .stdout(Stdio::piped());
+    // SAFETY: setsid is async-signal-safe; the child is placed in its own
+    // session before exec so terminating the probe cannot signal Noa.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => return Installed::Unknown(format!("{shell} を起動できません: {e}")),
     };
     // Read as it comes, so a chatty rc file cannot fill the pipe and stall
     // the shell, and what was printed survives a pipe that stays open.
-    let out = Arc::new(Mutex::new(Vec::new()));
+    let out = Arc::new(Mutex::new(Ok(Vec::new())));
     let (done_tx, done_rx) = mpsc::channel();
     if let Some(mut stdout) = child.stdout.take() {
         let out = Arc::clone(&out);
         std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
-            while let Ok(n) = stdout.read(&mut chunk) {
-                if n == 0 {
-                    break;
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Ok(bytes) = &mut *out {
+                            if n > OUTPUT_MAX.saturating_sub(bytes.len()) {
+                                *out = Err("ログインシェルの出力が大きすぎます".to_owned());
+                            } else {
+                                bytes.extend(&chunk[..n]);
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        *out.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Err(format!("ログインシェルの出力を読めません: {e}"));
+                        break;
+                    }
                 }
-                out.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .extend(&chunk[..n]);
             }
             let _ = done_tx.send(());
         });
     }
     let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+    loop {
+        match exited(&child) {
+            Ok(true) => break,
+            Ok(false) if Instant::now() < deadline => std::thread::sleep(POLL),
+            Ok(false) => {
+                let _ = finish(&mut child);
                 return Installed::Unknown(format!(
                     "{}秒以内に応答がありません",
                     timeout.as_secs()
                 ));
             }
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = finish(&mut child);
                 return Installed::Unknown(format!("{shell} の終了を確認できません: {e}"));
             }
         }
+    }
+    // An rc file may leave a background process holding stdout open, even
+    // after a successful probe. Stop the group before reaping its leader,
+    // whose unreaped pid prevents the group id being reused.
+    let status = match finish(&mut child) {
+        Ok(status) => status,
+        Err(e) => return Installed::Unknown(format!("{shell} の終了を確認できません: {e}")),
     };
     // The probe ends with `exit 0`: anything else means the shell could
     // not run it (a syntax it does not take, a failing rc file).
@@ -121,9 +157,43 @@ fn run(shell: &str, script: &str, timeout: Duration) -> Installed {
             None => "ログインシェルで確認できませんでした（シグナルで終了）".to_owned(),
         });
     }
-    let _ = done_rx.recv_timeout(DRAIN);
-    let bytes = out.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    Installed::Found(parse(&String::from_utf8_lossy(&bytes)))
+    if done_rx.recv_timeout(DRAIN).is_err() {
+        return Installed::Unknown("ログインシェルの出力を読み終えられません".to_owned());
+    }
+    match &*out.lock().unwrap_or_else(|e| e.into_inner()) {
+        Ok(bytes) => Installed::Found(parse(&String::from_utf8_lossy(bytes))),
+        Err(why) => Installed::Unknown(why.clone()),
+    }
+}
+
+/// Observe exit without releasing the pid used by `finish` to name the
+/// probe's process group. macOS also reports stopped children here, so
+/// only an exit status counts.
+fn exited(child: &Child) -> std::io::Result<bool> {
+    // SAFETY: zero is a valid initial value for the output-only siginfo_t.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: info is writable and child.id() names our unreaped child.
+    if unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    } == -1
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(info.si_signo != 0 && (libc::CLD_EXITED..=libc::CLD_DUMPED).contains(&info.si_code))
+}
+
+fn finish(child: &mut Child) -> std::io::Result<ExitStatus> {
+    // SAFETY: setsid made the unreaped child's pid its process group id;
+    // no process outside this probe belongs to that group.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    child.wait()
 }
 
 /// The kinds `stdout` of the probe names, in [`AgentKind::ALL`] order and
@@ -210,6 +280,81 @@ mod tests {
         let got = run("/bin/sh", "sleep 30", Duration::from_millis(200));
         assert!(matches!(got, Installed::Unknown(_)), "{got:?}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn excessive_shell_output_is_unknown_instead_of_an_incomplete_agent_list() {
+        let line = "x".repeat(1024);
+        let script = format!(
+            "i=0; while [ \"$i\" -lt 80 ]; do printf '%s' '{line}'; i=$((i+1)); done; \
+             printf '\\nnoa-agent:codex\\n'"
+        );
+        assert_eq!(
+            run("/bin/sh", &script, Duration::from_secs(5)),
+            Installed::Unknown("ログインシェルの出力が大きすぎます".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_jobs_do_not_survive_a_finished_or_timed_out_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("review-installed-children-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // macOS's Bash 3.2 can leave monitor mode on after startup even
+        // without a terminal. Reproduce that state on Linux as well.
+        let monitor_shell = dir.join("monitor-shell");
+        std::fs::write(&monitor_shell, "#!/bin/bash\nset -m\neval \"$4\"\n").unwrap();
+        std::fs::set_permissions(&monitor_shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let trigger = dir.join("continue");
+        let waiting = format!(
+            "while [ ! -e '{}' ]; do sleep 0.02; done",
+            trigger.display()
+        );
+        let mut results = Vec::new();
+        for (shell_name, shell) in [
+            ("system", "/bin/sh"),
+            ("monitor", monitor_shell.to_str().unwrap()),
+        ] {
+            for (name, tail, succeeds) in [
+                ("finished", "echo noa-agent:codex; exit 0", true),
+                ("timed-out", waiting.as_str(), false),
+            ] {
+                let marker = dir.join(format!("{shell_name}-{name}"));
+                let script = format!(
+                    "({waiting}; printf survived > '{}') & {tail}",
+                    marker.display()
+                );
+                let timeout = if succeeds {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(100)
+                };
+                results.push((marker, succeeds, run(shell, &script, timeout)));
+            }
+        }
+        // Release any escaped jobs before assertions, so a regression
+        // fails without leaving a background loop running after the test.
+        std::fs::write(trigger, "continue").unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        for (marker, succeeds, result) in results {
+            if succeeds {
+                assert_eq!(
+                    result,
+                    Installed::Found(vec![AgentKind::Codex]),
+                    "{}",
+                    marker.display()
+                );
+            } else {
+                assert!(matches!(result, Installed::Unknown(_)), "{result:?}");
+            }
+            assert!(!marker.exists(), "{} survived", marker.display());
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]

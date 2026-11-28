@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Review captures Git changes without running repository filters or hooks or
+  refreshing the original index. Type changes, index-only removals, and paths
+  containing spaces or literal backslashes keep the correct snapshot and
+  finding locations.
+- Review opens snapshot, reply, and report files through their parent directory
+  descriptors, rejects non-regular reply files without blocking, and refuses
+  symlinked session logs. Relative working directories are resolved before
+  agents start.
+- Review keeps correction attempts available when an old rejected reply cannot
+  be removed, backs off after connection failures, and bounds the installed-agent
+  probe's output while cleaning up its child processes. Resuming a session checks
+  its panel and round limit, and finding updates preserve a non-empty rationale.
+- Review prevents duplicate starts, reveals findings reached through links even
+  when filters hide them, and shows cumulative file coverage consistently in the
+  matrix and report. Footer controls and their keyboard focus rings stay inside
+  the window at compact sizes.
 - Verify rejects blocking reply files and reads, replaces, or removes them
   through checked directory handles. Re-run status errors no longer stop
   timeout monitoring, and stored logs are rechecked before being displayed

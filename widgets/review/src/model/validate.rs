@@ -121,7 +121,9 @@ fn check_location(
 ) -> Option<Location> {
     let raw = raw?;
     let before = problems.len();
-    let path = raw.path.trim().trim_start_matches("./").to_owned();
+    // Spaces can be part of a captured file name. Trimming could silently
+    // attach evidence to a different file and validate against its lines.
+    let path = raw.path.trim_start_matches("./").to_owned();
     if path.is_empty() {
         problems.push(format!("{at}.path is empty"));
     } else if path.starts_with('/') || path.split('/').any(|part| part == "..") {
@@ -473,7 +475,6 @@ pub fn parse_review(
 
     let coverage = raw.coverage.map(|c| {
         let mut check = |entry: &str, at: &str| {
-            let entry = entry.trim();
             if !session.manifest.matches(entry) {
                 problems.push(format!(
                     "{at} {entry:?} is not a target file, a directory ending in '/' that holds one, or \"*\""
@@ -498,6 +499,11 @@ pub fn parse_review(
                 )
             })
             .collect();
+        for (i, (_, reason)) in skipped.iter().enumerate() {
+            if reason.is_empty() {
+                problems.push(format!("coverage.skipped[{i}].reason is empty"));
+            }
+        }
         Coverage { reviewed, skipped }
     });
 
@@ -860,6 +866,9 @@ pub fn parse_lead(
                     check_lead_claim(claim, &at, &mut problems);
                 }
                 let rationale = rationale.map(|r| r.trim().to_owned());
+                if rationale.as_deref().is_some_and(str::is_empty) {
+                    problems.push(format!("{at}.rationale is empty"));
+                }
                 let fix = fix.map(|f| f.trim().to_owned());
                 let changes = claim.is_some()
                     || has_location

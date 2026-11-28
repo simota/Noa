@@ -97,24 +97,148 @@ fn write_file(root: &Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
 /// Git with every setting that changes the output it is parsed from pinned.
 fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
+    // A widget launched from a hook or another worktree must still read
+    // the repository selected by the person, not the inherited Git state.
+    for (name, _) in std::env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            cmd.env_remove(name);
+        }
+    }
     cmd.arg("-C").arg(dir);
     for setting in [
         "core.quotePath=false",
+        "core.hooksPath=/dev/null",
+        "core.fsmonitor=false",
+        "core.bigFileThreshold=512m",
         "color.ui=never",
         "diff.noprefix=false",
         "diff.mnemonicPrefix=false",
         "diff.relative=false",
         "diff.external=",
         "diff.renames=true",
+        "diff.renameLimit=1000",
         "diff.algorithm=myers",
         "diff.indentHeuristic=true",
+        "diff.interHunkContext=0",
+        "diff.suppressBlankEmpty=false",
+        "diff.submodule=short",
+        "diff.ignoreSubmodules=none",
     ] {
         cmd.args(["-c", setting]);
     }
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
-        .env_remove("GIT_EXTERNAL_DIFF");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C");
     cmd
+}
+
+/// Clean/process filters are commands, even during a read-only diff.
+/// Disable every configured driver so the patch describes the same raw
+/// bytes as the files copied from the worktree.
+fn filter_drivers(repo: &Path) -> Result<Vec<String>, String> {
+    let mut cmd = git(repo);
+    cmd.args(["config", "-z", "--name-only", "--get-regexp", r"^filter\."]);
+    let listing = run_capped(cmd, &[0, 1], MAX_LISTING_BYTES).map_err(|e| match e {
+        RunError::TooLarge => "git の設定が大きすぎます".to_owned(),
+        RunError::Failed(why) => why,
+    })?;
+    let mut drivers = std::collections::BTreeSet::new();
+    for key in nul_fields(&listing)? {
+        if let Some((driver, _)) = key.strip_prefix("filter.").and_then(|s| s.rsplit_once('.')) {
+            drivers.insert(driver.to_owned());
+        }
+    }
+    Ok(drivers.into_iter().collect())
+}
+
+fn git_unfiltered(repo: &Path, drivers: &[String]) -> Command {
+    let mut cmd = git(repo);
+    // Environment config keeps driver names containing '=' intact; -c
+    // would interpret the first '=' as the setting's value separator.
+    let settings: Vec<_> = drivers
+        .iter()
+        .flat_map(|driver| {
+            [
+                ("clean", ""),
+                ("smudge", ""),
+                ("process", ""),
+                ("required", "false"),
+            ]
+            .into_iter()
+            .map(move |(key, value)| (format!("filter.{driver}.{key}"), value))
+        })
+        .collect();
+    cmd.env("GIT_CONFIG_COUNT", settings.len().to_string());
+    for (i, (key, value)) in settings.into_iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{i}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
+    cmd
+}
+
+/// Git may refresh index stat information while diffing even with optional
+/// locks off. Give those commands a private copy, preserving its mtime so
+/// Git still detects entries changed in the same second as the index.
+struct IndexCopy(PathBuf);
+
+impl Drop for IndexCopy {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+        let mut lock = self.0.clone().into_os_string();
+        lock.push(".lock");
+        let _ = fs::remove_file(lock);
+    }
+}
+
+impl IndexCopy {
+    fn of(repo: &Path) -> Result<Self, String> {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let index = PathBuf::from(std::ffi::OsString::from_vec(git_line(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        )?));
+        let cannot = |e: io::Error| format!("インデックスの写しを作れません: {e}");
+        let (copy, mut file) = loop {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let path = std::env::temp_dir().join(format!(
+                "noa-review-index-{}-{}-{stamp}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::File::options()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(file) => break (Self(path), file),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(cannot(e)),
+            }
+        };
+        match fs::File::open(&index) {
+            Ok(mut source) => {
+                io::copy(&mut source, &mut file).map_err(cannot)?;
+                file.set_modified(
+                    source
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .map_err(cannot)?,
+                )
+                .map_err(cannot)?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::remove_file(&copy.0).map_err(cannot)?;
+            }
+            Err(e) => return Err(cannot(e)),
+        }
+        Ok(copy)
+    }
 }
 
 #[derive(Debug)]
@@ -215,11 +339,14 @@ pub fn default_base(repo: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn nul_fields(bytes: &[u8]) -> Vec<String> {
+fn nul_fields(bytes: &[u8]) -> Result<Vec<String>, String> {
     bytes
         .split(|&b| b == 0)
         .filter(|f| !f.is_empty())
-        .map(|f| String::from_utf8_lossy(f).into_owned())
+        .map(|f| {
+            String::from_utf8(f.to_vec())
+                .map_err(|_| "UTF-8 ではないパスや設定名は取り込めません".to_owned())
+        })
         .collect()
 }
 
@@ -239,7 +366,9 @@ pub struct RawEntry {
 /// path after a rename or copy.
 pub fn parse_raw(bytes: &[u8]) -> Result<Vec<RawEntry>, String> {
     let fields: Vec<&[u8]> = bytes.split(|&b| b == 0).collect();
-    let text = |f: &[u8]| String::from_utf8_lossy(f).into_owned();
+    let text = |f: &[u8]| {
+        String::from_utf8(f.to_vec()).map_err(|_| "UTF-8 ではないパスは取り込めません".to_owned())
+    };
     let mut out = Vec::new();
     let mut i = 0;
     while i < fields.len() {
@@ -248,7 +377,7 @@ pub fn parse_raw(bytes: &[u8]) -> Result<Vec<RawEntry>, String> {
             i += 1;
             continue;
         }
-        let head = text(head);
+        let head = text(head)?;
         let parts: Vec<&str> = head.trim_start_matches(':').split(' ').collect();
         let [old_mode, new_mode, _old_sha, new_sha, status] = parts[..] else {
             return Err(format!("git diff --raw を読めません: {head:?}"));
@@ -259,9 +388,9 @@ pub fn parse_raw(bytes: &[u8]) -> Result<Vec<RawEntry>, String> {
             return Err("git diff --raw が途中で切れています".to_owned());
         }
         let (from, path) = if paths == 2 {
-            (Some(text(fields[i + 1])), text(fields[i + 2]))
+            (Some(text(fields[i + 1])?), text(fields[i + 2])?)
         } else {
-            (None, text(fields[i + 1]))
+            (None, text(fields[i + 1])?)
         };
         out.push(RawEntry {
             status: code,
@@ -274,6 +403,18 @@ pub fn parse_raw(bytes: &[u8]) -> Result<Vec<RawEntry>, String> {
         i += 1 + paths;
     }
     Ok(out)
+}
+
+/// A file type change is one raw entry but two patch sections: the old
+/// type's deletion followed by the new type's addition.
+fn sections(entry: &RawEntry) -> usize {
+    let kind = |mode: &str| u32::from_str_radix(mode, 8).map_or(0, |mode| mode & 0o170000);
+    let (old, new) = (kind(&entry.old_mode), kind(&entry.new_mode));
+    if old != 0 && new != 0 && old != new {
+        2
+    } else {
+        1
+    }
 }
 
 /// Per file of a unified diff: additions, deletions and the new side's
@@ -453,6 +594,8 @@ fn too_large_diff(bytes: u64) -> String {
 }
 
 fn diff_view(repo: &Path, target: &Target, range: &[String]) -> Result<DiffView, String> {
+    let drivers = filter_drivers(repo)?;
+    let index = IndexCopy::of(repo)?;
     let common = [
         "--no-ext-diff",
         "--no-textconv",
@@ -460,7 +603,8 @@ fn diff_view(repo: &Path, target: &Target, range: &[String]) -> Result<DiffView,
         "--no-relative",
         "--find-renames",
     ];
-    let mut cmd = git(repo);
+    let mut cmd = git_unfiltered(repo, &drivers);
+    cmd.env("GIT_INDEX_FILE", &index.0);
     cmd.arg("diff")
         .args(common)
         .args(["--unified=3", "--src-prefix=a/", "--dst-prefix=b/"])
@@ -472,7 +616,8 @@ fn diff_view(repo: &Path, target: &Target, range: &[String]) -> Result<DiffView,
         Err(RunError::TooLarge) => return Err(too_large_diff(MAX_DIFF_BYTES)),
         Err(RunError::Failed(why)) => return Err(why),
     };
-    let mut cmd = git(repo);
+    let mut cmd = git_unfiltered(repo, &drivers);
+    cmd.env("GIT_INDEX_FILE", &index.0);
     cmd.arg("diff")
         .args(common)
         .args(["--raw", "-z", "--no-abbrev"])
@@ -482,10 +627,11 @@ fn diff_view(repo: &Path, target: &Target, range: &[String]) -> Result<DiffView,
     let raw = parse_raw(&run(cmd, MAX_LISTING_BYTES)?)?;
     let mut untracked = Vec::new();
     if target.head == Head::Worktree {
-        let mut cmd = git(repo);
+        let mut cmd = git_unfiltered(repo, &drivers);
+        cmd.env("GIT_INDEX_FILE", &index.0);
         cmd.args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
             .args(&target.paths);
-        untracked = nul_fields(&run(cmd, MAX_LISTING_BYTES)?);
+        untracked = nul_fields(&run(cmd, MAX_LISTING_BYTES)?)?;
         untracked.retain(|p| !p.split('/').any(|part| part == ".noa"));
     }
     // An untracked link has no patch here (a link to a folder gives none
@@ -505,7 +651,7 @@ fn diff_view(repo: &Path, target: &Target, range: &[String]) -> Result<DiffView,
             continue;
         }
         let left = MAX_DIFF_BYTES - patch.len() as u64;
-        let mut cmd = git(repo);
+        let mut cmd = git_unfiltered(repo, &drivers);
         cmd.args(["diff", "--no-index"]).args(common).args([
             "--unified=3",
             "--src-prefix=a/",
@@ -595,7 +741,8 @@ fn capture_git(
         return Err("差分がありません".to_owned());
     }
     let stats = parse_sections(&String::from_utf8_lossy(&view.patch));
-    let patched = view.raw.len() + view.untracked.iter().filter(|p| !p.ends_with('/')).count();
+    let patched = view.raw.iter().map(sections).sum::<usize>()
+        + view.untracked.iter().filter(|p| !p.ends_with('/')).count();
     if stats.len() != patched {
         return Err(format!(
             "差分を読み取れません（ファイル {patched} 件に対してパッチ {} 件）",
@@ -613,7 +760,15 @@ fn capture_git(
     };
     let mut stats = stats.into_iter();
     for entry in &view.raw {
-        let stat = stats.next().unwrap_or_default();
+        let mut stat = stats.next().unwrap_or_default();
+        if sections(entry) == 2 {
+            let added = stats.next().unwrap_or_default();
+            stat = DiffStat {
+                additions: stat.additions + added.additions,
+                deletions: stat.deletions + added.deletions,
+                changed: added.changed,
+            };
+        }
         let status = match entry.status {
             'A' => FileStatus::Added,
             'D' => FileStatus::Deleted,
@@ -627,6 +782,11 @@ fn capture_git(
             continue;
         }
         if status == FileStatus::Deleted {
+            // `git rm --cached` leaves the same path untracked: the
+            // post-image below is the one manifest entry for that path.
+            if view.untracked.contains(&entry.path) || view.links.contains(&entry.path) {
+                continue;
+            }
             collector.files.push(TargetFile {
                 path: entry.path.clone(),
                 status,
@@ -720,7 +880,10 @@ fn capture_git(
 /// differ from `head`: the work tree against the commit, as the snapshot is
 /// read, so a change only staged and undone in the work tree is none.
 fn differs(repo: &Path, head: &str, paths: &[String]) -> Result<bool, String> {
-    let output = git(repo)
+    let drivers = filter_drivers(repo)?;
+    let index = IndexCopy::of(repo)?;
+    let output = git_unfiltered(repo, &drivers)
+        .env("GIT_INDEX_FILE", &index.0)
         .args([
             "diff",
             "--quiet",
@@ -747,29 +910,43 @@ fn walk_skips(name: &str) -> bool {
     name.starts_with('.') || name == "target" || name == "node_modules"
 }
 
+fn push_unique(paths: &mut Vec<String>, path: String) {
+    if !paths.contains(&path) {
+        paths.push(path);
+    }
+}
+
+fn utf8_name(name: std::ffi::OsString) -> io::Result<String> {
+    name.into_string().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "UTF-8 ではないパスは取り込めません",
+        )
+    })
+}
+
 /// Lists the files under `rel` (below `root`), never following a link:
-/// links are listed in `links` instead.
+/// links are listed in `links` instead. De-duplicate while collecting so
+/// overlapping selections cannot spend the cap before later files are read.
 fn walk(root: &Path, rel: &Path, out: &mut Vec<String>, links: &mut Vec<String>) -> io::Result<()> {
-    let mut entries: Vec<_> = fs::read_dir(root.join(rel))?
-        .filter_map(Result::ok)
-        .collect();
+    let mut entries = fs::read_dir(root.join(rel))?.collect::<io::Result<Vec<_>>>()?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = utf8_name(entry.file_name())?;
         if walk_skips(&name) {
             continue;
         }
         let kind = entry.file_type()?;
         let child = rel.join(&name);
-        let child_text = child.to_string_lossy().replace('\\', "/");
+        let child_text = child.to_str().expect("UTF-8 path components").to_owned();
         if kind.is_symlink() {
-            links.push(child_text);
+            push_unique(links, child_text);
         } else if kind.is_dir() {
             walk(root, &child, out, links)?;
         } else if kind.is_file() {
-            out.push(child_text);
+            push_unique(out, child_text);
         }
-        if out.len() > MAX_TARGET_FILES {
+        if out.len() + links.len() > MAX_TARGET_FILES {
             return Ok(());
         }
     }
@@ -794,7 +971,7 @@ fn capture_files(target: &Target, dest: &Path, now: Millis) -> Result<TargetMani
         let mut cmd = git(&root);
         cmd.args(["ls-files", "-co", "--exclude-standard", "-z", "--"])
             .args(&target.paths);
-        paths = nul_fields(&run(cmd, MAX_LISTING_BYTES)?);
+        paths = nul_fields(&run(cmd, MAX_LISTING_BYTES)?)?;
         // `.noa/` holds review snapshots of its own; never review them.
         paths.retain(|p| !p.split('/').any(|part| part == ".noa"));
         paths.sort();
@@ -803,29 +980,31 @@ fn capture_files(target: &Target, dest: &Path, now: Millis) -> Result<TargetMani
         walk(&root, Path::new(""), &mut paths, &mut links).map_err(|e| e.to_string())?;
     } else {
         for rel in &target.paths {
-            let Some(safe) = safe_relative(rel.trim()) else {
+            let Some(safe) = safe_relative(rel) else {
                 return Err(format!("パス {rel:?} はルートの外を指しています"));
             };
             let full = root.join(&safe);
-            let text = safe.to_string_lossy().replace('\\', "/");
+            let text = safe.to_str().expect("path from a String").to_owned();
             if fsx::check_no_links(&root, &full).is_err() {
-                links.push(text);
+                push_unique(&mut links, text);
                 continue;
             }
             match fs::symlink_metadata(&full) {
                 Ok(meta) if meta.is_dir() => {
                     walk(&root, &safe, &mut paths, &mut links).map_err(|e| e.to_string())?;
                 }
-                Ok(meta) if meta.is_file() => paths.push(text),
-                Ok(_) => links.push(text),
+                Ok(meta) if meta.is_file() => push_unique(&mut paths, text),
+                Ok(_) => push_unique(&mut links, text),
                 Err(_) => return Err(format!("{rel} が見つかりません")),
             }
         }
         paths.sort();
         paths.dedup();
     }
-    if paths.len() > MAX_TARGET_FILES {
-        return Err(too_many(paths.len()));
+    links.sort();
+    links.dedup();
+    if paths.len() + links.len() > MAX_TARGET_FILES {
+        return Err(too_many(paths.len() + links.len()));
     }
     let mut collector = Collector {
         dest,
@@ -1664,5 +1843,299 @@ mod tests {
             (Some("old"), "new")
         );
         assert_eq!(entries[2].new_mode, "160000");
+    }
+
+    #[test]
+    fn inherited_git_environment_does_not_change_the_target() {
+        const CHILD: &str = "NOA_REVIEW_CAPTURE_GIT_ENV_TEST";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let repo = PathBuf::from(path);
+            let dest = temp("git-env-child").join("target");
+            let manifest = capture(&git_target(&repo, Head::Worktree), &dest, 0).unwrap();
+            assert_eq!(manifest.repo, Some(fs::canonicalize(&repo).unwrap()));
+            assert_eq!(
+                fs::read_to_string(dest.join(FILES_DIR).join("a.txt")).unwrap(),
+                "one\nTWO\nthree\nfour\n"
+            );
+            return;
+        }
+        let selected = repo();
+        let other = repo();
+        fs::write(other.join("a.txt"), "wrong repository\n").unwrap();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "capture::tests::inherited_git_environment_does_not_change_the_target",
+                "--nocapture",
+            ])
+            .env(CHILD, &selected)
+            .env("GIT_DIR", other.join(".git"))
+            .env("GIT_WORK_TREE", &other)
+            .env("GIT_INDEX_FILE", other.join(".git/index"))
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "diff.suppressBlankEmpty")
+            .env("GIT_CONFIG_VALUE_0", "true")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        fs::remove_dir_all(selected).unwrap();
+        fs::remove_dir_all(other).unwrap();
+    }
+
+    #[test]
+    fn worktree_capture_runs_no_filter_and_preserves_the_index() {
+        let repo = repo();
+        sh(
+            &repo,
+            &[
+                "config",
+                "filter.up.clean",
+                "printf ran > clean-ran; tr a-z A-Z",
+            ],
+        );
+        sh(&repo, &["config", "filter.up.required", "true"]);
+        fs::write(
+            repo.join(".gitattributes"),
+            "up.txt filter=up\nnew-up.txt filter=up\n",
+        )
+        .unwrap();
+        fs::write(repo.join("up.txt"), "hello\n").unwrap();
+        sh(&repo, &["add", ".gitattributes", "up.txt"]);
+        sh(&repo, &["commit", "-q", "-m", "filtered"]);
+        fs::write(repo.join("up.txt"), "hello\nworld\n").unwrap();
+        fs::write(repo.join("new-up.txt"), "fresh\n").unwrap();
+        // Refreshing a file's stat cache must only affect the private index.
+        fs::write(repo.join("a.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+        fs::remove_file(repo.join("clean-ran")).unwrap();
+        let before = fs::read(repo.join(".git/index")).unwrap();
+
+        let dest = temp("no-filter").join("target");
+        let manifest = capture(&git_target(&repo, Head::Worktree), &dest, 0).unwrap();
+        assert!(!repo.join("clean-ran").exists());
+        assert_eq!(fs::read(repo.join(".git/index")).unwrap(), before);
+        assert_eq!(
+            manifest.file("up.txt").unwrap().digest,
+            digest_bytes(b"hello\nworld\n")
+        );
+        let diff = fs::read_to_string(dest.join(DIFF_FILE)).unwrap();
+        assert!(
+            diff.contains("+world\n") && diff.contains("+fresh\n"),
+            "{diff}"
+        );
+        verify(&dest, &manifest).unwrap();
+    }
+
+    #[test]
+    fn a_temporary_index_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = repo();
+        let copy = IndexCopy::of(&repo).unwrap();
+        assert_eq!(
+            fs::metadata(&copy.0).unwrap().permissions().mode() & 0o077,
+            0,
+            "the index contains private repository paths and staged object IDs"
+        );
+        assert_eq!(
+            fs::read(&copy.0).unwrap(),
+            fs::read(repo.join(".git/index")).unwrap()
+        );
+        let path = copy.0.clone();
+        drop(copy);
+        assert!(!path.exists());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn type_changes_keep_following_files_aligned_with_their_patch_sections() {
+        use std::os::unix::fs::symlink;
+        let repo = temp("type-changes");
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("to-link.txt"), "was a file\n").unwrap();
+        symlink("to-link.txt", repo.join("to-file.txt")).unwrap();
+        fs::write(repo.join("z.txt"), "one\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "base"]);
+        sh(&repo, &["checkout", "-q", "-b", "feat"]);
+        fs::remove_file(repo.join("to-link.txt")).unwrap();
+        symlink("z.txt", repo.join("to-link.txt")).unwrap();
+        fs::remove_file(repo.join("to-file.txt")).unwrap();
+        fs::write(repo.join("to-file.txt"), "now\na file\n").unwrap();
+        fs::write(repo.join("z.txt"), "one\ntwo\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "types"]);
+
+        for head in [Head::Ref("feat".into()), Head::Worktree] {
+            let dest = temp("type-changes-dest").join("target");
+            let manifest = capture(&git_target(&repo, head), &dest, 0).unwrap();
+            assert!(manifest.omitted.iter().any(|o| o.path == "to-link.txt"));
+            let file = manifest.file("to-file.txt").unwrap();
+            assert_eq!(
+                (file.additions, file.deletions, file.changed.clone()),
+                (2, 1, vec![(1, 2)])
+            );
+            let z = manifest.file("z.txt").unwrap();
+            assert_eq!(
+                (z.additions, z.deletions, z.changed.clone()),
+                (1, 0, vec![(2, 2)])
+            );
+            verify(&dest, &manifest).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_file_removed_only_from_the_index_has_one_live_manifest_entry() {
+        let repo = repo();
+        sh(&repo, &["rm", "--cached", "a.txt"]);
+        let dest = temp("untracked-again").join("target");
+        let manifest = capture(&git_target(&repo, Head::Worktree), &dest, 0).unwrap();
+        assert_eq!(
+            manifest.files.iter().filter(|f| f.path == "a.txt").count(),
+            1
+        );
+        let file = manifest.file("a.txt").unwrap();
+        assert_eq!(file.status, FileStatus::Untracked);
+        assert_eq!(file.lines, 4);
+        verify(&dest, &manifest).unwrap();
+    }
+
+    #[test]
+    fn blank_context_lines_keep_their_line_numbers_despite_git_settings() {
+        let repo = repo();
+        sh(&repo, &["checkout", "-q", "main"]);
+        fs::write(repo.join("a.txt"), "one\n\ntwo\n\nthree\n").unwrap();
+        sh(&repo, &["commit", "-q", "-am", "blank base"]);
+        fs::write(repo.join("a.txt"), "one\n\ntwo\n\nTHREE\n").unwrap();
+        sh(&repo, &["config", "diff.suppressBlankEmpty", "true"]);
+        let dest = temp("blank-lines").join("target");
+        let manifest = capture(&git_target(&repo, Head::Worktree), &dest, 0).unwrap();
+        assert_eq!(manifest.file("a.txt").unwrap().changed, vec![(5, 5)]);
+    }
+
+    #[test]
+    fn plain_files_keep_literal_backslashes_and_spaces_in_their_names() {
+        let root = temp("backslash");
+        fs::write(root.join("a\\b.txt"), "literal backslash\n").unwrap();
+        fs::write(root.join(" a.txt "), "spaces\n").unwrap();
+        let target = Target {
+            kind: TargetKind::Files,
+            path: Some(root),
+            base: None,
+            head: Head::Worktree,
+            paths: Vec::new(),
+            text: None,
+            workdir: None,
+        };
+        for paths in [Vec::new(), vec!["a\\b.txt".into(), " a.txt ".into()]] {
+            let dest = temp("backslash-dest").join("target");
+            let manifest = capture(
+                &Target {
+                    paths,
+                    ..target.clone()
+                },
+                &dest,
+                0,
+            )
+            .unwrap();
+            assert_eq!(manifest.files.len(), 2);
+            assert!(manifest.file("a\\b.txt").is_some());
+            assert!(manifest.file(" a.txt ").is_some());
+            assert_eq!(
+                fs::read_to_string(dest.join(FILES_DIR).join("a\\b.txt")).unwrap(),
+                "literal backslash\n"
+            );
+            assert_eq!(
+                fs::read_to_string(dest.join(FILES_DIR).join(" a.txt ")).unwrap(),
+                "spaces\n"
+            );
+            verify(&dest, &manifest).unwrap();
+        }
+    }
+
+    #[test]
+    fn overlapping_file_selections_count_unique_paths_before_enforcing_the_cap() {
+        use std::os::unix::fs::symlink;
+        let root = temp("overlapping-paths");
+        for (folder, count) in [("a", 300), ("b", 50)] {
+            fs::create_dir_all(root.join("folder").join(folder)).unwrap();
+            for n in 0..count {
+                fs::write(root.join(format!("folder/{folder}/{n:03}.txt")), "x\n").unwrap();
+            }
+        }
+        symlink("missing", root.join("folder/link")).unwrap();
+        let target = Target {
+            kind: TargetKind::Files,
+            path: Some(root.clone()),
+            base: None,
+            head: Head::Worktree,
+            paths: vec![
+                "folder/a".into(),
+                "folder".into(),
+                "folder/a/000.txt".into(),
+                "folder/link".into(),
+                "folder".into(),
+            ],
+            text: None,
+            workdir: None,
+        };
+        let dest = temp("overlapping-paths-dest").join("target");
+        let manifest = capture(&target, &dest, 0).unwrap();
+        assert_eq!(manifest.files.len(), 350);
+        assert!(manifest.file("folder/b/049.txt").is_some());
+        assert_eq!(manifest.omitted.len(), 1);
+        assert_eq!(manifest.omitted[0].path, "folder/link");
+        verify(&dest, &manifest).unwrap();
+
+        // More than 400 distinct entries is still refused, despite overlaps.
+        for n in 50..101 {
+            fs::write(root.join(format!("folder/b/{n:03}.txt")), "x\n").unwrap();
+        }
+        let refused = temp("overlapping-paths-over-cap").join("target");
+        assert!(
+            capture(&target, &refused, 0)
+                .unwrap_err()
+                .contains("ファイルが多すぎます")
+        );
+        assert!(!refused.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn non_utf8_paths_are_rejected_instead_of_aliasing_another_file() {
+        use std::os::unix::ffi::OsStringExt;
+        assert!(parse_raw(b":100644 100644 a b M\0bad-\xff\0").is_err());
+        assert!(nul_fields(b"bad-\xff\0").is_err());
+        // APFS rejects this name before a directory entry can be created.
+        // Exercise the walk's exact conversion on the original bytes on
+        // every platform, without relying on the filesystem accepting them.
+        let invalid = std::ffi::OsString::from_vec(b"bad-\xff".to_vec());
+        let error = utf8_name(invalid).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("UTF-8"));
+        assert_eq!(utf8_name("bad-�".into()).unwrap(), "bad-�");
+        let root = temp("non-utf8");
+        fs::write(root.join("bad-�"), "different file\n").unwrap();
+        let target = Target {
+            kind: TargetKind::Files,
+            path: Some(root),
+            base: None,
+            head: Head::Worktree,
+            paths: Vec::new(),
+            text: None,
+            workdir: None,
+        };
+        let dest = temp("non-utf8-dest").join("target");
+        let manifest = capture(&target, &dest, 0).unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].path, "bad-�");
+        assert_eq!(
+            fs::read_to_string(dest.join(FILES_DIR).join("bad-�")).unwrap(),
+            "different file\n"
+        );
+        verify(&dest, &manifest).unwrap();
     }
 }

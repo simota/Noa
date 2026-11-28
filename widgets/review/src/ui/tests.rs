@@ -255,6 +255,112 @@ fn a_refused_start_shows_why_under_the_form() {
     assert!(!screen.tree.is_hidden(screen.start.root));
 }
 
+#[test]
+fn a_pending_start_is_sent_once_and_a_refusal_allows_retry() {
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    let mut text = TextStore::new(Default::default());
+    start::fill(
+        &mut screen.tree,
+        &mut screen.start,
+        &document_form(),
+        &mut text,
+    );
+    act(&mut screen, Action::Start);
+    assert!(!screen.tree.is_enabled(screen.start.start_button));
+    screen.rebuild(&mut text);
+    assert!(!screen.tree.is_enabled(screen.start.start_button));
+    act(&mut screen, Action::Start);
+    assert!(matches!(&commands(&link)[..], [Command::Start { .. }]));
+
+    link.notices
+        .send((0, "対象を読み取れません".into()))
+        .unwrap();
+    screen.poll_live(&mut text);
+    assert!(screen.tree.is_enabled(screen.start.start_button));
+    act(&mut screen, Action::Start);
+    assert!(matches!(&commands(&link)[..], [Command::Start { .. }]));
+}
+
+#[test]
+fn leaving_a_pending_start_allows_another_review() {
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    let mut text = TextStore::new(Default::default());
+    start::fill(
+        &mut screen.tree,
+        &mut screen.start,
+        &document_form(),
+        &mut text,
+    );
+    act(&mut screen, Action::Start);
+    commands(&link);
+    act(&mut screen, Action::NewReview);
+    assert!(!screen.starting);
+    assert!(screen.tree.is_enabled(screen.start.start_button));
+    start::fill(
+        &mut screen.tree,
+        &mut screen.start,
+        &document_form(),
+        &mut text,
+    );
+    act(&mut screen, Action::Start);
+    assert!(matches!(
+        &commands(&link)[..],
+        [Command::Leave, Command::Start { .. }]
+    ));
+}
+
+#[test]
+fn resuming_from_history_sends_one_command_and_blocks_a_parallel_start() {
+    let root = temp_dir("resume-pending");
+    let dir = stored_unfinished(&root);
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    act(&mut screen, Action::ResumePast(dir.clone()));
+    assert!(screen.starting);
+    assert!(!screen.tree.is_enabled(screen.start.start_button));
+    act(&mut screen, Action::ResumePast(dir.clone()));
+    act(&mut screen, Action::Start);
+    assert_eq!(commands(&link), [Command::Resume { dir }]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn reviewing_again_from_history_cancels_a_pending_start() {
+    let root = temp_dir("again-pending");
+    let dir = stored_demo(&root);
+    let stored = store::read_session(&dir).unwrap();
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    let mut text = TextStore::new(Default::default());
+    start::fill(
+        &mut screen.tree,
+        &mut screen.start,
+        &document_form(),
+        &mut text,
+    );
+    act(&mut screen, Action::Start);
+    commands(&link);
+    act(&mut screen, Action::ReviewAgain(Some(dir)));
+    assert_eq!(commands(&link), [Command::Leave]);
+    assert!(!screen.starting);
+    assert!(screen.tree.is_enabled(screen.start.start_button));
+    assert_eq!(
+        start::read(&screen.tree, &screen.start),
+        start::Form::from_session(&stored)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_demo_start_does_not_leave_the_form_waiting_for_a_runner() {
+    let mut screen = Review::demo_start();
+    act(&mut screen, Action::Start);
+    assert!(!screen.starting);
+    assert!(screen.tree.is_enabled(screen.start.start_button));
+}
+
 /// The demo review's log up to the end of round 1 (unfinished), stored
 /// under `root`.
 fn stored_unfinished(root: &Path) -> PathBuf {
@@ -431,6 +537,102 @@ fn ac13_the_board_hides_a_merged_finding_until_merged_is_asked_for() {
     assert!(!shown(&screen).contains(&id));
     act(&mut screen, Action::ToggleStatus(FindingStatus::Merged));
     assert!(shown(&screen).contains(&id));
+}
+
+#[test]
+fn following_a_merged_finding_reveals_its_target_outside_the_filters() {
+    let mut session = crate::demo::held();
+    let id = session.findings[1].id.clone();
+    let into = session.findings[0].id.clone();
+    session.findings[1].status = FindingStatus::Merged;
+    session.findings[1].merged_into = Some(into.clone());
+    let (mut screen, _link) = live_with(session);
+    screen.filters.statuses = [status_key(FindingStatus::Merged)].into_iter().collect();
+    act(&mut screen, Action::SelectFinding(Some(id)));
+    let action = Action::RevealFinding(into.clone());
+    assert!(acts(&screen).contains(&action));
+    act(&mut screen, action);
+    assert_eq!(screen.shown_selection(), Some(into.as_str()));
+    assert_eq!(screen.tab, CenterTab::Findings);
+    screen.drop_hidden_selection();
+    assert_eq!(screen.selected.as_deref(), Some(into.as_str()));
+}
+
+#[test]
+fn a_finding_deep_link_reveals_a_settled_finding() {
+    let mut screen = Review::demo().with_view(None, Some("F4".into()));
+    assert_eq!(screen.shown_selection(), Some("F4"));
+    screen.drop_hidden_selection();
+    assert_eq!(screen.selected.as_deref(), Some("F4"));
+    let unknown = Review::demo().with_view(None, Some("missing".into()));
+    assert!(unknown.selected.is_none());
+}
+
+#[test]
+fn a_finding_link_keeps_keyboard_focus_in_the_visible_pane() {
+    for size in [(1440.0, 900.0), SMALLEST] {
+        let mut session = crate::demo::held();
+        let id = session.findings[1].id.clone();
+        let into = session.findings[0].id.clone();
+        session.findings[1].status = FindingStatus::Merged;
+        session.findings[1].merged_into = Some(into.clone());
+        let (mut screen, _link) = live_with(session);
+        screen.filters.statuses = [status_key(FindingStatus::Merged)].into_iter().collect();
+        // Layout caches belong to the text store that made them; keep that
+        // store through dispatch, as a real window does.
+        let mut text = TextStore::new(Default::default());
+        screen.handle_action(Action::SelectFinding(Some(id)), &mut text);
+        noa_gpui_platform::Screen::prepare(
+            &mut screen,
+            noa_gpui_scene::Size::new(size.0, size.1),
+            &mut text,
+        );
+        let link = widget_for(&screen, &Action::RevealFinding(into.clone())).unwrap();
+        screen.tree.set_focus(Some(link));
+        noa_gpui_platform::Screen::dispatch(
+            &mut screen,
+            noa_gpui_core::Event::KeyDown {
+                key: noa_gpui_core::Key::Space,
+                modifiers: Default::default(),
+            },
+            &mut text,
+        );
+        assert_eq!(
+            screen.focused_action().map(|(action, _)| action),
+            Some(Action::SelectFinding(None)),
+        );
+        assert_eq!(screen.shown_selection(), Some(into.as_str()));
+        if screen.compact {
+            assert!(screen.within(screen.tree.focused().unwrap(), screen.right_host));
+        }
+    }
+}
+
+#[test]
+fn file_coverage_does_not_show_reviewed_files_as_skipped() {
+    use review::model::types::Coverage;
+    for reviewed in ["src/", "*"] {
+        let mut session = crate::demo::held();
+        session.coverage.clear();
+        session.coverage.insert(
+            PartId::new("claude"),
+            Coverage {
+                reviewed: vec![reviewed.into()],
+                skipped: vec![
+                    ("src/store.rs".into(), "already covered".into()),
+                    ("docs/".into(), "not checked yet".into()),
+                ],
+            },
+        );
+        let (mut screen, _link) = live_with(session);
+        act(&mut screen, Action::ShowTab(CenterTab::Matrix));
+        let shown = labels_under(&screen.tree, screen.center_host);
+        assert!(!shown.iter().any(|line| line.contains("already covered")));
+        assert_eq!(
+            shown.iter().any(|line| line.contains("not checked yet")),
+            reviewed != "*",
+        );
+    }
 }
 
 /// Every file under `dir` with its bytes and modification time.
@@ -814,6 +1016,42 @@ fn the_progress_strip_fits_the_smallest_window() {
     for mut screen in [Review::demo(), Review::demo_held()] {
         lay_out(&mut screen, SMALLEST);
         assert_eq!(cut_off(&screen, screen.progress_host), vec![]);
+    }
+}
+
+#[test]
+fn the_status_bar_contains_its_controls_and_their_focus_rings() {
+    for size in [SMALLEST, (1440.0, 900.0)] {
+        for (name, mut screen) in [("held", Review::demo_held()), ("finished", Review::demo())] {
+            let mut text = TextStore::new(Default::default());
+            for tools_open in [false, true] {
+                if tools_open {
+                    screen.handle_action(Action::ToggleSessionTools, &mut text);
+                }
+                screen.prepare(noa_gpui_scene::Size::new(size.0, size.1), &mut text);
+                let bar = screen.tree.parent(screen.status_trailing).unwrap();
+                let footer = screen.tree.window_rect(bar).unwrap();
+                assert!(footer.y >= 0.0 && footer.bottom() <= size.1 + 0.5);
+                for host in [screen.status_leading, screen.status_trailing] {
+                    for &id in screen.tree.children(host) {
+                        let rect = screen.tree.window_rect(id).unwrap();
+                        // A focused button paints its ring three pixels beyond
+                        // the control. Both must stay inside the bottom strip.
+                        let ring = if screen.tree.get::<Button>(id).is_some() {
+                            3.0
+                        } else {
+                            0.0
+                        };
+                        assert!(
+                            rect.y - ring >= footer.y - 0.5
+                                && rect.bottom() + ring <= footer.bottom() + 0.5,
+                            "{name} {size:?}, tools open: {tools_open}: \
+                             control {rect:?} with ring {ring} outside footer {footer:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1399,8 +1637,10 @@ fn the_original_split_window_shows_as_much_of_the_findings_as_before() {
     // first row's top and the rows shown whole at the original split-window
     // minimum. Keep this historical comparison at the same geometry; compact
     // navigation at 720px is covered by the narrow-window tests separately.
-    let original_size = (LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH
-        + 2.0 * noa_gpui_core::widgets::DIVIDER, 600.0);
+    let original_size = (
+        LEFT_WIDTH + CENTER_MIN + RIGHT_WIDTH + 2.0 * noa_gpui_core::widgets::DIVIDER,
+        600.0,
+    );
     let root = std::env::temp_dir().join(format!("noa-review-rows-{}", std::process::id()));
     let stored = Review::stored(&stored_demo(&root)).unwrap();
     // The stored review opens its snapshot from the target card (L1-5).
@@ -3443,13 +3683,14 @@ fn session_tools_open_on_demand_without_hiding_the_next_action() {
     assert!(widget_for(&screen, &Action::CopyReport).is_none());
 }
 
-
 #[test]
 fn compact_layout_reuses_panes_and_preserves_the_search_draft() {
     let mut screen = Review::demo();
     let panes = screen.pane_roots;
     let search = screen.search;
-    screen.tree.update::<TextField, _>(search, |field, cx| field.set_text(cx, "長い日本語の検索下書き"));
+    screen.tree.update::<TextField, _>(search, |field, cx| {
+        field.set_text(cx, "長い日本語の検索下書き")
+    });
     let mut text = TextStore::new(Default::default());
     screen.prepare(noa_gpui_scene::Size::new(720.0, 700.0), &mut text);
     assert!(screen.compact);
@@ -3459,11 +3700,16 @@ fn compact_layout_reuses_panes_and_preserves_the_search_draft() {
         screen.prepare(noa_gpui_scene::Size::new(720.0, 700.0), &mut text);
         assert_eq!(screen.pane_roots, panes);
         assert!(!screen.tree.is_hidden(panes[pane]));
-        assert_eq!(screen.tree.get::<TextField>(search).unwrap().text(), "長い日本語の検索下書き");
+        assert_eq!(
+            screen.tree.get::<TextField>(search).unwrap().text(),
+            "長い日本語の検索下書き"
+        );
     }
     screen.prepare(noa_gpui_scene::Size::new(1440.0, 900.0), &mut text);
     assert!(!screen.compact);
-    for root in panes { assert!(!screen.tree.is_hidden(root)); }
+    for root in panes {
+        assert!(!screen.tree.is_hidden(root));
+    }
 }
 
 #[test]
@@ -3482,14 +3728,15 @@ fn find_from_a_compact_detail_reveals_and_focuses_the_existing_search() {
     assert_eq!(screen.tree.focused(), Some(screen.search));
 }
 
-
 #[test]
 fn refilling_a_past_session_clears_an_unrelated_task_handoff() {
     let mut screen = Review::demo();
     screen.start_origin = Some(task_links::OriginHint {
         base: "b".repeat(40),
-        repo: PathBuf::from("/unrelated"), task: "t-other".into(),
-        run: "run-other".into(), commit: "a".repeat(40),
+        repo: PathBuf::from("/unrelated"),
+        task: "t-other".into(),
+        run: "run-other".into(),
+        commit: "a".repeat(40),
     });
     act(&mut screen, Action::ReviewAgain(None));
     assert!(screen.start_origin.is_none());

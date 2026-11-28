@@ -138,6 +138,7 @@ pub(crate) struct WorkflowScreen {
     actions: Vec<(WidgetId, Action)>,
     fields: Vec<(WidgetId, Field)>,
     origin_task: Option<workflow::tasks::TaskOrigin>,
+    has_ember_draft: bool,
     preset_name: String,
     save_button: WidgetId,
     start_button: WidgetId,
@@ -206,6 +207,7 @@ impl WorkflowScreen {
     /// A draft from Ember uses the same explicit start form as a new task.
     /// There is no Tasks identity and no assumed connection to an Ember run.
     pub fn with_ember(mut self, objective: String) -> Self {
+        self.has_ember_draft = true;
         self.objective = objective;
         self.preparing_run = true;
         self.selected_run = None;
@@ -432,6 +434,7 @@ impl WorkflowScreen {
             actions,
             fields: Vec::new(),
             origin_task: None,
+            has_ember_draft: false,
             preset_name: String::new(),
             save_button,
             start_button,
@@ -1310,10 +1313,14 @@ impl WorkflowScreen {
         if self.view.deferred {
             self.label(host, "保存済みの実行を閲覧しています。このウィンドウからは自動再開しません。「以前の実行を再開」を押すと、この保存済みの工程が動作します。", 12.0, true);
         }
-        if self.origin_task.is_some() {
+        if self.origin_task.is_some() || self.has_ember_draft {
             self.button(
                 host,
-                "引継ぎタスクの開始フォームへ",
+                if self.has_ember_draft {
+                    "エンバーの開始フォームへ"
+                } else {
+                    "引継ぎタスクの開始フォームへ"
+                },
                 Action::Select(String::new()),
             );
         }

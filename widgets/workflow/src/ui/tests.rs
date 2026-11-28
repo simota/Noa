@@ -273,6 +273,32 @@ fn an_ember_handoff_prefills_a_form_without_resuming_an_existing_run() {
     assert_eq!(screen.objective, objective);
     assert_eq!(screen.view.run.as_ref().unwrap().id, existing_run);
     assert!(screen.channel.is_none());
+
+    screen.act(Action::SavedRun, &mut text).unwrap();
+    assert!(!screen.preparing_run);
+    let (button, return_to_draft) = screen
+        .actions
+        .iter()
+        .find(|(_, action)| matches!(action, Action::Select(id) if id.is_empty()))
+        .cloned()
+        .expect("an Ember handoff offers a return to its draft beside an active run");
+    assert!(screen.tree.is_enabled(button));
+    screen.act(return_to_draft, &mut text).unwrap();
+    assert!(screen.preparing_run && screen.view.deferred);
+    assert!(!screen.start_pending && !screen.can_start_run());
+    assert!(screen.origin_task.is_none());
+    assert_eq!(screen.objective, objective);
+    assert_eq!(screen.view.run.as_ref().unwrap().id, existing_run);
+    let objective_field = screen
+        .fields
+        .iter()
+        .find(|(_, field)| matches!(field, Field::Objective))
+        .unwrap()
+        .0;
+    assert_eq!(
+        screen.tree.get::<TextArea>(objective_field).unwrap().text(),
+        objective
+    );
 }
 
 #[test]

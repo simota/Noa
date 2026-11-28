@@ -345,7 +345,7 @@ mod tests {
                 .contains("<title>画像比較 — first</title>")
         );
         let sender = enqueue(&mut screen, id);
-        screen.leave();
+        screen.leave(&mut TextStore::new(Default::default()));
         assert!(sender.send(Ok(prepare("cancelled"))).is_err());
         assert!(screen.preview_job.is_none());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);

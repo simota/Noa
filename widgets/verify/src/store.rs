@@ -383,10 +383,7 @@ pub fn prepare_reply(base: &Path, path: &Path) -> io::Result<()> {
 
 /// Removes a reply file; a link on the way to it is refused.
 pub fn clear_reply(base: &Path, path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fsx::check_no_links(base, parent)?;
-    }
-    match fs::remove_file(path) {
+    match fsx::remove_file(base, path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         other => other,
     }
@@ -989,6 +986,48 @@ mod tests {
         assert_eq!(fs::read_to_string(victim.join("v")).unwrap(), "keep");
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(victim);
+    }
+
+    #[test]
+    fn a_fifo_reply_is_rejected_without_waiting_for_a_writer() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let base = temp_root("fifo-reply");
+        fs::create_dir_all(&base).unwrap();
+        let path = base.join("reply.json");
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `name` is a valid C string in this test's own directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (sent, received) = mpsc::channel();
+        let worker_base = base.clone();
+        let worker_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            sent.send(read_reply(&worker_base, &worker_path)).unwrap();
+        });
+        let result = received.recv_timeout(Duration::from_secs(2));
+        // Release an incorrectly blocking open before failing the test,
+        // so the regression never strands a worker or hangs the suite.
+        let writer = if result.is_err() {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .ok()
+        } else {
+            None
+        };
+        reader.join().unwrap();
+        drop(writer);
+        fs::remove_dir_all(base).unwrap();
+        let error = result
+            .expect("reading a FIFO reply must not wait for a writer")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

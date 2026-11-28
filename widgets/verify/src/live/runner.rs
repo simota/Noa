@@ -1824,20 +1824,23 @@ impl<C: Connect, K: Clock> Runner<C, K> {
             let started = round
                 .brief(part, BriefKind::Rerun)
                 .is_some_and(|b| b.receipt.started.is_some());
+            let limits = rerun::Limits {
+                // A foreground brief keeps waiting through the widget's
+                // own command limits and the gaps between commands.
+                run: RERUN_TIMEOUT,
+                next_start: self.config.start_timeout,
+            };
             self.reruns.push(RerunWatch {
                 round: round.no,
                 part: part.clone(),
                 dir: store::rerun_dir(&store::verifier_reply_dir(session, part), round.no, part),
                 base: store::verifier_root(session, part),
                 request: request.clone(),
-                watch: rerun::Watch::new(rerun::Limits {
-                    // The same for every kind: a foreground re-run brief
-                    // tells the agent to keep waiting on the run for as
-                    // long as every command's limit allows
-                    // (`rerun::foreground_limit`, L1-5 step 3).
-                    run: RERUN_TIMEOUT,
-                    next_start: self.config.start_timeout,
-                }),
+                watch: if started {
+                    rerun::Watch::resume(limits)
+                } else {
+                    rerun::Watch::new(limits)
+                },
                 started,
                 told: false,
             });
@@ -1852,6 +1855,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
     fn poll_reruns(&mut self) -> Result<(), Fail> {
         let now = self.clock.now();
         let mut inputs = Vec::new();
+        let mut notices = Vec::new();
         let mut idx = 0;
         while idx < self.reruns.len() {
             let session = self.engine.session();
@@ -1868,7 +1872,7 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 continue;
             }
             let w = &mut self.reruns[idx];
-            let status = match rerun::poll(&w.dir, &w.request, &mut w.watch, now) {
+            let status = match rerun::poll(&w.base, &w.dir, &w.request, &mut w.watch, now) {
                 Ok(status) => status,
                 Err(e) => {
                     if !w.told {
@@ -1880,6 +1884,14 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     continue;
                 }
             };
+            if !status.errors.is_empty() && !w.told {
+                w.told = true;
+                notices.push(format!(
+                    "{} の再実行状態を読めません: {}（期限の監視は続けます）",
+                    w.part,
+                    status.errors.join("; ")
+                ));
+            }
             if !w.started && status.items.iter().any(|i| i.pid.is_some()) {
                 w.started = true;
                 inputs.push(Input::RerunStarted {
@@ -1895,6 +1907,9 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                 continue;
             }
             idx += 1;
+        }
+        for notice in notices {
+            self.notice(notice);
         }
         let mut manifests = BTreeSet::new();
         for input in inputs {
@@ -1953,7 +1968,16 @@ impl<C: Connect, K: Clock> Runner<C, K> {
                     .items
                     .iter()
                     .find(|i| i.n == item.n)
-                    .and_then(|i| i.end.clone());
+                    .and_then(|i| i.end.clone())
+                    .map(|end| match end {
+                        rerun::End::NotRun(why) if !status.errors.is_empty() => {
+                            rerun::End::NotRun(format!(
+                                "{why} (unreadable re-run state: {})",
+                                status.errors.join("; ")
+                            ))
+                        }
+                        other => other,
+                    });
                 let reported = match session.evidence_item(&item.key).map(|e| &e.body) {
                     Some(EvidenceBody::Command { exit, .. }) => Some(*exit),
                     _ => None,

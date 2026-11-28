@@ -591,6 +591,9 @@ pub fn check_ruling(
 /// `pass_with_issues` lists in `blocking` everything that holds the change
 /// back: each `should` criterion not verified, each `must` one ruled
 /// `not_applicable`, each live defect.
+/// `fail` lists every failed `must` criterion. Neither `fail` nor
+/// `inconclusive` may name a verified criterion, or a `should` criterion
+/// ruled `not_applicable`, as blocking.
 pub fn check_verdict(
     session: &Session,
     rulings: &BTreeMap<String, Ruling>,
@@ -636,6 +639,23 @@ pub fn check_verdict(
     let failed_must = of(Priority::Must, RulingKind::Failed);
     let must_open = unverified(Priority::Must);
     let must_not_applicable = of(Priority::Must, RulingKind::NotApplicable);
+    let check_blockers = || {
+        for id in &verdict.blocking {
+            if let Some(criterion) = session.criterion(id)
+                && !matches!(
+                    kind(id),
+                    Some(RulingKind::Failed | RulingKind::Inconclusive)
+                )
+                && !(criterion.priority == Priority::Must
+                    && kind(id) == Some(RulingKind::NotApplicable))
+            {
+                return Err(format!(
+                    "verdict.blocking: {id} holds nothing back (only an unverified must criterion, a failed or inconclusive should criterion, or a live defect does)"
+                ));
+            }
+        }
+        Ok(())
+    };
     match verdict.decision {
         Decision::Pass | Decision::PassWithIssues if !must_open.is_empty() => Err(format!(
             "verdict: {} needs every must criterion verified; {} {} not",
@@ -713,6 +733,22 @@ pub fn check_verdict(
             "verdict: fail needs blocking to list what fails: {}",
             failed_must.join(", ")
         )),
+        Decision::Fail => {
+            check_blockers()?;
+            let missing: Vec<&str> = failed_must
+                .iter()
+                .copied()
+                .filter(|id| !verdict.blocking.iter().any(|blocking| blocking == id))
+                .collect();
+            if missing.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "verdict.blocking: missing {}; fail lists every failed must criterion",
+                    missing.join(", ")
+                ))
+            }
+        }
         Decision::Inconclusive if !failed_must.is_empty() => Err(format!(
             "verdict: {} (must) failed; the decision is fail",
             failed_must.join(", ")
@@ -720,6 +756,7 @@ pub fn check_verdict(
         Decision::Inconclusive if of(Priority::Must, RulingKind::Inconclusive).is_empty() => {
             Err("verdict: inconclusive needs a must criterion ruled inconclusive".to_owned())
         }
+        Decision::Inconclusive => check_blockers(),
         _ => Ok(()),
     }
 }
@@ -833,6 +870,85 @@ mod tests {
         testkit::accept_default_criteria(&mut rig);
         testkit::start_round_one(&mut rig);
         rig.engine.session().clone()
+    }
+
+    fn verdict_rulings(kinds: [RulingKind; 3]) -> BTreeMap<String, Ruling> {
+        kinds
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                (
+                    format!("AC-{}", index + 1),
+                    Ruling {
+                        round: 1,
+                        kind,
+                        rationale: "the recorded evidence".into(),
+                        evidence: Vec::new(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_verdict_lists_every_failed_must_criterion() {
+        let session = base();
+        let rulings =
+            verdict_rulings([RulingKind::Failed, RulingKind::Failed, RulingKind::Verified]);
+        let defects = [defect("D1")];
+        let mut verdict = Verdict {
+            decision: Decision::Fail,
+            rationale: "two required checks failed".into(),
+            blocking: vec!["AC-1".into(), "D1".into()],
+        };
+        assert_eq!(
+            check_verdict(&session, &rulings, &defects, &verdict),
+            Err("verdict.blocking: missing AC-2; fail lists every failed must criterion".into())
+        );
+        verdict.blocking.push("AC-2".into());
+        assert!(check_verdict(&session, &rulings, &defects, &verdict).is_ok());
+    }
+
+    #[test]
+    fn a_verdict_never_names_a_verified_or_inapplicable_should_as_blocking() {
+        let session = base();
+        let defects = [defect("D1")];
+        for decision in [Decision::Fail, Decision::Inconclusive] {
+            for should in [RulingKind::Verified, RulingKind::NotApplicable] {
+                let rulings = verdict_rulings([
+                    if decision == Decision::Fail {
+                        RulingKind::Failed
+                    } else {
+                        RulingKind::Inconclusive
+                    },
+                    RulingKind::Inconclusive,
+                    should,
+                ]);
+                let mut verdict = Verdict {
+                    decision,
+                    rationale: "required checks are not verified".into(),
+                    blocking: vec!["AC-1".into(), "AC-2".into(), "D1".into()],
+                };
+                assert!(check_verdict(&session, &rulings, &defects, &verdict).is_ok());
+                verdict.blocking.push("AC-3".into());
+                let error = check_verdict(&session, &rulings, &defects, &verdict).unwrap_err();
+                assert!(error.contains("AC-3 holds nothing back"), "{error}");
+            }
+        }
+        let rulings = verdict_rulings([
+            RulingKind::Inconclusive,
+            RulingKind::Verified,
+            RulingKind::NotApplicable,
+        ]);
+        let mut verdict = Verdict {
+            decision: Decision::Inconclusive,
+            rationale: "the first check is unresolved".into(),
+            blocking: Vec::new(),
+        };
+        assert!(check_verdict(&session, &rulings, &defects, &verdict).is_ok());
+        verdict.blocking.push("AC-2".into());
+        let error = check_verdict(&session, &rulings, &defects, &verdict).unwrap_err();
+        assert!(error.contains("AC-2 holds nothing back"), "{error}");
     }
 
     fn item<'s>(session: &'s mut Session, key: &str) -> &'s mut Evidence {

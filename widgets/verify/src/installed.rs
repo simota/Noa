@@ -306,43 +306,60 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_background_writer_loses_the_pipe_when_detection_returns() {
-        let dir = std::env::temp_dir().join(format!(
-            "verify-installed-background-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let release = dir.join("release");
-        let result = dir.join("result");
-        let quote =
-            |path: &std::path::Path| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
-        // The child cannot test the pipe until run has returned. Ignoring
-        // SIGPIPE lets it report whether the reader was actually closed.
-        let script = format!(
-            "(trap '' PIPE; exec 3>&1; n=0; \
-             while [ ! -e {} ] && [ \"$n\" -lt 500 ]; do n=$((n + 1)); sleep 0.01; done; \
-             if printf 'noa-agent:claude\\n' >&3; then printf open; else printf closed; fi > {}) & \
-             printf 'noa-agent:codex\\n'; exit 0",
-            quote(&release),
-            quote(&result),
-        );
-        let started = Instant::now();
-        let got = run("/bin/sh", &script, Duration::from_secs(5));
-        std::fs::write(&release, b"go").unwrap();
-        let until = Instant::now() + Duration::from_secs(5);
-        let output = loop {
-            if let Ok(output) = std::fs::read_to_string(&result)
-                && !output.is_empty()
-            {
-                break output;
-            }
-            assert!(Instant::now() < until, "background writer did not answer");
-            std::thread::sleep(POLL);
-        };
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(got, Installed::Found(vec![AgentKind::Codex]));
-        assert!(started.elapsed() < Duration::from_secs(5));
-        assert_eq!(output, "closed", "detection left a pipe reader behind");
+        for shell in ["/bin/sh", "/bin/bash"] {
+            let name = std::path::Path::new(shell)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let dir = std::env::temp_dir().join(format!(
+                "verify-installed-background-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let release = dir.join("release");
+            let result = dir.join("result");
+            let quote = |path: &std::path::Path| {
+                format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
+            };
+            // The child cannot test the pipe until run has returned. Ignoring
+            // SIGPIPE lets it report whether the reader was actually closed.
+            // Isolate printf's stdio in another subshell, whose stdout stays
+            // on the pipe: a failed builtin write may retain buffered bytes
+            // on macOS, which must not be flushed into the result file.
+            let script = format!(
+                "(trap '' PIPE; exec 3>&1; n=0; \
+                 while [ ! -e {} ] && [ \"$n\" -lt 500 ]; do n=$((n + 1)); sleep 0.01; done; \
+                 if (exec 1>&3; printf 'noa-agent:claude\\n'); then printf open; else printf closed; fi > {}) & \
+                 printf 'noa-agent:codex\\n'; exit 0",
+                quote(&release),
+                quote(&result),
+            );
+            let started = Instant::now();
+            let got = run(shell, &script, Duration::from_secs(5));
+            std::fs::write(&release, b"go").unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            let output = loop {
+                if let Ok(output) = std::fs::read_to_string(&result)
+                    && !output.is_empty()
+                {
+                    break output;
+                }
+                assert!(
+                    Instant::now() < until,
+                    "{shell}: background writer did not answer"
+                );
+                std::thread::sleep(POLL);
+            };
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(got, Installed::Found(vec![AgentKind::Codex]), "{shell}");
+            assert!(started.elapsed() < Duration::from_secs(5), "{shell}");
+            assert_eq!(
+                output, "closed",
+                "{shell}: detection left a pipe reader behind"
+            );
+        }
     }
 
     #[cfg(unix)]

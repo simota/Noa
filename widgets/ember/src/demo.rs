@@ -5,7 +5,14 @@ use ember::model::{
     View,
 };
 
-pub(crate) const KINDS: &[&str] = &["conversation", "requests", "memory", "settings", "error"];
+pub(crate) const KINDS: &[&str] = &[
+    "welcome",
+    "conversation",
+    "requests",
+    "memory",
+    "settings",
+    "error",
+];
 const TIME: u64 = 1_795_843_200_000;
 pub(crate) const DOCUMENT: &str = "# エンバーの設計案\n\n## 最初に届ける体験\n\n一人のエンバーと会話を続け、調査や文書作成を任せる。ウィジェットを閉じても、Noaと端末が稼働している間は依頼が進む。\n\n## 画面\n\n- 会話: 選択したプロジェクトや資料を添えて相談する。\n- 依頼: 進行中の作業、成果物、停止状態を確認する。\n- 記憶: 自分で保存した内容と適用範囲を編集する。\n- 設定: モデル、通知、接続設定を確認する。\n\n## 開発への引継ぎ\n\n開発の仕事はWorkflowの開始画面で内容を確認してから進める。エンバーの文書作成と開発工程はそれぞれの依頼として記録する。\n\nこれは画面確認用のサンプルです。実際の調査結果ではありません。";
 
@@ -74,6 +81,11 @@ pub(crate) fn view(kind: &str) -> View {
             context:ContextSnapshot{scope:project, ..Default::default()}, ..Default::default()
         },
     ];
+    if kind == "welcome" {
+        state.messages.clear();
+        state.runs.clear();
+        state.memories.clear();
+    }
     View {
         state,
         backend_available: kind != "error",

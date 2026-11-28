@@ -1,5 +1,6 @@
 mod feed;
 mod style;
+mod thread;
 mod views;
 
 #[cfg(test)]
@@ -8,7 +9,7 @@ mod tests;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ember::model::{Attachment, Command, MemoryEntry, RunKind, Scope, Settings, View};
+use ember::model::{Attachment, Command, MemoryEntry, RunKind, RunStatus, Scope, Settings, View};
 use noa_gpui_core::widgets::{
     ButtonClicked, CheckState, Checkbox, CheckboxChanged, Container, Label, PopUpButton,
     SelectionChanged, TextArea, TextChanged, TextField, TextView,
@@ -46,16 +47,61 @@ impl Page {
     fn label(self) -> &'static str {
         match self {
             Self::Conversation => "会話",
-            Self::Requests => "依頼",
+            Self::Requests => "アクティビティ",
             Self::Memory => "記憶",
             Self::Settings => "設定",
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ActivityFilter {
+    #[default]
+    All,
+    Active,
+    Completed,
+    NeedsAttention,
+}
+
+impl ActivityFilter {
+    const ALL: [Self; 4] = [
+        Self::All,
+        Self::Active,
+        Self::Completed,
+        Self::NeedsAttention,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "すべて",
+            Self::Active => "進行中",
+            Self::Completed => "完了",
+            Self::NeedsAttention => "要確認",
+        }
+    }
+
+    fn matches(self, status: RunStatus) -> bool {
+        match self {
+            Self::All => true,
+            Self::Active => !status.terminal(),
+            Self::Completed => status == RunStatus::Completed,
+            Self::NeedsAttention => matches!(status, RunStatus::Failed | RunStatus::Uncertain),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Suggestion {
+    Conversation,
+    Document,
+    Research,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Action {
     Page(Page),
+    FilterActivity(ActivityFilter),
+    Suggest(Suggestion),
     Send,
     Start,
     StopConversation,
@@ -120,8 +166,10 @@ struct Ids {
     shell: WidgetId,
     navigation: WidgetId,
     navigation_buttons: [WidgetId; 4],
+    profile: WidgetId,
     pages: [WidgetId; 4],
     status: WidgetId,
+    notice_container: WidgetId,
     notice: WidgetId,
     retry: WidgetId,
     scope: WidgetId,
@@ -137,6 +185,8 @@ struct Ids {
     kind: WidgetId,
     start: WidgetId,
     archive_toggle: WidgetId,
+    activity_filters: [WidgetId; 4],
+    activity_summary: WidgetId,
     memory_list: WidgetId,
     memory_scroll: WidgetId,
     memory_text: WidgetId,
@@ -183,6 +233,7 @@ pub(crate) struct EmberScreen {
     pending: Option<Pending>,
     notice: String,
     show_archived: bool,
+    activity_filter: ActivityFilter,
     refresh_needed: bool,
     narrow: Option<bool>,
 }
@@ -240,6 +291,7 @@ impl EmberScreen {
             pending: None,
             notice: String::new(),
             show_archived: false,
+            activity_filter: ActivityFilter::All,
             refresh_needed: true,
             narrow: None,
         };
@@ -329,12 +381,60 @@ impl EmberScreen {
             Action::Page(page) => {
                 self.page = page;
                 self.preview = None;
+                if page == Page::Requests {
+                    self.activity_filter = ActivityFilter::All;
+                }
                 if page == Page::Memory
                     && self.memory_edit.is_none()
                     && self.area(self.ids.memory_text).is_empty()
                 {
                     self.memory_scope = self.scope.clone();
                 }
+                self.refresh_needed = true;
+            }
+            Action::FilterActivity(filter) => {
+                self.activity_filter = filter;
+                self.refresh_needed = true;
+            }
+            Action::Suggest(suggestion) => {
+                let (page, editor, prompt) = match suggestion {
+                    Suggestion::Conversation => (
+                        Page::Conversation,
+                        self.ids.composer,
+                        "考えを整理するのを手伝って。\n\n",
+                    ),
+                    Suggestion::Document => (
+                        Page::Requests,
+                        self.ids.objective,
+                        "次の内容を文書にまとめてください。\n\n",
+                    ),
+                    Suggestion::Research => (
+                        Page::Requests,
+                        self.ids.objective,
+                        "添えた資料を調べて、要点と根拠を整理してください。\n\n",
+                    ),
+                };
+                // Suggestions start an editable draft. They never replace work in
+                // progress or confirm an IME composition on the user's behalf.
+                if self.area(editor).is_empty() && !self.composing(editor) {
+                    self.set_area(editor, prompt.into());
+                    if page == Page::Requests {
+                        self.tree
+                            .update::<PopUpButton, _>(self.ids.kind, |picker, cx| {
+                                picker.set_selected(
+                                    cx,
+                                    usize::from(suggestion == Suggestion::Research),
+                                )
+                            });
+                    }
+                }
+                self.page = page;
+                self.preview = None;
+                if page == Page::Requests {
+                    self.activity_filter = ActivityFilter::All;
+                }
+                self.sync_chrome();
+                self.tree.set_focus(Some(editor));
                 self.refresh_needed = true;
             }
             Action::Send => {
@@ -660,13 +760,15 @@ impl EmberScreen {
                 self.notice = "相談を受け付けました".into();
             }
             Completion::Objective(value, paths) => {
+                self.activity_filter = ActivityFilter::All;
                 if self.area(self.ids.objective) == value && !self.composing(self.ids.objective) {
                     self.set_area(self.ids.objective, String::new());
                 }
                 if self.attachment_paths() == paths {
                     self.attachments.clear();
                 }
-                self.notice = "依頼を受け付けました。結果は依頼一覧に表示されます。".into();
+                self.notice =
+                    "依頼を受け付けました。アクティビティで進み具合を確認できます。".into();
             }
             Completion::Memory { id, scope, text } => {
                 if self.memory_edit == id

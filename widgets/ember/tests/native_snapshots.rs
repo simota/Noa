@@ -16,7 +16,14 @@ fn dimensions(path: &Path) -> (u32, u32) {
 
 #[test]
 fn every_demo_renders_at_minimum_size_without_creating_a_store() {
-    for kind in ["conversation", "requests", "memory", "settings", "error"] {
+    for kind in [
+        "welcome",
+        "conversation",
+        "requests",
+        "memory",
+        "settings",
+        "error",
+    ] {
         let home = tempfile::tempdir().unwrap();
         let png = home.path().join("preview.png");
         let output = Command::new(env!("CARGO_BIN_EXE_ember"))

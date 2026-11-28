@@ -107,12 +107,155 @@ fn presets_roundtrip_assignments_without_overwriting_graph_edits() {
 #[test]
 fn saved_run_inspection_has_no_execution_channel() {
     let run = workflow::model::Run::demo();
-    let mut screen = WorkflowScreen::saved(run);
+    let mut screen = WorkflowScreen::saved(run.clone());
     let mut text = TextStore::new(Default::default());
     screen.prepare(Size::new(1280.0, 860.0), &mut text);
     assert!(screen.channel.is_none());
     assert!(!screen.view.can_control);
     assert!(screen.send(Intent::Resume).is_err());
+    assert_eq!(screen.canvas.as_ref().unwrap().cards.len(), run.nodes.len());
+    assert!(screen.inspector.is_some());
+    assert!(screen.fields.is_empty());
+    assert!(
+        screen
+            .actions
+            .iter()
+            .any(|(_, action)| matches!(action, Action::PreviewText(..)))
+    );
+    assert!(!screen.actions.iter().any(|(_, action)| matches!(
+        action,
+        Action::Start | Action::Resume | Action::Pause | Action::Cancel | Action::Approve(..)
+    )));
+    for (id, action) in &screen.actions {
+        if matches!(
+            action,
+            Action::Tab(Tab::Build) | Action::Validate | Action::Save
+        ) {
+            assert!(!screen.tree.is_enabled(*id));
+        }
+    }
+    assert!(screen.act(Action::Tab(Tab::Build), &mut text).is_err());
+    assert!(screen.act(Action::Add(NodeKind::Plan), &mut text).is_err());
+    assert!(
+        screen
+            .act(Action::Select(String::new()), &mut text)
+            .is_err()
+    );
+
+    screen.act(Action::Tab(Tab::History), &mut text).unwrap();
+    let stage = screen
+        .actions
+        .iter()
+        .find_map(|(_, action)| match action {
+            Action::Select(id) => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    screen
+        .act(Action::Select(stage.clone()), &mut text)
+        .unwrap();
+    assert!(screen.tab == Tab::Run);
+    assert_eq!(screen.selected_run.as_deref(), Some(stage.as_str()));
+    assert!(screen.canvas.is_some());
+    screen
+        .act(
+            Action::PreviewText("保存済みの報告".into(), "検証結果".into()),
+            &mut text,
+        )
+        .unwrap();
+    assert_eq!(
+        screen
+            .tree
+            .get::<TextView>(screen.tree.focused().unwrap())
+            .unwrap()
+            .text(),
+        "検証結果"
+    );
+    screen.act(Action::ClosePreview, &mut text).unwrap();
+    assert_eq!(screen.selected_run.as_deref(), Some(stage.as_str()));
+    assert_eq!(screen.view.run, Some(run));
+}
+
+#[test]
+fn an_unavailable_runner_still_shows_the_startup_error() {
+    let mut screen = WorkflowScreen::unavailable(
+        PathBuf::from("/example/Noa"),
+        "保存先を読み取れません".into(),
+    );
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    assert!(!screen.is_saved_run());
+    assert!(screen.canvas.is_none());
+    assert!(screen.inspector.is_none());
+    assert_eq!(
+        screen.view.notice.as_deref(),
+        Some("保存先を読み取れません")
+    );
+}
+
+#[test]
+fn the_saved_demo_uses_the_same_read_only_path_as_saved_runs() {
+    let (mut screen, mut text) = prepared("saved");
+    assert!(screen.is_saved_run());
+    assert!(screen.canvas.is_some());
+    assert!(screen.inspector.is_some());
+    assert!(screen.act(Action::Start, &mut text).is_err());
+    assert!(screen.act(Action::SavePreset, &mut text).is_err());
+    assert!(screen.act(Action::Tab(Tab::Build), &mut text).is_err());
+    assert!(screen.channel.is_none());
+    assert!(!screen.view.can_control);
+}
+
+#[test]
+fn historical_failed_evidence_is_readable_with_its_attempt_and_target() {
+    use workflow::model::{Artifact, ArtifactKind, AttemptRecord};
+    let temporary = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(temporary.path())
+        .unwrap()
+        .join("old-report.json");
+    let contents = "{\"passed\":false,\"summary\":\"以前の対象に対する不合格結果\"}";
+    std::fs::write(&path, contents).unwrap();
+    let hash = workflow::adapters::fs::hash(contents.as_bytes());
+    let previous_target = "a".repeat(64);
+    let mut artifact = Artifact::new(
+        ArtifactKind::Evidence,
+        previous_target.clone(),
+        "過去の試行で検証に失敗しました",
+    );
+    artifact.path = Some(path.clone());
+    artifact.data = serde_json::json!({"report_sha256": hash});
+    let mut run = workflow::engine::demo_failed(100);
+    let node = run.nodes.get_mut("verify").unwrap();
+    node.attempt = 2;
+    node.history.push(AttemptRecord {
+        attempt: 1,
+        state: NodeState::Failed,
+        message: "修正前の不合格".into(),
+        outputs: vec![artifact],
+        target_digest: previous_target.clone(),
+    });
+    let mut screen = WorkflowScreen::saved(run.clone());
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    let action = screen
+        .actions
+        .iter()
+        .find_map(|(_, action)| match action {
+            Action::Evidence(file, _, _) if file == &path => Some(action.clone()),
+            _ => None,
+        })
+        .unwrap();
+    screen.act(action, &mut text).unwrap();
+    let (title, body) = screen.evidence_preview.as_ref().unwrap();
+    assert!(title.contains("過去の試行 #1"));
+    assert!(title.contains(&short(&previous_target)));
+    assert_eq!(body, contents);
+    assert_eq!(screen.view.run, Some(run));
+    assert!(
+        screen.view.run.as_ref().unwrap().nodes["verify"]
+            .outputs
+            .is_empty()
+    );
 }
 
 #[test]
@@ -247,6 +390,135 @@ fn narrow_layout_and_zoom_preserve_unapplied_form_values() {
     assert!(
         bounds.x >= 0.0 && bounds.x + bounds.width <= 721.0,
         "{bounds:?}"
+    );
+}
+
+#[test]
+fn resizing_within_narrow_mode_keeps_the_inspector_inside_the_window() {
+    let (mut screen, mut text) = prepared("editor");
+    screen.prepare(Size::new(1000.0, 700.0), &mut text);
+    screen.act(Action::Details, &mut text).unwrap();
+    screen.prepare(Size::new(1000.0, 700.0), &mut text);
+    let title = type_title(&mut screen, &mut text, "縮小しても保持する編集");
+    let inspector = screen.inspector.unwrap();
+    for width in [720.0, 980.0, 760.0] {
+        screen.prepare(Size::new(width, 700.0), &mut text);
+        assert_eq!(screen.inspector, Some(inspector));
+        assert_eq!(screen.tree.focused(), Some(title));
+        let bounds = screen.bounds(inspector).unwrap();
+        assert!(
+            bounds.x >= 0.0 && bounds.x + bounds.width <= width + 1.0,
+            "{bounds:?}"
+        );
+    }
+    assert_eq!(screen.form.title, "縮小しても保持する編集");
+    assert!(screen.form.dirty);
+}
+
+#[test]
+fn undo_discards_invalid_or_unchanged_input_before_earlier_graph_edits() {
+    for invalid in [true, false] {
+        let (mut screen, mut text) = prepared("editor");
+        screen
+            .editor
+            .change(|definition| definition.nodes[0].position.x += 8.0);
+        let graph = screen.editor.definition.clone();
+        type_title(
+            &mut screen,
+            &mut text,
+            if invalid { "" } else { "一時的な名前" },
+        );
+        if !invalid {
+            type_title(&mut screen, &mut text, &graph.nodes[0].title);
+        }
+        assert!(screen.form.dirty);
+        screen.act(Action::Undo, &mut text).unwrap();
+        assert_eq!(screen.editor.definition, graph);
+        assert_eq!(screen.form.title, graph.nodes[0].title);
+        assert!(!screen.form.dirty);
+        assert!(screen.editor.can_undo());
+        assert!(!screen.editor.can_redo());
+    }
+}
+
+#[test]
+fn valid_unapplied_input_remains_redoable_after_undo() {
+    let (mut screen, mut text) = prepared("editor");
+    let before = screen.editor.definition.clone();
+    type_title(&mut screen, &mut text, "やり直せる工程名");
+    screen.act(Action::Undo, &mut text).unwrap();
+    assert_eq!(screen.editor.definition, before);
+    screen.act(Action::Redo, &mut text).unwrap();
+    assert_eq!(screen.editor.definition.nodes[0].title, "やり直せる工程名");
+}
+
+#[test]
+fn reloading_a_conflict_does_not_require_invalid_input_to_be_applied() {
+    let (mut screen, mut text) = prepared("editor");
+    screen.act(Action::Settings, &mut text).unwrap();
+    screen.form.duration = "invalid".into();
+    screen.form.dirty = true;
+    let mut view = screen.view.clone();
+    view.definition.name = "別のウィンドウで保存した名前".into();
+    view.definition.revision += 1;
+    view.version += 1;
+    screen.receive(view.clone(), &mut text);
+    assert!(screen.editor.conflict);
+    screen.act(Action::Reload, &mut text).unwrap();
+    assert_eq!(screen.editor.definition, view.definition);
+    assert!(!screen.editor.conflict);
+    assert!(!screen.form.dirty);
+}
+
+#[test]
+fn asynchronously_saved_presets_appear_without_leaving_settings() {
+    let (mut screen, mut text) = prepared("editor");
+    screen.act(Action::Settings, &mut text).unwrap();
+    let mut view = screen.view.clone();
+    view.presets.push(AgentPreset::from_definition(
+        "保存した担当構成".into(),
+        &view.definition,
+    ));
+    screen.receive(view, &mut text);
+    assert!(
+        screen
+            .actions
+            .iter()
+            .any(|(_, action)| matches!(action, Action::ApplyPreset(0)))
+    );
+}
+
+#[test]
+fn preset_updates_wait_until_a_focused_settings_edit_can_be_preserved() {
+    let (mut screen, mut text) = prepared("editor");
+    screen.act(Action::Settings, &mut text).unwrap();
+    let name = screen
+        .fields
+        .iter()
+        .find(|(_, field)| matches!(field, Field::Name))
+        .unwrap()
+        .0;
+    screen.tree.set_focus(Some(name));
+    screen.dispatch(Event::Text("編集中".into()), &mut text);
+    let draft = screen.form.name.clone();
+    let mut view = screen.view.clone();
+    view.presets.push(AgentPreset::from_definition(
+        "新しい担当構成".into(),
+        &view.definition,
+    ));
+    screen.receive(view, &mut text);
+    assert_eq!(screen.tree.focused(), Some(name));
+    assert!(screen.deferred_inspector);
+    screen.tree.set_focus(None);
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    assert!(!screen.deferred_inspector);
+    assert_eq!(screen.form.name, draft);
+    assert!(screen.form.dirty);
+    assert!(
+        screen
+            .actions
+            .iter()
+            .any(|(_, action)| matches!(action, Action::ApplyPreset(0)))
     );
 }
 
@@ -405,8 +677,7 @@ fn adopting_an_external_definition_refreshes_the_editor_controls() {
     assert!(!screen.editor.dirty());
 }
 
-#[test]
-fn automatically_displayed_question_keeps_the_answer_node_identity() {
+fn question_screen() -> (WorkflowScreen, TextStore) {
     use workflow::engine::{Engine, Input};
     use workflow::model::{Artifact, ArtifactKind, TargetSnapshot};
     let definition = WorkflowDefinition::standard();
@@ -438,6 +709,7 @@ fn automatically_displayed_question_keeps_the_answer_node_identity() {
         .handle(Input::Waiting {
             node_id: "plan".into(),
             attempt: 1,
+            input_sequence: Some(41),
             external_ref: Some("pane-plan".into()),
             message: "対象機能を選んでください".into(),
             now: 103,
@@ -449,12 +721,22 @@ fn automatically_displayed_question_keeps_the_answer_node_identity() {
     screen.preparing_run = false;
     screen.selected_run = None;
     screen.build_body(&mut text);
-    let field = screen
+    (screen, text)
+}
+
+fn answer_field(screen: &WorkflowScreen) -> WidgetId {
+    screen
         .fields
         .iter()
-        .find(|(_, f)| matches!(f,Field::Answer(id) if id=="plan"))
+        .find(|(_, field)| matches!(field, Field::Answer(id) if id == "plan"))
         .unwrap()
-        .0;
+        .0
+}
+
+#[test]
+fn automatically_displayed_question_keeps_the_answer_node_identity() {
+    let (mut screen, mut text) = question_screen();
+    let field = answer_field(&screen);
     screen.tree.set_focus(Some(field));
     screen.dispatch(Event::Text("ログイン画面です".into()), &mut text);
     assert_eq!(
@@ -462,6 +744,110 @@ fn automatically_displayed_question_keeps_the_answer_node_identity() {
         Some("ログイン画面です")
     );
     assert!(screen.selected_run.is_none());
+    let action = screen
+        .actions
+        .iter()
+        .find_map(|(_, action)| match action {
+            Action::Answer(target) => Some(target.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let run = screen.view.run.as_ref().unwrap();
+    assert_eq!(action.run_id, run.id);
+    assert_eq!(action.node_id, "plan");
+    assert_eq!(action.attempt, run.nodes["plan"].attempt);
+    assert_eq!(action.request_id, run.nodes["plan"].request_id);
+    assert_eq!(
+        Some(action.input_sequence),
+        run.nodes["plan"].input_sequence
+    );
+}
+
+#[test]
+fn unrelated_runtime_updates_preserve_the_current_question_draft() {
+    let (mut screen, mut text) = question_screen();
+    let field = answer_field(&screen);
+    screen.tree.set_focus(Some(field));
+    screen.dispatch(Event::Text("入力中の回答".into()), &mut text);
+    let mut view = screen.view.clone();
+    view.run.as_mut().unwrap().updated_at += 1;
+    screen.receive(view, &mut text);
+    assert_eq!(screen.tree.focused(), Some(field));
+    assert_eq!(
+        screen.answers.get("plan").map(String::as_str),
+        Some("入力中の回答")
+    );
+    assert_eq!(
+        screen.tree.get::<TextArea>(field).unwrap().text(),
+        "入力中の回答"
+    );
+}
+
+#[test]
+fn a_replaced_question_cannot_reuse_a_focused_answer_from_another_request() {
+    for change in ["run", "attempt", "request", "question", "sequence", "state"] {
+        let (mut screen, mut text) = question_screen();
+        let field = answer_field(&screen);
+        screen.tree.set_focus(Some(field));
+        screen.dispatch(Event::Text("前の質問への回答".into()), &mut text);
+        let mut view = screen.view.clone();
+        let run = view.run.as_mut().unwrap();
+        let node = run.nodes.get_mut("plan").unwrap();
+        match change {
+            "run" => run.id = "another-run".into(),
+            "attempt" => node.attempt += 1,
+            "request" => node.request_id = "another-request".into(),
+            "question" => node.message = "変更後の質問".into(),
+            "sequence" => node.input_sequence = Some(42),
+            "state" => node.state = NodeState::Running,
+            _ => unreachable!(),
+        }
+        screen.receive(view, &mut text);
+        assert!(!screen.answers.contains_key("plan"), "{change}");
+        assert!(!screen.tree.contains(field), "{change}");
+        if change != "state" {
+            assert!(
+                screen
+                    .tree
+                    .get::<TextArea>(answer_field(&screen))
+                    .unwrap()
+                    .text()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn unversioned_input_requests_require_reconciliation_before_answering() {
+    let (mut screen, mut text) = question_screen();
+    let mut view = screen.view.clone();
+    view.run
+        .as_mut()
+        .unwrap()
+        .nodes
+        .get_mut("plan")
+        .unwrap()
+        .input_sequence = None;
+    screen.receive(view, &mut text);
+    assert!(
+        !screen
+            .fields
+            .iter()
+            .any(|(_, field)| matches!(field, Field::Answer(_)))
+    );
+    assert!(
+        !screen
+            .actions
+            .iter()
+            .any(|(_, action)| matches!(action, Action::Answer(_)))
+    );
+    assert!(
+        screen
+            .actions
+            .iter()
+            .any(|(_, action)| matches!(action, Action::Reconcile(node) if node == "plan"))
+    );
 }
 
 #[test]

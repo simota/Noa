@@ -63,7 +63,7 @@ enum Action {
     Repair,
     Reconcile(String),
     Focus(String),
-    Answer(String),
+    Answer(AnswerTarget),
     Refresh,
     Reload,
     Evidence(PathBuf, String, String),
@@ -72,6 +72,15 @@ enum Action {
     SavePreset,
     ApplyPreset(usize),
     OpenTask,
+}
+
+#[derive(Clone, PartialEq)]
+struct AnswerTarget {
+    run_id: String,
+    node_id: String,
+    attempt: u32,
+    request_id: String,
+    input_sequence: u64,
 }
 
 #[derive(Clone)]
@@ -175,6 +184,24 @@ fn clipped(value: &str, count: usize) -> String {
     }
 }
 
+fn same_question(previous: &View, current: &View, node_id: &str) -> bool {
+    let (Some(previous), Some(current)) = (&previous.run, &current.run) else {
+        return false;
+    };
+    let (Some(before), Some(after)) = (previous.nodes.get(node_id), current.nodes.get(node_id))
+    else {
+        return false;
+    };
+    previous.id == current.id
+        && before.attempt == after.attempt
+        && before.request_id == after.request_id
+        && before.input_sequence.is_some()
+        && before.input_sequence == after.input_sequence
+        && before.state == NodeState::Waiting
+        && after.state == NodeState::Waiting
+        && before.message == after.message
+}
+
 impl WorkflowScreen {
     pub fn with_task(mut self, origin: workflow::tasks::TaskOrigin, objective: String) -> Self {
         self.origin_task = Some(origin);
@@ -210,6 +237,12 @@ impl WorkflowScreen {
         screen
     }
     pub fn demo(kind: &str) -> Self {
+        if kind == "saved" {
+            let mut screen = Self::saved(workflow::model::Run::demo());
+            screen.notice =
+                "保存済み実行の表示サンプル · 読み取り専用です。実処理は実行しません。".into();
+            return screen;
+        }
         let run = match kind {
             "approval" => Some(workflow::engine::demo_waiting(now())),
             "failed" => Some(workflow::engine::demo_failed(now())),
@@ -459,7 +492,12 @@ impl WorkflowScreen {
         );
     }
 
-    fn evidence_buttons(&mut self, host: WidgetId, artifact: &workflow::model::Artifact) {
+    fn evidence_buttons(
+        &mut self,
+        host: WidgetId,
+        artifact: &workflow::model::Artifact,
+        context: Option<&str>,
+    ) {
         if let (Some(path), Some(hash)) = (
             &artifact.path,
             artifact.data.get("report_sha256").and_then(|v| v.as_str()),
@@ -467,7 +505,12 @@ impl WorkflowScreen {
             self.button(
                 host,
                 "構造化された報告を読む",
-                Action::Evidence(path.clone(), hash.into(), "報告書".into()),
+                Action::Evidence(
+                    path.clone(),
+                    hash.into(),
+                    context
+                        .map_or_else(|| "報告書".into(), |context| format!("{context} · 報告書")),
+                ),
             );
         }
         if let Some(files) = artifact.data.get("evidence").and_then(|v| v.as_array()) {
@@ -506,7 +549,14 @@ impl WorkflowScreen {
                 self.button(
                     host,
                     format!("根拠を読む · {}", clipped(&label, 22)),
-                    Action::Evidence(PathBuf::from(path), hash.into(), label),
+                    Action::Evidence(
+                        PathBuf::from(path),
+                        hash.into(),
+                        context.map_or_else(
+                            || label.clone(),
+                            |context| format!("{context} · {label}"),
+                        ),
+                    ),
                 );
             }
         }
@@ -548,6 +598,7 @@ impl WorkflowScreen {
     }
 
     fn status(&mut self) {
+        let read_only = self.is_saved_run();
         let repo = self
             .view
             .repository
@@ -562,7 +613,9 @@ impl WorkflowScreen {
         );
         self.tree
             .update::<Label, _>(self.header, |label, cx| label.set_text(cx, title));
-        let connection = if self.demo {
+        let connection = if read_only {
+            "保存済みの実行 · 読み取り専用"
+        } else if self.demo {
             "表示サンプル"
         } else if !self.view.can_control && self.channel.is_some() {
             "監視中 · 実行サービスの操作権を待機"
@@ -624,11 +677,12 @@ impl WorkflowScreen {
             .update::<Button, _>(self.start_button, |button, cx| {
                 button.set_label(
                     cx,
-                    if self
-                        .view
-                        .run
-                        .as_ref()
-                        .is_some_and(|r| r.nodes.values().any(|n| n.state.active()))
+                    if read_only
+                        || self
+                            .view
+                            .run
+                            .as_ref()
+                            .is_some_and(|r| r.nodes.values().any(|n| n.state.active()))
                     {
                         "実行を表示"
                     } else {
@@ -641,11 +695,15 @@ impl WorkflowScreen {
                 Action::Tab(tab) => {
                     self.tree
                         .update::<Button, _>(*id, |b, cx| b.set_selected(cx, *tab == self.tab));
+                    self.tree.set_enabled(*id, !read_only || *tab != Tab::Build);
                 }
+                Action::Validate => self.tree.set_enabled(*id, !read_only),
                 Action::Undo => self
                     .tree
                     .set_enabled(*id, self.editor.can_undo() || self.form.dirty),
-                Action::Redo => self.tree.set_enabled(*id, self.editor.can_redo()),
+                Action::Redo => self
+                    .tree
+                    .set_enabled(*id, self.editor.can_redo() && !self.form.dirty),
                 Action::Start => self.tree.set_enabled(
                     *id,
                     !self.demo
@@ -723,7 +781,7 @@ impl WorkflowScreen {
             self.status();
             return;
         }
-        if self.channel.is_none() && !self.demo {
+        if self.channel.is_none() && !self.demo && !self.is_saved_run() {
             let content = self.tree.insert(
                 Some(self.body),
                 Container::column()
@@ -759,7 +817,7 @@ impl WorkflowScreen {
             self.button(toolbar, "元に戻す", Action::Undo);
             self.button(toolbar, "やり直す", Action::Redo);
             self.button(toolbar, "整列", Action::Arrange);
-        } else {
+        } else if !self.is_saved_run() {
             self.button(toolbar, "再接続", Action::Refresh);
             if let Some(run) = &self.view.run {
                 let state = run.state;
@@ -832,11 +890,11 @@ impl WorkflowScreen {
                     flex_grow: if self.narrow { 1.0 } else { 0.0 },
                     flex_shrink: 0.0,
                     size: LayoutSize {
-                        width: length(if self.narrow {
-                            self.viewport.width
+                        width: if self.narrow {
+                            noa_gpui_core::style::auto()
                         } else {
-                            308.0
-                        }),
+                            length(308.0)
+                        },
                         height: noa_gpui_core::style::auto(),
                     },
                     min_size: LayoutSize {
@@ -1148,12 +1206,17 @@ impl WorkflowScreen {
         }
     }
 
+    fn is_saved_run(&self) -> bool {
+        self.channel.is_none() && !self.demo && self.view.run.is_some()
+    }
+
     fn can_start_run(&self) -> bool {
-        self.view.run.as_ref().is_none_or(|r| {
-            !r.nodes.values().any(|n| n.state.active())
-                && r.state != NodeState::Running
-                && (r.state != NodeState::Paused || r.limit_reason.is_some())
-        })
+        !self.is_saved_run()
+            && self.view.run.as_ref().is_none_or(|r| {
+                !r.nodes.values().any(|n| n.state.active())
+                    && r.state != NodeState::Running
+                    && (r.state != NodeState::Paused || r.limit_reason.is_some())
+            })
     }
 
     fn build_run_inspector(&mut self, host: WidgetId) {
@@ -1356,7 +1419,7 @@ impl WorkflowScreen {
                     );
                     for output in &result.outputs {
                         self.label(host, clipped(&output.summary, 700), 11.0, true);
-                        self.evidence_buttons(host, output);
+                        self.evidence_buttons(host, output, None);
                         if let Some(publication) = output.data.get("publication") {
                             self.section(host, "PUBLICATION / 公開内容");
                             self.label(
@@ -1423,7 +1486,9 @@ impl WorkflowScreen {
                 .iter()
                 .any(|n| n.kind == NodeKind::PullRequest);
             self.label(host,if publishes {"承認後、この対象版からブランチを公開してPRを作成します。変更が加わった場合、この承認は利用できません。"}else{"この対象版と検証結果を承認します。変更が加わった場合、この承認は利用できません。"},12.0,true);
-            if let Some(digest) = &state.approval_digest {
+            if let Some(digest) = &state.approval_digest
+                && !self.is_saved_run()
+            {
                 let approve = self.button(
                     host,
                     if publishes {
@@ -1436,23 +1501,43 @@ impl WorkflowScreen {
                 self.tree
                     .set_enabled(approve, !self.demo && self.channel.is_some());
             }
-        } else if state.state == NodeState::Waiting {
-            self.area(
-                host,
-                "エージェントへの回答",
-                self.answers.get(&id).cloned().unwrap_or_default(),
-                Field::Answer(id.clone()),
-                4,
-            );
-            self.button(host, "回答を送る", Action::Answer(id.clone()));
+        } else if state.state == NodeState::Waiting && !self.is_saved_run() {
+            if let Some(input_sequence) = state.input_sequence {
+                self.area(
+                    host,
+                    "エージェントへの回答",
+                    self.answers.get(&id).cloned().unwrap_or_default(),
+                    Field::Answer(id.clone()),
+                    4,
+                );
+                self.button(
+                    host,
+                    "回答を送る",
+                    Action::Answer(AnswerTarget {
+                        run_id: run.id.clone(),
+                        node_id: id.clone(),
+                        attempt: state.attempt,
+                        request_id: state.request_id.clone(),
+                        input_sequence,
+                    }),
+                );
+            } else {
+                self.label(
+                    host,
+                    "回答する前に、外部処理の状態を照合して最新の入力要求を確認してください。",
+                    12.0,
+                    true,
+                );
+            }
         }
-        if state.state == NodeState::Failed {
+        if state.state == NodeState::Failed && !self.is_saved_run() {
             self.button(host, "この工程を再試行", Action::Retry(id.clone()));
             if matches!(node.kind, NodeKind::Review | NodeKind::Verify) {
                 self.button(host, "根拠を渡して修正", Action::Repair);
             }
         }
-        if node.kind != NodeKind::Approval
+        if !self.is_saved_run()
+            && node.kind != NodeKind::Approval
             && matches!(
                 state.state,
                 NodeState::Uncertain | NodeState::Running | NodeState::Waiting
@@ -1460,7 +1545,7 @@ impl WorkflowScreen {
         {
             self.button(host, "外部処理の状態を照合", Action::Reconcile(id.clone()));
         }
-        if state.external_ref.is_some() {
+        if state.external_ref.is_some() && !self.is_saved_run() {
             self.button(host, "エージェントの詳細を表示", Action::Focus(id.clone()));
         }
         if !state.outputs.is_empty() {
@@ -1468,7 +1553,7 @@ impl WorkflowScreen {
             for artifact in &state.outputs {
                 self.label(host, artifact.kind.label(), 12.0, false);
                 self.label(host, clipped(&artifact.summary, 3000), 12.0, true);
-                self.evidence_buttons(host, artifact);
+                self.evidence_buttons(host, artifact, None);
                 if let Some(path) = &artifact.path {
                     let field = self.tree.insert(
                         Some(host),
@@ -1496,17 +1581,31 @@ impl WorkflowScreen {
         if !state.history.is_empty() {
             self.section(host, "ATTEMPTS / 過去の試行");
             for previous in state.history.iter().rev() {
+                let context = format!(
+                    "過去の試行 #{} · 対象 {}",
+                    previous.attempt,
+                    short(&previous.target_digest)
+                );
                 self.label(
                     host,
                     format!(
-                        "#{} {} · {}",
-                        previous.attempt,
+                        "{context}\n{} · {}",
                         previous.state.label(),
                         previous.message
                     ),
                     11.0,
                     true,
                 );
+                for artifact in &previous.outputs {
+                    self.label(
+                        host,
+                        format!("過去の成果物 · {}", artifact.kind.label()),
+                        12.0,
+                        true,
+                    );
+                    self.label(host, clipped(&artifact.summary, 3000), 12.0, true);
+                    self.evidence_buttons(host, artifact, Some(&context));
+                }
             }
         }
     }
@@ -1695,6 +1794,25 @@ impl WorkflowScreen {
     }
 
     fn act(&mut self, action: Action, text: &mut TextStore) -> Result<(), String> {
+        if self.is_saved_run()
+            && !matches!(
+                &action,
+                Action::Tab(Tab::Run | Tab::History)
+                    | Action::SavedRun
+                    | Action::Zoom(_)
+                    | Action::Fit
+                    | Action::Details
+                    | Action::Evidence(..)
+                    | Action::PreviewText(..)
+                    | Action::ClosePreview
+                    | Action::OpenTask
+            )
+            && !matches!(&action, Action::Select(id) if !id.is_empty())
+        {
+            return Err(
+                "保存済みの実行は読み取り専用です。工程と履歴を選んで確認できます。".into(),
+            );
+        }
         if !matches!(
             action,
             Action::Source(_)
@@ -1712,6 +1830,8 @@ impl WorkflowScreen {
                 | Action::Pause
                 | Action::Resume
                 | Action::Repair
+                | Action::Undo
+                | Action::Reload
         ) {
             self.apply_form()?;
         }
@@ -1849,7 +1969,17 @@ impl WorkflowScreen {
                 self.build_inspector(text);
             }
             Action::Undo => {
-                self.editor.undo();
+                if self.form.dirty {
+                    let before = self.editor.definition.clone();
+                    if self.apply_form().is_ok() && self.editor.definition != before {
+                        self.editor.undo();
+                    }
+                    // Invalid or unchanged input is still the latest edit to
+                    // undo; do not consume an earlier graph operation for it.
+                    self.form = Form::default();
+                } else {
+                    self.editor.undo();
+                }
                 self.build_canvas(text);
                 self.build_inspector(text);
             }
@@ -1973,12 +2103,23 @@ impl WorkflowScreen {
             Action::Repair => self.send(Intent::Repair)?,
             Action::Reconcile(node_id) => self.send(Intent::Reconcile { node_id })?,
             Action::Focus(node_id) => self.send(Intent::Focus { node_id })?,
-            Action::Answer(node_id) => {
-                let answer = self.answers.get(&node_id).cloned().unwrap_or_default();
+            Action::Answer(target) => {
+                let answer = self
+                    .answers
+                    .get(&target.node_id)
+                    .cloned()
+                    .unwrap_or_default();
                 if answer.trim().is_empty() {
                     return Err("回答を入力してください".into());
                 }
-                self.send(Intent::Answer { node_id, answer })?;
+                self.send(Intent::Answer {
+                    run_id: target.run_id,
+                    node_id: target.node_id,
+                    attempt: target.attempt,
+                    request_id: target.request_id,
+                    input_sequence: target.input_sequence,
+                    answer,
+                })?;
             }
             Action::Refresh => self.send(Intent::Refresh)?,
             Action::Reload => {
@@ -2011,6 +2152,14 @@ impl WorkflowScreen {
     }
 
     fn receive(&mut self, view: View, text: &mut TextStore) {
+        let question_replaced = self.tree.focused().is_some_and(|focused| {
+            self.fields.iter().any(|(id, field)| {
+                *id == focused
+                    && matches!(field, Field::Answer(node_id) if !same_question(&self.view, &view, node_id))
+            })
+        });
+        self.answers
+            .retain(|node_id, _| same_question(&self.view, &view, node_id));
         let before = self.editor.definition.clone();
         self.editor
             .receive(&view.definition, view.version, self.form.dirty);
@@ -2033,11 +2182,17 @@ impl WorkflowScreen {
             self.notice.clear();
         }
         let changed = self.view.run != view.run || self.view.deferred != view.deferred;
+        let presets_changed = self.view.presets != view.presets;
+        let run_replaced =
+            view.run.as_ref().map(|run| &run.id) != self.view.run.as_ref().map(|run| &run.id);
+        if run_replaced {
+            self.selected_run = None;
+            self.confirm_cancel = false;
+        }
         if self.start_pending {
-            if view.run.as_ref().map(|run| &run.id) != self.view.run.as_ref().map(|run| &run.id) {
+            if run_replaced {
                 self.start_pending = false;
                 self.preparing_run = false;
-                self.selected_run = None;
             } else if view.notice.is_some() {
                 // A rejected start keeps the task objective visible for correction.
                 self.start_pending = false;
@@ -2053,13 +2208,24 @@ impl WorkflowScreen {
         {
             self.build_canvas(text);
             self.build_inspector(text);
+        } else if presets_changed
+            && self.built
+            && self.tab == Tab::Build
+            && self.editor.selected.is_none()
+            && self.evidence_preview.is_none()
+        {
+            if self.text_focused() {
+                self.deferred_inspector = true;
+            } else {
+                self.build_inspector(text);
+            }
         }
         if changed && self.built && self.evidence_preview.is_none() {
             if self.tab == Tab::History {
                 self.build_body(text);
             } else if self.tab == Tab::Run {
                 self.build_canvas(text);
-                if self.text_focused() {
+                if self.text_focused() && !question_replaced {
                     self.deferred_inspector = true;
                 } else {
                     self.build_body(text);

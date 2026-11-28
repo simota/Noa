@@ -10,6 +10,27 @@ use super::fs;
 
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 
+/// Snapshot patches are machine input for `git apply` and evidence hashing.
+/// Display preferences must not add ANSI escapes or change their path/hunk syntax.
+fn diff(repo: &Path, args: &[&str], limit: usize) -> Result<Vec<u8>, String> {
+    let mut options = vec![
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--binary",
+        "--ignore-submodules=none",
+        "--submodule=short",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--output-indicator-new=+",
+        "--output-indicator-old=-",
+        "--output-indicator-context= ",
+    ];
+    options.extend_from_slice(args);
+    command_with_limit(repo, &options, limit)
+}
+
 pub fn command(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     command_with_limit(repo, args, MAX_SNAPSHOT_BYTES)
 }
@@ -37,7 +58,14 @@ fn command_with_limit(repo: &Path, args: &[&str], limit: usize) -> Result<Vec<u8
 
 pub fn text(repo: &Path, args: &[&str]) -> Result<String, String> {
     String::from_utf8(command(repo, args)?)
-        .map(|s| s.trim().to_owned())
+        // Paths can end in whitespace, including a newline. Remove only the
+        // record terminator emitted by Git, never bytes from the actual path.
+        .map(|mut s| {
+            if s.ends_with('\n') {
+                s.pop();
+            }
+            s
+        })
         .map_err(|_| "git の応答がUTF-8ではありません".into())
 }
 
@@ -88,18 +116,10 @@ fn capture(repo: &Path) -> Result<Capture, String> {
     if !command(repo, &["ls-files", "-z", "--", ".noa/workflow"])?.is_empty() {
         return Err(".noa/workflow は成果物用の予約領域です。追跡済みファイルがあるため対象を省略せず停止しました".into());
     }
-    let patch = command(
+    let patch = diff(
         repo,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--binary",
-            "HEAD",
-            "--",
-            ".",
-            ":(exclude).noa/workflow/**",
-        ],
+        &["HEAD", "--", ".", ":(exclude).noa/workflow/**"],
+        MAX_SNAPSHOT_BYTES,
     )?;
     if patch.len() > MAX_SNAPSHOT_BYTES {
         return Err("変更スナップショットが64 MiBを超えています".into());
@@ -166,17 +186,9 @@ pub fn is_clean(target: &TargetSnapshot) -> bool {
 /// This evidence is the committed change between fixed object IDs. Local
 /// uncommitted bytes remain bound by the separate target snapshot digest.
 pub fn committed_diff(repo: &Path, target: &TargetSnapshot) -> Result<Vec<u8>, String> {
-    command_with_limit(
+    diff(
         repo,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--binary",
-            &target.base_sha,
-            &target.head_sha,
-            "--",
-        ],
+        &[&target.base_sha, &target.head_sha, "--"],
         8 * 1024 * 1024,
     )
 }
@@ -283,6 +295,131 @@ mod tests {
             relative(b"src/main.rs").unwrap(),
             PathBuf::from("src/main.rs")
         );
+    }
+
+    #[test]
+    fn repository_paths_keep_trailing_whitespace_instead_of_selecting_a_sibling() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+        for suffix in [" ", "\n"] {
+            let source = directory.join(format!("source{suffix}"));
+            let sibling = directory.join("source");
+            let metadata = if suffix == "\n" {
+                source.join(".git")
+            } else {
+                directory.join(format!("metadata{suffix}"))
+            };
+            std::fs::create_dir(&source).unwrap();
+            std::fs::create_dir_all(&sibling).unwrap();
+            command(&sibling, &["init", "-q"]).unwrap();
+            if suffix == "\n" {
+                command(&source, &["init", "-q"]).unwrap();
+            } else {
+                command(
+                    &source,
+                    &[
+                        "init",
+                        "-q",
+                        "--separate-git-dir",
+                        metadata.to_str().unwrap(),
+                    ],
+                )
+                .unwrap();
+            }
+
+            assert_eq!(repository(&source).unwrap(), source);
+            assert_eq!(common_dir(&source).unwrap(), metadata);
+        }
+    }
+
+    #[test]
+    fn display_preferences_cannot_change_snapshot_patches_or_committed_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+        let source = directory.join("source");
+        std::fs::create_dir(&source).unwrap();
+        command(&source, &["init", "-q"]).unwrap();
+        command(&source, &["config", "user.name", "Workflow Test"]).unwrap();
+        command(
+            &source,
+            &["config", "user.email", "workflow@example.invalid"],
+        )
+        .unwrap();
+        std::fs::write(source.join("tracked.txt"), "before\ncontext\n").unwrap();
+        command(&source, &["add", "tracked.txt"]).unwrap();
+        command(&source, &["commit", "-qm", "initial"]).unwrap();
+        let base = head(&source).unwrap();
+        std::fs::write(source.join("tracked.txt"), "committed\ncontext\n").unwrap();
+        command(&source, &["commit", "-qam", "change"]).unwrap();
+        std::fs::write(source.join("tracked.txt"), "uncommitted\ncontext\n").unwrap();
+        let target = snapshot(&source, &base).unwrap();
+        let evidence = committed_diff(&source, &target).unwrap();
+
+        for (key, value) in [
+            ("color.ui", "always"),
+            ("diff.noprefix", "true"),
+            ("diff.mnemonicprefix", "true"),
+            ("diff.srcPrefix", "custom/old/"),
+            ("diff.dstPrefix", "custom/new/"),
+            ("diff.outputIndicatorNew", ">"),
+            ("diff.outputIndicatorOld", "<"),
+            ("diff.outputIndicatorContext", "_"),
+        ] {
+            command(&source, &["config", key, value]).unwrap();
+        }
+        assert_eq!(snapshot(&source, &base).unwrap(), target);
+        assert_eq!(committed_diff(&source, &target).unwrap(), evidence);
+        assert!(!evidence.contains(&0x1b));
+
+        let isolated = directory.join("isolated");
+        prepare(&source, &isolated, None, &target).unwrap();
+        assert_eq!(snapshot(&isolated, &base).unwrap(), target);
+        assert_eq!(
+            std::fs::read(isolated.join("tracked.txt")).unwrap(),
+            b"uncommitted\ncontext\n"
+        );
+    }
+
+    #[test]
+    fn submodule_preferences_cannot_hide_target_changes_or_rewrite_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = std::fs::canonicalize(directory.path()).unwrap();
+        let submodule = source.join("submodule");
+        std::fs::create_dir(&submodule).unwrap();
+        for repository in [&source, &submodule] {
+            command(repository, &["init", "-q"]).unwrap();
+            command(repository, &["config", "user.name", "Workflow Test"]).unwrap();
+            command(
+                repository,
+                &["config", "user.email", "workflow@example.invalid"],
+            )
+            .unwrap();
+        }
+        std::fs::write(submodule.join("tracked.txt"), "before\n").unwrap();
+        command(&submodule, &["add", "tracked.txt"]).unwrap();
+        command(&submodule, &["commit", "-qm", "initial"]).unwrap();
+        command(&source, &["add", "submodule"]).unwrap();
+        command(&source, &["commit", "-qm", "add gitlink"]).unwrap();
+        let base = head(&source).unwrap();
+        let clean = snapshot(&source, &base).unwrap();
+        command(&source, &["config", "diff.ignoreSubmodules", "all"]).unwrap();
+        command(&source, &["config", "diff.submodule", "log"]).unwrap();
+
+        std::fs::write(submodule.join("tracked.txt"), "changed\n").unwrap();
+        let dirty = snapshot(&source, &base).unwrap();
+        assert_ne!(dirty, clean);
+        assert!(!is_clean(&dirty));
+        command(&submodule, &["commit", "-qam", "change"]).unwrap();
+        let updated = snapshot(&source, &base).unwrap();
+        assert_ne!(updated, dirty);
+        assert!(!is_clean(&updated));
+        command(&source, &["add", "submodule"]).unwrap();
+        command(&source, &["commit", "-qm", "update gitlink"]).unwrap();
+        let target = snapshot(&source, &base).unwrap();
+        let evidence = committed_diff(&source, &target).unwrap();
+        let evidence = String::from_utf8(evidence).unwrap();
+        assert!(evidence.starts_with("diff --git a/submodule b/submodule\n"));
+        assert!(evidence.contains(&format!("+Subproject commit {}", head(&submodule).unwrap())));
     }
 
     #[test]

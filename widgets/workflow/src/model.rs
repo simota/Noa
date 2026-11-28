@@ -59,24 +59,26 @@ impl AgentChoice {
         if self.provider == "auto" && (self.model.is_some() || self.effort.is_some()) {
             return Err("モデルやeffortを指定する場合はエージェントを選んでください".into());
         }
-        if let Some(model) = &self.model {
-            if model.is_empty()
+        if let Some(model) = &self.model
+            && (model.is_empty()
                 || model.len() > 200
                 || model.starts_with(['-', '='])
                 || !model
                     .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"._:/@+=-".contains(&c))
-            {
-                return Err("モデル名には英数字と . _ : / @ + = - を使用してください（先頭の - と = は不可）".into());
-            }
+                    .all(|c| c.is_ascii_alphanumeric() || b"._:/@+=-".contains(&c)))
+        {
+            return Err(
+                "モデル名には英数字と . _ : / @ + = - を使用してください（先頭の - と = は不可）"
+                    .into(),
+            );
         }
-        if let Some(effort) = &self.effort {
-            if !Self::efforts(&self.provider).contains(&effort.as_str()) {
-                return Err(format!(
-                    "{} は effort {effort:?} に対応していません",
-                    self.provider
-                ));
-            }
+        if let Some(effort) = &self.effort
+            && !Self::efforts(&self.provider).contains(&effort.as_str())
+        {
+            return Err(format!(
+                "{} は effort {effort:?} に対応していません",
+                self.provider
+            ));
         }
         Ok(())
     }
@@ -723,6 +725,13 @@ pub struct NodeRun {
     pub retry_at: Option<Millis>,
     pub retryable: bool,
     pub cancel_requested: bool,
+    /// An expired attempt is automatically reconciled once. A running reply
+    /// must not immediately reconcile the same expired deadline again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_reconciled_at: Option<Millis>,
+    /// The agent's sequence identifies the exact input request being answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_sequence: Option<u64>,
 }
 
 impl NodeRun {
@@ -742,6 +751,8 @@ impl NodeRun {
             retry_at: None,
             retryable: false,
             cancel_requested: false,
+            timeout_reconciled_at: None,
+            input_sequence: None,
         }
     }
 }
@@ -807,6 +818,8 @@ mod tests {
         let run = Run::demo();
         let encoded = serde_json::to_string(&run).unwrap();
         assert!(!encoded.contains("origin_task"));
+        assert!(!encoded.contains("timeout_reconciled_at"));
+        assert!(!encoded.contains("input_sequence"));
         crate::engine::Engine::restore(serde_json::from_str(&encoded).unwrap()).unwrap();
     }
 

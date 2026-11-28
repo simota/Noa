@@ -39,6 +39,7 @@ pub enum Input {
         attempt: u32,
         message: String,
         retryable: bool,
+        outputs: Vec<Artifact>,
         now: Millis,
     },
     Uncertain {
@@ -60,6 +61,7 @@ pub enum Input {
         attempt: u32,
         message: String,
         external_ref: Option<String>,
+        input_sequence: Option<u64>,
         now: Millis,
     },
     Reconcile {
@@ -131,7 +133,7 @@ impl Input {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Execute {
-        node: Node,
+        node: Box<Node>,
         attempt: u32,
         request_id: String,
         inputs: Vec<Artifact>,
@@ -153,6 +155,13 @@ pub enum Effect {
 #[derive(Debug, Clone)]
 pub struct Engine {
     run: Run,
+}
+
+struct NodeObservation {
+    state: NodeState,
+    message: String,
+    external_ref: Option<String>,
+    input_sequence: Option<u64>,
 }
 
 impl Engine {
@@ -436,6 +445,7 @@ impl Engine {
                 node.message = outputs[0].summary.clone();
                 node.outputs = outputs;
                 node.retry_at = None;
+                node.input_sequence = None;
                 self.record(
                     now,
                     Some(&node_id),
@@ -448,15 +458,19 @@ impl Engine {
                 attempt,
                 message,
                 retryable,
+                outputs,
                 ..
             } => {
                 self.active_attempt(&node_id, attempt)?;
                 let definition = self.node_definition(&node_id)?.clone();
+                validate_failure_outputs(definition.kind, &self.run.target, &outputs)?;
                 let node = self.run.nodes.get_mut(&node_id).expect("validated node");
                 node.state = NodeState::Failed;
                 node.finished_at = Some(now);
                 node.message = message.clone();
                 node.retryable = retryable;
+                node.outputs = outputs;
+                node.input_sequence = None;
                 self.record(now, Some(&node_id), "failed", &message);
                 if retryable
                     && definition.kind != NodeKind::PullRequest
@@ -487,9 +501,12 @@ impl Engine {
                 effects.extend(self.observe(
                     &node_id,
                     attempt,
-                    NodeState::Uncertain,
-                    message,
-                    external_ref,
+                    NodeObservation {
+                        state: NodeState::Uncertain,
+                        message,
+                        external_ref,
+                        input_sequence: None,
+                    },
                     now,
                 )?);
             }
@@ -498,14 +515,18 @@ impl Engine {
                 attempt,
                 message,
                 external_ref,
+                input_sequence,
                 ..
             } => {
                 effects.extend(self.observe(
                     &node_id,
                     attempt,
-                    NodeState::Waiting,
-                    message,
-                    external_ref,
+                    NodeObservation {
+                        state: NodeState::Waiting,
+                        message,
+                        external_ref,
+                        input_sequence,
+                    },
                     now,
                 )?);
             }
@@ -519,9 +540,12 @@ impl Engine {
                 effects.extend(self.observe(
                     &node_id,
                     attempt,
-                    NodeState::Running,
-                    message,
-                    external_ref,
+                    NodeObservation {
+                        state: NodeState::Running,
+                        message,
+                        external_ref,
+                        input_sequence: None,
+                    },
                     now,
                 )?);
             }
@@ -544,6 +568,7 @@ impl Engine {
                 });
                 let node = self.run.nodes.get_mut(&node_id).expect("validated node");
                 node.state = NodeState::Uncertain;
+                node.input_sequence = None;
                 node.message = "保存済みの要求と外部の状態を照合しています".into();
                 self.record(
                     now,
@@ -703,6 +728,7 @@ impl Engine {
                     return Err(EngineError("この工程には中断を要求していません".into()));
                 }
                 node.state = NodeState::Canceled;
+                node.input_sequence = None;
                 node.finished_at = Some(now);
                 node.message = "処理の停止を確認しました".into();
                 self.record(
@@ -742,11 +768,15 @@ impl Engine {
         &mut self,
         id: &str,
         attempt: u32,
-        state: NodeState,
-        message: String,
-        external_ref: Option<String>,
+        observation: NodeObservation,
         now: Millis,
     ) -> Result<Vec<Effect>, EngineError> {
+        let NodeObservation {
+            state,
+            message,
+            external_ref,
+            input_sequence,
+        } = observation;
         self.active_attempt(id, attempt)?;
         if self.node_definition(id)?.kind == NodeKind::Approval {
             return Err(EngineError(
@@ -755,12 +785,17 @@ impl Engine {
         }
         let node = self.run.nodes.get_mut(id).expect("validated node");
         let external_ref = external_ref.or_else(|| node.external_ref.clone());
-        if node.state == state && node.message == message && node.external_ref == external_ref {
+        if node.state == state
+            && node.message == message
+            && node.external_ref == external_ref
+            && node.input_sequence == input_sequence
+        {
             return Ok(Vec::new());
         }
         node.state = state;
         node.message = message.clone();
         node.external_ref = external_ref;
+        node.input_sequence = input_sequence;
         self.record(now, Some(id), "observed", &message);
         Ok(Vec::new())
     }
@@ -846,7 +881,10 @@ impl Engine {
                 state: node.state,
                 message: node.message.clone(),
                 outputs: node.outputs.clone(),
-                target_digest,
+                target_digest: node
+                    .outputs
+                    .first()
+                    .map_or(target_digest, |artifact| artifact.target_digest.clone()),
             });
         }
         node.state = NodeState::Pending;
@@ -859,6 +897,8 @@ impl Engine {
         node.retry_at = None;
         node.retryable = false;
         node.cancel_requested = false;
+        node.timeout_reconciled_at = None;
+        node.input_sequence = None;
     }
 
     fn invalidate_descendants(&mut self, id: &str, now: Millis) -> Result<(), EngineError> {
@@ -914,8 +954,11 @@ impl Engine {
         }
         self.run.repair_context = failed
             .iter()
-            .map(|id| {
+            .flat_map(|id| {
                 let node = &self.run.nodes[id];
+                if !node.outputs.is_empty() {
+                    return node.outputs.clone();
+                }
                 let mut artifact = Artifact::new(
                     ArtifactKind::Evidence,
                     self.run.target.digest(),
@@ -923,7 +966,7 @@ impl Engine {
                 );
                 artifact.data =
                     serde_json::json!({"passed": false, "node_id": id, "attempt": node.attempt});
-                artifact
+                vec![artifact]
             })
             .collect();
         let implementation = self
@@ -1039,6 +1082,7 @@ impl Engine {
                 d.kind != NodeKind::Approval
                     && n.state == NodeState::Running
                     && !n.cancel_requested
+                    && n.timeout_reconciled_at.is_none()
                     && n.started_at
                         .is_some_and(|start| now.saturating_sub(start) >= d.timeout_ms)
             })
@@ -1047,6 +1091,8 @@ impl Engine {
         for id in timed_out {
             let node = self.run.nodes.get_mut(&id).expect("validated node");
             node.state = NodeState::Uncertain;
+            node.input_sequence = None;
+            node.timeout_reconciled_at = Some(now);
             node.message = "応答の期限を過ぎました。処理結果を照合してください".into();
             effects.push(Effect::Reconcile {
                 node_id: id.clone(),
@@ -1102,6 +1148,14 @@ impl Engine {
             let id = &definition.id;
             if self.run.nodes[id].state != NodeState::Pending
                 || self.run.nodes[id].retry_at.is_some_and(|retry| now < retry)
+                // Every planning stage reads the initial snapshot. Finish all
+                // of them before the single writer can replace the run target,
+                // including plans that are not its direct input.
+                || (definition.kind == NodeKind::Implement
+                    && self.run.definition.nodes.iter().any(|node| {
+                        node.kind == NodeKind::Plan
+                            && self.run.nodes[&node.id].state != NodeState::Succeeded
+                    }))
                 || !self
                     .run
                     .definition
@@ -1151,7 +1205,7 @@ impl Engine {
                 node.retry_at = None;
                 node.message = "実行を開始しています".into();
                 effects.push(Effect::Execute {
-                    node: definition.clone(),
+                    node: Box::new(definition.clone()),
                     attempt: node.attempt,
                     request_id: node.request_id.clone(),
                     inputs,
@@ -1194,6 +1248,46 @@ impl Engine {
         };
         Ok(())
     }
+}
+
+fn validate_failure_outputs(
+    kind: NodeKind,
+    target: &TargetSnapshot,
+    outputs: &[Artifact],
+) -> Result<(), EngineError> {
+    let digest = target.digest();
+    if outputs.len() > 64
+        || outputs.iter().any(|artifact| {
+            artifact.id.is_empty()
+                || artifact.id.len() > 256
+                || artifact.kind != kind.output_kind()
+                || artifact.summary.len() > 65_536
+                || artifact
+                    .data
+                    .get("passed")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || if kind == NodeKind::Implement {
+                    // A failed writer can leave partial changes. Preserve its
+                    // report without adopting that target or approving it.
+                    artifact.target_digest.len() != 64
+                        || !artifact
+                            .target_digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit())
+                        || outputs
+                            .first()
+                            .is_some_and(|first| first.target_digest != artifact.target_digest)
+                } else {
+                    artifact.target_digest != digest
+                }
+        })
+    {
+        return Err(EngineError(
+            "失敗した成果物の型・検証対象・不合格の記録が一致しません".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn validate_run(run: &Run) -> Result<(), EngineError> {
@@ -1242,6 +1336,8 @@ pub fn validate_run(run: &Run) -> Result<(), EngineError> {
         };
         if node.node_id != definition.id
             || (node.state.active() && node.attempt == 0)
+            || (node.input_sequence.is_some()
+                && (node.state != NodeState::Waiting || !definition.kind.uses_agent()))
             || (node.attempt > 0
                 && node.request_id != format!("{}-{}-{}", run.id, node.node_id, node.attempt))
         {
@@ -1255,6 +1351,9 @@ pub fn validate_run(run: &Run) -> Result<(), EngineError> {
                     .any(|a| a.kind != definition.kind.output_kind()))
         {
             return Err(EngineError("完了した工程の成果物がありません".into()));
+        }
+        if node.state == NodeState::Failed {
+            validate_failure_outputs(definition.kind, &run.target, &node.outputs)?;
         }
         if (node.state.active() || node.state == NodeState::Succeeded)
             && run
@@ -1380,7 +1479,7 @@ fn demo(now: Millis, fail: bool) -> Run {
             continue;
         };
         let input = if fail && node.kind == NodeKind::Verify {
-            Input::Failed { node_id: node.id, attempt, message: "必須条件：狭い画面でフォーカスが維持されません。入力を残して戻れるように修正してください（デモ）".into(), retryable: false, now }
+            Input::Failed { node_id: node.id, attempt, message: "必須条件：狭い画面でフォーカスが維持されません。入力を残して戻れるように修正してください（デモ）".into(), retryable: false, outputs: Vec::new(), now }
         } else {
             let summary = match node.kind {
                 NodeKind::Trigger => "目的と受け入れ条件を保存しました（デモ）",
@@ -1531,6 +1630,7 @@ mod tests {
                 attempt: 1,
                 message: "temporary disconnect".into(),
                 retryable: true,
+                outputs: Vec::new(),
                 now: 3,
             })
             .unwrap();
@@ -1633,6 +1733,7 @@ mod tests {
                 attempt: 1,
                 message: "missing boundary case".into(),
                 retryable: false,
+                outputs: Vec::new(),
                 now: 3,
             })
             .unwrap();
@@ -1651,6 +1752,7 @@ mod tests {
                 attempt: 2,
                 message: "still failing".into(),
                 retryable: false,
+                outputs: Vec::new(),
                 now: 6,
             })
             .unwrap();
@@ -1659,6 +1761,167 @@ mod tests {
         assert_eq!(engine.run.state, NodeState::Failed);
         assert_eq!(engine.run.repair_attempts, 1);
         assert!(engine.handle(Input::Repair { now: 8 }).is_err());
+    }
+
+    #[test]
+    fn failed_reports_keep_their_evidence_in_history_and_repair_inputs() {
+        let mut engine = engine();
+        to_review(&mut engine);
+        let mut findings = Artifact::new(
+            ArtifactKind::Evidence,
+            engine.run.target.digest(),
+            "See the report for concrete blocking findings",
+        );
+        findings.path = Some(PathBuf::from("/results/review/result.json"));
+        findings.data = serde_json::json!({
+            "passed": false,
+            "report_sha256": "report-hash",
+            "evidence": [{"path": "/results/review/review.md", "sha256": "findings-hash"}],
+        });
+        engine
+            .handle(Input::Failed {
+                node_id: "review".into(),
+                attempt: 1,
+                message: findings.summary.clone(),
+                retryable: false,
+                outputs: vec![findings.clone()],
+                now: 3,
+            })
+            .unwrap();
+        assert_eq!(engine.run.nodes["review"].outputs, vec![findings.clone()]);
+        assert_eq!(engine.run.nodes["approval"].state, NodeState::Pending);
+        Engine::restore(engine.run.clone()).unwrap();
+        let effects = engine.handle(completion(&engine, "verify", 4)).unwrap();
+        assert_eq!(engine.run.repair_context, vec![findings.clone()]);
+        assert_eq!(
+            engine.run.nodes["review"].history.last().unwrap().outputs,
+            vec![findings.clone()]
+        );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Execute { node, inputs, .. }
+                if node.kind == NodeKind::Implement && inputs.contains(&findings)
+        )));
+        assert!(engine.run.nodes["review"].outputs.is_empty());
+        assert_eq!(engine.run.nodes["approval"].state, NodeState::Pending);
+    }
+
+    #[test]
+    fn failed_evidence_must_be_nonpassing_and_for_the_current_target() {
+        let mut engine = engine();
+        engine.run.definition.limits.max_repair_attempts = 0;
+        engine.run.definition_digest = engine.run.definition.digest();
+        to_review(&mut engine);
+        let mut findings = Artifact::new(
+            ArtifactKind::Evidence,
+            engine.run.target.digest(),
+            "blocking findings",
+        );
+        findings.data = serde_json::json!({"passed": false});
+        for invalid in [
+            Artifact {
+                target_digest: "another-target".into(),
+                ..findings.clone()
+            },
+            Artifact {
+                kind: ArtifactKind::Plan,
+                ..findings.clone()
+            },
+            Artifact {
+                data: serde_json::json!({"passed": true}),
+                ..findings.clone()
+            },
+            Artifact {
+                data: serde_json::Value::Null,
+                ..findings.clone()
+            },
+        ] {
+            let before = engine.run.clone();
+            assert!(
+                engine
+                    .handle(Input::Failed {
+                        node_id: "review".into(),
+                        attempt: 1,
+                        message: "rejected report".into(),
+                        retryable: false,
+                        outputs: vec![invalid],
+                        now: 3,
+                    })
+                    .is_err()
+            );
+            assert_eq!(engine.run, before);
+        }
+        engine
+            .handle(Input::Failed {
+                node_id: "review".into(),
+                attempt: 1,
+                message: findings.summary.clone(),
+                retryable: false,
+                outputs: vec![findings],
+                now: 4,
+            })
+            .unwrap();
+        engine.handle(completion(&engine, "verify", 5)).unwrap();
+        assert_eq!(engine.run.state, NodeState::Failed);
+        assert_eq!(engine.run.nodes["approval"].state, NodeState::Pending);
+        assert_eq!(engine.run.nodes["pr"].state, NodeState::Pending);
+        let mut corrupt = engine.run.clone();
+        corrupt.nodes.get_mut("review").unwrap().outputs[0].data["passed"] = true.into();
+        assert!(Engine::restore(corrupt).is_err());
+    }
+
+    #[test]
+    fn a_failed_writers_report_does_not_adopt_its_partial_target() {
+        let mut engine = engine();
+        engine.handle(Input::Start { now: 1 }).unwrap();
+        for id in ["task", "plan"] {
+            engine.handle(completion(&engine, id, 2)).unwrap();
+        }
+        let original = engine.run.target.clone();
+        let mut partial = original.clone();
+        partial.dirty_digest = "partial-changes".into();
+        let mut report = Artifact::new(ArtifactKind::Change, partial.digest(), "incomplete work");
+        report.data = serde_json::json!({"passed": false});
+        let inconsistent = Artifact {
+            target_digest: original.digest(),
+            ..report.clone()
+        };
+        assert!(
+            engine
+                .handle(Input::Failed {
+                    node_id: "implement".into(),
+                    attempt: 1,
+                    message: report.summary.clone(),
+                    retryable: false,
+                    outputs: vec![report.clone(), inconsistent],
+                    now: 3,
+                })
+                .is_err()
+        );
+        engine
+            .handle(Input::Failed {
+                node_id: "implement".into(),
+                attempt: 1,
+                message: report.summary.clone(),
+                retryable: false,
+                outputs: vec![report.clone()],
+                now: 3,
+            })
+            .unwrap();
+        assert_eq!(engine.run.target, original);
+        assert_eq!(engine.run.nodes["implement"].outputs, vec![report.clone()]);
+        assert_eq!(engine.run.nodes["review"].state, NodeState::Pending);
+        Engine::restore(engine.run.clone()).unwrap();
+        engine
+            .handle(Input::RetryAtTarget {
+                node_id: "implement".into(),
+                current_target: partial.clone(),
+                now: 4,
+            })
+            .unwrap();
+        let history = engine.run.nodes["implement"].history.last().unwrap();
+        assert_eq!(history.target_digest, partial.digest());
+        assert_eq!(history.outputs, vec![report]);
     }
 
     #[test]
@@ -1817,6 +2080,7 @@ mod tests {
                 attempt: 1,
                 message: "writer exited after partial changes".into(),
                 retryable: false,
+                outputs: Vec::new(),
                 now: 4,
             })
             .unwrap();
@@ -1844,6 +2108,153 @@ mod tests {
         let previous = engine.run.clone();
         assert!(engine.handle(Input::Resume { now: deadline + 1 }).is_err());
         assert_eq!(engine.run, previous);
+    }
+
+    #[test]
+    fn a_running_timeout_reply_does_not_reconcile_the_same_deadline_again() {
+        let mut engine = engine();
+        engine.handle(Input::Start { now: 1 }).unwrap();
+        let timeout = engine.run.definition.node("task").unwrap().timeout_ms + 1;
+        let effects = engine.handle(Input::Tick { now: timeout }).unwrap();
+        assert!(matches!(effects.as_slice(), [Effect::Reconcile { .. }]));
+        assert_eq!(
+            engine.run.nodes["task"].timeout_reconciled_at,
+            Some(timeout)
+        );
+
+        // A live adapter may immediately confirm the existing worker. Its
+        // original start time remains useful without becoming another timeout.
+        let effects = engine
+            .handle(Input::ObservedRunning {
+                node_id: "task".into(),
+                attempt: 1,
+                external_ref: Some("pane:1".into()),
+                message: "still running".into(),
+                now: timeout,
+            })
+            .unwrap();
+        assert!(effects.is_empty());
+        assert_eq!(engine.run.nodes["task"].started_at, Some(1));
+        let persisted = serde_json::to_vec(engine.run()).unwrap();
+        let mut engine = Engine::restore(serde_json::from_slice(&persisted).unwrap()).unwrap();
+        let before = engine.run.clone();
+        for elapsed in 1..=10 {
+            assert!(
+                engine
+                    .handle(Input::Tick {
+                        now: timeout + elapsed,
+                    })
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(engine.run, before);
+        assert!(matches!(
+            engine
+                .handle(Input::Cancel { now: timeout + 11 })
+                .unwrap()
+                .as_slice(),
+            [Effect::Cancel { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_new_attempt_gets_its_own_timeout_after_an_earlier_attempt_expired() {
+        let mut engine = engine();
+        engine.handle(Input::Start { now: 1 }).unwrap();
+        let duration = engine.run.definition.node("task").unwrap().timeout_ms;
+        engine.handle(Input::Tick { now: duration + 1 }).unwrap();
+        engine
+            .handle(Input::Failed {
+                node_id: "task".into(),
+                attempt: 1,
+                message: "temporary failure after reconciliation".into(),
+                retryable: true,
+                outputs: Vec::new(),
+                now: duration + 2,
+            })
+            .unwrap();
+        assert_eq!(engine.run.nodes["task"].timeout_reconciled_at, None);
+        let restarted = duration + 2_002;
+        let effects = engine.handle(Input::Tick { now: restarted }).unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Execute { attempt: 2, .. }]
+        ));
+        assert!(
+            engine
+                .handle(Input::Tick {
+                    now: restarted + duration - 1,
+                })
+                .unwrap()
+                .is_empty()
+        );
+        let effects = engine
+            .handle(Input::Tick {
+                now: restarted + duration,
+            })
+            .unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Reconcile { attempt: 2, .. }]
+        ));
+    }
+
+    #[test]
+    fn implementation_waits_for_all_plans_before_changing_the_target() {
+        for parallel in [1, 2] {
+            let mut engine = engine();
+            // A plan appended after Implement in editor order is valid even
+            // when it is not the implementation's direct Plan input.
+            engine
+                .run
+                .definition
+                .nodes
+                .push(Node::new("second-plan", NodeKind::Plan, 0.0, 0.0));
+            engine.run.definition.edges.push(Edge {
+                from: "task".into(),
+                to: "second-plan".into(),
+                artifact: ArtifactKind::Task,
+            });
+            engine.run.definition.limits.max_parallel_nodes = parallel;
+            engine.run.definition_digest = engine.run.definition.digest();
+            engine
+                .run
+                .nodes
+                .insert("second-plan".into(), NodeRun::pending("second-plan"));
+            validate_run(engine.run()).unwrap();
+            let initial_digest = engine.run.target.digest();
+            engine.handle(Input::Start { now: 1 }).unwrap();
+            engine.handle(completion(&engine, "task", 2)).unwrap();
+            engine.handle(completion(&engine, "plan", 3)).unwrap();
+            assert_eq!(engine.run.nodes["implement"].state, NodeState::Pending);
+            assert_eq!(engine.run.nodes["second-plan"].state, NodeState::Running);
+            let effects = engine
+                .handle(completion(&engine, "second-plan", 4))
+                .unwrap();
+            assert!(matches!(
+                effects.as_slice(),
+                [Effect::Execute { node, .. }] if node.kind == NodeKind::Implement
+            ));
+            let mut changed = engine.run.target.clone();
+            changed.head_sha = "implemented-head".into();
+            let mut input = completion(&engine, "implement", 5);
+            if let Input::Completed {
+                outputs, target, ..
+            } = &mut input
+            {
+                outputs[0].target_digest = changed.digest();
+                outputs[0].data = serde_json::json!({"publication": demo_publication(&changed)});
+                *target = Some(changed.clone());
+            }
+            engine.handle(input).unwrap();
+            assert_eq!(engine.run.target, changed);
+            assert_eq!(engine.run.nodes["second-plan"].state, NodeState::Succeeded);
+            assert_eq!(
+                engine.run.nodes["second-plan"].outputs[0].target_digest,
+                initial_digest
+            );
+        }
     }
 
     #[test]

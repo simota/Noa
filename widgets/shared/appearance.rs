@@ -136,10 +136,10 @@ fn read(path: &Path) -> Result<Settings, String> {
 fn save(path: &Path, settings: &Settings) -> Result<(), String> {
     let parent = path.parent().ok_or("表示設定の保存先が不正です")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if !meta.is_file() || meta.file_type().is_symlink() {
-            return Err("通常ファイルでない表示設定は置き換えません".into());
-        }
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && (!meta.is_file() || meta.file_type().is_symlink())
+    {
+        return Err("通常ファイルでない表示設定は置き換えません".into());
     }
     let temp = parent.join(format!(".widget-appearance-{}.tmp", std::process::id()));
     let mut options = OpenOptions::new();

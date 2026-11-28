@@ -13,7 +13,7 @@ use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 use workflow::runner::Channel;
 
-const USAGE: &str = "Usage: workflow --repo=PATH [--task-origin=JSON | --run=RUN_ID]\n       workflow --demo[=editor|approval|failed] [--snapshot=PNG] [--size=1280x860]\n\nA native visual development workflow editor for Noa.\nTask handoffs open the start form; --run opens a saved run read-only.\nSnapshots and demos never start agents or publish changes.";
+const USAGE: &str = "Usage: workflow --repo=PATH [--task-origin=JSON | --run=RUN_ID]\n       workflow --demo[=editor|approval|failed|saved] [--snapshot=PNG] [--size=1280x860]\n\nA native visual development workflow editor for Noa.\nTask handoffs open the start form; --run opens a saved run read-only.\nSnapshots and demos never start agents or publish changes.";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -51,8 +51,8 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         } else if arg == "--demo" {
             parsed.demo = Some("editor".into());
         } else if let Some(demo) = arg.strip_prefix("--demo=") {
-            if !matches!(demo, "editor" | "approval" | "failed") {
-                return Err("unknown demo; use editor, approval or failed".into());
+            if !matches!(demo, "editor" | "approval" | "failed" | "saved") {
+                return Err("unknown demo; use editor, approval, failed or saved".into());
             }
             parsed.demo = Some(demo.into());
         } else if let Some(path) = arg.strip_prefix("--snapshot=") {
@@ -194,6 +194,7 @@ mod tests {
         assert!(args(&["--repo=.", "--snapshot=out.png"]).is_err());
         assert!(args(&["--repo=.", "--demo"]).is_err());
         assert!(args(&["--demo=approval", "--snapshot=out.png", "--size=1280x860"]).is_ok());
+        assert!(args(&["--demo=saved", "--snapshot=out.png"]).is_ok());
         assert!(args(&["--demo", "--size=999999x1"]).is_err());
         assert!(args(&["--repo="]).is_err());
         assert!(args(&["--help"]).unwrap().help);

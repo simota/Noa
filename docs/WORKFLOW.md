@@ -12,6 +12,18 @@ These screenshots are rendered by the native widget's software renderer from exp
 
 ![Approval view with frozen target, evidence and prepared publication details](images/workflow/approval.png)
 
+Saved-run inspection uses the same read-only path as Tasks result links. The
+following offline fixtures were rendered on Linux at 2× scale, at logical sizes
+1280×860 and 720×600. The narrow graph scrolls vertically and its **詳細** button
+opens the full-width inspector. These images do not represent a live agent run.
+
+![Saved run with its graph and evidence inspector](images/workflow/saved-run.png)
+
+![Saved run at the minimum window size](images/workflow/saved-run-narrow.png)
+
+Reproduce these fixtures with `--demo=saved --snapshot=PATH.png` and
+`--size=1280x860` or `--size=720x600`.
+
 ## Using a workflow
 
 1. Open Workflow for a repository. The first saved definition is the standard development cycle.
@@ -59,6 +71,8 @@ After committing run state, Workflow writes a derived reference under `<Noa data
 
 `workflow --repo=PATH --run=RUN_ID` opens the saved run read-only without starting the runner or connecting to agents. It is the destination of the result link in Tasks. The run snapshot remains available after a later run starts. If a derived reference cannot be written, the committed run remains authoritative and the UI reports the projection failure.
 
+The saved-run window shows its frozen graph, stage details, history, and evidence. Editing, approval, retries, and agent input are unavailable there. A draft answer in a live window belongs to the displayed run, stage attempt, and agent input-report sequence; a different run, attempt, or question clears that draft. The runner rejects an answer addressed to an attempt that is no longer waiting for that input, and the adapter checks the sequence against the latest agent report before sending. A restored wait without an input sequence offers reconciliation rather than an answer field until the live request has been observed again.
+
 ### Shared display preferences
 
 Use **ウィジェットの表示設定** from Noa's command palette, or run any native widget with `--widget-settings`, to choose system/light/dark appearance, 100/115/130/150% body and input text size, and standard/compact whitespace. Labels, buttons and editable text use the selected scale; auxiliary menus, segmented controls and tags retain GPUI's default size. The preview shows the chosen text size and appearance. Save and reopen the widgets to apply the preference. Density changes whitespace independently from text size and the Workflow port-target minimum.
@@ -70,6 +84,8 @@ The shared file is `<Noa data directory>/widget-appearance.json`. Offline demo/s
 Select a completed stage, or the waiting Approval stage, to open its reports and evidence inside the workflow. **構造化された報告を読む** opens the structured report. **根拠を読む** opens an evidence file, including the captured `changes.patch` for Implement, review findings, or verification logs. **公開するPR本文を読む** shows the prepared PR body. The viewer is read-only and supports text selection and copying; use **ワークフローへ戻る** or Escape to return to the graph.
 
 Before displaying a file, the viewer reads its entire contents up to 8 MiB and verifies the recorded SHA-256. It refuses missing or changed files, symlinked paths, oversized files, and non-UTF-8 content. It displays at most 120,000 characters and marks truncation explicitly, after checking the full file rather than only the visible prefix. Control characters other than newline and tab, and bidirectional display controls, appear as visible `[U+XXXX]` notation. The stored evidence remains unchanged. A truncated preview is not a claim that the whole file has been reviewed.
+
+Failed structured reports retain their evidence too. After a retry or repair, open it under **過去の試行**; its attempt number and target distinguish it from the current stage's results. A failed Review or Verify passes these reports and logs to the repair attempt as hash-checked local copies. Failure evidence remains a failed verdict and cannot satisfy an approval's successful-input requirements.
 
 ## Stage and connection contracts
 
@@ -89,6 +105,8 @@ The definition must be a directed acyclic graph with exactly one Trigger and exa
 
 The default graph fans out from Implement to Review and Verify and joins their evidence at Approval. There is no arbitrary script stage, expression language, conditional branch, or user-authored graph cycle. Repair is a bounded runner operation, not a back edge in the graph.
 
+If a graph has multiple Plan stages, all of them finish before Implement starts. Their worktrees use the initial target, so this barrier prevents an independent Plan from finishing against an obsolete target after implementation has changed it.
+
 ## Definitions, runs, and targets
 
 The saved editor definition and the active run are separate values. Saving a changed definition advances its revision. Starting a run copies that definition and its digest into the run, along with the objective and canonical repository path. A draft edit cannot change the topology, instructions, or limits of a run already in progress.
@@ -104,6 +122,8 @@ The implementation stage can produce a new target. Its dependent results and app
 The source repository is not reset or edited by the workflow's Git adapter. Worktree preparation never removes an existing worktree or resets its contents. Implementation and validation worktrees remain on disk after the run. The application must be able to create worktrees in the repository's shared Git directory.
 
 Snapshot support currently requires UTF-8 paths and bounds the captured delta plus untracked content to 64 MiB. Symlinked untracked files cannot be read as regular snapshot files. Ignored files are not copied. Only `.noa/workflow/` is reserved for workflow requests and results and excluded from the target delta; other `.noa` content is treated as ordinary project content. Tracked files in the reserved directory cause an explicit error instead of being silently omitted. Dependencies, ignored build inputs, or local configuration needed by verification must therefore be available independently in the new worktree. Worktrees isolate changes; they are not a security sandbox for an agent or a test command.
+
+Snapshot patches and committed evidence use fixed, uncolored Git patch syntax regardless of color, prefix, or submodule display preferences. Submodule changes are always detected; a preference to hide them cannot make a changed target appear clean. Repository and Git-directory paths retain trailing whitespace when resolved.
 
 After the implementation worker has stopped, the runner captures a Git patch between the fixed starting base SHA and the implementation's target HEAD SHA. This `changes.patch` is an additional Change evidence item with source `captured_git_diff`, scope `committed_changes`, both commit IDs, byte count, and a SHA-256 hash. Git produces it with external diff programs and text conversion disabled, and with binary-patch support. The patch is bounded to 8 MiB. Capture failure or an oversized patch preserves the implementation result as Uncertain and requires explicit reconciliation; it does not silently advance or restart the writer.
 
@@ -135,7 +155,7 @@ When the only failures are in Review or Verify, the engine can automatically rep
 | Stages | 7 | 1–64; the graph rules still apply. |
 | Connections | 8 | At most 256. |
 | Concurrent active stages | 2 | 1–8. There is still only one implementation writer. |
-| Stage response timeout | 30 minutes | Greater than zero, at most 24 hours. A timed-out running attempt is reconciled, not presumed unexecuted. |
+| Stage response timeout | 30 minutes | Greater than zero, at most 24 hours. A timed-out running attempt is automatically reconciled once, not presumed unexecuted. A running reply retains its original start time without retriggering that deadline. |
 | Automatic retries per stage | 2 | 0–5. This bounds automatic retries, not a person's later retry decision. |
 | Repair attempts per run | 2 | 0–10. |
 | Total elapsed run time | 90 minutes | Greater than zero, at most 24 hours. Paused and waiting time still counts. |
@@ -256,7 +276,7 @@ Install and authenticate a supported agent and make it available in the login sh
 
 The launcher supplies `--repo=DIR` to the native helper. Developers may invoke the helper with that argument for diagnosis; users can open it from Noa. Run limits and node instructions belong to the saved definition, rather than a separate global Workflow configuration file.
 
-For offline UI inspection, the helper accepts `--demo`, `--demo=approval`, and `--demo=failed`. `--snapshot=PATH.png` is available only with a demo, with an optional `--size=WIDTHxHEIGHT`; it cannot be combined with a live repository. Demos never spawn agents or publish changes.
+For offline UI inspection, the helper accepts `--demo`, `--demo=approval`, `--demo=failed`, and `--demo=saved`. The saved-run demo uses the same read-only display path as `--run`. `--snapshot=PATH.png` is available only with a demo, with an optional `--size=WIDTHxHEIGHT`; it cannot be combined with a live repository. Demos never spawn agents or publish changes.
 
 Objectives, instructions, repository paths, artifact summaries, logs, reports, and local copies of changed files are retained in the state and worktrees. These are not automatically encrypted, redacted, expired, or synchronized. Agent prompts and repository content are processed according to the selected agent's own service and authentication configuration. Publishing sends the branch and PR text to the configured GitHub repository. The workflow does not upload its local evidence files as PR attachments.
 

@@ -63,7 +63,11 @@ pub enum Intent {
         node_id: String,
     },
     Answer {
+        run_id: String,
         node_id: String,
+        attempt: u32,
+        request_id: String,
+        input_sequence: u64,
         answer: String,
     },
     Refresh,
@@ -442,11 +446,13 @@ impl Worker {
             Observation::Waiting {
                 external_ref,
                 message,
+                input_sequence,
             } => Input::Waiting {
                 node_id,
                 attempt,
                 external_ref,
                 message,
+                input_sequence,
                 now,
             },
             Observation::Complete { outputs, target } => Input::Completed {
@@ -456,11 +462,16 @@ impl Worker {
                 target,
                 now,
             },
-            Observation::Failed { message, retryable } => Input::Failed {
+            Observation::Failed {
+                message,
+                retryable,
+                outputs,
+            } => Input::Failed {
                 node_id,
                 attempt,
                 message,
                 retryable,
+                outputs,
                 now,
             },
             Observation::Uncertain {
@@ -510,10 +521,24 @@ impl Worker {
                     inputs,
                     target,
                 } => {
+                    // An earlier effect in this batch can reach a run limit
+                    // and enqueue cancellation behind the remaining executes.
+                    // Dispatch only an attempt that is still allowed to start.
+                    if run.pause_requested
+                        || run.cancel_requested
+                        || run.nodes.get(&node.id).is_none_or(|current| {
+                            current.state != NodeState::Running
+                                || current.attempt != attempt
+                                || current.request_id != request_id
+                                || current.cancel_requested
+                        })
+                    {
+                        continue;
+                    }
                     let id = node.id.clone();
                     let observation = self
                         .adapters
-                        .execute(&run, node, attempt, request_id, inputs, target);
+                        .execute(&run, *node, attempt, request_id, inputs, target);
                     (id, attempt, observation)
                 }
                 Effect::Reconcile {
@@ -775,12 +800,36 @@ impl Worker {
                 let node = run.nodes.get(&node_id).ok_or("工程がありません")?;
                 return self.adapters.focus(&run.id, &node_id, node.attempt);
             }
-            Intent::Answer { node_id, answer } => {
+            Intent::Answer {
+                run_id,
+                node_id,
+                attempt,
+                request_id,
+                input_sequence,
+                answer,
+            } => {
                 let run = self.engine.as_ref().ok_or("実行がありません")?.run();
                 let node = run.nodes.get(&node_id).ok_or("工程がありません")?;
+                if run.id != run_id
+                    || node.attempt != attempt
+                    || node.request_id != request_id
+                    || node.input_sequence != Some(input_sequence)
+                    || node.state != NodeState::Waiting
+                    || run.cancel_requested
+                    || node.cancel_requested
+                    || run
+                        .definition
+                        .node(&node_id)
+                        .is_none_or(|definition| !definition.kind.uses_agent())
+                {
+                    return Err(
+                        "回答先の実行・試行・入力待ち状態が変わりました。最新の要求を確認してください"
+                            .into(),
+                    );
+                }
                 return self
                     .adapters
-                    .answer(&run.id, &node_id, node.attempt, &answer);
+                    .answer(&run_id, &node_id, attempt, input_sequence, &answer);
             }
             Intent::Refresh => {
                 if self.deferred {
@@ -871,6 +920,30 @@ mod tests {
         (directory, repository, path.join("state"))
     }
 
+    fn worker(repository: PathBuf, root: PathBuf, engine: Engine) -> Worker {
+        let store = Store::open(root.clone()).unwrap();
+        let stored = store
+            .save(0, &engine.run().definition, Some(engine.run()))
+            .unwrap();
+        let adapters = Adapters::new(repository.clone(), root.join("runs")).unwrap();
+        let lease = fs::Lease::try_acquire(&root.join("runner.lock")).unwrap();
+        Worker {
+            repository,
+            root,
+            store,
+            stored,
+            engine: Some(engine),
+            adapters,
+            views: Arc::new(Mutex::new(None)),
+            wake: Arc::new(|| {}),
+            notice: None,
+            persistence_failed: false,
+            lease,
+            presets: Vec::new(),
+            deferred: false,
+        }
+    }
+
     fn saved_attempt(
         repository: &std::path::Path,
         root: &std::path::Path,
@@ -900,6 +973,7 @@ mod tests {
                     attempt: 1,
                     message: "temporary".into(),
                     retryable: true,
+                    outputs: Vec::new(),
                     now: started,
                 })
                 .unwrap();
@@ -913,6 +987,168 @@ mod tests {
             .unwrap()
             .save(0, &definition, Some(engine.run()))
             .unwrap()
+    }
+
+    #[test]
+    fn queued_executions_do_not_start_after_a_limit_requests_cancellation() {
+        let (_directory, repository, root) = repository();
+        let definition = WorkflowDefinition::standard();
+        let head = git::head(&repository).unwrap();
+        let mut engine = Engine::new(
+            "run-queued-before-limit".into(),
+            definition.clone(),
+            repository.clone(),
+            "Stop before dispatching queued work".into(),
+            git::snapshot(&repository, &head).unwrap(),
+            0,
+        )
+        .unwrap();
+        let mut queued = engine.handle(Input::Start { now: 1 }).unwrap();
+        // The runner can still have these Execute effects in its batch when
+        // accepting another effect's result reaches the elapsed-time limit.
+        queued.extend(
+            engine
+                .handle(Input::Tick {
+                    now: definition.limits.max_duration_ms,
+                })
+                .unwrap(),
+        );
+        let mut worker = worker(repository, root.clone(), engine);
+        worker.effects(queued).unwrap();
+        let run = worker.engine.as_ref().unwrap().run();
+        assert_eq!(run.nodes["task"].state, NodeState::Canceled);
+        assert!(run.nodes["task"].outputs.is_empty());
+        assert!(
+            !root
+                .join("runs")
+                .join(&run.id)
+                .join("jobs")
+                .join("task-1")
+                .exists(),
+            "a canceled dispatch must not prepare or execute an adapter job"
+        );
+    }
+
+    #[test]
+    fn answers_are_bound_to_the_displayed_run_attempt_and_waiting_state() {
+        let (_directory, repository, root) = repository();
+        let head = git::head(&repository).unwrap();
+        let started = now();
+        let mut engine = Engine::new(
+            "run-current-question".into(),
+            WorkflowDefinition::standard(),
+            repository.clone(),
+            "Answer only the displayed question".into(),
+            git::snapshot(&repository, &head).unwrap(),
+            started,
+        )
+        .unwrap();
+        engine.handle(Input::Start { now: started }).unwrap();
+        engine
+            .handle(Input::Completed {
+                node_id: "task".into(),
+                attempt: 1,
+                outputs: vec![crate::model::Artifact::new(
+                    crate::model::ArtifactKind::Task,
+                    engine.run().target.digest(),
+                    "captured objective",
+                )],
+                target: None,
+                now: started,
+            })
+            .unwrap();
+        let waiting = Input::Waiting {
+            node_id: "plan".into(),
+            attempt: 1,
+            message: "A current question".into(),
+            external_ref: None,
+            input_sequence: Some(1),
+            now: started,
+        };
+        engine.handle(waiting.clone()).unwrap();
+        let run_id = engine.run().id.clone();
+        let request_id = engine.run().nodes["plan"].request_id.clone();
+        let answer = |run_id: String, attempt: u32, request_id: String| Intent::Answer {
+            run_id,
+            node_id: "plan".into(),
+            attempt,
+            request_id,
+            input_sequence: 1,
+            answer: "the answer".into(),
+        };
+        let mut worker = worker(repository, root, engine);
+        for intent in [
+            answer("run-previous-question".into(), 1, request_id.clone()),
+            answer(run_id.clone(), 2, request_id.clone()),
+            answer(run_id.clone(), 1, "previous-request".into()),
+        ] {
+            assert!(worker.intent(intent).unwrap_err().contains("回答先"));
+        }
+        // A current answer reaches the adapter. No job exists in this fixture,
+        // so it stops before opening an IPC connection or sending any text.
+        assert_eq!(
+            worker
+                .intent(answer(run_id.clone(), 1, request_id.clone()))
+                .unwrap_err(),
+            "工程の実行記録がありません"
+        );
+        let mut later_question = waiting.clone();
+        if let Input::Waiting { input_sequence, .. } = &mut later_question {
+            *input_sequence = Some(2);
+        }
+        let before = worker.engine.as_ref().unwrap().run().seq;
+        worker
+            .engine
+            .as_mut()
+            .unwrap()
+            .handle(later_question)
+            .unwrap();
+        let updated = worker.engine.as_ref().unwrap().run();
+        assert!(
+            updated.seq > before,
+            "a new question must be persisted even when its text is identical"
+        );
+        let restored =
+            Engine::restore(serde_json::from_slice(&serde_json::to_vec(updated).unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(restored.run().nodes["plan"].input_sequence, Some(2));
+        assert!(
+            worker
+                .intent(answer(run_id.clone(), 1, request_id.clone()))
+                .unwrap_err()
+                .contains("回答先")
+        );
+        worker
+            .engine
+            .as_mut()
+            .unwrap()
+            .handle(Input::ObservedRunning {
+                node_id: "plan".into(),
+                attempt: 1,
+                external_ref: None,
+                message: "working again".into(),
+                now: started,
+            })
+            .unwrap();
+        assert_eq!(
+            worker.engine.as_ref().unwrap().run().nodes["plan"].input_sequence,
+            None
+        );
+        assert!(
+            worker
+                .intent(answer(run_id.clone(), 1, request_id.clone()))
+                .unwrap_err()
+                .contains("回答先")
+        );
+        let engine = worker.engine.as_mut().unwrap();
+        engine.handle(waiting).unwrap();
+        engine.handle(Input::Cancel { now: started }).unwrap();
+        assert!(
+            worker
+                .intent(answer(run_id, 1, request_id))
+                .unwrap_err()
+                .contains("回答先")
+        );
     }
 
     #[test]

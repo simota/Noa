@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.23] - 2026-11-29
+
+A persistent personal assistant widget, faster plain-text and OSC parsing, and
+hardened Review, Verify and Workflow runs.
+
+### Added
+
+- Ember: View → Ember, `ember.open` in the command palette, or the Ember
+  menu-bar entry opens a persistent assistant window with conversation,
+  requests, memory and settings pages. It answers in conversation, produces
+  Markdown documents and research reports from explicitly shared files as
+  independent background requests, keeps only the preferences the user saves,
+  and hands a reviewable draft to Workflow's unstarted form. It uses an OpenAI
+  API key from the environment or the macOS Keychain and ships in the macOS
+  bundle. See `docs/EMBER.md`. (#294)
+
+### Performance
+
+- Plain ASCII text after a narrow ASCII character is written straight from the
+  source bytes (mixed ASCII/SGR/cursor flood about 19% fewer instructions). (#290)
+- Shell-mark eviction is constant time, the Style hash is written once, and OSC
+  string screening no longer allocates (OSC 8 link floods about 31% fewer
+  instructions). (#289)
+
 ### Fixed
 
 - Review captures Git changes without running repository filters or hooks or

@@ -1889,7 +1889,7 @@ dependencies = [
 
 [[package]]
 name = "noa-ipc"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -1904,7 +1904,7 @@ dependencies = [
 
 [[package]]
 name = "noa-widget"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "libc",
  "serde",

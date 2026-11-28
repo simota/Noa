@@ -456,6 +456,91 @@ fn a_refused_start_shows_why_under_the_form() {
     let _ = std::fs::remove_dir_all(repo);
 }
 
+#[test]
+fn a_pending_start_cannot_be_submitted_twice_and_a_refusal_allows_retry() {
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    let repo = temp("pending-start");
+    let mut text = TextStore::new(Default::default());
+    let form = start::Form {
+        repo: repo.display().to_string(),
+        ..start::Form::default()
+    };
+    start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+    act(&mut screen, Action::Start);
+    act(&mut screen, Action::Start);
+    let sent = commands(&link);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(matches!(sent[0], Command::Start { .. }));
+    assert!(!screen.tree.is_enabled(screen.start.start_button));
+    // An unrelated redraw must not re-enable the pending action.
+    screen.rebuild(&mut text);
+    assert!(!screen.tree.is_enabled(screen.start.start_button));
+    link.notices.send((0, "開始を拒否しました".into())).unwrap();
+    screen.poll_live(&mut text);
+    assert!(!screen.starting);
+    assert!(screen.tree.is_enabled(screen.start.start_button));
+    act(&mut screen, Action::Start);
+    assert!(matches!(&commands(&link)[..], [Command::Start { .. }]));
+    act(&mut screen, Action::NewVerification);
+    assert!(!screen.starting);
+    let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn a_pending_resume_cannot_be_submitted_twice_or_start_another_verification() {
+    let root = temp("pending-resume");
+    let dir = stored_unfinished(&root);
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    act(&mut screen, Action::ResumePast(dir.clone()));
+    act(&mut screen, Action::ResumePast(dir.clone()));
+    act(&mut screen, Action::Start);
+    assert_eq!(commands(&link), [Command::Resume { dir }]);
+    assert!(screen.starting);
+    assert!(!screen.tree.is_enabled(screen.start.start_button));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn reconfiguring_a_past_verification_cancels_a_pending_resume() {
+    let root = temp("refill-pending-resume");
+    let unfinished = stored_unfinished(&root);
+    let finished = stored_demo(&root);
+    let (channel, link) = Channel::fake();
+    let mut screen = live_ready(channel);
+    act(&mut screen, Action::ResumePast(unfinished.clone()));
+    assert_eq!(commands(&link), [Command::Resume { dir: unfinished }]);
+    assert!(screen.starting);
+    act(&mut screen, Action::VerifyAgain(Some(finished)));
+    assert_eq!(commands(&link), [Command::Leave]);
+    assert!(!screen.starting);
+    assert!(screen.tree.is_enabled(screen.start.start_button));
+    // The old runner's late answer cannot replace the newly filled form.
+    link.snapshots
+        .send(snapshot(crate::demo::held(), None, 0))
+        .unwrap();
+    screen.poll_live(&mut TextStore::new(Default::default()));
+    assert!(screen.session.is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_demo_start_does_not_leave_the_form_waiting_for_a_runner() {
+    let mut screen = Verify::demo_start();
+    let repo = temp("demo-start-pending");
+    let mut text = TextStore::new(Default::default());
+    let form = start::Form {
+        repo: repo.display().to_string(),
+        ..start::Form::default()
+    };
+    start::fill(&mut screen.tree, &mut screen.start, &form, &mut text);
+    act(&mut screen, Action::Start);
+    assert!(!screen.starting);
+    assert!(toasts(&screen).iter().any(|t| t.contains("デモ表示")));
+    let _ = std::fs::remove_dir_all(repo);
+}
+
 /// A link-log notice after a successful open (L1-4: it never fails the
 /// session) is not a start refusal, whichever channel is read first.
 #[test]
@@ -1275,6 +1360,28 @@ fn ac23_opening_evidence_opens_the_stored_copy_not_the_worktree_file() {
     let _ = std::fs::remove_dir_all(workdir);
 }
 
+#[test]
+fn opening_a_command_log_refuses_content_changed_since_ingest() {
+    let workdir = temp("changed-command-log");
+    let (session, reply) = demo_with_files(&workdir);
+    let log_key = key("claude/r1/e1");
+    let stored = session
+        .evidence_item(&log_key)
+        .unwrap()
+        .stored
+        .as_ref()
+        .unwrap();
+    let path = reply.join(&stored.path);
+    let mut changed = std::fs::read(&path).unwrap();
+    changed[0] ^= 1;
+    std::fs::write(&path, changed).unwrap();
+    let (mut screen, _link) = live_with_dirs(session, &reply);
+    act(&mut screen, Action::OpenEvidence(log_key));
+    assert!(screen.log_open.is_none());
+    assert!(toasts(&screen).iter().any(|t| t.contains("一致しません")));
+    let _ = std::fs::remove_dir_all(workdir);
+}
+
 /// Whether any widget under `root` draws a picture.
 fn draws_a_picture(tree: &UiTree, root: WidgetId) -> bool {
     let mut stack = vec![root];
@@ -1961,6 +2068,89 @@ fn the_report_is_saved_alone_or_exported_with_its_evidence() {
         toasts(&screen)
     );
     let _ = std::fs::remove_dir_all(workdir);
+}
+
+#[test]
+fn file_dialog_answers_do_not_write_or_attach_to_a_different_verification() {
+    let root = temp("stale-dialogs");
+    let (session, reply) = demo_with_files(&root);
+    let (mut screen, link) = live_with_dirs(session, &reply);
+    let mut text = TextStore::new(Default::default());
+    act(&mut screen, Action::SaveReport);
+    act(&mut screen, Action::ExportBundle);
+    assert_eq!(Screen::take_file_dialogs(&mut screen).len(), 2);
+    act(&mut screen, Action::NewVerification);
+    let mut next = crate::demo::held();
+    next.id = verify::model::types::SessionId::new("ver-next");
+    link.snapshots
+        .send(snapshot(
+            next.clone(),
+            Some((reply.clone(), root.clone())),
+            1,
+        ))
+        .unwrap();
+    screen.poll_live(&mut text);
+    // A new request stays correctly paired even when the old dialogs finish late.
+    act(&mut screen, Action::SaveReport);
+    assert_eq!(Screen::take_file_dialogs(&mut screen).len(), 1);
+    let stale_report = root.join("stale.md");
+    let stale_bundle = root.join("stale-bundle");
+    Screen::file_dialog_finished(
+        &mut screen,
+        FileDialogResult::Saved(stale_report.clone()),
+        &mut text,
+    );
+    Screen::file_dialog_finished(
+        &mut screen,
+        FileDialogResult::Saved(stale_bundle.clone()),
+        &mut text,
+    );
+    assert!(!stale_report.exists());
+    assert!(!stale_bundle.exists());
+    let current = root.join("current.md");
+    Screen::file_dialog_finished(
+        &mut screen,
+        FileDialogResult::Saved(current.clone()),
+        &mut text,
+    );
+    assert_eq!(
+        std::fs::read_to_string(current).unwrap(),
+        store::report_text(&next)
+    );
+    act(&mut screen, Action::AttachEvidence);
+    assert_eq!(Screen::take_file_dialogs(&mut screen).len(), 1);
+    next.id = verify::model::types::SessionId::new("ver-another");
+    link.snapshots
+        .send(snapshot(next, Some((reply.clone(), root.clone())), 1))
+        .unwrap();
+    screen.poll_live(&mut text);
+    Screen::file_dialog_finished(
+        &mut screen,
+        FileDialogResult::Opened(vec![reply.join("evidence/user/1.png")]),
+        &mut text,
+    );
+    assert!(screen.attach_current.is_none());
+    assert!(screen.attach_queue.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn changing_verifications_dismisses_old_destructive_confirmations() {
+    let (mut screen, link) = live_with(crate::demo::held());
+    let mut text = TextStore::new(Default::default());
+    act(&mut screen, Action::Close);
+    assert!(screen.close_alert.is_some());
+    let mut next = crate::demo::held();
+    next.id = verify::model::types::SessionId::new("ver-next-alert");
+    link.snapshots.send(snapshot(next, None, 0)).unwrap();
+    screen.poll_live(&mut text);
+    assert!(screen.close_alert.is_none());
+    assert!(commands(&link).is_empty());
+    act(&mut screen, Action::ClosePanes);
+    assert!(screen.panes_alert.is_some());
+    act(&mut screen, Action::NewVerification);
+    assert!(screen.panes_alert.is_none());
+    assert_eq!(commands(&link), [Command::Leave]);
 }
 
 // ---- requirement A: ペインをすべて閉じる ----

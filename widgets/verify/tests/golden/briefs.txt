@@ -502,10 +502,10 @@ Write the whole file in one go when you are done. Do not answer in the terminal.
 
 Rules:
 - rulings: one per criterion: verified, failed, inconclusive, not_applicable, or same (the previous one unchanged); evidence lists the keys it rests on
-- defect ops: every raw defect of section 6 in exactly one add or merge "from", or one dismiss with a reason; new ids are free (the next is D1); status open, agreed, disputed or rejected (rejected needs a rationale)
+- defect ops: every raw defect of section 6 in exactly one add or merge "from", or one dismiss with a reason; new ids are free (the next is D1) and must not reuse current or removed criterion ids; status open, agreed, disputed or rejected (rejected needs a rationale)
 - severity: critical, high, medium, low, info; confidence: high, medium, low; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
 - assign: verifier ids: claude, codex, agy; values <verifier>/<criterion> of another verifier, or a live defect id
-- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back
+- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking lists every failed must criterion), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back; blocking never names a verified criterion or a should criterion ruled not_applicable
 - verdict: only in the last round or with "close": true
 ===== R2 brief to claude =====
 ## 1. Request and round
@@ -1134,8 +1134,8 @@ Write the whole file in one go when you are done. Do not answer in the terminal.
 
 Rules:
 - rulings: one per criterion: verified, failed, inconclusive, not_applicable, or same (the previous one unchanged); evidence lists the keys it rests on
-- defect ops: every raw defect of section 6 in exactly one add or merge "from", or one dismiss with a reason; new ids are free (the next is D2); status open, agreed, disputed or rejected (rejected needs a rationale)
+- defect ops: every raw defect of section 6 in exactly one add or merge "from", or one dismiss with a reason; new ids are free (the next is D2) and must not reuse current or removed criterion ids; status open, agreed, disputed or rejected (rejected needs a rationale)
 - severity: critical, high, medium, low, info; confidence: high, medium, low; category: conformance, falsify, regression, e2e, nonfunctional, custom, other
 - assign: verifier ids: claude, codex, agy; values <verifier>/<criterion> of another verifier, or a live defect id
-- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back
+- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking lists every failed must criterion), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back; blocking never names a verified criterion or a should criterion ruled not_applicable
 - verdict: only in the last round or with "close": true

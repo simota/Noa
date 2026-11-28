@@ -708,7 +708,7 @@ fn write_item(out: &mut String, session: &Session, key: &EvidenceKey, reply_dir:
                 let _ = write!(out, "command of {lines} lines (cwd {cwd}) exit {exit}");
             } else {
                 let one = cmd.lines().next().unwrap_or_default();
-                let _ = write!(out, "command `{one}` (cwd {cwd}) exit {exit}");
+                let _ = write!(out, "command {} (cwd {cwd}) exit {exit}", inline_code(one));
             }
             match &item.rerun {
                 Some(r) => {
@@ -770,6 +770,22 @@ fn write_item(out: &mut String, session: &Session, key: &EvidenceKey, reply_dir:
         None => {}
     }
     out.push('\n');
+}
+
+/// A single line of literal code. A longer delimiter keeps shell command
+/// substitutions literal; padding separates edge backticks and preserves
+/// spaces that Markdown would otherwise trim at both ends.
+pub(crate) fn inline_code(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    let pad = text.starts_with('`')
+        || text.ends_with('`')
+        || (text.starts_with(' ') && text.ends_with(' ') && text.chars().any(|c| c != ' '));
+    if pad {
+        format!("{fence} {text} {fence}")
+    } else {
+        format!("{fence}{text}{fence}")
+    }
 }
 
 /// `text` as a fenced code block, each line after `indent`, starting with
@@ -1046,7 +1062,7 @@ fn write_tail<'a>(
     if let Some(tail) = tails.get(key)
         && tailed.insert(key)
     {
-        let _ = writeln!(out, "    log tail:\n```\n{}\n```", tail.trim_end());
+        let _ = writeln!(out, "    log tail:{}", fenced(tail.trim_end(), ""));
     }
 }
 
@@ -1310,7 +1326,7 @@ pub fn judge_brief(
     body.push_str("- rulings: one per criterion: verified, failed, inconclusive, not_applicable, or same (the previous one unchanged); evidence lists the keys it rests on\n");
     let _ = writeln!(
         body,
-        "- defect ops: every raw defect of section 6 in exactly one add or merge \"from\", or one dismiss with a reason; new ids are free (the next is {next}); status open, agreed, disputed or rejected (rejected needs a rationale)"
+        "- defect ops: every raw defect of section 6 in exactly one add or merge \"from\", or one dismiss with a reason; new ids are free (the next is {next}) and must not reuse current or removed criterion ids; status open, agreed, disputed or rejected (rejected needs a rationale)"
     );
     body.push_str(
         "- severity: critical, high, medium, low, info; confidence: high, medium, low; category: ",
@@ -1326,7 +1342,7 @@ pub fn judge_brief(
             .join(", "),
     );
     body.push_str("; values <verifier>/<criterion> of another verifier, or a live defect id\n");
-    body.push_str("- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking non-empty), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back\n");
+    body.push_str("- verdict.decision: pass (every must verified, no live critical or high defect, no blocking), pass_with_issues (every must verified, or ruled not_applicable and listed in blocking; blocking lists every should criterion not verified, every must ruled not_applicable and every live defect), fail (some must failed; blocking lists every failed must criterion), inconclusive (some must inconclusive, none failed); a should criterion ruled not_applicable holds nothing back; blocking never names a verified criterion or a should criterion ruled not_applicable\n");
     body.push_str("- verdict: only in the last round or with \"close\": true\n");
 
     let judge = session.judge.id.clone();

@@ -128,6 +128,9 @@ pub struct Status {
     pub items: Vec<ItemStatus>,
     /// What `done` holds, once written.
     pub done: Option<String>,
+    /// Status files that could not be read this poll. Missing files and
+    /// refused links are not I/O errors; their normal timeouts still apply.
+    pub errors: Vec<String>,
 }
 
 /// The time limits a script's commands are held to (L1-5 steps 3–4).
@@ -152,6 +155,11 @@ pub struct Limits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watch {
     limits: Limits,
+    /// The log already records a started script, or a poll saw its pid.
+    started: bool,
+    /// A resumed script with no readable first pid gets one start grace
+    /// from here, rather than waiting forever for a run it cannot observe.
+    first_poll: Option<Millis>,
     /// When each command's `.pid` was first seen, by `n`.
     seen: BTreeMap<u32, Millis>,
     /// Each command's process as its `.pid` was first read: the only one
@@ -160,8 +168,13 @@ pub struct Watch {
     /// When each command's process group was sent SIGTERM past its limit.
     term: BTreeMap<u32, Millis>,
     /// How each command ended, once its files or the kill past its limit
-    /// said: it stays, and is given once the command's turn is over.
+    /// said. A provisional stopped result caused by unreadable files may
+    /// recover during `unreadable_result`'s grace; known outcomes stay.
     decided: BTreeMap<u32, End>,
+    /// First failed result read for a process found gone. Its stopped
+    /// result remains provisional for one next-start grace, while process
+    /// checks and deadlines continue independently.
+    unreadable_result: BTreeMap<u32, Millis>,
     /// When the widget first saw nothing left of each decided command's
     /// process group.
     gone: BTreeMap<u32, Millis>,
@@ -173,12 +186,25 @@ impl Watch {
     pub fn new(limits: Limits) -> Watch {
         Watch {
             limits,
+            started: false,
+            first_poll: None,
             seen: BTreeMap::new(),
             procs: BTreeMap::new(),
             term: BTreeMap::new(),
             decided: BTreeMap::new(),
+            unreadable_result: BTreeMap::new(),
             gone: BTreeMap::new(),
             ended: BTreeMap::new(),
+        }
+    }
+
+    /// Watches a script the event log already records as started. Its
+    /// files may have disappeared while the widget was stopped; the first
+    /// command must become observable within the same next-start grace.
+    pub fn resume(limits: Limits) -> Watch {
+        Watch {
+            started: true,
+            ..Self::new(limits)
         }
     }
 }
@@ -509,6 +535,13 @@ fn clear_partial(dir: &OwnedFd, commands: usize) -> io::Result<()> {
 /// following a link and never blocking on a FIFO; `None` when it is not
 /// there (yet) or is not a regular file.
 fn read_small(base: &Path, dir: &Path, name: &str, cap: u64) -> io::Result<Option<Vec<u8>>> {
+    #[cfg(test)]
+    if READ_FAILURE.with_borrow(|failed| failed.as_deref() == Some(name)) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "status file is unreadable",
+        ));
+    }
     match evidence::open_file(base, dir, Path::new(name)) {
         Ok(Some((file, _))) => Ok(Some(fsx::read_capped(file, cap)?.0)),
         Ok(None) => Ok(None),
@@ -517,22 +550,37 @@ fn read_small(base: &Path, dir: &Path, name: &str, cap: u64) -> io::Result<Optio
     }
 }
 
-fn read_number(dir: &Path, name: &str) -> io::Result<Option<i32>> {
-    Ok(read_small(dir, dir, name, 64)?
+fn read_number(base: &Path, dir: &Path, name: &str) -> io::Result<Option<i32>> {
+    Ok(read_small(base, dir, name, 64)?
         .and_then(|bytes| String::from_utf8_lossy(&bytes).trim().parse().ok()))
 }
 
 /// `<n>.pid`: the command's pid (never 0 or 1) and, beside it, the pid of
 /// the `run.sh` that started it.
-fn read_pid(dir: &Path, n: u32) -> io::Result<Option<(i32, Option<i32>)>> {
+fn read_pid(base: &Path, dir: &Path, n: u32) -> io::Result<Option<(i32, Option<i32>)>> {
     Ok(
-        read_small(dir, dir, &format!("{n}.pid"), 64)?.and_then(|bytes| {
+        read_small(base, dir, &format!("{n}.pid"), 64)?.and_then(|bytes| {
             let text = String::from_utf8_lossy(&bytes);
             let mut words = text.split_whitespace().map(|word| word.parse::<i32>().ok());
             let pid = words.next().flatten().filter(|pid| *pid > 1)?;
             Some((pid, words.next().flatten()))
         }),
     )
+}
+
+/// An unreadable status file supplies no observation, but must not stop
+/// process checks or deadlines for the commands already being watched.
+fn observed<T>(name: &str, read: io::Result<Option<T>>, errors: &mut Vec<String>) -> Option<T> {
+    match read {
+        Ok(value) => value,
+        Err(error) => {
+            let why = format!("{name}: {error}");
+            if !errors.contains(&why) {
+                errors.push(why);
+            }
+            None
+        }
+    }
 }
 
 /// Whether any process of the group `pid` leads still exists.
@@ -552,6 +600,9 @@ thread_local! {
     /// command's `.exit` and `.nocwd`: lets a test change what the command
     /// does at that point of a poll, which no timing can place.
     static AFTER_READS: std::cell::RefCell<Option<Hook>> =
+        const { std::cell::RefCell::new(None) };
+    // A persistent read error, independent of the test user's privileges.
+    static READ_FAILURE: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -598,22 +649,44 @@ thread_local! {
 /// its `.pid` stays without an outcome: whether the script started at all
 /// is the re-run brief's start timeout ([`DID_NOT_START`]). Files are read
 /// without following a link; a `.pid` of 0 or 1 is never taken for a
+/// process. Every path, including `dir` itself, is read below the
+/// verifier's trusted `base`, as the script and log digests are checked.
+/// I/O errors are reported in [`Status::errors`] and leave that file
+/// unobserved; process checks, timeout signals and completion deadlines
+/// still advance. If a gone process has an unreadable result, its stopped
+/// outcome stays provisional for a next-start grace, even if `done` or
+/// the next pid is present. A readable exit or cwd failure within that
+/// grace supplies the outcome; a known timeout is never replaced by the
+/// exit status its signal caused. A resumed script with no readable pid ends
+/// after its first next-start grace, without ever signalling an unknown
 /// process.
 pub fn poll(
+    base: &Path,
     dir: &Path,
     request: &RerunRequest,
     watch: &mut Watch,
     now: Millis,
 ) -> io::Result<Status> {
     let limits = watch.limits;
+    let first_poll = *watch.first_poll.get_or_insert(now);
+    let mut errors = Vec::new();
     // `done`, then every `.pid`, then each `.exit`: the script writes each
     // of them only after the ones before it, so none read later is older.
-    let done = read_small(dir, dir, DONE_FILE, 256)?
-        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned());
+    let done = observed(
+        DONE_FILE,
+        read_small(base, dir, DONE_FILE, 256),
+        &mut errors,
+    )
+    .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned());
     for item in &request.items {
         if !watch.procs.contains_key(&item.n)
-            && let Some((pid, run)) = read_pid(dir, item.n)?
+            && let Some((pid, run)) = observed(
+                &format!("{}.pid", item.n),
+                read_pid(base, dir, item.n),
+                &mut errors,
+            )
         {
+            watch.started = true;
             watch.seen.insert(item.n, now);
             watch.procs.insert(item.n, Proc::first_seen(pid, run));
         }
@@ -627,8 +700,13 @@ pub fn poll(
         let alive = proc.is_some_and(|proc| proc.leads());
         // Read after the liveness check: the subshell writes them before
         // it ends, so a process found gone has written one by now if ever.
-        let mut exit = read_number(dir, &format!("{n}.exit"))?;
-        let no_cwd = read_small(dir, dir, &format!("{n}.nocwd"), 64)?.is_some();
+        let exit_name = format!("{n}.exit");
+        let cwd_name = format!("{n}.nocwd");
+        let exit_read = read_number(base, dir, &exit_name);
+        let cwd_read = read_small(base, dir, &cwd_name, 64);
+        let result_unreadable = exit_read.is_err() || cwd_read.is_err();
+        let mut exit = observed(&exit_name, exit_read, &mut errors);
+        let no_cwd = observed(&cwd_name, cwd_read, &mut errors).is_some();
         #[cfg(test)]
         AFTER_READS.with_borrow_mut(|hook| {
             if let Some(hook) = hook {
@@ -636,12 +714,24 @@ pub fn poll(
             }
         });
         if !watch.ended.contains_key(&n) {
+            if watch.unreadable_result.contains_key(&n)
+                && (exit.is_some() || no_cwd || !result_unreadable)
+            {
+                // An I/O failure did not prove the result file absent.
+                // Replace only that provisional stopped outcome, never
+                // a known exit, cwd failure or timeout from an earlier poll.
+                watch.decided.remove(&n);
+                watch.unreadable_result.remove(&n);
+            }
             if let Entry::Vacant(slot) = watch.decided.entry(n) {
                 let end = if let Some(code) = exit {
                     Some(End::Exited(code))
                 } else if no_cwd {
                     Some(End::NotRun(NO_CWD.to_owned()))
                 } else if proc.is_some() && !alive {
+                    if result_unreadable {
+                        watch.unreadable_result.entry(n).or_insert(now);
+                    }
                     Some(End::NotRun(STOPPED.to_owned()))
                 } else {
                     None
@@ -660,6 +750,7 @@ pub fn poll(
             // The script gone before this command's `.pid` (none within the
             // next-start limit after the one before ended).
             let overdue = stalled
+                || (i == 0 && watch.started && now.saturating_sub(first_poll) >= limits.next_start)
                 || previous_end.is_some_and(|at| now.saturating_sub(at) >= limits.next_start);
             let last = i + 1 == request.items.len();
             let next_seen = request
@@ -674,7 +765,11 @@ pub fn poll(
                 gone.get(&n)
                     .is_some_and(|&at| !last || now.saturating_sub(at) >= limits.next_start)
             };
-            let mut over = said || gone_over(&watch.gone);
+            let result_ready = watch
+                .unreadable_result
+                .get(&n)
+                .is_none_or(|&since| now.saturating_sub(since) >= limits.next_start);
+            let mut over = (said || gone_over(&watch.gone)) && result_ready;
             if let Some(proc) = proc
                 && !(over && watch.decided.contains_key(&n))
             {
@@ -690,7 +785,11 @@ pub fn poll(
                             // Timed out only if it still ran when the signal
                             // was sent: a status that has appeared by now,
                             // in this same poll, wins.
-                            exit = read_number(dir, &format!("{n}.exit"))?;
+                            exit = observed(
+                                &exit_name,
+                                read_number(base, dir, &exit_name),
+                                &mut errors,
+                            );
                             let end = exit.map_or(End::TimedOut, End::Exited);
                             watch.decided.entry(n).or_insert(end);
                         } else if proc.sid.is_none() {
@@ -712,7 +811,7 @@ pub fn poll(
                 {
                     watch.gone.insert(n, now);
                 }
-                over = said || gone_over(&watch.gone);
+                over = (said || gone_over(&watch.gone)) && result_ready;
             }
             if let Some(end) = watch.decided.get(&n).filter(|_| over) {
                 watch.ended.insert(n, (end.clone(), now));
@@ -733,7 +832,11 @@ pub fn poll(
             end: ended.map(|(end, _)| end.clone()),
         });
     }
-    Ok(Status { items, done })
+    Ok(Status {
+        items,
+        done,
+        errors,
+    })
 }
 
 /// Sends `signal` to the process group `pid` leads.
@@ -926,7 +1029,7 @@ mod tests {
         let mut watch = Watch::new(limits);
         loop {
             let now = started.elapsed().as_millis() as Millis;
-            let status = poll(dir, request, &mut watch, now).unwrap();
+            let status = poll(dir, dir, request, &mut watch, now).unwrap();
             each(&status);
             if status.items.iter().all(|i| i.end.is_some()) {
                 return status;
@@ -950,7 +1053,7 @@ mod tests {
 
     /// The pid of the `run.sh` that wrote `dir`'s `<n>.pid`.
     fn run_pid(dir: &Path, n: u32) -> i32 {
-        read_pid(dir, n).unwrap().unwrap().1.unwrap()
+        read_pid(dir, dir, n).unwrap().unwrap().1.unwrap()
     }
 
     #[test]
@@ -987,7 +1090,7 @@ mod tests {
             worktree.join("sub").to_string_lossy()
         );
         // `done` holds the nonce once the script is through.
-        let done = poll(&dir, &request, &mut Watch::new(LIMITS), 0)
+        let done = poll(&worktree, &dir, &request, &mut Watch::new(LIMITS), 0)
             .unwrap()
             .done;
         assert_eq!(done.as_deref(), Some(request.nonce.as_str()));
@@ -1215,14 +1318,14 @@ mod tests {
         fs::write(dir.join("1.exit"), "0\n").unwrap();
         let mut watch = Watch::new(LIMITS);
         for now in [0, LIMITS.next_start - 1] {
-            let status = poll(&dir, &request, &mut watch, now).unwrap();
+            let status = poll(&worktree, &dir, &request, &mut watch, now).unwrap();
             assert_eq!(status.items[0].end, None, "at {now}");
         }
-        let status = poll(&dir, &request, &mut watch, LIMITS.next_start).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut watch, LIMITS.next_start).unwrap();
         assert_eq!(status.items[0].end, Some(End::Exited(0)));
         // With `done` there, at once.
         fs::write(dir.join(DONE_FILE), format!("{}\n", request.nonce)).unwrap();
-        let status = poll(&dir, &request, &mut Watch::new(LIMITS), 0).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut Watch::new(LIMITS), 0).unwrap();
         assert_eq!(status.items[0].end, Some(End::Exited(0)));
     }
 
@@ -1238,20 +1341,31 @@ mod tests {
         let mut child = start(&dir);
         let mut watch = Watch::new(LIMITS);
         let started = Instant::now();
-        while !poll(&dir, &request, &mut watch, 0).unwrap().items[0].alive {
+        while !poll(&worktree, &dir, &request, &mut watch, 0)
+            .unwrap()
+            .items[0]
+            .alive
+        {
             assert!(started.elapsed() < Duration::from_secs(30), "never ran");
             std::thread::sleep(Duration::from_millis(10));
         }
         child.wait().unwrap();
         // The script's own files, as they are before it writes `done`.
         fs::remove_file(dir.join(DONE_FILE)).unwrap();
-        assert_eq!(read_number(&dir, "1.exit").unwrap(), Some(0));
+        assert_eq!(read_number(&worktree, &dir, "1.exit").unwrap(), Some(0));
         let gone_at = LIMITS.run;
         for now in [gone_at, gone_at + LIMITS.next_start - 1] {
-            let status = poll(&dir, &request, &mut watch, now).unwrap();
+            let status = poll(&worktree, &dir, &request, &mut watch, now).unwrap();
             assert_eq!(status.items[0].end, None, "at {now}");
         }
-        let status = poll(&dir, &request, &mut watch, gone_at + LIMITS.next_start).unwrap();
+        let status = poll(
+            &worktree,
+            &dir,
+            &request,
+            &mut watch,
+            gone_at + LIMITS.next_start,
+        )
+        .unwrap();
         assert_eq!(status.items[0].end, Some(End::Exited(0)));
     }
 
@@ -1286,27 +1400,32 @@ mod tests {
             next_start: 10_000,
         };
         let mut watch = Watch::new(limits);
-        assert!(poll(&dir, &request, &mut watch, 0).unwrap().items[0].alive);
+        assert!(
+            poll(&worktree, &dir, &request, &mut watch, 0)
+                .unwrap()
+                .items[0]
+                .alive
+        );
         // Past its limit it gets SIGTERM, and nothing of its group is left
         // after; `run.sh` has not written `done`, so the run is not through.
-        let status = poll(&dir, &request, &mut watch, limits.run).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut watch, limits.run).unwrap();
         assert_eq!(status.items[0].end, None);
         child.wait().unwrap();
         for now in [limits.run + 1, limits.run + limits.next_start - 1] {
-            let status = poll(&dir, &request, &mut watch, now).unwrap();
+            let status = poll(&worktree, &dir, &request, &mut watch, now).unwrap();
             assert_eq!(status.items[0].end, None, "at {now}");
         }
         let mut no_done = watch.clone();
         // `done`: through at once.
         fs::write(dir.join(DONE_FILE), format!("{}\n", request.nonce)).unwrap();
         let now = limits.run + limits.next_start - 1;
-        let status = poll(&dir, &request, &mut watch, now).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut watch, now).unwrap();
         assert_eq!(status.items[0].end, Some(End::TimedOut));
         // A `run.sh` gone without writing it: the start timeout after the
         // group was seen gone.
         fs::remove_file(dir.join(DONE_FILE)).unwrap();
         let now = limits.run + 1 + limits.next_start;
-        let status = poll(&dir, &request, &mut no_done, now).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut no_done, now).unwrap();
         assert_eq!(status.items[0].end, Some(End::TimedOut));
     }
 
@@ -1325,7 +1444,12 @@ mod tests {
                 next_start: 10_000,
             };
             let mut watch = Watch::new(limits);
-            assert!(poll(&dir, &request, &mut watch, 0).unwrap().items[0].alive);
+            assert!(
+                poll(&worktree, &dir, &request, &mut watch, 0)
+                    .unwrap()
+                    .items[0]
+                    .alive
+            );
             let mut ending = if ends { child.take() } else { None };
             let exit = dir.join("1.exit");
             AFTER_READS.set(Some(Box::new(move |n| {
@@ -1337,13 +1461,13 @@ mod tests {
                     fs::write(&exit, "0\n").unwrap();
                 }
             })));
-            poll(&dir, &request, &mut watch, limits.run).unwrap();
+            poll(&worktree, &dir, &request, &mut watch, limits.run).unwrap();
             AFTER_READS.take();
             if let Some(mut child) = child {
                 // Ended by the SIGTERM.
                 child.wait().unwrap();
             }
-            let status = poll(&dir, &request, &mut watch, limits.run + 1).unwrap();
+            let status = poll(&worktree, &dir, &request, &mut watch, limits.run + 1).unwrap();
             assert_eq!(status.items[0].end, Some(End::Exited(0)), "ends: {ends}");
         }
     }
@@ -1387,7 +1511,7 @@ mod tests {
             ]
         );
         assert_eq!(fs::read_to_string(dir.join("1.log")).unwrap(), "");
-        let done = poll(&dir, &request, &mut Watch::new(LIMITS), 0)
+        let done = poll(&worktree, &dir, &request, &mut Watch::new(LIMITS), 0)
             .unwrap()
             .done;
         assert_eq!(done.as_deref(), Some(request.nonce.as_str()));
@@ -1487,12 +1611,12 @@ mod tests {
                 next_start: 10_000,
             };
             let mut watch = Watch::new(limits);
-            let status = poll(&dir, &request, &mut watch, 0).unwrap();
+            let status = poll(&worktree, &dir, &request, &mut watch, 0).unwrap();
             assert!(!status.items[0].alive);
             assert_eq!(status.items[0].end, None);
-            let status = poll(&dir, &request, &mut watch, limits.next_start).unwrap();
+            let status = poll(&worktree, &dir, &request, &mut watch, limits.next_start).unwrap();
             assert_eq!(status.items[0].end, Some(End::NotRun(STOPPED.into())));
-            poll(&dir, &request, &mut watch, RERUN_KILL_GRACE * 3).unwrap();
+            poll(&worktree, &dir, &request, &mut watch, RERUN_KILL_GRACE * 3).unwrap();
             std::thread::sleep(Duration::from_millis(100));
             assert!(
                 bystander.try_wait().unwrap().is_none(),
@@ -1601,7 +1725,7 @@ mod tests {
         // sent again) ...
         let mut watch = Watch::new(LIMITS);
         for now in [0, LIMITS.next_start, 10 * (LIMITS.run + LIMITS.next_start)] {
-            let status = poll(&dir, &request, &mut watch, now).unwrap();
+            let status = poll(&worktree, &dir, &request, &mut watch, now).unwrap();
             assert!(
                 status
                     .items
@@ -1648,11 +1772,18 @@ mod tests {
         fs::write(dir.join("1.pid"), format!("{gone_pid}\n")).unwrap();
         fs::write(dir.join("1.exit"), "0\n").unwrap();
         fs::write(dir.join("2.pid"), format!("{gone_pid}\n")).unwrap();
-        let status = poll(&dir, &request, &mut watch, 100).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut watch, 100).unwrap();
         assert_eq!(status.items[0].end, Some(End::Exited(0)));
         assert_eq!(status.items[1].end, Some(End::NotRun(STOPPED.into())));
         assert_eq!(status.items[2].end, None);
-        let status = poll(&dir, &request, &mut watch, 100 + LIMITS.next_start).unwrap();
+        let status = poll(
+            &worktree,
+            &dir,
+            &request,
+            &mut watch,
+            100 + LIMITS.next_start,
+        )
+        .unwrap();
         assert_eq!(
             status.items[2].end,
             Some(End::NotRun(DID_NOT_FINISH.into()))
@@ -1661,10 +1792,10 @@ mod tests {
         // No next `.pid` after command 1 ended: 2 and 3 both, at once.
         let mut watch = Watch::new(LIMITS);
         fs::remove_file(dir.join("2.pid")).unwrap();
-        poll(&dir, &request, &mut watch, 0).unwrap();
-        let status = poll(&dir, &request, &mut watch, LIMITS.next_start - 1).unwrap();
+        poll(&worktree, &dir, &request, &mut watch, 0).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut watch, LIMITS.next_start - 1).unwrap();
         assert_eq!(status.items[1].end, None);
-        let status = poll(&dir, &request, &mut watch, LIMITS.next_start).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut watch, LIMITS.next_start).unwrap();
         let ends: Vec<Option<End>> = status.items.iter().map(|i| i.end.clone()).collect();
         assert_eq!(
             ends,
@@ -1676,17 +1807,228 @@ mod tests {
         );
         // An outcome stays once given, whatever the files say later.
         fs::write(dir.join("2.exit"), "0\n").unwrap();
-        let status = poll(&dir, &request, &mut watch, LIMITS.next_start + 1).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut watch, LIMITS.next_start + 1).unwrap();
         assert_eq!(
             status.items[1].end,
             Some(End::NotRun(DID_NOT_FINISH.into()))
         );
         // A pid of 0 or 1 is never a process, nor ever signalled.
         fs::write(dir.join("3.pid"), "1\n").unwrap();
-        let status = poll(&dir, &request, &mut Watch::new(LIMITS), 0).unwrap();
+        let status = poll(&worktree, &dir, &request, &mut Watch::new(LIMITS), 0).unwrap();
         assert_eq!(status.items[2].pid, None);
         assert!(kill_group(1, Signal::Term).is_err());
         assert!(kill_group(0, Signal::Term).is_err());
+    }
+
+    #[test]
+    fn a_temporarily_unreadable_result_recovers_before_its_deadline() {
+        for (name, outcome) in [
+            ("1.exit", End::Exited(0)),
+            ("1.nocwd", End::NotRun(NO_CWD.to_owned())),
+        ] {
+            for completion in ["waiting", "done", "next"] {
+                let worktree = temp("poll-recovery");
+                let dir = worktree.join("r");
+                let commands = [command("e1", "exit 0", "."), command("e2", "exit 0", ".")];
+                let count = if completion == "next" { 2 } else { 1 };
+                let request =
+                    write_request(&worktree, &dir, &worktree, &commands[..count]).unwrap();
+                let mut child = std::process::Command::new("true").spawn().unwrap();
+                let pid = child.id();
+                child.wait().unwrap();
+                fs::write(dir.join("1.pid"), format!("{pid}\n")).unwrap();
+                fs::write(dir.join(name), "0\n").unwrap();
+                if completion == "done" {
+                    fs::write(dir.join(DONE_FILE), &request.nonce).unwrap();
+                } else if completion == "next" {
+                    fs::write(dir.join("2.pid"), format!("{pid}\n")).unwrap();
+                    fs::write(dir.join("2.exit"), "0\n").unwrap();
+                }
+                let limits = Limits {
+                    run: 10_000,
+                    next_start: 1_000,
+                };
+                let mut watch = Watch::new(limits);
+                READ_FAILURE.with_borrow_mut(|failed| *failed = Some(name.into()));
+                let unreadable = poll(&worktree, &dir, &request, &mut watch, 0);
+                READ_FAILURE.with_borrow_mut(|failed| *failed = None);
+                let unreadable = unreadable.unwrap();
+                assert_eq!(unreadable.items[0].end, None, "{name}, {completion}");
+                assert_eq!(unreadable.errors.len(), 1);
+                let recovered = poll(&worktree, &dir, &request, &mut watch, 500).unwrap();
+                assert!(recovered.errors.is_empty());
+                let ended = poll(&worktree, &dir, &request, &mut watch, 1_000).unwrap();
+                assert_eq!(
+                    ended.items[0].end,
+                    Some(outcome.clone()),
+                    "{name}, {completion}"
+                );
+                fs::remove_dir_all(worktree).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_persistently_unreadable_result_exhausts_its_grace_even_with_done_present() {
+        let worktree = temp("poll-persistent-io");
+        let dir = worktree.join("r");
+        let request =
+            write_request(&worktree, &dir, &worktree, &[command("e1", "exit 0", ".")]).unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        fs::write(dir.join("1.pid"), format!("{pid}\n")).unwrap();
+        fs::write(dir.join("1.exit"), "0\n").unwrap();
+        fs::write(dir.join(DONE_FILE), &request.nonce).unwrap();
+        let mut watch = Watch::new(LIMITS);
+        READ_FAILURE.with_borrow_mut(|failed| *failed = Some("1.exit".into()));
+        let unreadable = poll(&worktree, &dir, &request, &mut watch, 0);
+        let ended = poll(&worktree, &dir, &request, &mut watch, LIMITS.next_start);
+        READ_FAILURE.with_borrow_mut(|failed| *failed = None);
+        let unreadable = unreadable.unwrap();
+        let ended = ended.unwrap();
+        assert_eq!(unreadable.items[0].end, None);
+        assert!(matches!(ended.items[0].end, Some(End::NotRun(_))));
+        assert_eq!(ended.errors.len(), 1);
+        let recovered = poll(&worktree, &dir, &request, &mut watch, LIMITS.next_start + 1).unwrap();
+        assert_eq!(recovered.items[0].end, ended.items[0].end);
+        fs::remove_dir_all(worktree).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_status_file_does_not_suspend_a_started_runs_deadline() {
+        let worktree = temp("poll-io");
+        let dir = worktree.join("r");
+        let request =
+            write_request(&worktree, &dir, &worktree, &[command("e1", "exit 0", ".")]).unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        fs::write(dir.join("1.pid"), format!("{pid}\n")).unwrap();
+        let mut watch = Watch::new(LIMITS);
+        let before = poll(&worktree, &dir, &request, &mut watch, 0).unwrap();
+        assert_eq!(before.items[0].pid, Some(pid as i32));
+        assert_eq!(before.items[0].end, None);
+
+        READ_FAILURE.with_borrow_mut(|failed| *failed = Some("1.exit".into()));
+        let after = poll(&worktree, &dir, &request, &mut watch, LIMITS.next_start);
+        READ_FAILURE.with_borrow_mut(|failed| *failed = None);
+        fs::remove_dir_all(worktree).unwrap();
+        let after = after.expect("an I/O error must not suspend the run's deadline");
+        assert!(matches!(after.items[0].end, Some(End::NotRun(_))));
+        assert_eq!(after.errors.len(), 1);
+        assert!(after.errors[0].starts_with("1.exit:"));
+    }
+
+    #[test]
+    fn an_unreadable_status_file_does_not_prevent_a_running_commands_timeout() {
+        let worktree = temp("poll-live-io");
+        let dir = worktree.join("r");
+        let request = write_request(
+            &worktree,
+            &dir,
+            &worktree,
+            &[command("e1", "sleep 60", ".")],
+        )
+        .unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        fs::write(
+            dir.join("1.pid"),
+            format!("{} {}\n", child.id(), std::process::id()),
+        )
+        .unwrap();
+        let limits = Limits {
+            run: 10,
+            next_start: 10,
+        };
+        let mut watch = Watch::new(limits);
+        let before = poll(&worktree, &dir, &request, &mut watch, 0).unwrap();
+        assert!(before.items[0].alive);
+        READ_FAILURE.with_borrow_mut(|failed| *failed = Some(DONE_FILE.into()));
+        let timed = poll(&worktree, &dir, &request, &mut watch, limits.run);
+        let signalled = watch.term.contains_key(&1);
+        if !signalled {
+            // A broken timeout must not leave the test's process behind.
+            let _ = child.kill();
+        }
+        child.wait().unwrap();
+        // A shell may publish its SIGTERM exit status only after the
+        // timeout. That does not turn the timeout into an ordinary exit.
+        fs::write(dir.join("1.exit"), "143\n").unwrap();
+        let gone = poll(&worktree, &dir, &request, &mut watch, limits.run + 1);
+        let after = poll(
+            &worktree,
+            &dir,
+            &request,
+            &mut watch,
+            limits.run + 1 + limits.next_start,
+        );
+        READ_FAILURE.with_borrow_mut(|failed| *failed = None);
+        fs::remove_dir_all(worktree).unwrap();
+        assert!(timed.is_ok() && gone.is_ok());
+        assert!(signalled, "I/O errors must not suppress the timeout signal");
+        assert_eq!(after.unwrap().items[0].end, Some(End::TimedOut));
+    }
+
+    #[test]
+    fn a_resumed_started_script_without_pid_files_finishes_within_the_start_grace() {
+        let worktree = temp("poll-resume");
+        let dir = worktree.join("r");
+        let request = write_request(
+            &worktree,
+            &dir,
+            &worktree,
+            &[command("e1", "exit 0", "."), command("e2", "exit 0", ".")],
+        )
+        .unwrap();
+        let mut watch = Watch::resume(LIMITS);
+        let before = poll(&worktree, &dir, &request, &mut watch, 0).unwrap();
+        assert!(before.items.iter().all(|item| item.end.is_none()));
+        let after = poll(&worktree, &dir, &request, &mut watch, LIMITS.next_start).unwrap();
+        assert!(after.items.iter().all(|item| {
+            item.pid.is_none() && item.end == Some(End::NotRun(DID_NOT_FINISH.to_owned()))
+        }));
+        fs::remove_dir_all(worktree).unwrap();
+    }
+
+    #[test]
+    fn polling_never_adopts_status_from_a_replaced_rerun_directory() {
+        use std::os::unix::fs::symlink;
+
+        for replace_parent in [false, true] {
+            let (worktree, dir) = layout(if replace_parent {
+                "poll-parent-link"
+            } else {
+                "poll-directory-link"
+            });
+            let request =
+                write_request(&worktree, &dir, &worktree, &[command("e1", "exit 0", ".")]).unwrap();
+            let replaced = if replace_parent {
+                dir.parent().unwrap()
+            } else {
+                dir.as_path()
+            };
+            let moved = worktree.join("moved");
+            fs::rename(replaced, &moved).unwrap();
+            symlink(&moved, replaced).unwrap();
+            // These files are outside the checked path now. Reading them
+            // must not adopt a pid or an apparent successful completion.
+            fs::write(dir.join("1.pid"), "2 1\n").unwrap();
+            fs::write(dir.join("1.exit"), "0\n").unwrap();
+            fs::write(dir.join(DONE_FILE), &request.nonce).unwrap();
+            let mut watch = Watch::new(LIMITS);
+            let status = poll(&worktree, &dir, &request, &mut watch, 0).unwrap();
+            assert_eq!(status.done, None, "parent replaced: {replace_parent}");
+            assert_eq!(status.items[0].pid, None);
+            assert_eq!(status.items[0].exit, None);
+            assert_eq!(status.items[0].end, None);
+            assert!(watch.procs.is_empty());
+            fs::remove_dir_all(worktree).unwrap();
+        }
     }
 
     #[test]

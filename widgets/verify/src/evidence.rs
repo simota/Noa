@@ -531,7 +531,7 @@ pub fn tail(
     lines: usize,
 ) -> io::Result<String> {
     // A stored log holds at most MAX_LOG_BYTES and a cut mark.
-    let (bytes, _) = read_stored(reply_base, reply_dir, stored, MAX_LOG_BYTES + 4096)?;
+    let bytes = read_verified_stored(reply_base, reply_dir, stored, MAX_LOG_BYTES + 4096)?;
     let text = String::from_utf8_lossy(&bytes);
     let all: Vec<&str> = text.lines().collect();
     Ok(all[all.len().saturating_sub(lines)..].join("\n"))
@@ -552,6 +552,33 @@ pub fn read_stored(
         io::Error::new(kind, refused.message(&stored.path))
     })?;
     fsx::read_capped(file, cap)
+}
+
+/// Reads the recorded bytes again before displaying or quoting them as
+/// evidence. A changed copy must not acquire the original log's authority.
+pub fn read_verified_stored(
+    reply_base: &Path,
+    reply_dir: &Path,
+    stored: &Stored,
+    cap: u64,
+) -> io::Result<Vec<u8>> {
+    if stored.bytes > cap {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} は読み込み上限を超えています", stored.path.display()),
+        ));
+    }
+    let (bytes, over) = read_stored(reply_base, reply_dir, stored, stored.bytes)?;
+    if over || bytes.len() as u64 != stored.bytes || digest_bytes(&bytes) != stored.digest {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} は保存時のサイズ・ハッシュと一致しません",
+                stored.path.display()
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 /// 証跡ごと書き出す (L1-8): writes `report` as `<dest>/report.md` and
@@ -1219,5 +1246,31 @@ mod tests {
                 .kind(),
             io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn stored_log_excerpts_refuse_changed_bytes_even_at_the_recorded_size() {
+        let f = fixture_dirs();
+        fs::write(f.src_dir.join("logs/1.log"), b"test failed\n").unwrap();
+        let out = ingest(
+            &f.src_base,
+            &f.src_dir,
+            &f.reply_base,
+            &f.reply_dir,
+            1,
+            &part(),
+            &[item("e1", "logs/1.log", MAX_LOG_BYTES)],
+        );
+        let stored = out[0].1.clone().unwrap();
+        let path = f.reply_dir.join(&stored.path);
+        for changed in [
+            b"test passed\n".as_slice(),
+            b"test passed with extra bytes\n",
+        ] {
+            fs::write(&path, changed).unwrap();
+            let error = tail(&f.reply_base, &f.reply_dir, &stored, 40)
+                .expect_err("unverified log content must not reach the judge or a fix task");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
     }
 }

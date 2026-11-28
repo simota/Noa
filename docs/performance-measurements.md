@@ -486,3 +486,69 @@ Candidates looked at and not changed:
 - Swapping SipHash for a faster unkeyed or weakly keyed hasher was rejected:
   style and hyperlink keys come from program output, so it would weaken
   HashDoS resistance.
+
+## ASCII tails in mixed-text printing (2026-11-28)
+
+Scope: one `noa-grid` ingest-path change, found by profiling
+`bench_throughput` (80x24 mixed plain/SGR/CUP flood, the shape the line
+batches hand back to per-line replay) with callgrind. Baseline: `0a9da6d`,
+same toolchain and release profile (plus `debug = "line-tables-only"` for
+both sides). Machine: 4-vCPU Linux cloud container, no `perf`.
+
+**`Screen::print_plain_text`** decoded every scalar and looked its width up
+in the memoized `plain_width` table, an out-of-line call per scalar (12% of
+all `bench_throughput` instructions), even for ASCII, which is always plain
+and narrow. After writing a narrow ASCII scalar, the loop now writes the
+ASCII bytes that follow (up to the segment end) straight from the source:
+same cells, same order, same wide-pair splitting below the occupancy
+watermark. Wide and non-ASCII scalars take the unchanged per-scalar steps.
+Covered by the existing bulk-vs-per-scalar differential tests and the new
+`bulk_ascii_tail_matches_per_scalar_over_wide_pairs_and_row_ends` (which
+fails if the tail skips the wide-pair split).
+
+Instruction counts (`valgrind --tool=callgrind`, whole process including
+input generation; 3 runs per side where the counts vary):
+
+| Workload | Baseline Ir | After Ir | Change |
+| --- | ---: | ---: | ---: |
+| `bench_throughput 4` | 2,099,084,933 | 1,692,465,694 | -19.4% |
+| `feed_bench` 20 MiB unicode, 120x40 | 2,938.6M-2,943.3M | 2,846.5M-2,851.0M | -3.1% |
+| `bench_vt_shapes combining` | 12,957.7M-12,996.6M | 12,571.6M-12,626.0M | -3.0% |
+| `feed_bench` 20 MiB ASCII, 120x40 | 792,664,905-908 | 792,612,253-342 | -0.01% |
+| `cjk_tui` | 4,558,595,482 | 4,558,513,088 | 0.00% |
+| `scroll_region` | 3,465,852,270 | 3,465,847,486 | 0.00% |
+| `tui_repaint` | 2,869,320,114 | 2,868,695,166 | -0.02% |
+| `erase_edit` | 5,128.1M-5,129.7M | 5,126.4M-5,129.7M | within noise |
+| `osc_links` | 6,273,513,348 | 6,262,536,873 | -0.17% |
+| `sgr_per_cell` | 4,707.6M-4,901.0M | 4,850.1M-5,048.2M | see below |
+
+`sgr_per_cell` never reaches the changed function (its text goes through
+`print_ascii_str`, whose count was identical: 1,126,522,888 Ir both sides).
+Its run-to-run spread of about 4% on the *same* binary comes from the
+randomly keyed SipHash in the scrollback style table and the packer thread.
+
+Wall/CPU time (8 A/B alternating runs, medians):
+
+| Metric | Baseline | After | Change |
+| --- | ---: | ---: | ---: |
+| `bench_throughput 64` best-of-5 wall | 0.418 s | 0.363 s | -13.2% |
+| `bench_throughput 64` process CPU | 2.780 s | 2.409 s | -13.3% |
+| `tui_repaint` min wall | 97.4 ms | 97.1 ms | within noise |
+| `cjk_tui` min wall | 181.8 ms | 181.8 ms | within noise |
+| `sgr_per_cell` min wall | 135.6 ms | 135.5 ms | within noise |
+| `bench_throughput 64` peak RSS (3 runs) | 120.9-121.0 MB | 120.9-121.0 MB | same |
+
+Screen digests matched for every `bench_vt_shapes` section (`combining_read`
+differs between runs of the baseline binary too).
+
+Candidates looked at and not changed:
+
+- An inlined ASCII early return in `plain_width` itself: -15% on
+  `bench_throughput`, but +0.9% on `cjk_tui` (every wide scalar pays the
+  extra branch), so it was replaced by the tail loop above.
+- Splitting the ASCII tail into a watermark-checked prefix and an unchecked
+  store loop: -0.35% more on `bench_throughput` but +0.25% on `cjk_tui`.
+- The `record_shell_mark` prune probe still scans the 4096-mark buffer on
+  each mark once it is full (about 7% of `osc_links`). A cached lower bound
+  would need invalidating at every site that shifts marks (several, and the
+  field is public), and real shells record about four marks per command.

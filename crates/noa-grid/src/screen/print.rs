@@ -663,6 +663,32 @@ impl Screen {
                         Self::clear_wide_at(row, k, &blank);
                     }
                     row.cells[k] = Cell { ch: next, ..narrow };
+                    if next.is_ascii() {
+                        // ASCII tail: every ASCII scalar is plain and narrow,
+                        // so the bytes that follow are written straight from
+                        // the source instead of being decoded and
+                        // width-probed one scalar at a time. Same cells in
+                        // the same order as the per-scalar steps below.
+                        let rest = chars.as_str();
+                        let n = rest.as_bytes()[..rest.len().min(seg_end - (k + 1))]
+                            .iter()
+                            .take_while(|b| b.is_ascii())
+                            .count();
+                        if n > 0 {
+                            for &b in &rest.as_bytes()[..n] {
+                                k += 1;
+                                if k < occupied && row.cells[k].attrs.intersects(layout) {
+                                    Self::clear_wide_at(row, k, &blank);
+                                }
+                                row.cells[k] = Cell {
+                                    ch: char::from(b),
+                                    ..narrow
+                                };
+                            }
+                            next = char::from(rest.as_bytes()[n - 1]);
+                            chars = rest[n..].chars();
+                        }
+                    }
                 } else {
                     if k < occupied {
                         for cell_x in [k, k + 1] {

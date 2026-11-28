@@ -365,6 +365,24 @@ fn bulk_mixed_text_matches_per_scalar_across_row_boundaries() {
 }
 
 #[test]
+fn bulk_ascii_tail_matches_per_scalar_over_wide_pairs_and_row_ends() {
+    // `print_plain_text` writes the ASCII bytes after a narrow scalar
+    // straight from the source: those writes must still split every wide
+    // pair they land on (lead or spacer half) and stop at the segment end.
+    let wide_rows = "日本語あいう漢字かな\r\n日本語あいう漢字かな\r\n\x1b[1;1H";
+    for start in 1..=6 {
+        let setup = format!("{wide_rows}\x1b[1;{start}H");
+        for text in ["abcdefghijklmnopqrstuvwxyz0123456789", "a日bcdefgh", "жabcdefghijk日"] {
+            assert_bulk_print_matches_per_scalar(13, 4, setup.as_bytes(), text);
+            let bce = format!("\x1b[44m{setup}");
+            assert_bulk_print_matches_per_scalar(13, 4, bce.as_bytes(), text);
+            let margins = format!("\x1b[?69h\x1b[2;9s{setup}");
+            assert_bulk_print_matches_per_scalar(13, 4, margins.as_bytes(), text);
+        }
+    }
+}
+
+#[test]
 fn bulk_mixed_text_matches_per_scalar_for_scrambled_input() {
     // Plain scalars of each width next to every cluster-forming kind, over
     // rows that already hold wide pairs, marks and a background-erase blank.

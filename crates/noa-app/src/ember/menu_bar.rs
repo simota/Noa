@@ -417,7 +417,7 @@ mod tests {
                 }),
                 placeholder.clone(),
             );
-            delegate.open_ember(&placeholder);
+            let _: () = msg_send![&*delegate, openEmber: &*placeholder];
             assert_eq!(*commands.borrow(), vec![AppCommand::OpenEmber]);
         }
     }

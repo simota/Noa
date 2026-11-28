@@ -64,10 +64,10 @@ when no GPU adapter is available.
   on Linux, as before. It also builds `widgets/agent-dashboard`,
   `widgets/repo-browser`, `widgets/discussion`, `widgets/competition`,
   `widgets/review`, `widgets/verify`, `widgets/tasks`, `widgets/agent-usage`,
-  `widgets/scaffold`, `widgets/workflow` and `widgets/widget-host`, crates outside the workspace,
+  `widgets/scaffold`, `widgets/workflow`, `widgets/ember` and `widgets/widget-host`, crates outside the workspace,
   with their tests; the tests run only on macOS (some expect the
   widths of macOS's system fonts), except `widgets/tasks`', `widgets/agent-usage`'s,
-  `widgets/scaffold`'s, `widgets/workflow`'s and `widgets/widget-host`'s, which run on Linux too. `scripts/verify.sh` runs the same check when
+  `widgets/scaffold`'s, `widgets/workflow`'s, `widgets/ember`'s and `widgets/widget-host`'s, which run on Linux too. `scripts/verify.sh` runs the same check when
   a change reaches one of these crates or the Noa crates it uses by path.
 - `scripts/check-widget-registration.py` runs in every `scripts/verify.sh`: it
   reads the places a widget is registered and fails when one disagrees with

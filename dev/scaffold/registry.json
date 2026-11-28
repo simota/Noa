@@ -25,6 +25,12 @@
         "macos"
       ]
     },
+    "ember": {
+      "ships": [
+        "macos"
+      ],
+      "reason": "初期版は macOS の native UI とライフサイクルを対象にする。Linux では headless logic の検証のみ行い、UI・常駐終了・連携 helper の確認後に配布を判断する。"
+    },
     "repo-browser": {
       "ships": [
         "linux",

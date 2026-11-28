@@ -64,13 +64,13 @@ case "$MODE" in
 esac
 
 # The agent dashboard, the repo browser, the discussion, the competition, the
-# review, the verify, the tasks, the scaffold, the workflow and the agent usage (widgets/agent-dashboard,
+# review, the verify, the tasks, the scaffold, the workflow, Ember and the agent usage (widgets/agent-dashboard,
 # widgets/repo-browser, widgets/discussion, widgets/competition, widgets/review,
-# widgets/verify, widgets/tasks, widgets/scaffold, widgets/workflow and widgets/agent-usage, crates outside the workspace) ship in
+# widgets/verify, widgets/tasks, widgets/scaffold, widgets/workflow, widgets/ember and widgets/agent-usage, crates outside the workspace) ship in
 # Noa.app's Contents/Helpers; Noa starts them from View
 # > Agent Dashboard, View > Repo Browser, View > Discussion, View > Competition
-# View > Review, View > Verify, View > Tasks, View > Scaffold, View > Workflow and View > Agent Usage (or the command palette).
-for widget in agent-dashboard repo-browser discussion competition review verify tasks scaffold workflow agent-usage widget-host; do
+# View > Review, View > Verify, View > Tasks, View > Scaffold, View > Workflow, View > Ember and View > Agent Usage (or the command palette).
+for widget in agent-dashboard repo-browser discussion competition review verify tasks scaffold workflow ember agent-usage widget-host; do
   if [ "$PROFILE" = release ]; then
     cargo build --manifest-path "$ROOT/widgets/$widget/Cargo.toml" --locked --release
   else
@@ -92,6 +92,7 @@ VERIFY_BIN="$TARGET_DIR/verify"
 TASKS_BIN="$TARGET_DIR/tasks"
 SCAFFOLD_BIN="$TARGET_DIR/scaffold"
 WORKFLOW_BIN="$TARGET_DIR/workflow"
+EMBER_BIN="$TARGET_DIR/ember"
 USAGE_BIN="$TARGET_DIR/agent-usage"
 WIDGET_HOST_BIN="$TARGET_DIR/widget-host"
 
@@ -105,6 +106,7 @@ WIDGET_HOST_BIN="$TARGET_DIR/widget-host"
 [ -x "$TASKS_BIN" ] || { echo "error: binary not found at $TASKS_BIN" >&2; exit 1; }
 [ -x "$SCAFFOLD_BIN" ] || { echo "error: binary not found at $SCAFFOLD_BIN" >&2; exit 1; }
 [ -x "$WORKFLOW_BIN" ] || { echo "error: binary not found at $WORKFLOW_BIN" >&2; exit 1; }
+[ -x "$EMBER_BIN" ] || { echo "error: binary not found at $EMBER_BIN" >&2; exit 1; }
 [ -x "$USAGE_BIN" ] || { echo "error: binary not found at $USAGE_BIN" >&2; exit 1; }
 [ -x "$WIDGET_HOST_BIN" ] || { echo "error: binary not found at $WIDGET_HOST_BIN" >&2; exit 1; }
 
@@ -129,6 +131,7 @@ cp "$VERIFY_BIN" "$CONTENTS/Helpers/Noa Verify"
 cp "$TASKS_BIN" "$CONTENTS/Helpers/Noa Tasks"
 cp "$SCAFFOLD_BIN" "$CONTENTS/Helpers/Noa Scaffold"
 cp "$WORKFLOW_BIN" "$CONTENTS/Helpers/Noa Workflow"
+cp "$EMBER_BIN" "$CONTENTS/Helpers/Noa Ember"
 cp "$USAGE_BIN" "$CONTENTS/Helpers/Noa Agent Usage"
 cp "$WIDGET_HOST_BIN" "$CONTENTS/Helpers/Noa Widget Host"
 cp -RX "$ROOT/assets/wallpapers" "$CONTENTS/Resources/wallpapers"
@@ -219,6 +222,9 @@ if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Workflow"
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/assets/macos.entitlements.plist" \
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Ember"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/macos.entitlements.plist" \
     --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/Helpers/Noa Agent Usage"

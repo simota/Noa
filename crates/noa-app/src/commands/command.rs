@@ -127,6 +127,9 @@ pub enum AppCommand {
     /// Start the development workflow editor (`widgets/workflow`). This is
     /// separate from the agent board's read-only worker delegation graph.
     OpenWorkflow,
+    /// Open Ember's persistent conversation and personal-agent requests.
+    /// This does not change the menu-bar mascot's visibility.
+    OpenEmber,
     /// Browse and preview this worktree's declarative widgets.
     OpenWidgetHost,
     /// Open the shared appearance, text-size and density preferences.
@@ -322,6 +325,7 @@ impl AppCommand {
     pub(crate) const OPEN_TASKS_MENU_ID: &'static str = "noa.view.open-tasks";
     pub(crate) const OPEN_SCAFFOLD_MENU_ID: &'static str = "noa.view.open-scaffold";
     pub(crate) const OPEN_WORKFLOW_MENU_ID: &'static str = "noa.view.open-workflow";
+    pub(crate) const OPEN_EMBER_MENU_ID: &'static str = "noa.view.open-ember";
     pub(crate) const OPEN_WIDGET_SETTINGS_MENU_ID: &'static str = "noa.view.widget-settings";
     pub(crate) const OPEN_WIDGET_HOST_MENU_ID: &'static str = "noa.view.open-widget-host";
     pub(crate) const OPEN_AGENT_USAGE_MENU_ID: &'static str = "noa.view.open-agent-usage";
@@ -416,6 +420,7 @@ impl AppCommand {
             AppCommand::OpenTasks => Self::OPEN_TASKS_MENU_ID,
             AppCommand::OpenScaffold => Self::OPEN_SCAFFOLD_MENU_ID,
             AppCommand::OpenWorkflow => Self::OPEN_WORKFLOW_MENU_ID,
+            AppCommand::OpenEmber => Self::OPEN_EMBER_MENU_ID,
             AppCommand::OpenWidgetHost => Self::OPEN_WIDGET_HOST_MENU_ID,
             AppCommand::OpenWidgetSettings => Self::OPEN_WIDGET_SETTINGS_MENU_ID,
             AppCommand::OpenAgentUsage => Self::OPEN_AGENT_USAGE_MENU_ID,
@@ -499,6 +504,7 @@ impl AppCommand {
             Self::OPEN_TASKS_MENU_ID => Some(Self::OpenTasks),
             Self::OPEN_SCAFFOLD_MENU_ID => Some(Self::OpenScaffold),
             Self::OPEN_WORKFLOW_MENU_ID => Some(Self::OpenWorkflow),
+            Self::OPEN_EMBER_MENU_ID => Some(Self::OpenEmber),
             Self::OPEN_WIDGET_HOST_MENU_ID => Some(Self::OpenWidgetHost),
             Self::OPEN_WIDGET_SETTINGS_MENU_ID => Some(Self::OpenWidgetSettings),
             Self::OPEN_AGENT_USAGE_MENU_ID => Some(Self::OpenAgentUsage),
@@ -636,6 +642,7 @@ impl AppCommand {
             Self::OpenTasks => "tasks.open",
             Self::OpenScaffold => "scaffold.open",
             Self::OpenWorkflow => "workflow.open",
+            Self::OpenEmber => "ember.open",
             Self::OpenWidgetHost => "widget-host.open",
             Self::OpenWidgetSettings => "widget-settings.open",
             Self::OpenAgentUsage => "agent-usage.open",
@@ -742,6 +749,7 @@ impl AppCommand {
             "tasks.open" => Some(Self::OpenTasks),
             "scaffold.open" => Some(Self::OpenScaffold),
             "workflow.open" => Some(Self::OpenWorkflow),
+            "ember.open" => Some(Self::OpenEmber),
             "widget-host.open" => Some(Self::OpenWidgetHost),
             "widget-settings.open" => Some(Self::OpenWidgetSettings),
             "agent-usage.open" => Some(Self::OpenAgentUsage),

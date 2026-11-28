@@ -27,9 +27,7 @@ fn error(error: ClientError) -> Error {
     match error {
         // A spawn can still execute after the UI-thread deadline; treating
         // that response as refused would allow a second worker to start.
-        ClientError::Rpc { code, message }
-            if code != noa_ipc::ErrorCode::OutcomeUnknown.code() =>
-        {
+        ClientError::Rpc { code, message } if code != noa_ipc::ErrorCode::OutcomeUnknown.code() => {
             Error::Refused(format!("{message} ({code})"))
         }
         ClientError::InvalidInput(message) => Error::Refused(message),
@@ -263,7 +261,7 @@ impl Ipc {
     /// A person's explicit answer is distinct from a scheduled node. The
     /// final Enter is guarded server-side too; an uncertain receipt is
     /// never automatically replayed.
-    pub fn answer(&mut self, pane: &Panel, answer: &str) -> Result<(), Error> {
+    pub fn answer(&mut self, pane: &Panel, input_sequence: u64, answer: &str) -> Result<(), Error> {
         if answer.len() > 16 * 1024
             || answer
                 .chars()
@@ -278,6 +276,15 @@ impl Ipc {
         {
             return Err(Error::Refused(
                 "エージェントは現在入力を求めていません".into(),
+            ));
+        }
+        if pane
+            .agent
+            .as_ref()
+            .is_none_or(|agent| agent.seq != input_sequence)
+        {
+            return Err(Error::Refused(
+                "入力要求が更新されました。最新の質問を確認してから回答してください".into(),
             ));
         }
         self.client

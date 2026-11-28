@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Workflow opens saved runs with their graph, history, and evidence in a
+  read-only window. Narrow-window resizing keeps the inspector in bounds;
+  invalid form input can be undone or replaced by a conflict reload, and
+  newly saved assignment presets appear without leaving settings.
+- Workflow reconciles a stage's response timeout once per attempt, keeps
+  queued work from starting after cancellation or a run limit, and waits
+  for every Plan stage before starting the implementation writer.
+- Failed Workflow reports retain their evidence for inspection and repair.
+  Repair inputs are copied with their recorded hashes checked, and past
+  evidence identifies its original attempt and target. Answers are bound
+  to the displayed run and attempt instead of a reused stage name.
+- Workflow captures Git patches independently of color, prefix, and
+  submodule display settings, detects hidden submodule changes, and
+  preserves trailing whitespace in repository paths.
+
 ## [0.9.22] - 2026-11-28
 
 Exact handoffs between task widgets, reported processing state for widget

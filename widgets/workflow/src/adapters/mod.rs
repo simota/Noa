@@ -23,6 +23,7 @@ pub enum Observation {
     Waiting {
         external_ref: Option<String>,
         message: String,
+        input_sequence: Option<u64>,
     },
     Complete {
         outputs: Vec<Artifact>,
@@ -31,6 +32,7 @@ pub enum Observation {
     Failed {
         message: String,
         retryable: bool,
+        outputs: Vec<Artifact>,
     },
     Uncertain {
         external_ref: Option<String>,
@@ -363,6 +365,7 @@ impl Adapters {
                     _ => Observation::Failed {
                         message,
                         retryable: is_pr,
+                        outputs: Vec::new(),
                     },
                 }
             }
@@ -508,7 +511,11 @@ impl Adapters {
         fs::plain_dirs(request_dir)?;
         let request = request_dir.join("request.md");
         let local_inputs = copy_inputs(request_dir, &inputs)?;
-        fs::atomic_write(&request, brief(run, &job, &local_inputs).as_bytes())?;
+        let repair_context = copy_inputs(&request_dir.join("repair"), &run.repair_context)?;
+        fs::atomic_write(
+            &request,
+            brief(run, &job, &local_inputs, &repair_context).as_bytes(),
+        )?;
         self.connect()?;
         let instance = self.connection.as_ref().expect("connected").instance();
         let board = match self.board.clone() {
@@ -572,6 +579,7 @@ impl Adapters {
                 Ok(Observation::Failed {
                     message,
                     retryable: true,
+                    outputs: Vec::new(),
                 })
             }
             Err(error) => {
@@ -655,9 +663,11 @@ impl Adapters {
             return Ok(Observation::Canceled);
         }
         if job.phase == Phase::Failed {
+            validate_saved_evidence(&job.outputs)?;
             return Ok(Observation::Failed {
                 message: job.failure.unwrap_or_else(|| "工程が失敗しました".into()),
                 retryable: false,
+                outputs: job.outputs,
             });
         }
         if job.phase == Phase::PrIntent {
@@ -727,6 +737,7 @@ impl Adapters {
             return Ok(Observation::Waiting {
                 external_ref: Some(format!("pane:{}", pane.pane_id.0)),
                 message,
+                input_sequence: agent.map(|agent| agent.seq),
             });
         }
         if state == Some("error")
@@ -746,6 +757,7 @@ impl Adapters {
             return Ok(if complete {
                 Observation::Waiting {
                     external_ref,
+                    input_sequence: None,
                     message:
                         "エージェントは終了しましたが、構造化された成果物をまだ受領していません"
                             .into(),
@@ -827,6 +839,9 @@ impl Adapters {
         // The worker has stopped before this final target/evidence check;
         // a last write between its finished signal and close cannot sneak
         // into a successful Change or quality verdict.
+        // Failed reports also inform repair, so their evidence must remain
+        // bound to the accepted bytes after the writer has stopped.
+        validate_saved_evidence(&job.outputs)?;
         if job.failure.is_none() {
             if git::common_dir(&job.worktree)? != job.repository_common {
                 return Err("保存済み成果物のリポジトリ識別情報が変わっています".into());
@@ -836,7 +851,6 @@ impl Adapters {
             {
                 return Err("実装成果のブランチが受領時から変わっています".into());
             }
-            validate_saved_evidence(&job.outputs)?;
             git::same_snapshot(
                 &job.worktree,
                 job.result_target.as_ref().unwrap_or(&job.target),
@@ -848,6 +862,7 @@ impl Adapters {
             Ok(Observation::Failed {
                 message,
                 retryable: false,
+                outputs: job.outputs,
             })
         } else {
             if job.node.kind == NodeKind::Implement {
@@ -985,8 +1000,9 @@ impl Adapters {
             // Until its worker has been seen, absence is not cancellation.
             return Ok(Observation::Uncertain {
                 external_ref: None,
-                message: "起動要求の結果が未確認のため、停止完了を確認できません。結果を照合してください"
-                    .into(),
+                message:
+                    "起動要求の結果が未確認のため、停止完了を確認できません。結果を照合してください"
+                        .into(),
             });
         }
         job.phase = Phase::Canceled;
@@ -1013,6 +1029,7 @@ impl Adapters {
         run: &str,
         node: &str,
         attempt: u32,
+        input_sequence: u64,
         answer: &str,
     ) -> Result<(), String> {
         let job = self
@@ -1024,7 +1041,7 @@ impl Adapters {
         self.connection
             .as_mut()
             .expect("connected")
-            .answer(pane, answer)
+            .answer(pane, input_sequence, answer)
             .map_err(|e| e.to_string())
     }
 }
@@ -1130,13 +1147,18 @@ fn private_results(worktree: &Path) -> Result<(), String> {
 }
 
 fn copy_inputs(directory: &Path, inputs: &[Artifact]) -> Result<Vec<Artifact>, String> {
-    validate_saved_evidence(inputs)?;
     let mut copied = inputs.to_vec();
     for (index, input) in copied.iter_mut().enumerate() {
         let local = directory.join("inputs").join(index.to_string());
         if let Some(path) = &input.path {
             let bytes =
                 fs::read(path, fs::MAX_REPORT_BYTES)?.ok_or("入力成果物が見つかりません")?;
+            let expected = input.data["report_sha256"]
+                .as_str()
+                .ok_or("入力報告書の識別子がありません")?;
+            if fs::hash(&bytes) != expected {
+                return Err("入力報告書の内容が受領時から変わりました".into());
+            }
             let output = local.join("result.json");
             fs::atomic_write(&output, &bytes)?;
             input.path = Some(output);
@@ -1151,6 +1173,12 @@ fn copy_inputs(directory: &Path, inputs: &[Artifact]) -> Result<Vec<Artifact>, S
                     PathBuf::from(file["path"].as_str().ok_or("入力証跡のパスが不正です")?);
                 let bytes =
                     fs::read(&original, 8 * 1024 * 1024)?.ok_or("入力証跡が見つかりません")?;
+                let expected = file["sha256"]
+                    .as_str()
+                    .ok_or("入力証跡の識別子がありません")?;
+                if fs::hash(&bytes) != expected {
+                    return Err("入力証跡の内容が受領時から変わりました".into());
+                }
                 let output = local.join(format!("evidence-{file_index}.txt"));
                 fs::atomic_write(&output, &bytes)?;
                 file["path"] = serde_json::json!(output);
@@ -1222,7 +1250,7 @@ fn collect_artifacts(
     Ok(vec![artifact])
 }
 
-fn brief(run: &Run, job: &Job, inputs: &[Artifact]) -> String {
+fn brief(run: &Run, job: &Job, inputs: &[Artifact], repair_context: &[Artifact]) -> String {
     let policy = match job.node.kind {
         NodeKind::Plan => {
             "Create a concrete plan and acceptance criteria. Do not modify project files. Write your plan as plan.md beside result.json."
@@ -1259,7 +1287,7 @@ fn brief(run: &Run, job: &Job, inputs: &[Artifact]) -> String {
         job.node.instruction,
         serde_json::to_string_pretty(&job.target).unwrap_or_default(),
         serde_json::to_string_pretty(inputs).unwrap_or_default(),
-        serde_json::to_string_pretty(&run.repair_context).unwrap_or_default(),
+        serde_json::to_string_pretty(repair_context).unwrap_or_default(),
         job.report.display(),
         serde_json::to_string_pretty(&sample).unwrap_or_default()
     )
@@ -1290,7 +1318,12 @@ mod tests {
         ) -> Result<noa_ipc::TextResult, noa_ipc::IpcError> {
             Err(noa_ipc::IpcError::UnknownPane)
         }
-        fn get_grid(&self, _: u64, _: u64, _: u64) -> Result<noa_ipc::GridResult, noa_ipc::IpcError> {
+        fn get_grid(
+            &self,
+            _: u64,
+            _: u64,
+            _: u64,
+        ) -> Result<noa_ipc::GridResult, noa_ipc::IpcError> {
             Err(noa_ipc::IpcError::UnknownPane)
         }
         fn send_text(
@@ -1568,6 +1601,54 @@ mod tests {
     }
 
     #[test]
+    fn answers_recheck_the_live_question_sequence_before_sending_any_text() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (backend, server) = cancellation_server();
+        let mut adapters = Adapters::new(root.join("repository"), root.join("runs")).unwrap();
+        adapters.connection = Some(cancellation_connection(&server));
+        let mut job = job(&adapters.root);
+        job.phase = Phase::Running;
+        job.pane_id = Some(7);
+        fs::plain_dirs(&job.worktree).unwrap();
+        adapters.save(&job).unwrap();
+        let mut panel = worker_panel(&job);
+        panel.agent = Some(noa_ipc::PanelAgent {
+            blocked: None,
+            detail: Some("The displayed question".into()),
+            kind: Some("codex".into()),
+            seq: 11,
+            state: Some("input".into()),
+        });
+        backend.panels.lock().unwrap().push(panel.clone());
+        assert!(matches!(
+            adapters.observe("run", "verify", 1, false),
+            Observation::Waiting {
+                input_sequence: Some(11),
+                ..
+            }
+        ));
+
+        // A new question may have identical wording in the same attempt.
+        // The backend panics if any text is sent, including a final Enter.
+        panel.agent.as_mut().unwrap().seq = 12;
+        *backend.panels.lock().unwrap() = vec![panel];
+        assert!(
+            adapters
+                .answer("run", "verify", 1, 11, "answer to the previous question")
+                .unwrap_err()
+                .contains("入力要求が更新")
+        );
+        assert!(matches!(
+            adapters.observe("run", "verify", 1, false),
+            Observation::Waiting {
+                input_sequence: Some(12),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn evidence_changes_after_receipt_are_detected_before_approval() {
         let root = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(root.path()).unwrap();
@@ -1579,6 +1660,47 @@ mod tests {
         assert!(validate_saved_evidence(&[artifact.clone()]).is_ok());
         std::fs::write(&path, "failed\n").unwrap();
         assert!(validate_saved_evidence(&[artifact]).is_err());
+    }
+
+    #[test]
+    fn repair_inputs_copy_reports_and_evidence_with_their_accepted_hashes() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let report = root.join("failed-result.json");
+        let log = root.join("review.md");
+        fs::atomic_write(&report, b"{\"passed\":false}").unwrap();
+        fs::atomic_write(&log, b"src/main.rs:12: handle the missing argument\n").unwrap();
+        let mut artifact = Artifact::new(ArtifactKind::Evidence, "target", "One finding");
+        artifact.path = Some(report.clone());
+        artifact.data = serde_json::json!({
+            "passed": false,
+            "report_sha256": fs::hash(b"{\"passed\":false}"),
+            "evidence": [{
+                "path": log,
+                "sha256": fs::hash(b"src/main.rs:12: handle the missing argument\n")
+            }]
+        });
+        let request = root.join("request");
+        let copied = copy_inputs(&request.join("repair"), &[artifact.clone()]).unwrap();
+        let local_report = copied[0].path.as_ref().unwrap();
+        let local_log = PathBuf::from(copied[0].data["evidence"][0]["path"].as_str().unwrap());
+        assert!(local_report.starts_with(&request));
+        assert!(local_log.starts_with(&request));
+        assert_ne!(local_report, &report);
+        assert_ne!(local_log, log);
+        validate_saved_evidence(&copied).unwrap();
+        let prompt = brief(&Run::demo(), &job(&root), &[], &copied);
+        assert!(prompt.contains(local_log.to_str().unwrap()));
+        assert!(!prompt.contains(log.to_str().unwrap()));
+
+        // The next worker reads only the accepted copies. Later changes to
+        // the prior attempt must be rejected by a new handoff.
+        fs::atomic_write(&log, b"changed after review\n").unwrap();
+        validate_saved_evidence(&copied).unwrap();
+        assert!(copy_inputs(&root.join("next-request"), &[artifact.clone()]).is_err());
+        fs::atomic_write(&log, b"src/main.rs:12: handle the missing argument\n").unwrap();
+        fs::atomic_write(&report, b"{\"passed\":true}").unwrap();
+        assert!(copy_inputs(&root.join("next-report"), &[artifact]).is_err());
     }
 
     fn stopped_implementation(root: &Path) -> (Adapters, Job) {
@@ -1658,6 +1780,54 @@ mod tests {
             adapters.observe("run", "implement", 1, true),
             Observation::Uncertain { .. }
         ));
+    }
+
+    #[test]
+    fn failed_reports_keep_their_evidence_across_restarts() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (mut adapters, mut job) = stopped_implementation(&root);
+        job.failure = Some("The implementation needs another change".into());
+        job.outputs[0].data["passed"] = serde_json::json!(false);
+        adapters.save(&job).unwrap();
+        let expected = job.outputs.clone();
+        let Observation::Failed { outputs, .. } = adapters.observe("run", "implement", 1, true)
+        else {
+            panic!("a failed report should preserve its accepted evidence");
+        };
+        assert_eq!(outputs, expected);
+        drop(adapters);
+
+        let mut reopened = Adapters::new(root.join("repository"), root.join("runs")).unwrap();
+        let Observation::Failed { outputs, .. } = reopened.observe("run", "implement", 1, true)
+        else {
+            panic!("reopening a failed report should preserve its evidence");
+        };
+        assert_eq!(outputs, expected);
+        fs::atomic_write(&job.report, b"{\"changed\":true}").unwrap();
+        assert!(matches!(
+            reopened.observe("run", "implement", 1, true),
+            Observation::Uncertain { .. }
+        ));
+    }
+
+    #[test]
+    fn a_failed_report_is_rechecked_after_its_writer_stops() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (mut adapters, mut job) = stopped_implementation(&root);
+        job.failure = Some("Needs repair".into());
+        job.outputs[0].data["passed"] = serde_json::json!(false);
+        adapters.save(&job).unwrap();
+        fs::atomic_write(&job.report, b"{\"changed\":true}").unwrap();
+        assert!(matches!(
+            adapters.observe("run", "implement", 1, true),
+            Observation::Uncertain { .. }
+        ));
+        assert_eq!(
+            adapters.load("run", "implement", 1).unwrap().unwrap().phase,
+            Phase::Finishing
+        );
     }
 
     #[test]

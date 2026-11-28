@@ -259,6 +259,23 @@ fn historical_failed_evidence_is_readable_with_its_attempt_and_target() {
 }
 
 #[test]
+fn an_ember_handoff_prefills_a_form_without_resuming_an_existing_run() {
+    let mut screen = WorkflowScreen::demo("approval");
+    screen.view.deferred = true;
+    let existing_run = screen.view.run.as_ref().unwrap().id.clone();
+    let objective = "Review this Ember draft before starting".to_owned();
+    let mut screen = screen.with_ember(objective.clone());
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    assert!(screen.preparing_run && screen.view.deferred);
+    assert!(!screen.start_pending && !screen.can_start_run());
+    assert!(screen.origin_task.is_none());
+    assert_eq!(screen.objective, objective);
+    assert_eq!(screen.view.run.as_ref().unwrap().id, existing_run);
+    assert!(screen.channel.is_none());
+}
+
+#[test]
 fn a_task_handoff_keeps_its_form_separate_from_an_older_active_run() {
     let mut screen = WorkflowScreen::demo("approval");
     screen.view.deferred = true;

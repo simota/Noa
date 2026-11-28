@@ -66,10 +66,10 @@ sys.exit(1 if bad else 0)'
 
 # widgets/agent-dashboard, widgets/repo-browser, widgets/discussion,
 # widgets/competition, widgets/review, widgets/verify, widgets/tasks,
-# widgets/scaffold, widgets/workflow, widgets/agent-usage and widgets/widget-host are crates of their own, outside the
+# widgets/scaffold, widgets/workflow, widgets/ember, widgets/agent-usage and widgets/widget-host are crates of their own, outside the
 # workspace. Each is built with its tests everywhere; the tests run on macOS
 # only, because some expect the text widths of macOS's system fonts. The
-# exception is widgets/agent-usage, widgets/tasks, widgets/scaffold, widgets/workflow and widgets/widget-host (no
+# exception is widgets/agent-usage, widgets/tasks, widgets/scaffold, widgets/workflow, widgets/ember and widgets/widget-host (no
 # font-dependent test), whose tests run everywhere. Which widget ships on which
 # platform is dev/scaffold/registry.json's to say, checked by the registration
 # checker.
@@ -82,6 +82,7 @@ verify=widgets/verify/Cargo.toml
 tasks=widgets/tasks/Cargo.toml
 scaffold=widgets/scaffold/Cargo.toml
 workflow=widgets/workflow/Cargo.toml
+ember=widgets/ember/Cargo.toml
 usage=widgets/agent-usage/Cargo.toml
 widget_host=widgets/widget-host/Cargo.toml
 widget_check() {
@@ -138,6 +139,7 @@ if [ "$full" = 1 ]; then
   in_part widgets && run tasks usage_check "$tasks"
   in_part widgets && run scaffold usage_check "$scaffold"
   in_part widgets && run workflow usage_check "$workflow"
+  in_part widgets && run ember usage_check "$ember"
   in_part widgets && run usage usage_check "$usage"
   in_part widgets && run widget-host usage_check "$widget_host"
   in_part core && run hook-test python3 -I -B scripts/test_noa_agent_hook.py
@@ -148,7 +150,7 @@ if [ "$full" = 1 ]; then
       appstreamcli validate --no-net dist/linux/com.simota.noa.metainfo.xml'
   fi
 elif [ "${#changed[@]}" -gt 0 ]; then
-  pkgs=() hook=0 skill=0 reg=0 dash=0 rb=0 disc=0 comp=0 rev=0 ver=0 tsk=0 scf=0 wf=0 use=0 wgh=0
+  pkgs=() hook=0 skill=0 reg=0 dash=0 rb=0 disc=0 comp=0 rev=0 ver=0 tsk=0 scf=0 wf=0 emb=0 use=0 wgh=0
   for path in "${changed[@]}"; do
     p=$(package_of "$path"); [ -n "$p" ] && pkgs+=("$p")
     case $path in widgets/agent-dashboard/*) dash=1 ;; esac
@@ -163,6 +165,7 @@ elif [ "${#changed[@]}" -gt 0 ]; then
     # the registry it round-trips.
     case $path in widgets/scaffold/* | scripts/tests/fixtures/widget-registration/* | dev/scaffold/*) scf=1 ;; esac
     case $path in widgets/workflow/*) wf=1 ;; esac
+    case $path in widgets/ember/*) emb=1 ;; esac
     case $path in widgets/agent-usage/*) use=1 ;; esac
     case $path in widgets/widget-host/* | .noa-widgets/* | skills/noa-widgets/* | skills/noa-widget-creator/*) wgh=1 ;; esac
     case $path in scripts/noa-agent-hook.py | scripts/test_noa_agent_hook.py) hook=1 ;; esac
@@ -233,6 +236,12 @@ elif [ "${#changed[@]}" -gt 0 ]; then
       echo "verify: cannot list the workflow's packages; checking it anyway"
       wf=1
     fi
+    if uses=$(widget_uses "$ember"); then
+      for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && emb=1; done
+    else
+      echo "verify: cannot list Ember's packages; checking it anyway"
+      emb=1
+    fi
     if uses=$(widget_uses "$usage"); then
       for p in "${pkgs[@]}"; do grep -qx "$p" <<<"$uses" && use=1; done
     else
@@ -255,6 +264,7 @@ elif [ "${#changed[@]}" -gt 0 ]; then
   [ "$tsk" = 1 ] && run tasks usage_check "$tasks"
   [ "$scf" = 1 ] && run scaffold usage_check "$scaffold"
   [ "$wf" = 1 ] && run workflow usage_check "$workflow"
+  [ "$emb" = 1 ] && run ember usage_check "$ember"
   [ "$use" = 1 ] && run usage usage_check "$usage"
   [ "$wgh" = 1 ] && run widget-host usage_check "$widget_host"
   [ "$hook" = 1 ] && run hook-test python3 -I -B scripts/test_noa_agent_hook.py

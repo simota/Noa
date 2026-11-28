@@ -1304,6 +1304,28 @@ fn workflow_is_addressable_by_action_and_menu_id() {
 }
 
 #[test]
+fn ember_is_addressable_without_changing_the_mascot_toggle() {
+    let command = AppCommand::OpenEmber;
+    assert_eq!(command.action_name(), "ember.open");
+    assert_eq!(AppCommand::from_action_name("ember.open"), Some(command));
+    assert_eq!(command.menu_id(), "noa.view.open-ember");
+    assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+    assert_eq!(
+        crate::command_palette::command_palette_title(command),
+        "Open Ember"
+    );
+    assert_eq!(
+        crate::command_palette::command_category(command),
+        crate::command_palette::CommandCategory::View
+    );
+    assert_eq!(
+        AppCommand::from_action_name("ember.toggle"),
+        Some(AppCommand::ToggleEmber)
+    );
+    assert_ne!(command.menu_id(), AppCommand::ToggleEmber.menu_id());
+}
+
+#[test]
 fn widget_host_is_addressable_by_action_and_menu_id() {
     let command = AppCommand::OpenWidgetHost;
     assert_eq!(command.action_name(), "widget-host.open");

@@ -203,6 +203,19 @@ fn same_question(previous: &View, current: &View, node_id: &str) -> bool {
 }
 
 impl WorkflowScreen {
+    /// A draft from Ember uses the same explicit start form as a new task.
+    /// There is no Tasks identity and no assumed connection to an Ember run.
+    pub fn with_ember(mut self, objective: String) -> Self {
+        self.objective = objective;
+        self.preparing_run = true;
+        self.selected_run = None;
+        self.start_pending = false;
+        self.tab = Tab::Run;
+        self.detail_only = true;
+        self.view.notice = Some("エンバーから引き継いだ下書きです。目的を確認して開始してください。実行状況はWorkflowで確認できます。".into());
+        self
+    }
+
     pub fn with_task(mut self, origin: workflow::tasks::TaskOrigin, objective: String) -> Self {
         self.origin_task = Some(origin);
         self.objective = objective;

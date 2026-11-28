@@ -2,6 +2,7 @@
 //! local storage. The native window and live Noa adapters are separate callers.
 
 pub mod adapters;
+pub mod ember;
 pub mod engine;
 pub mod model;
 pub mod runner;

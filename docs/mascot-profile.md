@@ -106,6 +106,12 @@ dynamic is the heart of the IP. **Pronoun: *it*. Non-verbal**: it never speaks; 
 communicates only through motion, glow, and its face. Noa speaks; Ember emotes.
 Full profile: `mascot-ip-bible.md` §2.
 
+**Assistant widget:** the Ember personal-agent widget uses the same name and
+companion identity. Text in its conversation is the software assistant's response;
+the illustrated sprite continues to communicate through expression and motion.
+The widget adds no character voice or spoken dialogue. See [Ember](EMBER.md) for
+the product behavior and its explicit memory controls.
+
 > **Rendering note**: Ember's body reads **white**, never orange; the `#E8A33D`
 > accent stays on Noa. A faint warm glow may flare only with strong emotion, never
 > tinting the body; in dark / orange scenes render pure white. (See the

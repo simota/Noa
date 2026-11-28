@@ -13,7 +13,7 @@ use noa_gpui_scene::Size;
 use noa_gpui_text::TextStore;
 use workflow::runner::Channel;
 
-const USAGE: &str = "Usage: workflow --repo=PATH [--task-origin=JSON | --run=RUN_ID]\n       workflow --demo[=editor|approval|failed|saved] [--snapshot=PNG] [--size=1280x860]\n\nA native visual development workflow editor for Noa.\nTask handoffs open the start form; --run opens a saved run read-only.\nSnapshots and demos never start agents or publish changes.";
+const USAGE: &str = "Usage: workflow --repo=PATH [--task-origin=JSON | --ember-origin=JSON | --run=RUN_ID]\n       workflow --demo[=editor|approval|failed|saved] [--snapshot=PNG] [--size=1280x860]\n\nA native visual development workflow editor for Noa.\nTask and Ember handoffs open the start form; --run opens a saved run read-only.\nSnapshots and demos never start agents or publish changes.";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -23,6 +23,7 @@ struct Args {
     size: (u32, u32),
     help: bool,
     task_origin: Option<PathBuf>,
+    ember_origin: Option<PathBuf>,
     run: Option<String>,
 }
 
@@ -34,6 +35,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         size: (1280, 860),
         help: false,
         task_origin: None,
+        ember_origin: None,
         run: None,
     };
     for arg in args {
@@ -43,6 +45,8 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             parsed.repo = Some(PathBuf::from(repo));
         } else if let Some(path) = arg.strip_prefix("--task-origin=") {
             parsed.task_origin = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--ember-origin=") {
+            parsed.ember_origin = Some(PathBuf::from(path));
         } else if let Some(id) = arg.strip_prefix("--run=") {
             if !workflow::model::valid_id(id) {
                 return Err("invalid run id".into());
@@ -76,14 +80,22 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     if parsed.repo.is_some() == parsed.demo.is_some() {
         return Err("specify exactly one of --repo=PATH or --demo".into());
     }
-    if (parsed.task_origin.is_some() || parsed.run.is_some()) && parsed.repo.is_none()
-        || parsed.task_origin.is_some() && parsed.run.is_some()
-        || parsed
-            .task_origin
-            .as_ref()
-            .is_some_and(|p| !p.is_absolute())
+    let modes = [
+        parsed.task_origin.is_some(),
+        parsed.ember_origin.is_some(),
+        parsed.run.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if modes > 1
+        || modes > 0 && parsed.repo.is_none()
+        || [&parsed.task_origin, &parsed.ember_origin]
+            .into_iter()
+            .flatten()
+            .any(|p| !p.is_absolute())
     {
-        return Err("task handoffs and saved runs require --repo, are mutually exclusive, and handoff paths must be absolute".into());
+        return Err("handoffs and saved runs require --repo, are mutually exclusive, and handoff paths must be absolute".into());
     }
     if parsed
         .repo
@@ -146,11 +158,16 @@ fn main() -> Result<(), String> {
         .as_ref()
         .map(|path| workflow::tasks::read_handoff(path, &repository))
         .transpose()?;
+    let ember_handoff = args
+        .ember_origin
+        .as_ref()
+        .map(|path| workflow::ember::read_handoff(path, &repository))
+        .transpose()?;
     let retained: Arc<Mutex<Option<Channel>>> = Arc::new(Mutex::new(None));
     let holder = retained.clone();
     App::new(options, move |setup| {
         let waker = setup.waker.clone();
-        let channel = if handoff.is_some() {
+        let channel = if handoff.is_some() || ember_handoff.is_some() {
             Channel::open_deferred(repository.clone(), move || waker.wake())
         } else {
             Channel::open(repository.clone(), move || waker.wake())
@@ -161,7 +178,10 @@ fn main() -> Result<(), String> {
                 let screen = ui::WorkflowScreen::live(repository, channel);
                 Box::new(match handoff {
                     Some((origin, objective)) => screen.with_task(origin, objective),
-                    None => screen,
+                    None => match ember_handoff {
+                        Some(objective) => screen.with_ember(objective),
+                        None => screen,
+                    },
                 })
             }
             Err(error) => Box::new(ui::WorkflowScreen::unavailable(repository, error)),
@@ -209,5 +229,28 @@ mod tests {
         assert!(args(&["--demo", "--run=run-123"]).is_err());
         assert!(args(&["--repo=.", "--run=run-123", "--task-origin=/tmp/task.json"]).is_err());
         assert!(args(&["--repo=.", "--run=../run-123"]).is_err());
+    }
+
+    #[test]
+    fn ember_handoffs_are_explicit_and_never_combine_with_demo_or_resumption() {
+        assert!(args(&["--repo=.", "--ember-origin=/tmp/ember.json"]).is_ok());
+        assert!(args(&["--repo=.", "--ember-origin=ember.json"]).is_err());
+        assert!(args(&["--demo", "--ember-origin=/tmp/ember.json"]).is_err());
+        assert!(
+            args(&[
+                "--repo=.",
+                "--run=run-123",
+                "--ember-origin=/tmp/ember.json"
+            ])
+            .is_err()
+        );
+        assert!(
+            args(&[
+                "--repo=.",
+                "--task-origin=/tmp/task.json",
+                "--ember-origin=/tmp/ember.json"
+            ])
+            .is_err()
+        );
     }
 }

@@ -14,7 +14,7 @@ use noa_gpui_text::TextStore;
 
 const DEFAULT_SIZE: (u32, u32) = (1120, 780);
 const MIN_SIZE: (u32, u32) = (720, 640);
-const USAGE: &str = "Usage: ember [--repo=PATH]\n       ember --demo[=conversation|requests|memory|settings|error] [--snapshot=PNG] [--size=1120x780]\n\nA personal assistant window for Noa.\nDemos and snapshots never start the service, read projects, or call a provider.\n--widget-settings opens the shared widget appearance settings.";
+const USAGE: &str = "Usage: ember [--repo=PATH]\n       ember --demo[=welcome|conversation|requests|memory|settings|error] [--snapshot=PNG] [--size=1120x780]\n\nA personal assistant window for Noa.\nDemos and snapshots never start the service, read projects, or call a provider.\n--widget-settings opens the shared widget appearance settings.";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -53,7 +53,8 @@ fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Args, String> {
             let kind = argument.strip_prefix("--demo=").unwrap_or("conversation");
             if !demo::KINDS.contains(&kind) {
                 return Err(
-                    "unknown demo; use conversation, requests, memory, settings or error".into(),
+                    "unknown demo; use welcome, conversation, requests, memory, settings or error"
+                        .into(),
                 );
             }
             parsed.demo = Some(kind.into());

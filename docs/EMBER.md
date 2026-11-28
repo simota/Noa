@@ -37,12 +37,36 @@ paid request has authenticated successfully. Authentication and model-access
 errors are shown on the affected request. No network request is made just to
 open Settings or inspect history.
 
-## Conversation, requests and memory
+## Conversation, activity and memory
 
-The window has four pages: conversation, requests, memory and settings. Enter
-inserts a newline; Command+Enter sends on macOS (Control+Enter on Linux).
+The window has four pages in a horizontal tab bar: conversation, activity
+(アクティビティ), memory and settings. Select Ember's profile in the header to
+open Activity. The conversation uses a centered reading column, with your
+messages on the right and Ember's on the left. The composer stays below the
+scrolling conversation so you can keep writing while reading replies and
+checking background work. Shared widget appearance preferences still control
+the theme, text size and spacing.
+
+An empty conversation offers **考えを整理する**, **文書をまとめる** and
+**資料を調べる**. These open an editable draft in the appropriate page; they
+do not send a message or start a request, and an existing draft is preserved.
+Enter inserts a newline; Command+Enter sends on macOS (Control+Enter on Linux).
 Native text controls survive state updates and resizing so a service update
-does not replace the current draft or IME composition.
+does not replace the current draft or IME composition. Each message keeps
+controls for opening its full text and preparing an explicitly saved memory.
+
+Activity shows requests in the selected scope. Its filters are **すべて** (All),
+**進行中** (Active), **完了** (Completed) and **要確認** (Needs attention).
+Active includes queued work and requests waiting for a stop confirmation; Needs
+attention includes failed requests and uncertain outcomes. The conversation
+also shows up to three recent activity cards, keeping a completed artifact
+visible when newer work is still running. Open an artifact from its card, stop
+an active request, or open Activity to inspect the rest.
+
+The conversation-first layout takes design cues from
+[OpenAI dots](https://learn.chatgpt.com/docs/dots): a named assistant, ongoing
+conversation and a separate view of delegated work. Ember's available actions
+and service behavior are described below.
 
 | Operation | Result |
 |---|---|
@@ -65,7 +89,9 @@ The **personal** scope uses its own history and personal memories. A **project**
 scope uses that project's history, its project memories, and the explicitly
 saved personal memories. Project A's history, files and memories are not inserted
 into Project B's request. Switching scope does not retarget work that has already
-been accepted.
+been accepted. The conversation displays the selected scope's latest 60 messages;
+Activity and the recent activity cards use that same scope. Older messages remain
+available through Settings' saved-data view.
 
 The app does not infer permanent memories from ordinary conversation. Editing or
 deleting a saved memory advances the context generation: older replies and
@@ -199,11 +225,15 @@ extensions.
 
 ## Screenshots
 
-These are native headless renders of the offline demo, not live conversations.
+### Before the conversation-focused redesign
 
-![Ember conversation at 1120 by 780 logical pixels](images/ember/conversation.png)
+These native headless renders show the previous offline-demo layout, not the
+current conversation-focused design or live conversations. Updated native
+captures are pending.
 
-![Requests at the minimum 720 by 640 logical size](images/ember/requests.png)
+![Previous Ember conversation layout at 1120 by 780 logical pixels](images/ember/conversation.png)
+
+![Previous Requests page at the minimum 720 by 640 logical size](images/ember/requests.png)
 
 ## Development and validation
 
@@ -213,12 +243,13 @@ The widget is its own Cargo workspace, like Workflow and Tasks:
 cargo run --manifest-path widgets/ember/Cargo.toml -- --repo=/absolute/project
 cargo test --manifest-path widgets/ember/Cargo.toml --locked --no-default-features
 cargo test --manifest-path widgets/ember/Cargo.toml --locked
+cargo run --manifest-path widgets/ember/Cargo.toml -- --demo=welcome --snapshot=ember-welcome.png
 cargo run --manifest-path widgets/ember/Cargo.toml -- --demo=conversation --snapshot=ember.png
 cargo run --manifest-path widgets/ember/Cargo.toml -- --demo=requests --snapshot=ember-small.png --size=720x640
 scripts/verify.sh --full
 ```
 
-Demo pages are `conversation`, `requests`, `memory`, `settings` and `error`.
+Demo pages are `welcome`, `conversation`, `requests`, `memory`, `settings` and `error`.
 Demo/snapshot arguments reject live repositories and service options before
 initialization. Their fixture data never opens the service or calls a provider.
 `--widget-settings` uses the existing shared appearance settings.

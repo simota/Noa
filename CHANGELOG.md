@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.24] - 2026-11-29
+
+A conversation-first redesign of the Ember assistant.
+
+### Changed
+
+- Ember: the window is organized around the conversation, with conversation,
+  activity, memory and settings pages in a horizontal tab bar. Messages sit in
+  a centered reading column with the composer kept below, an empty
+  conversation offers editable starter drafts, and up to three recent activity
+  cards show background requests alongside the conversation. The Activity page
+  filters requests by All, Active, Completed and Needs attention. The
+  conversation shows the selected scope's latest 60 messages. See
+  `docs/EMBER.md`. (#296)
+
 ## [0.9.23] - 2026-11-29
 
 A persistent personal assistant widget, faster plain-text and OSC parsing, and

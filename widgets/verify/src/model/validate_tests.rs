@@ -746,6 +746,28 @@ fn judge_problems(rig: &Rig, text: &str) -> Vec<String> {
 }
 
 #[test]
+fn a_new_defect_cannot_reuse_a_current_or_removed_criterion_id() {
+    let rig = ruled_round(2);
+    let mut session = rig.engine.session().clone();
+    let mut removed = session.criteria[0].clone();
+    removed.id = "AC-4".into();
+    session.removed_criteria.push(removed);
+    let text = judge_json(&good_rulings(), "open", "");
+    assert!(parse_judge(&text, &session, rig.round()).is_ok());
+
+    for id in ["AC-1", "AC-4"] {
+        let text = text.replace("\"id\": \"D1\"", &format!("\"id\": \"{id}\""));
+        let error = parse_judge(&text, &session, rig.round()).unwrap_err();
+        assert!(
+            error.problems.iter().any(|problem| problem == &format!(
+                "defect_ops[0] (add): defect id {id} is reserved for a criterion; use a distinct defect id (D1, D2, …)"
+            )),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn ac13_each_evidence_standard_rule_is_its_own_problem_line() {
     let rig = ruled_round(2);
     assert_eq!(

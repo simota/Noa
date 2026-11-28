@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::model::brief::inline_code;
 use crate::model::recheck;
 use crate::model::rules::{Check, History};
 use crate::model::types::{
@@ -443,7 +444,11 @@ fn item_entry(item: &Evidence, indent: &str) -> String {
                 block = Some(crate::model::brief::fenced(cmd, &format!("{indent}  ")));
             } else {
                 let one = cmd.lines().next().unwrap_or_default();
-                let _ = write!(out, "コマンド `{one}`（{cwd}） · 終了コード {exit}");
+                let _ = write!(
+                    out,
+                    "コマンド {}（{cwd}） · 終了コード {exit}",
+                    inline_code(one)
+                );
             }
             if let Some(r) = &item.rerun {
                 let _ = write!(out, " · 再実行 {}", rerun_label(r));
@@ -457,10 +462,10 @@ fn item_entry(item: &Evidence, indent: &str) -> String {
         } => {
             match media {
                 Some(m) => {
-                    let _ = write!(out, "{}（{}）`{path}`", m.label(), m.name());
+                    let _ = write!(out, "{}（{}）{}", m.label(), m.name(), inline_code(path));
                 }
                 None => {
-                    let _ = write!(out, "ファイル `{path}`");
+                    let _ = write!(out, "ファイル {}", inline_code(path));
                 }
             }
             if let Some(caption) = caption {
@@ -478,10 +483,10 @@ fn item_entry(item: &Evidence, indent: &str) -> String {
         Some(s) => {
             let _ = write!(
                 out,
-                " · digest `{:016x}` · {} バイト · `{}`",
+                " · digest `{:016x}` · {} バイト · {}",
                 s.digest,
                 s.bytes,
-                s.path.display()
+                inline_code(&s.path.to_string_lossy())
             );
         }
         None if item.file_path().is_some() => out.push_str(" · 保存なし"),
@@ -1383,7 +1388,8 @@ fn write_fix_item(
         EvidenceBody::Command { cmd, cwd, exit, .. } => {
             let _ = writeln!(
                 out,
-                "- Evidence {key}: exit {exit} in `{cwd}`:\n\n{}\n",
+                "- Evidence {key}: exit {exit} in {}:\n\n{}\n",
+                inline_code(cwd),
                 indent(cmd.trim())
             );
             if let Some(r) = &item.rerun {
@@ -1412,8 +1418,8 @@ fn write_fix_item(
     if let Some(tail) = tails.get(key) {
         let _ = writeln!(
             out,
-            "  Last {FIX_TAIL_LINES} lines of its log:\n\n```\n{}\n```\n",
-            tail.trim_end()
+            "  Last {FIX_TAIL_LINES} lines of its log:\n{}\n",
+            crate::model::brief::fenced(tail.trim_end(), "")
         );
     }
 }
@@ -1551,6 +1557,83 @@ mod tests {
         assert_eq!(
             crate::model::brief::fenced("echo ```\nls", "  "),
             "\n  ````\n  echo ```\n  ls\n  ````"
+        );
+    }
+
+    #[test]
+    fn shell_backticks_stay_literal_in_the_brief_and_report() {
+        let mut rig = Rig::new(2);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        let command = "test -d `pwd`";
+        let evidence = serde_json::json!({
+            "id": "e1", "kind": "command", "cmd": command,
+            "cwd": ".", "exit": 0, "log": "logs/e1.log", "rerun": true,
+        });
+        rig.reply(
+            "claude",
+            &reply_json(
+                &[
+                    ("AC-1", "pass", &["e1"]),
+                    ("AC-2", "pass", &["e1"]),
+                    ("AC-3", "pass", &["e1"]),
+                ],
+                &[evidence.to_string()],
+                "",
+            ),
+        );
+        for part in ["codex", "claude-2"] {
+            rig.reply(part, &all_pass());
+        }
+        rig.ingest();
+        rig.rerun_all_matched();
+        let brief = rig.brief("judge", crate::model::types::BriefKind::Work);
+        assert!(
+            brief.contains("command `` test -d `pwd` `` (cwd .) exit 0"),
+            "{brief}"
+        );
+        let report = report_markdown(rig.engine.session(), None);
+        assert!(
+            report.contains("コマンド `` test -d `pwd` ``（.） · 終了コード 0"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn stored_log_fences_stay_literal_in_the_judge_brief_and_fix_task() {
+        let mut rig = Rig::new(1);
+        testkit::accept_default_criteria(&mut rig);
+        testkit::start_round_one(&mut rig);
+        rig.deliver();
+        let reply = reply_json(
+            &[
+                ("AC-1", "fail", &["e1"]),
+                ("AC-2", "pass", &["e1"]),
+                ("AC-3", "pass", &["e1"]),
+            ],
+            &[cmd("e1", 1, false)],
+            "",
+        );
+        rig.reply("claude", &reply);
+        for part in ["codex", "claude-2"] {
+            rig.reply(part, &all_pass());
+        }
+        let log = "Markdown snapshot differs:\n```text\nactual\n```\nexpected\n````\nend";
+        let tails = BTreeMap::from([(EvidenceKey::new("claude/r1/e1"), log.into())]);
+        rig.ingest_except(&[], &tails);
+        rig.rerun_all_matched();
+        let brief = rig.brief("judge", crate::model::types::BriefKind::Work);
+        assert!(
+            brief.contains(&format!("log tail:\n`````\n{log}\n`````\n")),
+            "{brief}"
+        );
+        let task = fix_task(rig.engine.session(), &["AC-1".into()], &[], &tails);
+        assert!(
+            task.contains(&format!(
+                "Last {FIX_TAIL_LINES} lines of its log:\n\n`````\n{log}\n`````\n"
+            )),
+            "{task}"
         );
     }
 

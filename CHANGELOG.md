@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when filters hide them, and shows cumulative file coverage consistently in the
   matrix and report. Footer controls and their keyboard focus rings stay inside
   the window at compact sizes.
+- Verify rejects blocking reply files and reads, replaces, or removes them
+  through checked directory handles. Re-run status errors no longer stop
+  timeout monitoring, and stored logs are rechecked before being displayed
+  or quoted to the judge or repair agent.
+- Verify prevents duplicate starts and stale file-dialog or confirmation
+  answers from acting on another verification. Agent detection bounds its
+  output and closes the read pipe when the check ends.
+- Verify rejects ambiguous criterion/defect IDs and misleading verdict
+  blockers, and preserves shell backticks and Markdown fences in evidence
+  reports and agent briefs.
 - Workflow opens saved runs with their graph, history, and evidence in a
   read-only window. Narrow-window resizing keeps the inspector in bounds;
   invalid form input can be undone or replaced by a conflict reload, and

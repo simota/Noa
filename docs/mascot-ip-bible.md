@@ -68,6 +68,9 @@ reacting so Noa doesn't have to: the duo dynamic is the heart of the IP.
   height, with a clear gap; faces forward with a gentle hover / bob.
 - Pronoun / voice: *it*; **non-verbal**; communicates only through motion,
   glow, and face. Noa speaks; Ember emotes.
+- Product extension: the [Ember assistant widget](EMBER.md) presents software
+  responses as conversation text. Its sprite remains non-verbal; the widget does
+  not add a character voice or change the illustrated duo's dialogue convention.
 
 > **Name locked (2026-07-10): Ember.** The named duo unlocks duo-content, plush
 > merch, and collab framing: an Ember plush is the recommended first goods lead (§5).

@@ -1477,6 +1477,15 @@ pub fn parse_judge(
                     ));
                 } else if shadow.status.contains_key(&id) {
                     problems.push(format!("{at}: defect {id} already exists"));
+                } else if session
+                    .criteria
+                    .iter()
+                    .chain(&session.removed_criteria)
+                    .any(|criterion| criterion.id == id)
+                {
+                    problems.push(format!(
+                        "{at}: defect id {id} is reserved for a criterion; use a distinct defect id (D1, D2, …)"
+                    ));
                 }
                 if from.is_empty() {
                     problems.push(format!(

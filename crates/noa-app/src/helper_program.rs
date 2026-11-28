@@ -3,7 +3,8 @@
 //! browser (`repo-browser.open`), the discussion (`discussion.open`), the
 //! competition (`competition.open`), the review (`review.open`), the verify
 //! (`verify.open`), the tasks (`tasks.open`), the scaffold
-//! (`scaffold.open`), the workflow editor (`workflow.open`) and the agent
+//! (`scaffold.open`), the workflow editor (`workflow.open`), Ember
+//! (`ember.open`) and the agent
 //! usage (`agent-usage.open`). Each runs as a process of its own. Helpers that
 //! inspect live panes use Noa's control server; local views can open without
 //! it. Repository-oriented helpers receive the focused pane's
@@ -82,6 +83,12 @@ pub(crate) const WORKFLOW: HelperProgram = HelperProgram {
     crate_name: "workflow",
 };
 
+pub(crate) const EMBER: HelperProgram = HelperProgram {
+    title: "Ember",
+    bundled: "Noa Ember",
+    crate_name: "ember",
+};
+
 pub(crate) const WIDGET_HOST: HelperProgram = HelperProgram {
     title: "Repository Widgets",
     bundled: "Noa Widget Host",
@@ -106,6 +113,7 @@ pub(crate) fn launch_args(helper: HelperProgram, focused_cwd: Option<&str>) -> V
                 || helper.crate_name == TASKS.crate_name
                 || helper.crate_name == SCAFFOLD.crate_name
                 || helper.crate_name == WORKFLOW.crate_name
+                || helper.crate_name == EMBER.crate_name
                 || helper.crate_name == WIDGET_HOST.crate_name)
                 && Path::new(cwd).is_absolute() =>
         {
@@ -157,6 +165,7 @@ pub(crate) fn open(
     } = helper;
     let program = program_path(helper)?;
     let mut command = Command::new(&program);
+    configure_ember_owner(helper, &mut command);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -188,6 +197,14 @@ pub(crate) fn open(
         })
         .map_err(|err| format!("Could not watch {title}: {err}"))?;
     Ok(())
+}
+
+/// The service inherits this from its UI so it can stop scheduling when the
+/// Noa process that opened it exits. Other helpers retain their environment.
+fn configure_ember_owner(helper: HelperProgram, command: &mut Command) {
+    if helper.crate_name == EMBER.crate_name {
+        command.env("NOA_EMBER_OWNER_PID", std::process::id().to_string());
+    }
 }
 
 /// Where an installed Noa keeps its helpers, given the directory of Noa's
@@ -332,6 +349,7 @@ mod tests {
             TASKS,
             SCAFFOLD,
             WORKFLOW,
+            EMBER,
             WIDGET_HOST,
         ] {
             let dirs = dev_build_dirs(helper);
@@ -408,6 +426,46 @@ mod tests {
         for dir in [exe_dir, dev] {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn ember_is_found_by_its_own_binary_name() {
+        let exe_dir = scratch_dir("ember-exe");
+        let dev = scratch_dir("ember-dev");
+        assert_eq!(
+            locate(EMBER, Some(&exe_dir), std::slice::from_ref(&dev)),
+            None
+        );
+        std::fs::write(dev.join("ember"), "").unwrap();
+        assert_eq!(
+            locate(EMBER, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(dev.join("ember"))
+        );
+        std::fs::write(exe_dir.join("Noa Ember"), "").unwrap();
+        assert_eq!(
+            locate(EMBER, Some(&exe_dir), std::slice::from_ref(&dev)),
+            Some(exe_dir.join("Noa Ember"))
+        );
+        for dir in [exe_dir, dev] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn only_ember_receives_the_noa_owner_pid() {
+        let mut ember = Command::new("ember");
+        configure_ember_owner(EMBER, &mut ember);
+        assert_eq!(
+            ember
+                .get_envs()
+                .find(|(key, _)| *key == "NOA_EMBER_OWNER_PID")
+                .and_then(|(_, value)| value)
+                .and_then(|value| value.to_str()),
+            Some(std::process::id().to_string().as_str())
+        );
+        let mut tasks = Command::new("tasks");
+        configure_ember_owner(TASKS, &mut tasks);
+        assert_eq!(tasks.get_envs().count(), 0);
     }
 
     #[test]
@@ -571,7 +629,15 @@ mod tests {
 
     #[test]
     fn repository_helpers_are_given_the_focused_panes_directory() {
-        for helper in [REVIEW, VERIFY, TASKS, SCAFFOLD, WORKFLOW, WIDGET_HOST] {
+        for helper in [
+            REVIEW,
+            VERIFY,
+            TASKS,
+            SCAFFOLD,
+            WORKFLOW,
+            EMBER,
+            WIDGET_HOST,
+        ] {
             assert_eq!(
                 launch_args(helper, Some("/Users/me/src/noa")),
                 ["--repo=/Users/me/src/noa"],

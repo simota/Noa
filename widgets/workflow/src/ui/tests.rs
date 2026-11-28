@@ -259,6 +259,49 @@ fn historical_failed_evidence_is_readable_with_its_attempt_and_target() {
 }
 
 #[test]
+fn an_ember_handoff_prefills_a_form_without_resuming_an_existing_run() {
+    let mut screen = WorkflowScreen::demo("approval");
+    screen.view.deferred = true;
+    let existing_run = screen.view.run.as_ref().unwrap().id.clone();
+    let objective = "Review this Ember draft before starting".to_owned();
+    let mut screen = screen.with_ember(objective.clone());
+    let mut text = TextStore::new(Default::default());
+    screen.prepare(Size::new(1280.0, 860.0), &mut text);
+    assert!(screen.preparing_run && screen.view.deferred);
+    assert!(!screen.start_pending && !screen.can_start_run());
+    assert!(screen.origin_task.is_none());
+    assert_eq!(screen.objective, objective);
+    assert_eq!(screen.view.run.as_ref().unwrap().id, existing_run);
+    assert!(screen.channel.is_none());
+
+    screen.act(Action::SavedRun, &mut text).unwrap();
+    assert!(!screen.preparing_run);
+    let (button, return_to_draft) = screen
+        .actions
+        .iter()
+        .find(|(_, action)| matches!(action, Action::Select(id) if id.is_empty()))
+        .cloned()
+        .expect("an Ember handoff offers a return to its draft beside an active run");
+    assert!(screen.tree.is_enabled(button));
+    screen.act(return_to_draft, &mut text).unwrap();
+    assert!(screen.preparing_run && screen.view.deferred);
+    assert!(!screen.start_pending && !screen.can_start_run());
+    assert!(screen.origin_task.is_none());
+    assert_eq!(screen.objective, objective);
+    assert_eq!(screen.view.run.as_ref().unwrap().id, existing_run);
+    let objective_field = screen
+        .fields
+        .iter()
+        .find(|(_, field)| matches!(field, Field::Objective))
+        .unwrap()
+        .0;
+    assert_eq!(
+        screen.tree.get::<TextArea>(objective_field).unwrap().text(),
+        objective
+    );
+}
+
+#[test]
 fn a_task_handoff_keeps_its_form_separate_from_an_older_active_run() {
     let mut screen = WorkflowScreen::demo("approval");
     screen.view.deferred = true;

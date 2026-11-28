@@ -1,0 +1,40 @@
+[package]
+name = "ember"
+description = "A personal assistant for Noa with durable conversations, scoped memory and background requests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = ["native"]
+native = ["dep:noa-gpui-platform", "dep:noa-gpui-core", "dep:noa-gpui-scene", "dep:noa-gpui-text"]
+
+[[bin]]
+name = "ember"
+path = "src/main.rs"
+required-features = ["native"]
+
+[dependencies]
+noa-gpui-platform = { version = "0.2.1", features = ["native"], optional = true }
+noa-gpui-core = { version = "0.2.1", optional = true }
+noa-gpui-scene = { version = "0.2.1", optional = true }
+noa-gpui-text = { version = "0.2.1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+libc = "0.2"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev.package.font-types]
+opt-level = 1
+[profile.dev.package.read-fonts]
+opt-level = 1
+[profile.dev.package.skrifa]
+opt-level = 1
+[profile.dev.package.harfrust]
+opt-level = 1

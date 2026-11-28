@@ -73,6 +73,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::OpenTasks
         | AppCommand::OpenScaffold
         | AppCommand::OpenWorkflow
+        | AppCommand::OpenEmber
         | AppCommand::OpenWidgetHost
         | AppCommand::OpenWidgetSettings
         | AppCommand::OpenAgentUsage

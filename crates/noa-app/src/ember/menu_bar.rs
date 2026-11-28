@@ -84,6 +84,11 @@ define_class!(
         fn hide(&self, _sender: &AnyObject) {
             (self.ivars().send)(UserEvent::AppCommand(AppCommand::ToggleEmber));
         }
+
+        #[unsafe(method(openEmber:))]
+        fn open_ember(&self, _sender: &AnyObject) {
+            (self.ivars().send)(UserEvent::AppCommand(AppCommand::OpenEmber));
+        }
     }
 );
 
@@ -157,6 +162,7 @@ impl Delegate {
             }
         }
         add_separator(menu);
+        self.add_action(menu, "エンバーを開く", sel!(openEmber:), "");
         self.add_action(menu, "Hide Ember", sel!(hide:), "");
     }
 
@@ -384,6 +390,7 @@ mod tests {
             );
             assert_eq!((items[1].1, items[1].2), (true, 0));
             assert_eq!((items[2].1, items[2].2), (true, 1));
+            assert_eq!(items[4], ("エンバーを開く".to_string(), true, 0));
             assert_eq!(items.last().unwrap().0, "Hide Ember");
             let panes: Vec<u64> = delegate
                 .ivars()
@@ -393,6 +400,25 @@ mod tests {
                 .map(|id| id.pane_id.get())
                 .collect();
             assert_eq!(panes, vec![7, 3]);
+        }
+    }
+
+    #[test]
+    fn opening_the_agent_does_not_toggle_the_status_item() {
+        unsafe {
+            let commands = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let received = commands.clone();
+            let placeholder: Retained<AnyObject> = msg_send![class(c"NSObject"), new];
+            let delegate = Delegate::new(
+                Box::new(move |event| {
+                    if let UserEvent::AppCommand(command) = event {
+                        received.borrow_mut().push(command);
+                    }
+                }),
+                placeholder.clone(),
+            );
+            let _: () = msg_send![&*delegate, openEmber: &*placeholder];
+            assert_eq!(*commands.borrow(), vec![AppCommand::OpenEmber]);
         }
     }
 

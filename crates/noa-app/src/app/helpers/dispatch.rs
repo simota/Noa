@@ -426,6 +426,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenTasks
         | AppCommand::OpenScaffold
         | AppCommand::OpenWorkflow
+        | AppCommand::OpenEmber
         | AppCommand::OpenWidgetHost
         | AppCommand::OpenWidgetSettings
         | AppCommand::OpenAgentUsage
@@ -499,6 +500,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenTasks
         | AppCommand::OpenScaffold
         | AppCommand::OpenWorkflow
+        | AppCommand::OpenEmber
         | AppCommand::OpenWidgetHost
         | AppCommand::OpenWidgetSettings
         | AppCommand::OpenAgentUsage

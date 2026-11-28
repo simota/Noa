@@ -251,6 +251,7 @@ impl App {
             AppCommand::OpenTasks => self.open_helper_program(crate::helper_program::TASKS),
             AppCommand::OpenScaffold => self.open_helper_program(crate::helper_program::SCAFFOLD),
             AppCommand::OpenWorkflow => self.open_helper_program(crate::helper_program::WORKFLOW),
+            AppCommand::OpenEmber => self.open_helper_program(crate::helper_program::EMBER),
             AppCommand::OpenWidgetHost => {
                 self.open_helper_program(crate::helper_program::WIDGET_HOST)
             }

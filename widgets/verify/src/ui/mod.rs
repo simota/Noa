@@ -286,7 +286,10 @@ pub struct Verify {
     /// An intervention sent and not yet seen in the log.
     pending_intervention: Option<PendingIntervention>,
     file_dialogs: Vec<FileDialogRequest>,
-    dialog_purposes: VecDeque<Purpose>,
+    /// A dialog's answer belongs to the view that requested it. Keep old
+    /// entries until their callbacks arrive so later answers stay paired.
+    dialog_purposes: VecDeque<(u64, Purpose)>,
+    view_generation: u64,
     /// The session on screen was read from its log: no runner drives it.
     read_only: bool,
     /// The window `verify --session=DIR` opened: its read-only views offer
@@ -607,6 +610,7 @@ impl Verify {
             pending_intervention: None,
             file_dialogs: Vec::new(),
             dialog_purposes: VecDeque::new(),
+            view_generation: 0,
             read_only: false,
             viewer: false,
             past: Vec::new(),
@@ -785,8 +789,10 @@ impl Verify {
             self.rebuild_composer(text);
             self.attach_actions();
         } else {
-            self.tree
-                .set_enabled(self.start.start_button, self.detection.startable());
+            self.tree.set_enabled(
+                self.start.start_button,
+                self.detection.startable() && !self.starting,
+            );
             match (&self.refusal, self.starting) {
                 (_, true) => {}
                 (Some(why), false) => {
@@ -845,7 +851,8 @@ impl Verify {
     /// unfinished one stays resumable from the list). A planner deciding
     /// the start view's rows stops too: the view it would fill, and its
     /// 中止, go from the screen.
-    fn leave(&mut self) {
+    fn leave(&mut self, text: &mut TextStore) {
+        self.invalidate_view_actions(text);
         self.auto.cancel();
         if let Source::Live(channel) = &self.source {
             channel.leave();
@@ -862,6 +869,7 @@ impl Verify {
         self.origin = None;
         self.timeline = Status::Idle;
         self.extending = false;
+        self.starting = false;
         self.tab = CenterTab::Criteria;
         self.compact_pane = 1;
         self.layout_focus = None;
@@ -886,6 +894,18 @@ impl Verify {
         self.refresh_past();
     }
 
+    /// A file chooser or destructive confirmation must never act on a
+    /// different verification, even when its reply arrives after a switch.
+    fn invalidate_view_actions(&mut self, text: &mut TextStore) {
+        self.view_generation += 1;
+        for alert in [self.close_alert.take(), self.panes_alert.take()]
+            .into_iter()
+            .flatten()
+        {
+            self.tree.close_overlay(alert, text);
+        }
+    }
+
     fn show_stored(&mut self, dir: &Path, text: &mut TextStore) -> Result<(), String> {
         // Taken just before the read, so it goes with the session read: a
         // write that lands after it shows as a change at the next look.
@@ -893,7 +913,7 @@ impl Verify {
         let session = self.load_stored(dir)?;
         #[cfg(test)]
         tests::after_stored_read();
-        self.leave();
+        self.leave(text);
         if !matches!(self.source, Source::Demo) {
             self.reply_root = Some(store::reply_dir(&session));
             self.session_dir = Some(dir.to_owned());
@@ -1503,6 +1523,7 @@ impl Verify {
             }
             // Drafts typed for another verification's criteria go.
             if snapshot.session.as_ref().map(|s| &s.id) != self.session.as_ref().map(|s| &s.id) {
+                self.invalidate_view_actions(text);
                 self.compact_pane = 1;
                 self.layout_focus = None;
                 self.editor.reset();
@@ -1651,14 +1672,14 @@ impl Verify {
         };
         let item = session.evidence_item(key).expect("found above");
         if let EvidenceBody::Command { cmd, .. } = &item.body {
-            let read = verify::evidence::read_stored(
+            let read = verify::evidence::read_verified_stored(
                 &store::reply_base(&session),
                 &root,
                 &stored,
                 MAX_LOG_BYTES + 4096,
             );
             match read {
-                Ok((bytes, _)) => {
+                Ok(bytes) => {
                     self.compact_pane = 1;
                     let title = format!("{key} のログ — $ {cmd}");
                     evidence::show_log(
@@ -1785,7 +1806,8 @@ impl Verify {
     }
 
     fn ask(&mut self, purpose: Purpose, request: FileDialogRequest) {
-        self.dialog_purposes.push_back(purpose);
+        self.dialog_purposes
+            .push_back((self.view_generation, purpose));
         self.file_dialogs.push(request);
     }
 
@@ -2157,7 +2179,7 @@ impl Verify {
             }
             Action::NewVerification => {
                 self.start_origin = None;
-                self.leave();
+                self.leave(text);
                 self.refusal = None;
                 self.auto.reset();
                 let form = start::Form::for_kinds(self.start.kinds());
@@ -2224,6 +2246,9 @@ impl Verify {
             Action::Continue => self.send_cmd(Command::Continue),
             Action::Extend(by) => match self.stored_dir.clone() {
                 Some(dir) if self.read_only => {
+                    if self.extending {
+                        return;
+                    }
                     if !matches!(self.source, Source::Live(_)) {
                         self.toast("デモ表示では操作を送信できません");
                         return;
@@ -2239,7 +2264,14 @@ impl Verify {
                 _ => self.send_cmd(Command::Extend { by }),
             },
             Action::ResumeShown => {
+                if self.extending {
+                    return;
+                }
                 if let Some(dir) = self.stored_dir.clone() {
+                    if !matches!(self.source, Source::Live(_)) {
+                        self.toast("デモ表示では操作を送信できません");
+                        return;
+                    }
                     if let Some(why) = self.agents_blocker() {
                         self.toast(why);
                         return;
@@ -2302,11 +2334,18 @@ impl Verify {
     /// Shows why a start was refused under the form, until the next one.
     fn refuse(&mut self, why: String, text: &mut TextStore) {
         start::show_refusal(&mut self.tree, &self.start, &why, text);
+        self.tree.set_enabled(
+            self.start.start_button,
+            self.detection.startable() && !self.starting,
+        );
         self.refusal = Some(why);
         self.show_auto(text);
     }
 
     fn start_verification(&mut self, text: &mut TextStore) {
+        if self.starting || self.session.is_some() {
+            return;
+        }
         if !self.detection.startable() {
             let why = self.detection.blocked_reason();
             return self.refuse(why, text);
@@ -2318,6 +2357,10 @@ impl Verify {
         };
         if let Err(why) = verify::engine::check_panel(&form.judge, &form.panel) {
             return self.refuse(why, text);
+        }
+        if !matches!(self.source, Source::Live(_)) {
+            self.toast("デモ表示では操作を送信できません");
+            return;
         }
         // A planner still deciding stops: the rows start as they are.
         let was_planning = matches!(self.auto.state, auto::AutoState::Running { .. });
@@ -2331,6 +2374,7 @@ impl Verify {
             &self.detection,
             text,
         );
+        self.tree.set_enabled(self.start.start_button, false);
         self.send_cmd(Command::Start {
             origin: self.start_origin.clone(),
             request: form.request.clone(),
@@ -2354,8 +2398,25 @@ impl Verify {
     /// view's list. It leaves the start view, as 検証を開始 does, so a
     /// planner still deciding its rows stops.
     fn resume_past(&mut self, dir: PathBuf, text: &mut TextStore) {
+        if self.starting || self.session.is_some() {
+            return;
+        }
+        if !matches!(self.source, Source::Live(_)) {
+            self.toast("デモ表示では操作を送信できません");
+            return;
+        }
         let was_planning = matches!(self.auto.state, auto::AutoState::Running { .. });
         self.auto.cancel();
+        self.refusal = None;
+        self.starting = true;
+        start::rebuild_note(
+            &mut self.tree,
+            &self.start,
+            &Link::Connecting,
+            &self.detection,
+            text,
+        );
+        self.tree.set_enabled(self.start.start_button, false);
         self.send_cmd(Command::Resume { dir });
         if was_planning {
             self.rebuild(text);
@@ -2375,8 +2436,10 @@ impl Verify {
         };
         self.start_origin = None;
         let form = start::Form::from_session(&session);
-        if self.session.is_some() {
-            self.leave();
+        if self.session.is_some() || self.starting {
+            self.leave(text);
+        } else {
+            self.invalidate_view_actions(text);
         }
         self.refusal = None;
         // The new run is manual unless the person auto-assigns again (L1-7).
@@ -2575,20 +2638,23 @@ impl Screen for Verify {
     }
 
     fn file_dialog_finished(&mut self, result: FileDialogResult, text: &mut TextStore) {
-        let purpose = self.dialog_purposes.pop_front();
+        let Some((generation, purpose)) = self.dialog_purposes.pop_front() else {
+            return;
+        };
+        if generation != self.view_generation {
+            return;
+        }
         match (purpose, result) {
-            (Some(Purpose::Spec), FileDialogResult::Opened(paths)) => {
+            (Purpose::Spec, FileDialogResult::Opened(paths)) => {
                 if let Some(path) = paths.first() {
                     start::set_spec_file(&mut self.tree, &self.start, path);
                 }
             }
-            (Some(Purpose::Attach), FileDialogResult::Opened(paths)) => {
+            (Purpose::Attach, FileDialogResult::Opened(paths)) => {
                 self.queue_attachments(paths, text)
             }
-            (Some(Purpose::SaveReport), FileDialogResult::Saved(path)) => self.save_report(&path),
-            (Some(Purpose::ExportBundle), FileDialogResult::Saved(path)) => {
-                self.export_bundle(&path)
-            }
+            (Purpose::SaveReport, FileDialogResult::Saved(path)) => self.save_report(&path),
+            (Purpose::ExportBundle, FileDialogResult::Saved(path)) => self.export_bundle(&path),
             _ => {}
         }
     }

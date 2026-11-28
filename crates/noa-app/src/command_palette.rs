@@ -136,6 +136,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::OpenTasks => "Open Tasks",
         AppCommand::OpenScaffold => "Open Scaffold",
         AppCommand::OpenWorkflow => "Open Workflow",
+        AppCommand::OpenEmber => "Open Ember",
         AppCommand::OpenWidgetHost => "Repository Widgets…",
         AppCommand::OpenWidgetSettings => "Widget Appearance Settings…",
         AppCommand::OpenAgentUsage => "Open Agent Usage",
@@ -298,6 +299,9 @@ pub(crate) fn command_palette_description(command: AppCommand) -> &'static str {
         AppCommand::OpenWorkflow => {
             "ワークフロー 開発フロー 工程. Workflow editor: build and inspect a development cycle as connected steps, with execution states, verification and approval, in a window of its own."
         }
+        AppCommand::OpenEmber => {
+            "エンバー マイエージェント 相談 記憶 調査 文章. Continue a personal assistant conversation, follow requests and manage explicitly saved memories."
+        }
         AppCommand::OpenAgentUsage => {
             "使用量 利用量 制限 残量. Show Claude Code, Codex and Antigravity usage limits and statistics in a window of its own."
         }
@@ -413,6 +417,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::OpenTasks,
         AppCommand::OpenScaffold,
         AppCommand::OpenWorkflow,
+        AppCommand::OpenEmber,
         AppCommand::OpenWidgetHost,
         AppCommand::OpenWidgetSettings,
         AppCommand::OpenAgentUsage,
@@ -722,6 +727,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::OpenTasks
         | AppCommand::OpenScaffold
         | AppCommand::OpenWorkflow
+        | AppCommand::OpenEmber
         | AppCommand::OpenWidgetHost
         | AppCommand::OpenWidgetSettings
         | AppCommand::OpenAgentUsage => CommandCategory::View,
@@ -1097,6 +1103,7 @@ mod tests {
             AppCommand::OpenTasks,
             AppCommand::OpenScaffold,
             AppCommand::OpenWorkflow,
+            AppCommand::OpenEmber,
             AppCommand::OpenWidgetHost,
             AppCommand::OpenWidgetSettings,
             AppCommand::OpenAgentUsage,
@@ -1627,6 +1634,10 @@ mod widget_discovery_tests {
             ("検証", AppCommand::OpenVerify),
             ("使用量", AppCommand::OpenAgentUsage),
             ("ワークフロー", AppCommand::OpenWorkflow),
+            ("エンバー", AppCommand::OpenEmber),
+            ("マイエージェント", AppCommand::OpenEmber),
+            ("相談", AppCommand::OpenEmber),
+            ("記憶", AppCommand::OpenEmber),
             ("表示設定", AppCommand::OpenWidgetSettings),
         ] {
             assert!(

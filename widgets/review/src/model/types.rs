@@ -1055,6 +1055,14 @@ pub struct Coverage {
     pub skipped: Vec<(String, String)>,
 }
 
+impl Coverage {
+    /// A review reported in any round covers the file, including when a
+    /// later round skips it. Coverage is for the same captured snapshot.
+    pub fn has_reviewed(&self, path: &str) -> bool {
+        self.reviewed.iter().any(|entry| covers(entry, path))
+    }
+}
+
 /// What one reviewer's accepted reply in a round held, for the cards.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewNote {

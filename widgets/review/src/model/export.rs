@@ -40,11 +40,10 @@ pub fn unreviewed_files(session: &Session) -> Vec<&str> {
         .files
         .iter()
         .filter(|file| {
-            !session.coverage.values().any(|c| {
-                c.reviewed
-                    .iter()
-                    .any(|entry| super::types::covers(entry, &file.path))
-            })
+            !session
+                .coverage
+                .values()
+                .any(|c| c.has_reviewed(&file.path))
         })
         .map(|file| file.path.as_str())
         .collect()

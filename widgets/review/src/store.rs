@@ -14,7 +14,8 @@
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::fsx;
@@ -87,13 +88,8 @@ pub fn target_dir(reply_dir: &Path) -> PathBuf {
 pub fn prepare_workdir(workdir: &Path) -> io::Result<()> {
     let dir = workdir.join(".noa");
     fsx::create_dirs(workdir, &dir.join("reviews"))?;
-    // `create_new` does not follow a link left at the name.
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dir.join(".gitignore"))
-    {
-        Ok(mut file) => io::Write::write_all(&mut file, b"*\n"),
+    match fsx::write_new(workdir, &dir.join(".gitignore"), b"*\n") {
+        Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e),
     }
@@ -203,10 +199,7 @@ pub fn prepare_reply(base: &Path, path: &Path) -> io::Result<()> {
 
 /// Removes a reply file; a link on the way to it is refused.
 pub fn clear_reply(base: &Path, path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fsx::check_no_links(base, parent)?;
-    }
-    match fs::remove_file(path) {
+    match fsx::remove_file(base, path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         other => other,
     }
@@ -298,9 +291,23 @@ impl Store {
     /// while the store is open, so two runners never append to one log.
     pub fn open(dir: &Path) -> Result<(Store, Session), StoreError> {
         let path = dir.join(EVENTS_FILE);
-        let mut file = OpenOptions::new().append(true).open(&path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} は通常のファイルではありません", path.display()),
+            )
+            .into());
+        }
         lock(&file)?;
-        let text = fs::read(&path)?;
+        // Fold the descriptor whose lock is held, even if the path is
+        // replaced while opening; never read one log and append to another.
+        let mut text = Vec::new();
+        file.read_to_end(&mut text)?;
         let parsed = parse(&text)?;
         let session = reduce::replay(&parsed.batches).map_err(StoreError::Reduce)?;
         if parsed.torn {
@@ -404,14 +411,15 @@ fn parse(text: &[u8]) -> Result<Parsed, StoreError> {
 /// Folds `dir`'s log without writing to it or taking its lock: what a
 /// read-only view of a review, and the list of past ones, show.
 pub fn read_session(dir: &Path) -> Result<Session, StoreError> {
-    let text = fs::read(dir.join(EVENTS_FILE))?;
+    let mut text = Vec::new();
+    fsx::open_read(dir, &dir.join(EVENTS_FILE))?.read_to_end(&mut text)?;
     let parsed = parse(&text)?;
     reduce::replay(&parsed.batches).map_err(StoreError::Reduce)
 }
 
 /// Whether a runner holds `dir`'s log open right now.
 pub fn is_busy(dir: &Path) -> bool {
-    File::open(dir.join(EVENTS_FILE))
+    fsx::open_read(dir, &dir.join(EVENTS_FILE))
         .is_ok_and(|file| matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)))
 }
 
@@ -648,6 +656,27 @@ mod tests {
         drop(store);
         assert!(read_session(&dir).unwrap().hold);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_log_link_is_never_opened_or_repaired_through_its_target() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root("log-link");
+        let dir = root.join("rev-1");
+        let victim = root.join("victim");
+        fs::create_dir_all(&dir).unwrap();
+        let mut text = line(&created("rev-1", 1)).unwrap();
+        text.extend_from_slice(b"[{\"event\":");
+        fs::write(&victim, &text).unwrap();
+        symlink(&victim, dir.join(EVENTS_FILE)).unwrap();
+        assert!(Store::open(&dir).is_err());
+        assert!(read_session(&dir).is_err());
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            text,
+            "an unrelated file was truncated"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

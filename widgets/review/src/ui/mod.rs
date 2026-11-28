@@ -433,6 +433,8 @@ pub enum Action {
     /// A matrix cell: the board filtered to one lens (and severity).
     ShowCell(String, Option<Severity>),
     SelectFinding(Option<String>),
+    /// Follows a finding link, revealing it when the current filters hide it.
+    RevealFinding(String),
     /// Opens a snapshot file (or the snapshot folder) in the OS.
     OpenSnapshot(Option<String>),
     /// Opens a panel to choose the document file of a document review.
@@ -758,9 +760,8 @@ impl Review {
         if let Some(tab) = tab {
             self.tab = tab;
         }
-        if finding.is_some() {
-            self.compact_pane = 2;
-            self.selected = finding;
+        if let Some(id) = finding {
+            self.reveal_finding(id);
         }
         let mut text = TextStore::new(Default::default());
         self.rebuild(&mut text);
@@ -947,7 +948,14 @@ impl Review {
     /// Focuses the `nth` widget that carries `action` (the first, when there
     /// are fewer now).
     fn focus_action(&mut self, action: &Action, nth: usize) {
-        let mut carrying = self.actions.iter().filter(|(_, a)| a == action);
+        let mut carrying =
+            self.actions.iter().filter(|(id, a)| {
+                a == action
+                    && (!self.compact
+                        || !self.pane_roots.iter().enumerate().any(|(pane, root)| {
+                            pane != self.compact_pane && self.within(*id, *root)
+                        }))
+            });
         let first = carrying.clone().next().map(|(id, _)| *id);
         if let Some(id) = carrying.nth(nth).map(|(id, _)| *id).or(first) {
             self.tree.set_focus(Some(id));
@@ -1052,6 +1060,7 @@ impl Review {
         self.read_only = false;
         self.stored_dir = None;
         self.extending = false;
+        self.starting = false;
         self.tab = CenterTab::Findings;
         self.filters = Filters::default();
         self.progress_details = false;
@@ -1910,6 +1919,23 @@ impl Review {
         }
     }
 
+    fn reveal_finding(&mut self, id: String) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let Some(finding) = session.finding(&id) else {
+            return;
+        };
+        if !board::passes(session, &self.filters, finding) {
+            self.filters = Filters {
+                statuses: BTreeSet::new(),
+                ..Filters::default()
+            };
+        }
+        self.selected = Some(id);
+        self.compact_pane = 2;
+    }
+
     fn toast(&mut self, message: impl Into<String>) {
         Toast::new(message.into()).show(&mut self.tree);
     }
@@ -1971,6 +1997,13 @@ impl Review {
                 self.render_auto(text);
             }
             Action::Start => {
+                if self.starting || self.session.is_some() {
+                    return;
+                }
+                if !matches!(self.source, Source::Live(_)) {
+                    self.toast("デモ表示では操作を送信できません");
+                    return;
+                }
                 if !self.detection.startable() {
                     let why = self.detection.blocked_reason();
                     start::show_refusal(&mut self.tree, &self.start, &why, text);
@@ -2023,18 +2056,26 @@ impl Review {
                     self.toast(why);
                 }
             }
-            Action::ResumePast(dir) => match self.load_stored(&dir) {
-                Ok(session) if session.closed => {
-                    if let Err(why) = self.show_stored(&dir, text) {
+            Action::ResumePast(dir) => {
+                if self.starting {
+                    return;
+                }
+                if let Ok(session) = self.load_stored(&dir) {
+                    if session.closed {
+                        if let Err(why) = self.show_stored(&dir, text) {
+                            self.toast(why);
+                        }
+                        return;
+                    }
+                    if let Some(why) = self.detection.resume_blocker(&session) {
                         self.toast(why);
+                        return;
                     }
                 }
-                Ok(session) => match self.detection.resume_blocker(&session) {
-                    Some(why) => self.toast(why),
-                    None => self.send_cmd(Command::Resume { dir }),
-                },
-                Err(_) => self.send_cmd(Command::Resume { dir }),
-            },
+                self.starting = matches!(self.source, Source::Live(_));
+                self.render_auto(text);
+                self.send_cmd(Command::Resume { dir });
+            }
             Action::CompactPane(index) => {
                 self.compact_pane = index.min(2);
                 self.adapt_layout(self.viewport_width);
@@ -2119,8 +2160,14 @@ impl Review {
                 self.refilter(text);
             }
             Action::SelectFinding(id) => {
-                self.compact_pane = if id.is_some() { 2 } else { 1 };
                 self.selected = id;
+                self.drop_hidden_selection();
+                self.compact_pane = if self.selected.is_some() { 2 } else { 1 };
+                self.rebuild(text);
+            }
+            Action::RevealFinding(id) => {
+                self.reveal_finding(id);
+                self.tab = CenterTab::Findings;
                 self.rebuild(text);
             }
             Action::OpenSnapshot(path) => self.open_snapshot(path),
@@ -2266,7 +2313,7 @@ impl Review {
                 self.start_origin = None;
                 self.auto.reset();
                 let form = start::Form::from_session(&session);
-                if self.session.is_some() {
+                if self.starting || self.session.is_some() {
                     self.leave();
                 }
                 let left_out = start::fill(&mut self.tree, &mut self.start, &form, text);
@@ -2460,7 +2507,9 @@ fn pressed_again(
     reviewer: Option<&PartId>,
 ) -> Option<Action> {
     match action {
-        Action::SelectFinding(Some(_)) => Some(Action::SelectFinding(None)),
+        Action::SelectFinding(Some(_)) | Action::RevealFinding(_) => {
+            Some(Action::SelectFinding(None))
+        }
         Action::SelectFinding(None) => {
             selected.map(|id| Action::SelectFinding(Some(id.to_owned())))
         }

@@ -84,7 +84,7 @@ impl Review {
         }
     }
 
-    fn within(&self, mut id: WidgetId, root: WidgetId) -> bool {
+    pub(super) fn within(&self, mut id: WidgetId, root: WidgetId) -> bool {
         loop {
             if id == root {
                 return true;

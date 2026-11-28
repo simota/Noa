@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | slug | review-widget |
-| status | draft (design only, 2026-11-24). No code yet. No owner sign-off |
+| status | implemented; initial design 2026-11-24, reliability updates 2026-11-28 |
 | owner | simota |
-| as-of | 2026-11-24 (HEAD 309e44e4, branch `orch/review-widget`) |
+| as-of | 2026-11-28 (based on HEAD 04062e1) |
 | crate | `widgets/review` (binary `review`, bundled as `Noa Review`) |
 | request | 「ディスカッション、コンペ機能を元に複数エージェントでの徹底レビューウィジェットを作成してください。多角的なフィードバックとレポートが行えるようにしてください。」 |
 
@@ -75,6 +75,8 @@ Common rules:
 - The start is refused, with the numbers and a hint to narrow the paths, when the target has more than `MAX_TARGET_FILES` (400) files, more than `MAX_TARGET_BYTES` (24 MiB) in total, a diff over `MAX_DIFF_BYTES` (4 MiB), or a document over 1 MiB.
 - The manifest (`TargetManifest`, L2-2) holds per file: path, status (added / modified / deleted / renamed from / untracked / plain), line count, bytes, additions/deletions, the changed line ranges of the post-image (git), and a digest; plus base/head refs and SHAs, the merge base, the filter, the omitted list, the diff's digest and size, and the capture time.
 - The snapshot is captured by the runner (I/O) before the `Created` event is written. A capture that fails leaves the start view with the reason in its note and starts no pane.
+- Path lists ignore blank lines but preserve the leading and trailing spaces of every non-blank path. Snapshot paths, finding locations and coverage entries use those same filenames. On Unix, a literal backslash remains part of a filename; non-UTF-8 names are refused instead of being mapped to another file.
+- Git capture clears inherited repository-selection variables, disables external filters and filesystem-monitor hooks, and uses a temporary index for read-only worktree comparisons. File-to-symlink type changes and index-only removals retain one manifest entry per path.
 
 ### L1-2. Panel and lenses
 
@@ -319,7 +321,15 @@ Added after v1, on the 指摘 board:
 - A finding passes when it holds every word typed (split on spaces, case aside) in its id, claim, rationale, fix or location, or in a source's claim, evidence or fix.
 - In the matrix tab's file coverage, a file that any finding points into (its own location or a source's, whatever its status) has このファイルの指摘: it opens the board filtered to that file, shown as the chip 「ファイル: <path> ✕」 in the tab row (a long path shortened to its last components after `…/`, whole in the tooltip), which takes the filter off. The file's counts by severity use the same matching for its live findings; with only settled ones it says 未解決の指摘なし（却下・取り下げ・統合 n）. The tab row is as wide as the pane and wraps, so the chip and 条件をすべて解除 stay in it at the smallest window.
 - A filter, words or a file that hide the selected finding let it go, so the thread and 修正を依頼 follow what the board shows.
+- An explicit finding link (`--finding` or a merged finding's destination) reveals that finding. If the current filters hide it, they are cleared so the board, detail pane and fix scope stay consistent; an unknown id selects nothing.
 - Both combine with the other five filters; every chip's count stays what choosing it shows, and 表示 n / 全 m counts with them. 条件をすべて解除 also clears the words and the file; a matrix cell keeps neither. The 表示中 scope of 修正を依頼 (L1-9) is what the board shows with them.
+
+### Reliability of starting, replies and coverage
+
+- While a start is pending, the start button is disabled and duplicate start actions are ignored. A refused start or leaving the form makes starting available again.
+- A rejected reply's recorded digest identifies the same leftover file after a failed cleanup or resume. Reading it again does not consume another retry, and it does not block delivery of the correction brief; a different reply is validated normally and existing timeouts still apply.
+- Reconnection failures, including failures immediately after a connection opens, use the same bounded backoff. Installed-agent detection retains at most 64 KiB of output and terminates its process group before reaping the shell, both after success and after a timeout.
+- Coverage's `reviewed` paths accumulate across rounds over the immutable snapshot. The latest `skipped` paths explain files not already covered by that reviewer's accumulated paths; the matrix and report use the same file and directory-prefix matching.
 
 ## L2: Detail
 
@@ -404,7 +414,7 @@ pub struct Session {
     pub lead: Participant, pub reviewers: Vec<Participant>,
     pub raw: Vec<RawFinding>, pub findings: Vec<Finding>, pub dismissed: Vec<Dismissal>,
     pub summaries: Vec<ReviewerSummary>,                    // per round, per reviewer
-    pub coverage: BTreeMap<PartId, Coverage>,               // latest per reviewer
+    pub coverage: BTreeMap<PartId, Coverage>,               // accumulated reviewed, latest skipped
     pub messages: Vec<Message>,                             // interventions, lead summaries
     pub rounds: Vec<Round>,                                 // Round.outcome: Option<LeadOutput>
     pub closed: bool, pub hold: bool,

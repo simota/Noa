@@ -251,12 +251,13 @@ pub(super) fn insert(
         let reviewed: Vec<String> = session
             .coverage
             .iter()
-            .filter(|(_, c)| c.reviewed.iter().any(|e| covers(e, &file.path)))
+            .filter(|(_, c)| c.has_reviewed(&file.path))
             .map(|(p, _)| p.to_string())
             .collect();
         let skipped: Vec<String> = session
             .coverage
             .iter()
+            .filter(|(_, c)| !c.has_reviewed(&file.path))
             .flat_map(|(p, c)| {
                 c.skipped
                     .iter()

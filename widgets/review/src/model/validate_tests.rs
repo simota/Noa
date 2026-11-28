@@ -360,6 +360,35 @@ fn ac10_verdict_rules_in_the_last_round() {
 }
 
 #[test]
+fn a_lead_update_cannot_erase_a_findings_rationale() {
+    let mut rig = Rig::new(4);
+    through_round_one(&mut rig);
+    rig.deliver();
+    rig.reply("claude", &review(&[], &[("F2", "confirm", "")]));
+    rig.reply("codex", &review(&[], &[("F2", "confirm", "")]));
+    rig.reply("agy", &review(&[], &[("F1", "confirm", "")]));
+    rig.lead(
+        r#"{"summary":"Rejected F2.","ops":[{"op":"update","id":"F2","status":"rejected","rationale":"The boundary is intentional."}]}"#,
+    );
+    for id in ["F1", "F2"] {
+        let problems = lead_problems(
+            &rig,
+            &format!(
+                r#"{{"summary":"Updated.","ops":[{{"op":"update","id":"{id}","rationale":"  "}}]}}"#
+            ),
+        );
+        assert_eq!(problems, ["ops[0] (update).rationale is empty"]);
+    }
+    assert!(
+        lead_problems(
+            &rig,
+            r#"{"summary":"Clarified.","ops":[{"op":"update","id":"F2","rationale":"The evidence confirms the intended boundary."}]}"#,
+        )
+        .is_empty()
+    );
+}
+
+#[test]
 fn a_fenced_reply_is_taken_as_its_content() {
     let rig = Rig::new(3);
     let fenced = format!("```json\n{}\n```", blind(&[]));
@@ -384,6 +413,82 @@ fn locations_know_whether_they_touch_the_diff() {
     );
     assert_eq!(locate(&m, &loc("assets/logo.png", None)), (true, None));
     assert_eq!(locate(&m, &loc("lib/other.rs", Some(3))), (false, None));
+}
+
+#[test]
+fn finding_and_coverage_paths_preserve_spaces_in_captured_names() {
+    let rig = Rig::new(3);
+    for path in [" src/store.rs", "src/store.rs ", " src/store.rs "] {
+        let mut session = rig.engine.session().clone();
+        let mut file = session.manifest.files[0].clone();
+        file.path = path.to_owned();
+        file.lines = 10;
+        file.changed = vec![(1, 10)];
+        session.manifest.files.push(file);
+
+        let text = with(
+            "location",
+            &serde_json::json!({"path": path, "line": 5}).to_string(),
+        );
+        let review = parse_review(&text, &session, &p("claude"), 1).unwrap();
+        assert_eq!(review.findings[0].location.as_ref().unwrap().path, path);
+        assert!(review.findings[0].in_target);
+        assert_eq!(review.findings[0].in_diff, Some(true));
+
+        let beyond = with(
+            "location",
+            &serde_json::json!({"path": path, "line": 11}).to_string(),
+        );
+        assert!(
+            parse_review(&beyond, &session, &p("claude"), 1)
+                .unwrap_err()
+                .to_string()
+                .contains("10 lines in the snapshot")
+        );
+
+        let coverage = serde_json::json!({
+            "summary": "Reviewed the named file.",
+            "coverage": {"reviewed": [path]}
+        });
+        let parsed = parse_review(&coverage.to_string(), &session, &p("claude"), 1).unwrap();
+        let coverage = parsed.coverage.unwrap();
+        assert_eq!(coverage.reviewed, [path]);
+        assert!(coverage.has_reviewed(path));
+        assert!(!coverage.has_reviewed("src/store.rs"));
+
+        let skipped = serde_json::json!({
+            "summary": "Skipped the named file.",
+            "coverage": {"skipped": [{"path": path, "reason": "Outside my lens."}]}
+        });
+        let parsed = parse_review(&skipped.to_string(), &session, &p("claude"), 1).unwrap();
+        assert_eq!(parsed.coverage.unwrap().skipped[0].0, path);
+    }
+}
+
+#[test]
+fn skipped_files_require_a_nonempty_reason() {
+    let rig = Rig::new(3);
+    for reason in [None, Some(""), Some(" \n\t ")] {
+        let mut skipped = serde_json::json!({"path": "src/"});
+        if let Some(reason) = reason {
+            skipped["reason"] = reason.into();
+        }
+        let text = serde_json::json!({
+            "summary": "Skipped the source directory.",
+            "coverage": {"skipped": [skipped]}
+        });
+        assert_eq!(
+            review_problems(&rig, "claude", &text.to_string()),
+            ["coverage.skipped[0].reason is empty"]
+        );
+    }
+
+    let text = r#"{"summary":"Skipped sources.","coverage":{"skipped":[{"path":"src/","reason":"  Outside my lens.  "}]}}"#;
+    let parsed = parse_review(text, rig.engine.session(), &p("claude"), 1).unwrap();
+    assert_eq!(
+        parsed.coverage.unwrap().skipped,
+        [("src/".to_owned(), "Outside my lens.".to_owned())]
+    );
 }
 
 #[test]

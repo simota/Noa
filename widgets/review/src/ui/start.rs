@@ -497,8 +497,7 @@ impl Form {
 /// One path per line, blank lines left out: a path may hold spaces.
 fn lines(text: &str) -> Vec<String> {
     text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
+        .filter(|l| !l.trim().is_empty())
         .map(str::to_owned)
         .collect()
 }
@@ -1328,7 +1327,6 @@ pub(super) fn rebuild_note(
     text: &mut TextStore,
 ) {
     clear_children(tree, parts.note, text);
-    tree.set_enabled(parts.start_button, detection.startable());
     let notes = [
         match link {
             Link::Live => None,
@@ -1664,7 +1662,7 @@ mod tests {
         assert_eq!(target.kind, TargetKind::Git);
         assert_eq!(target.head, Head::Ref("feat/x".into()));
         assert_eq!(target.base, None);
-        assert_eq!(target.paths, ["src/", "docs/release notes.md"]);
+        assert_eq!(target.paths, ["src/", " docs/release notes.md "]);
         assert!(
             Form::default()
                 .target()
@@ -1678,7 +1676,7 @@ mod tests {
             paths: "a.rs\n\n b/ \n".into(),
             ..Form::default()
         };
-        assert_eq!(files.target().unwrap().paths, ["a.rs", "b/"]);
+        assert_eq!(files.target().unwrap().paths, ["a.rs", " b/ "]);
 
         let doc = Form {
             kind: TargetKind::Document,

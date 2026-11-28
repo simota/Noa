@@ -156,14 +156,17 @@ fn ac11_a_rejected_reply_is_cleared_corrected_logged_and_fails_after_the_retries
         .unwrap()
         .receipt;
     assert_eq!(receipt.rejected_digest, Some(store::digest("{ not json")));
-    for _ in 0..2 {
+    for attempt in 0..2 {
         let at = rig.tick();
         rig.feed(Input::Sent {
             round: 1,
             part: p("claude"),
             at,
         });
-        rig.reply("claude", r#"{"summary": ""}"#);
+        rig.reply(
+            "claude",
+            &format!(r#"{{"summary": "{}"}}"#, " ".repeat(attempt)),
+        );
     }
     let receipt = &rig
         .engine
@@ -188,6 +191,122 @@ fn ac11_a_rejected_reply_is_cleared_corrected_logged_and_fails_after_the_retries
         lead.contains("- claude (claude): no reply: invalid output after retries"),
         "{lead}"
     );
+}
+
+#[test]
+fn rereading_a_rejected_reply_keeps_watching_without_spending_retries() {
+    let mut rig = Rig::new(3);
+    rig.deliver();
+    let invalid = "{ not json";
+    rig.reply("claude", invalid);
+    let rejected = rig.engine.session().clone();
+    for _ in 0..3 {
+        let out = rig.reply("claude", invalid);
+        assert!(out.batches.is_empty());
+        assert!(matches!(
+            out.effects.as_slice(),
+            [Effect::WatchReply { round: 1, part, .. }] if *part == p("claude")
+        ));
+        assert_eq!(*rig.engine.session(), rejected);
+    }
+
+    // The rejection digest survives a restart and sending the correction.
+    rig.engine = Engine::resume(
+        rig.engine.session().clone(),
+        Path::new("/data/reviews/rev-1"),
+        Config::default(),
+    );
+    rig.feed(Input::Start { now: 5_000 });
+    rig.feed(Input::Sent {
+        round: 1,
+        part: p("claude"),
+        at: 5_001,
+    });
+    let out = rig.reply("claude", invalid);
+    assert!(out.batches.is_empty());
+    assert!(matches!(
+        out.effects.as_slice(),
+        [Effect::WatchReply { round: 1, part, .. }] if *part == p("claude")
+    ));
+
+    rig.reply("claude", &blind(&[]));
+    let receipt = &rig
+        .engine
+        .session()
+        .round(1)
+        .unwrap()
+        .brief(&p("claude"))
+        .unwrap()
+        .receipt;
+    assert!(receipt.replied.is_some());
+    assert_eq!(receipt.retries, 1);
+    assert!(receipt.rejected_digest.is_none());
+}
+
+#[test]
+fn rereading_an_unreadable_reply_does_not_exhaust_correction_attempts() {
+    let mut rig = Rig::new(3);
+    rig.deliver();
+    let unreadable = |digest| Input::ReplyUnreadable {
+        round: 1,
+        part: p("claude"),
+        error: "reply is not UTF-8".to_owned(),
+        digest,
+        at: 100,
+    };
+    rig.feed(unreadable(7));
+    let rejected = rig.engine.session().clone();
+    for _ in 0..3 {
+        let out = rig.feed(unreadable(7));
+        assert!(out.batches.is_empty());
+        assert!(matches!(
+            out.effects.as_slice(),
+            [Effect::WatchReply { round: 1, part, .. }] if *part == p("claude")
+        ));
+        assert_eq!(*rig.engine.session(), rejected);
+    }
+    // Different bytes are a new attempt, even when the read error is equal.
+    rig.feed(unreadable(8));
+    let receipt = &rig
+        .engine
+        .session()
+        .round(1)
+        .unwrap()
+        .brief(&p("claude"))
+        .unwrap()
+        .receipt;
+    assert_eq!(receipt.retries, 2);
+    assert_eq!(receipt.rejected_digest, Some(8));
+    assert!(receipt.failed.is_none());
+}
+
+#[test]
+fn a_stale_send_acknowledgement_does_not_restart_a_current_permission_timeout() {
+    let mut rig = Rig::new(3);
+    through_round_one(&mut rig);
+    rig.deliver();
+    rig.feed(Input::AgentStateChanged {
+        part: p("claude"),
+        state: AgentState::Permission,
+        at: 1_000,
+    });
+    rig.feed(Input::Sent {
+        round: 1,
+        part: p("claude"),
+        at: 2_000,
+    });
+    let out = rig.feed(Input::Tick { now: 100_000 });
+    assert!(Rig::sent_to(&out, "claude").is_none());
+    let receipt = &rig
+        .engine
+        .session()
+        .round(2)
+        .unwrap()
+        .brief(&p("claude"))
+        .unwrap()
+        .receipt;
+    assert_eq!(receipt.retries, 0);
+    assert!(receipt.failed.is_none());
 }
 
 #[test]
@@ -744,4 +863,78 @@ fn ac20_a_log_whose_participants_or_lead_reply_path_were_edited_is_not_resumed()
     // Untouched, it gets past both checks (to the snapshot, absent here).
     let err = check_resumable(&session, dir).unwrap_err();
     assert!(err.contains("スナップショット"), "{err}");
+}
+
+#[test]
+fn resume_checks_the_same_panel_and_round_minimum_as_a_new_review() {
+    let rig = Rig::new(3);
+    let session = rig.engine.session();
+    let dir = Path::new("/data/reviews/rev-1");
+
+    let mut too_small = session.clone();
+    too_small.reviewers.truncate(1);
+    assert!(
+        check_resumable(&too_small, dir)
+            .unwrap_err()
+            .contains("2体以上")
+    );
+
+    let mut too_large = session.clone();
+    let choices = vec![testkit::reviewer(AgentKind::Claude, BuiltinLens::Tests); 7];
+    too_large.reviewers = participants(&AgentKind::Claude.into(), &choices).1;
+    assert!(
+        check_resumable(&too_large, dir)
+            .unwrap_err()
+            .contains("6体まで")
+    );
+
+    for text in [String::new(), "あ".repeat(MAX_CUSTOM_LENS + 1)] {
+        let mut custom = session.clone();
+        custom.reviewers[0].lens = Some(Lens::Custom {
+            id: "custom".to_owned(),
+            text,
+        });
+        let err = check_resumable(&custom, dir).unwrap_err();
+        assert!(err.contains("カスタム観点"), "{err}");
+    }
+
+    let mut no_rounds = session.clone();
+    no_rounds.max_rounds = 0;
+    assert!(
+        check_resumable(&no_rounds, dir)
+            .unwrap_err()
+            .contains("1以上")
+    );
+}
+
+#[test]
+fn coverage_keeps_previously_reviewed_files_when_a_later_round_skips_the_directory() {
+    let mut rig = Rig::new(3);
+    rig.deliver();
+    rig.reply(
+        "claude",
+        r#"{"summary":"Reviewed the store.","coverage":{"reviewed":["src/store.rs"]}}"#,
+    );
+    rig.reply("codex", r#"{"summary":"No coverage reported."}"#);
+    rig.reply("agy", r#"{"summary":"No coverage reported."}"#);
+    rig.lead(r#"{"summary":"Continue the review."}"#);
+    rig.deliver();
+    rig.reply(
+        "claude",
+        r#"{"summary":"Skipped sources this round.","coverage":{"skipped":[{"path":"src/","reason":"Reviewed another concern."}]}}"#,
+    );
+
+    let session = rig.engine.session();
+    let coverage = &session.coverage[&p("claude")];
+    assert!(coverage.has_reviewed("src/store.rs"));
+    assert!(!coverage.has_reviewed("src/engine.rs"));
+    assert_eq!(
+        coverage.skipped.len(),
+        1,
+        "the still-unreviewed sibling keeps its reason"
+    );
+    assert_eq!(
+        crate::model::export::unreviewed_files(session),
+        ["src/engine.rs"]
+    );
 }
